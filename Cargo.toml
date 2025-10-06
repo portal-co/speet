@@ -1,0 +1,9 @@
+[workspace]
+members=[]
+resolver="3"
+
+[workspace.package]
+description = "Fast static recompiler"
+license-file = "COPYING.md"
+
+[workspace.dependencies]

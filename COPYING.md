@@ -1,0 +1,1 @@
+You may use this project under the [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.en.html) or under a proprietary license from Portal Solutions LLC. By contributing to this repository, similarly, you permit Portal Solutions LLC to emit proprietary licenses to this work alongsides the rights granted by the GNU AGPLv3
