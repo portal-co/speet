@@ -1,6 +1,6 @@
 #![no_std]
 
-use alloc::vec::Vec;
+use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use wasm_encoder::{Function, Instruction, ValType};
 extern crate alloc;
 pub struct Opts {
@@ -21,48 +21,35 @@ pub struct Link {
 }
 pub struct FeedState {
     functions: Vec<(Function, Option<u32>)>,
+    counters: VecDeque<Option<u32>>,
     opts: Opts,
 }
 impl FeedState {
     pub fn new(opts: Opts) -> Self {
         Self {
             functions: Default::default(),
+            counters: Default::default(),
             opts,
         }
     }
     pub fn id_for_offset(&self, offset: i32) -> u32 {
-        return self
-            .opts
-            .size
-            .wrapping_sub(self.functions.len() as u32)
-            .wrapping_add_signed(offset);
+        return (self.functions.len() as u32).wrapping_add_signed(offset);
     }
-    pub fn begin_inst(&mut self, last_len: i32) {
-        let next = self.id_for_offset(last_len);
-        if let Some((f, g)) = self.functions.last_mut() {
-            if let Some(next) = g.take() {
-                for a in 0..self.opts.params {
-                    f.instruction(&Instruction::LocalGet(a));
-                }
-                f.instruction(&Instruction::ReturnCall(next));
-            }
-            *g = Some(next);
+    pub fn begin_inst(&mut self, len: u32) {
+        while self.counters.len() < len as usize {
+            self.counters.push_front(None);
         }
-        self.functions
-            .push((Function::new(self.opts.locals.clone()), None));
+        *self.counters.iter_mut().nth(len as usize).unwrap() = Some(self.functions.len() as u32);
+        self.functions.push((
+            Function::new(self.opts.locals.clone()),
+            self.counters.pop_back().flatten(),
+        ));
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
         for (f, g) in self.functions.iter_mut() {
-            if let Some(next) = g.take() {
-                for a in 0..self.opts.params {
-                    f.instruction(&Instruction::LocalGet(a));
-                }
-                f.instruction(&Instruction::ReturnCall(next));
-            } else {
-                f.instruction(&Instruction::Unreachable);
-            }
+            f.instruction(&Instruction::Unreachable);
         }
-        self.functions.reverse();
+        // self.functions.reverse();
         return (self.opts, self.functions.into_iter().map(|a| a.0).collect());
     }
     pub fn instr<'a>(&'a mut self, i: &Instruction<'_>) -> &'a mut Self {
