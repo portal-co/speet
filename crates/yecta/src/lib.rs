@@ -10,6 +10,7 @@ use crate::pin::PinTracker;
 extern crate alloc;
 pub mod feed;
 pub mod pin;
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Env {
     pub size: u32,
     pub offset: u32,
