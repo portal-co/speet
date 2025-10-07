@@ -22,6 +22,7 @@ pub struct Opts {
 }
 pub struct FastCall {
     pub lr: u32,
+    pub lr_backup: u32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Link {

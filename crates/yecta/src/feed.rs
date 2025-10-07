@@ -26,6 +26,14 @@ impl FeedState {
             Function::new(self.opts.locals.clone()),
             self.counters.pop_front().flatten(),
         ));
+        if let Some(fc) = self.opts.fastcall.as_ref() {
+            self.functions
+                .last_mut()
+                .unwrap()
+                .0
+                .instruction(&Instruction::LocalGet(fc.lr))
+                .instruction(&Instruction::LocalSet(fc.lr_backup));
+        }
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
         for (f, g) in self.functions.iter_mut() {
@@ -186,17 +194,30 @@ impl FeedState {
                 }
             }
         }
+        let mut needs_end = false;
         if let Some(fc) = self.opts.fastcall.as_ref()
             && fc.lr == idx
             && !peg
         {
+            f.instruction(&Instruction::LocalGet(fc.lr));
+            f.instruction(&Instruction::LocalGet(fc.lr_backup));
+            f.instruction(&match self.opts.xlen {
+                xLen::_32 => Instruction::I32Eq,
+                xLen::_64 => Instruction::I64Eq,
+            })
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
             f.instruction(&Instruction::Drop);
             f.instruction(&Instruction::Return);
-            return;
+            f.instruction(&Instruction::Else);
+
+            needs_end = true;
         }
         f.instruction(&Instruction::ReturnCallIndirect {
             type_index: self.opts.function_ty,
             table_index: self.opts.table,
         });
+        if needs_end {
+            f.instruction(&Instruction::End);
+        }
     }
 }
