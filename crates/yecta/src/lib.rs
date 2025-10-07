@@ -74,14 +74,21 @@ impl FeedState {
             fi = *a as usize;
         }
     }
-    pub fn jmp(&mut self, offset: i32, lcall: Option<Link>) {
+    pub fn jmp(&mut self, offset: i32, lcall: Option<Link>, conditional: bool) {
         let mut fi = self.functions.len() - 1;
         loop {
             self.fi_jmp(fi, offset, lcall);
-            let Some(a) = &self.functions[fi].1 else {
-                return;
-            };
-            fi = *a as usize;
+            if conditional {
+                let Some(a) = &self.functions[fi].1 else {
+                    return;
+                };
+                fi = *a as usize;
+            } else {
+                let Some(a) = self.functions[fi].1.take() else {
+                    return;
+                };
+                fi = a as usize;
+            }
         }
     }
     fn fi_jmp(&mut self, fi: usize, offset: i32, lcall: Option<Link>) {
@@ -107,14 +114,21 @@ impl FeedState {
         }
         f.instruction(&Instruction::ReturnCall(next));
     }
-    pub fn jr(&mut self, idx: u32, lcall: Option<Link>) {
+    pub fn jr(&mut self, idx: u32, lcall: Option<Link>, conditional: bool) {
         let mut fi = self.functions.len() - 1;
         loop {
             self.fi_jr(fi, idx, lcall);
-            let Some(a) = &self.functions[fi].1 else {
-                return;
-            };
-            fi = *a as usize;
+            if conditional {
+                let Some(a) = &self.functions[fi].1 else {
+                    return;
+                };
+                fi = *a as usize;
+            } else {
+                let Some(a) = self.functions[fi].1.take() else {
+                    return;
+                };
+                fi = a as usize;
+            }
         }
     }
     fn fi_jr(&mut self, fi: usize, idx: u32, lcall: Option<Link>) {
