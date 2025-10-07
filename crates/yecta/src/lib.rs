@@ -37,12 +37,12 @@ impl FeedState {
     }
     pub fn begin_inst(&mut self, len: u32) {
         while self.counters.len() < len as usize {
-            self.counters.push_front(None);
+            self.counters.push_back(None);
         }
         *self.counters.iter_mut().nth(len as usize).unwrap() = Some(self.functions.len() as u32);
         self.functions.push((
             Function::new(self.opts.locals.clone()),
-            self.counters.pop_back().flatten(),
+            self.counters.pop_front().flatten(),
         ));
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
