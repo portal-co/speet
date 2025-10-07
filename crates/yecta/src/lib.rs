@@ -78,7 +78,7 @@ impl FeedState {
         let mut fi = self.functions.len() - 1;
         loop {
             self.fi_jmp(fi, offset, lcall);
-            if conditional {
+            if conditional || lcall.is_some() {
                 let Some(a) = &self.functions[fi].1 else {
                     return;
                 };
@@ -118,7 +118,7 @@ impl FeedState {
         let mut fi = self.functions.len() - 1;
         loop {
             self.fi_jr(fi, idx, lcall);
-            if conditional {
+            if conditional || lcall.is_some() {
                 let Some(a) = &self.functions[fi].1 else {
                     return;
                 };
