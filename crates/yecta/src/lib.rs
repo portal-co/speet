@@ -20,12 +20,24 @@ pub struct Env {
     pub table: u32,
     pub function_ty: u32,
 }
+#[non_exhaustive]
 pub struct Opts {
     pub env: Env,
     pub locals: Vec<(u32, ValType)>,
     pub fastcall: Option<FastCall>,
     pub pinned: PinTracker,
     pub non_arg_params: BTreeSet<u32>,
+}
+impl From<Env> for Opts {
+    fn from(value: Env) -> Self {
+        Self {
+            env: value,
+            locals: Default::default(),
+            fastcall: None,
+            pinned: Default::default(),
+            non_arg_params: Default::default(),
+        }
+    }
 }
 pub struct FastCall {
     pub lr: u32,
