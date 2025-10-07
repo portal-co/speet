@@ -89,9 +89,7 @@ impl FeedState {
         {
             f.instruction(&Instruction::LocalGet(fc.lr_backup));
         }
-        for a in 0..self.opts.params {
-            f.instruction(&Instruction::LocalGet(a));
-        }
+
         if let Some(l) = lcall.as_ref() {
             let off = off.unwrap() as u64;
             let off = off
@@ -110,6 +108,9 @@ impl FeedState {
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
+                for a in 0..self.opts.params {
+                    f.instruction(&Instruction::LocalGet(a));
+                }
                 f.instruction(&Instruction::Call(next));
                 for a in (0..self.opts.params).rev() {
                     f.instruction(&Instruction::LocalSet(a));
@@ -117,6 +118,9 @@ impl FeedState {
                 f.instruction(&Instruction::LocalSet(fc.lr_backup));
                 return;
             }
+        }
+        for a in 0..self.opts.params {
+            f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::ReturnCall(next));
     }
@@ -149,11 +153,9 @@ impl FeedState {
         if let Some(fc) = self.opts.fastcall.as_ref()
             && let Some(l) = lcall.as_ref()
             && fc.lr == l.reg
+            && fc.lr != idx
         {
             f.instruction(&Instruction::LocalGet(fc.lr_backup));
-        }
-        for a in 0..self.opts.params {
-            f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::LocalGet(idx))
             .instruction(&match self.opts.xlen {
@@ -197,6 +199,9 @@ impl FeedState {
                 if fc.lr == idx {
                     peg = true;
                 } else {
+                    for a in 0..self.opts.params {
+                        f.instruction(&Instruction::LocalGet(a));
+                    }
                     f.instruction(&Instruction::CallIndirect {
                         type_index: self.opts.function_ty,
                         table_index: self.opts.table,
@@ -222,10 +227,16 @@ impl FeedState {
             })
             .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
             f.instruction(&Instruction::Drop);
+            for a in 0..self.opts.params {
+                f.instruction(&Instruction::LocalGet(a));
+            }
             f.instruction(&Instruction::Return);
             f.instruction(&Instruction::Else);
 
             needs_end = true;
+        }
+        for a in 0..self.opts.params {
+            f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::ReturnCallIndirect {
             type_index: self.opts.function_ty,
