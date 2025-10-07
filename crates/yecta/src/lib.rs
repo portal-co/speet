@@ -94,6 +94,8 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if let Some(l) = lcall.as_ref() {
+            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
+                .instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
@@ -103,8 +105,6 @@ impl FeedState {
                 }
                 return;
             }
-            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
-                .instruction(&Instruction::LocalSet(l.reg));
         }
         f.instruction(&Instruction::ReturnCall(next));
     }
@@ -127,6 +127,8 @@ impl FeedState {
         f.instruction(&Instruction::LocalGet(idx));
         let mut peg = false;
         if let Some(l) = lcall.as_ref() {
+            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
+                .instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
@@ -143,8 +145,6 @@ impl FeedState {
                     return;
                 }
             }
-            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
-                .instruction(&Instruction::LocalSet(l.reg));
         }
         if let Some(fc) = self.opts.fastcall.as_ref()
             && fc.lr == idx
