@@ -1,0 +1,9 @@
+[package]
+name = "portal-solutions-yecta"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+wasm-encoder.workspace = true
