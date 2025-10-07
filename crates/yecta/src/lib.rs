@@ -10,6 +10,7 @@ pub struct Opts {
     pub table: u32,
     pub function_ty: u32,
     pub fastcall: Option<FastCall>,
+    pub pinned: Vec<bool>,
 }
 pub struct FastCall {
     pub lr: u32,
@@ -36,7 +37,7 @@ impl FeedState {
         return (self.functions.len() as u32).wrapping_add_signed(offset);
     }
     pub fn begin_inst(&mut self, len: u32) {
-        while self.counters.len() < len as usize {
+        while self.counters.len() <= len as usize {
             self.counters.push_back(None);
         }
         *self.counters.iter_mut().nth(len as usize).unwrap() = Some(self.functions.len() as u32);
@@ -94,6 +95,12 @@ impl FeedState {
     fn fi_jmp(&mut self, fi: usize, offset: i32, lcall: Option<Link>) {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
+        if let Some(off) = off {
+            while self.opts.pinned.len() <= off as usize {
+                self.opts.pinned.push(false);
+            }
+            self.opts.pinned[off as usize] = true
+        }
         let f = &mut self.functions[fi].0;
 
         for a in 0..self.opts.params {
@@ -133,6 +140,12 @@ impl FeedState {
     }
     fn fi_jr(&mut self, fi: usize, idx: u32, lcall: Option<Link>) {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
+        if let Some(off) = off {
+            while self.opts.pinned.len() <= off as usize {
+                self.opts.pinned.push(false);
+            }
+            self.opts.pinned[off as usize] = true
+        }
         let f = &mut self.functions[fi].0;
         for a in 0..self.opts.params {
             f.instruction(&Instruction::LocalGet(a));
