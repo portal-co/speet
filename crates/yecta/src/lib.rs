@@ -3,6 +3,21 @@
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use wasm_encoder::{Function, Instruction, ValType};
 extern crate alloc;
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PinTracker {
+    backing: Vec<bool>,
+}
+impl PinTracker {
+    pub fn get(&self, a: usize) -> bool {
+        return self.backing.get(a).cloned().unwrap_or_default();
+    }
+    pub fn flag(&mut self, a: usize) {
+        while self.backing.len() <= a {
+            self.backing.push(false);
+        }
+        self.backing[a] = true;
+    }
+}
 pub struct Opts {
     pub size: u32,
     pub locals: Vec<(u32, ValType)>,
@@ -10,7 +25,7 @@ pub struct Opts {
     pub table: u32,
     pub function_ty: u32,
     pub fastcall: Option<FastCall>,
-    pub pinned: Vec<bool>,
+    pub pinned: PinTracker,
 }
 pub struct FastCall {
     pub lr: u32,
@@ -96,10 +111,7 @@ impl FeedState {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
-            while self.opts.pinned.len() <= off as usize {
-                self.opts.pinned.push(false);
-            }
-            self.opts.pinned[off as usize] = true
+            self.opts.pinned.flag(off as usize);
         }
         let f = &mut self.functions[fi].0;
 
@@ -141,10 +153,7 @@ impl FeedState {
     fn fi_jr(&mut self, fi: usize, idx: u32, lcall: Option<Link>) {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
-            while self.opts.pinned.len() <= off as usize {
-                self.opts.pinned.push(false);
-            }
-            self.opts.pinned[off as usize] = true
+            self.opts.pinned.flag(off as usize);
         }
         let f = &mut self.functions[fi].0;
         for a in 0..self.opts.params {
