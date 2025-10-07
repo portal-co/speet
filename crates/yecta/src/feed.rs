@@ -15,7 +15,7 @@ impl FeedState {
     pub fn id_for_offset(&self, offset: i32) -> u32 {
         return (self.functions.len() as u32)
             .wrapping_add_signed(offset)
-            .wrapping_add(self.opts.offset);
+            .wrapping_add(self.opts.env.offset);
     }
     pub fn begin_inst(&mut self, len: u32) {
         while self.counters.len() <= len as usize {
@@ -78,8 +78,8 @@ impl FeedState {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
             self.opts.pinned.flag(
-                off.wrapping_sub(self.opts.offset)
-                    .wrapping_add(self.opts.table_offset) as usize,
+                off.wrapping_sub(self.opts.env.offset)
+                    .wrapping_add(self.opts.env.table_offset) as usize,
             );
         }
         let f = &mut self.functions[fi].0;
@@ -87,9 +87,9 @@ impl FeedState {
         if let Some(l) = lcall.as_ref() {
             let off = off.unwrap() as u64;
             let off = off
-                .wrapping_sub(self.opts.offset.into())
-                .wrapping_add(self.opts.code_offset.into());
-            f.instruction(&match self.opts.xlen {
+                .wrapping_sub(self.opts.env.offset.into())
+                .wrapping_add(self.opts.env.code_offset.into());
+            f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
             });
@@ -98,15 +98,22 @@ impl FeedState {
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
-                for mut a in 0..self.opts.params {
+                for mut a in 0..self.opts.env.params {
+                    if self.opts.non_arg_params.contains(&a) {
+                        f.instruction(&match self.opts.env.xlen {
+                            xLen::_32 => Instruction::I32Const(0),
+                            xLen::_64 => Instruction::I64Const(0),
+                        });
+                        continue;
+                    }
                     if a == fc.lr_backup {
                         a = fc.lr
                     }
                     f.instruction(&Instruction::LocalGet(a));
                 }
                 f.instruction(&Instruction::Call(next));
-                for a in (0..self.opts.params).rev() {
-                    if a == fc.lr_backup {
+                for a in (0..self.opts.env.params).rev() {
+                    if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                         f.instruction(&Instruction::Drop);
                     } else {
                         f.instruction(&Instruction::LocalSet(a));
@@ -116,7 +123,14 @@ impl FeedState {
                 return;
             }
         }
-        for a in 0..self.opts.params {
+        for a in 0..self.opts.env.params {
+            if self.opts.non_arg_params.contains(&a) {
+                f.instruction(&match self.opts.env.xlen {
+                    xLen::_32 => Instruction::I32Const(0),
+                    xLen::_64 => Instruction::I64Const(0),
+                });
+                continue;
+            }
             f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::ReturnCall(next));
@@ -142,31 +156,31 @@ impl FeedState {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
             self.opts.pinned.flag(
-                off.wrapping_sub(self.opts.offset)
-                    .wrapping_add(self.opts.table_offset) as usize,
+                off.wrapping_sub(self.opts.env.offset)
+                    .wrapping_add(self.opts.env.table_offset) as usize,
             );
         }
         let f = &mut self.functions[fi].0;
         macro_rules! table_index {
             () => {
                 f.instruction(&Instruction::LocalGet(idx))
-                    .instruction(&match self.opts.xlen {
+                    .instruction(&match self.opts.env.xlen {
                         xLen::_64 => Instruction::I64Const(
                             (self
-                                .opts
+                                .opts.env
                                 .code_offset
-                                .wrapping_sub(self.opts.table_offset.into()))
+                                .wrapping_sub(self.opts.env.table_offset.into()))
                                 as i64,
                         ),
                         xLen::_32 => Instruction::I32Const(
                             (self
-                                .opts
+                                .opts.env
                                 .code_offset
-                                .wrapping_sub(self.opts.table_offset.into())
+                                .wrapping_sub(self.opts.env.table_offset.into())
                                 & 0xffff_ffff) as u32 as i32,
                         ),
                     })
-                    .instruction(&match self.opts.xlen {
+                    .instruction(&match self.opts.env.xlen {
                         xLen::_64 => Instruction::I64Sub,
                         xLen::_32 => Instruction::I32Sub,
                     });
@@ -176,9 +190,9 @@ impl FeedState {
         if let Some(l) = lcall.as_ref() {
             let off = off.unwrap() as u64;
             let off = off
-                .wrapping_sub(self.opts.offset.into())
-                .wrapping_add(self.opts.code_offset.into());
-            f.instruction(&match self.opts.xlen {
+                .wrapping_sub(self.opts.env.offset.into())
+                .wrapping_add(self.opts.env.code_offset.into());
+            f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
             });
@@ -189,7 +203,14 @@ impl FeedState {
                 if fc.lr == idx {
                     peg = true;
                 } else {
-                    for mut a in 0..self.opts.params {
+                    for mut a in 0..self.opts.env.params {
+                        if self.opts.non_arg_params.contains(&a) {
+                            f.instruction(&match self.opts.env.xlen {
+                                xLen::_32 => Instruction::I32Const(0),
+                                xLen::_64 => Instruction::I64Const(0),
+                            });
+                            continue;
+                        }
                         if a == fc.lr_backup {
                             a = fc.lr
                         }
@@ -197,11 +218,11 @@ impl FeedState {
                     }
                     table_index!();
                     f.instruction(&Instruction::CallIndirect {
-                        type_index: self.opts.function_ty,
-                        table_index: self.opts.table,
+                        type_index: self.opts.env.function_ty,
+                        table_index: self.opts.env.table,
                     });
-                    for a in (0..self.opts.params).rev() {
-                        if a == fc.lr_backup {
+                    for a in (0..self.opts.env.params).rev() {
+                        if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                             f.instruction(&Instruction::Drop);
                         } else {
                             f.instruction(&Instruction::LocalSet(a));
@@ -218,13 +239,13 @@ impl FeedState {
         {
             f.instruction(&Instruction::LocalGet(fc.lr));
             f.instruction(&Instruction::LocalGet(fc.lr_backup));
-            f.instruction(&match self.opts.xlen {
+            f.instruction(&match self.opts.env.xlen {
                 xLen::_32 => Instruction::I32Eq,
                 xLen::_64 => Instruction::I64Eq,
             })
             .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
             f.instruction(&Instruction::Drop);
-            for a in 0..self.opts.params {
+            for a in 0..self.opts.env.params {
                 f.instruction(&Instruction::LocalGet(a));
             }
             f.instruction(&Instruction::Return);
@@ -232,13 +253,20 @@ impl FeedState {
 
             needs_end = true;
         }
-        for a in 0..self.opts.params {
+        for a in 0..self.opts.env.params {
+            if self.opts.non_arg_params.contains(&a) {
+                f.instruction(&match self.opts.env.xlen {
+                    xLen::_32 => Instruction::I32Const(0),
+                    xLen::_64 => Instruction::I64Const(0),
+                });
+                continue;
+            }
             f.instruction(&Instruction::LocalGet(a));
         }
         table_index!();
         f.instruction(&Instruction::ReturnCallIndirect {
-            type_index: self.opts.function_ty,
-            table_index: self.opts.table,
+            type_index: self.opts.env.function_ty,
+            table_index: self.opts.env.table,
         });
         if needs_end {
             f.instruction(&Instruction::End);
