@@ -20,6 +20,10 @@ impl PinTracker {
 }
 pub struct Opts {
     pub size: u32,
+    pub offset: u32,
+    pub table_offset: u32,
+    pub code_offset: u64,
+    pub is64: bool,
     pub locals: Vec<(u32, ValType)>,
     pub params: u32,
     pub table: u32,
@@ -49,7 +53,9 @@ impl FeedState {
         }
     }
     pub fn id_for_offset(&self, offset: i32) -> u32 {
-        return (self.functions.len() as u32).wrapping_add_signed(offset);
+        return (self.functions.len() as u32)
+            .wrapping_add_signed(offset)
+            .wrapping_add(self.opts.offset);
     }
     pub fn begin_inst(&mut self, len: u32) {
         while self.counters.len() <= len as usize {
@@ -111,7 +117,10 @@ impl FeedState {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
-            self.opts.pinned.flag(off as usize);
+            self.opts.pinned.flag(
+                off.wrapping_sub(self.opts.offset)
+                    .wrapping_add(self.opts.table_offset) as usize,
+            );
         }
         let f = &mut self.functions[fi].0;
 
@@ -119,8 +128,15 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if let Some(l) = lcall.as_ref() {
-            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
-                .instruction(&Instruction::LocalSet(l.reg));
+            let off = off.unwrap() as u64;
+            let off = off
+                .wrapping_sub(self.opts.offset.into())
+                .wrapping_add(self.opts.code_offset.into());
+            f.instruction(&match self.opts.is64 {
+                true => Instruction::I64Const(off as i64),
+                false => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
+            })
+            .instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
@@ -153,17 +169,40 @@ impl FeedState {
     fn fi_jr(&mut self, fi: usize, idx: u32, lcall: Option<Link>) {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         if let Some(off) = off {
-            self.opts.pinned.flag(off as usize);
+            self.opts.pinned.flag(
+                off.wrapping_sub(self.opts.offset)
+                    .wrapping_add(self.opts.table_offset) as usize,
+            );
         }
         let f = &mut self.functions[fi].0;
         for a in 0..self.opts.params {
             f.instruction(&Instruction::LocalGet(a));
         }
-        f.instruction(&Instruction::LocalGet(idx));
+        f.instruction(&Instruction::LocalGet(idx))
+            .instruction(&match self.opts.is64 {
+                true => Instruction::I64Const(
+                    (self.opts.code_offset.wrapping_sub(self.opts.table_offset.into())) as i64,
+                ),
+                false => Instruction::I32Const(
+                    (self.opts.code_offset.wrapping_sub(self.opts.table_offset.into()) & 0xffff_ffff)
+                        as u32 as i32,
+                ),
+            })
+            .instruction(&match self.opts.is64 {
+                true => Instruction::I64Sub,
+                false => Instruction::I32Sub,
+            });
         let mut peg = false;
         if let Some(l) = lcall.as_ref() {
-            f.instruction(&Instruction::I32Const(off.unwrap() as i32))
-                .instruction(&Instruction::LocalSet(l.reg));
+            let off = off.unwrap() as u64;
+            let off = off
+                .wrapping_sub(self.opts.offset.into())
+                .wrapping_add(self.opts.code_offset.into());
+            f.instruction(&match self.opts.is64 {
+                true => Instruction::I64Const(off as i64),
+                false => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
+            })
+            .instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
