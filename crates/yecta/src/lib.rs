@@ -75,6 +75,18 @@ impl FeedState {
             fi = *a as usize;
         }
     }
+    pub fn instrs<'a>(&'a mut self, i: &[Instruction<'_>]) -> &'a mut Self {
+        let mut fi = self.functions.len() - 1;
+        loop {
+            for i in i.iter() {
+                self.functions[fi].0.instruction(i);
+            }
+            let Some(a) = &self.functions[fi].1 else {
+                return self;
+            };
+            fi = *a as usize;
+        }
+    }
     pub fn jmp(&mut self, offset: i32, lcall: Option<Link>) {
         let mut fi = self.functions.len() - 1;
         loop {
