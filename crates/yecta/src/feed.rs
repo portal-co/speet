@@ -83,12 +83,6 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
-        if let Some(fc) = self.opts.fastcall.as_ref()
-            && let Some(l) = lcall.as_ref()
-            && fc.lr == l.reg
-        {
-            f.instruction(&Instruction::LocalGet(fc.lr_backup));
-        }
 
         if let Some(l) = lcall.as_ref() {
             let off = off.unwrap() as u64;
@@ -99,23 +93,22 @@ impl FeedState {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
             });
-            if let Some(fc) = self.opts.fastcall.as_ref()
-                && fc.lr == l.reg
-            {
-                f.instruction(&Instruction::LocalTee(fc.lr_backup));
-            }
+
             f.instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
-                for a in 0..self.opts.params {
+                for mut a in 0..self.opts.params {
+                    if a == fc.lr_backup {
+                        a = fc.lr
+                    }
                     f.instruction(&Instruction::LocalGet(a));
                 }
                 f.instruction(&Instruction::Call(next));
                 for a in (0..self.opts.params).rev() {
                     f.instruction(&Instruction::LocalSet(a));
                 }
-                f.instruction(&Instruction::LocalSet(fc.lr_backup));
+
                 return;
             }
         }
@@ -150,13 +143,6 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
-        if let Some(fc) = self.opts.fastcall.as_ref()
-            && let Some(l) = lcall.as_ref()
-            && fc.lr == l.reg
-            && fc.lr != idx
-        {
-            f.instruction(&Instruction::LocalGet(fc.lr_backup));
-        }
         f.instruction(&Instruction::LocalGet(idx))
             .instruction(&match self.opts.xlen {
                 xLen::_64 => Instruction::I64Const(
@@ -187,11 +173,6 @@ impl FeedState {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
             });
-            if let Some(fc) = self.opts.fastcall.as_ref()
-                && fc.lr == l.reg
-            {
-                f.instruction(&Instruction::LocalTee(fc.lr_backup));
-            }
             f.instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
@@ -199,7 +180,10 @@ impl FeedState {
                 if fc.lr == idx {
                     peg = true;
                 } else {
-                    for a in 0..self.opts.params {
+                    for mut a in 0..self.opts.params {
+                        if a == fc.lr_backup {
+                            a = fc.lr
+                        }
                         f.instruction(&Instruction::LocalGet(a));
                     }
                     f.instruction(&Instruction::CallIndirect {
@@ -209,7 +193,6 @@ impl FeedState {
                     for a in (0..self.opts.params).rev() {
                         f.instruction(&Instruction::LocalSet(a));
                     }
-                    f.instruction(&Instruction::LocalSet(fc.lr_backup));
                     return;
                 }
             }
