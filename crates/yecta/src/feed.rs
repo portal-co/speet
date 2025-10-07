@@ -26,14 +26,6 @@ impl FeedState {
             Function::new(self.opts.locals.clone()),
             self.counters.pop_front().flatten(),
         ));
-        if let Some(fc) = self.opts.fastcall.as_ref() {
-            self.functions
-                .last_mut()
-                .unwrap()
-                .0
-                .instruction(&Instruction::LocalGet(fc.lr))
-                .instruction(&Instruction::LocalSet(fc.lr_backup));
-        }
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
         for (f, g) in self.functions.iter_mut() {
@@ -91,7 +83,12 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
-
+        if let Some(fc) = self.opts.fastcall.as_ref()
+            && let Some(l) = lcall.as_ref()
+            && fc.lr == l.reg
+        {
+            f.instruction(&Instruction::LocalGet(fc.lr_backup));
+        }
         for a in 0..self.opts.params {
             f.instruction(&Instruction::LocalGet(a));
         }
@@ -103,8 +100,13 @@ impl FeedState {
             f.instruction(&match self.opts.xlen {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
-            })
-            .instruction(&Instruction::LocalSet(l.reg));
+            });
+            if let Some(fc) = self.opts.fastcall.as_ref()
+                && fc.lr == l.reg
+            {
+                f.instruction(&Instruction::LocalTee(fc.lr_backup));
+            }
+            f.instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
@@ -112,6 +114,7 @@ impl FeedState {
                 for a in (0..self.opts.params).rev() {
                     f.instruction(&Instruction::LocalSet(a));
                 }
+                f.instruction(&Instruction::LocalSet(fc.lr_backup));
                 return;
             }
         }
@@ -143,6 +146,12 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
+        if let Some(fc) = self.opts.fastcall.as_ref()
+            && let Some(l) = lcall.as_ref()
+            && fc.lr == l.reg
+        {
+            f.instruction(&Instruction::LocalGet(fc.lr_backup));
+        }
         for a in 0..self.opts.params {
             f.instruction(&Instruction::LocalGet(a));
         }
@@ -175,8 +184,13 @@ impl FeedState {
             f.instruction(&match self.opts.xlen {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
-            })
-            .instruction(&Instruction::LocalSet(l.reg));
+            });
+            if let Some(fc) = self.opts.fastcall.as_ref()
+                && fc.lr == l.reg
+            {
+                f.instruction(&Instruction::LocalTee(fc.lr_backup));
+            }
+            f.instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
@@ -190,6 +204,7 @@ impl FeedState {
                     for a in (0..self.opts.params).rev() {
                         f.instruction(&Instruction::LocalSet(a));
                     }
+                    f.instruction(&Instruction::LocalSet(fc.lr_backup));
                     return;
                 }
             }
