@@ -125,7 +125,7 @@ impl FeedState {
                 let fl = match self.opts.env.feat_flags.as_ref().cloned() {
                     None => true,
                     Some(fl) => {
-                        f.instruction(&Instruction::GlobalGet(fl))
+                        f.instruction(&Instruction::Call(fl))
                             .instruction(&Instruction::I32Const(1))
                             .instruction(&Instruction::I32And)
                             .instruction(&Instruction::I32Eqz)
@@ -245,7 +245,7 @@ impl FeedState {
                     let fl = match self.opts.env.feat_flags.as_ref().cloned() {
                         None => true,
                         Some(fl) => {
-                            f.instruction(&Instruction::GlobalGet(fl))
+                            f.instruction(&Instruction::Call(fl))
                                 .instruction(&Instruction::I32Const(1))
                                 .instruction(&Instruction::I32And)
                                 .instruction(&Instruction::I32Eqz)
@@ -300,7 +300,7 @@ impl FeedState {
                 xLen::_64 => Instruction::I64Eq,
             });
             if let Some(fl) = self.opts.env.feat_flags.as_ref().cloned() {
-                f.instruction(&Instruction::GlobalGet(fl))
+                f.instruction(&Instruction::Call(fl))
                     .instruction(&Instruction::I32Const(1))
                     .instruction(&Instruction::I32And)
                     .instruction(&Instruction::I32Eqz)
