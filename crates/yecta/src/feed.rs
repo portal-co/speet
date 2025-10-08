@@ -48,28 +48,31 @@ impl FeedState {
             self.counters.pop_front().flatten(),
         ));
         if let Some(i) = self.opts.env.inst_start.as_ref().cloned() {
-            for p in 0..self.opts.env.params {
-                self.instr(&Instruction::LocalGet(p));
-            }
-            self.instr(&Instruction::I32Const(self.functions.len() as u32 as i32));
-            self.instr(&Instruction::Call(i));
-
-            self.instr(&Instruction::If(wasm_encoder::BlockType::Empty));
-            if self.opts.env.tail_calls_disabled {
-                self.instr(&Instruction::Return);
-            } else {
-                self.instr(&Instruction::ReturnCallIndirect {
-                    type_index: self.opts.env.function_ty,
-                    table_index: self.opts.env.table,
-                });
-            }
-            self.instr(&Instruction::Else);
-            for p in (0..self.opts.env.params).rev() {
-                self.instr(&Instruction::LocalSet(p));
-            }
-            self.instr(&Instruction::Drop);
-            self.instr(&Instruction::End);
+            self.ecall(i)
         }
+    }
+    pub fn ecall(&mut self, i: u32) {
+        for p in 0..self.opts.env.params {
+            self.instr(&Instruction::LocalGet(p));
+        }
+        self.instr(&Instruction::I32Const(self.functions.len() as u32 as i32));
+        self.instr(&Instruction::Call(i));
+
+        self.instr(&Instruction::If(wasm_encoder::BlockType::Empty));
+        if self.opts.env.tail_calls_disabled {
+            self.instr(&Instruction::Return);
+        } else {
+            self.instr(&Instruction::ReturnCallIndirect {
+                type_index: self.opts.env.function_ty,
+                table_index: self.opts.env.table,
+            });
+        }
+        self.instr(&Instruction::Else);
+        for p in (0..self.opts.env.params).rev() {
+            self.instr(&Instruction::LocalSet(p));
+        }
+        self.instr(&Instruction::Drop);
+        self.instr(&Instruction::End);
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
         for (f, g) in self.functions.iter_mut() {
@@ -191,7 +194,9 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if self.opts.env.tail_calls_disabled {
-            let soff = next.wrapping_sub(self.opts.env.offset).wrapping_add(self.opts.env.table_offset);
+            let soff = next
+                .wrapping_sub(self.opts.env.offset)
+                .wrapping_add(self.opts.env.table_offset);
             self.opts.pinned.flag(soff as usize);
             f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(soff as u64 as i64),
