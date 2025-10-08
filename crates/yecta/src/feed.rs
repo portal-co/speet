@@ -105,6 +105,7 @@ impl FeedState {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
         let soff = self.id_for_offset(-(self.functions.len() as u32 as i32));
+        let sidx = self.functions.len();
         if let Some(off) = off {
             self.opts.pinned.flag(
                 off.wrapping_sub(self.opts.env.offset)
@@ -174,6 +175,7 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if self.opts.env.tail_calls_disabled {
+            self.opts.pinned.flag(sidx);
             f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(soff as u64 as i64),
                 xLen::_32 => Instruction::I32Const(soff as i32),
@@ -383,6 +385,9 @@ fn apply_env_tco_end(env: &Env, f: &mut Function) {
             })
             .instruction(&Instruction::Br(0))
             .instruction(&Instruction::Else)
-            .instruction(&Instruction::End);
+            .instruction(&Instruction::End)
+            .instruction(&Instruction::LocalGet(env.params))
+            .instruction(&Instruction::End)
+            .instruction(&Instruction::Drop);
     }
 }
