@@ -107,7 +107,7 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
-
+        let mut flr = false;
         if let Some(l) = lcall.as_ref() {
             let off = off.unwrap() as u64;
             let off = off
@@ -122,6 +122,19 @@ impl FeedState {
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
             {
+                let fl = match self.opts.env.feat_flags.as_ref().cloned() {
+                    None => true,
+                    Some(fl) => {
+                        f.instruction(&Instruction::GlobalGet(fl))
+                            .instruction(&Instruction::I32Const(1))
+                            .instruction(&Instruction::I32And)
+                            .instruction(&Instruction::I32Eqz)
+                            .instruction(&Instruction::I32Eqz)
+                            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                        flr = true;
+                        false
+                    }
+                };
                 for mut a in 0..self.opts.env.params {
                     if self.opts.non_arg_params.contains(&a) {
                         f.instruction(&match self.opts.env.xlen {
@@ -143,14 +156,20 @@ impl FeedState {
                         f.instruction(&Instruction::LocalSet(a));
                     }
                 }
-
-                return;
+                if fl {
+                    return;
+                } else {
+                    f.instruction(&Instruction::Else);
+                }
             }
         }
         for a in 0..self.opts.env.params {
             f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::ReturnCall(next));
+        if flr {
+            f.instruction(&Instruction::End);
+        }
     }
     pub fn jr(&mut self, idx: u32, lcall: Option<Link>, conditional: bool) {
         let mut fi = self.functions.len() - 1;
@@ -178,6 +197,7 @@ impl FeedState {
             );
         }
         let f = &mut self.functions[fi].0;
+        let mut flr = false;
         macro_rules! table_index {
             () => {
                 f.instruction(&Instruction::LocalGet(idx))
@@ -222,6 +242,19 @@ impl FeedState {
                 if fc.lr == idx {
                     peg = true;
                 } else {
+                    let fl = match self.opts.env.feat_flags.as_ref().cloned() {
+                        None => true,
+                        Some(fl) => {
+                            f.instruction(&Instruction::GlobalGet(fl))
+                                .instruction(&Instruction::I32Const(1))
+                                .instruction(&Instruction::I32And)
+                                .instruction(&Instruction::I32Eqz)
+                                .instruction(&Instruction::I32Eqz)
+                                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                            flr = true;
+                            false
+                        }
+                    };
                     for mut a in 0..self.opts.env.params {
                         if self.opts.non_arg_params.contains(&a) {
                             f.instruction(&match self.opts.env.xlen {
@@ -247,7 +280,11 @@ impl FeedState {
                             f.instruction(&Instruction::LocalSet(a));
                         }
                     }
-                    return;
+                    if fl {
+                        return;
+                    } else {
+                        f.instruction(&Instruction::Else);
+                    }
                 }
             }
         }
@@ -261,8 +298,16 @@ impl FeedState {
             f.instruction(&match self.opts.env.xlen {
                 xLen::_32 => Instruction::I32Eq,
                 xLen::_64 => Instruction::I64Eq,
-            })
-            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            });
+            if let Some(fl) = self.opts.env.feat_flags.as_ref().cloned() {
+                f.instruction(&Instruction::GlobalGet(fl))
+                    .instruction(&Instruction::I32Const(1))
+                    .instruction(&Instruction::I32And)
+                    .instruction(&Instruction::I32Eqz)
+                    .instruction(&Instruction::I32Eqz)
+                    .instruction(&Instruction::I32And);
+            }
+            f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
             f.instruction(&Instruction::Drop);
             for a in 0..self.opts.env.params {
                 f.instruction(&Instruction::LocalGet(a));
@@ -281,6 +326,9 @@ impl FeedState {
             table_index: self.opts.env.table,
         });
         if needs_end {
+            f.instruction(&Instruction::End);
+        }
+        if flr {
             f.instruction(&Instruction::End);
         }
     }

@@ -20,7 +20,8 @@ pub struct Env {
     pub params: u32,
     pub table: u32,
     pub function_ty: u32,
-    pub inst_start: Option<u32>
+    pub inst_start: Option<u32>,
+    pub feat_flags: Option<u32>
 }
 #[non_exhaustive]
 pub struct Opts {
