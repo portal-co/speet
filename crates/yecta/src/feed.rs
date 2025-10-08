@@ -26,7 +26,23 @@ impl FeedState {
         }
         *self.counters.iter_mut().nth(len as usize).unwrap() = Some(self.functions.len() as u32);
         self.functions.push((
-            match Function::new(self.opts.locals.clone()) {
+            match Function::new(match self.opts.locals.clone() {
+                mut l => {
+                    if self.opts.env.tail_calls_disabled {
+                        l.insert(
+                            0,
+                            (
+                                1,
+                                match self.opts.env.xlen {
+                                    xLen::_32 => ValType::I32,
+                                    xLen::_64 => ValType::I64,
+                                },
+                            ),
+                        );
+                    }
+                    l
+                }
+            }) {
                 mut f => f,
             },
             self.counters.pop_front().flatten(),
