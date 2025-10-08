@@ -124,13 +124,6 @@ impl FeedState {
             }
         }
         for a in 0..self.opts.env.params {
-            if self.opts.non_arg_params.contains(&a) {
-                f.instruction(&match self.opts.env.xlen {
-                    xLen::_32 => Instruction::I32Const(0),
-                    xLen::_64 => Instruction::I64Const(0),
-                });
-                continue;
-            }
             f.instruction(&Instruction::LocalGet(a));
         }
         f.instruction(&Instruction::ReturnCall(next));
@@ -167,14 +160,16 @@ impl FeedState {
                     .instruction(&match self.opts.env.xlen {
                         xLen::_64 => Instruction::I64Const(
                             (self
-                                .opts.env
+                                .opts
+                                .env
                                 .code_offset
                                 .wrapping_sub(self.opts.env.table_offset.into()))
                                 as i64,
                         ),
                         xLen::_32 => Instruction::I32Const(
                             (self
-                                .opts.env
+                                .opts
+                                .env
                                 .code_offset
                                 .wrapping_sub(self.opts.env.table_offset.into())
                                 & 0xffff_ffff) as u32 as i32,
@@ -254,13 +249,6 @@ impl FeedState {
             needs_end = true;
         }
         for a in 0..self.opts.env.params {
-            if self.opts.non_arg_params.contains(&a) {
-                f.instruction(&match self.opts.env.xlen {
-                    xLen::_32 => Instruction::I32Const(0),
-                    xLen::_64 => Instruction::I64Const(0),
-                });
-                continue;
-            }
             f.instruction(&Instruction::LocalGet(a));
         }
         table_index!();
