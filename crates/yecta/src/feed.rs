@@ -172,7 +172,7 @@ impl FeedState {
                 }
                 apply_env_tco(&self.opts.env, f);
                 f.instruction(&Instruction::Call(next));
-                apply_env_tco_end(&self.opts.env, f);
+                apply_env_tco_end(&self.opts.env, f, self.opts.env.params);
                 for a in (0..self.opts.env.params).rev() {
                     if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                         f.instruction(&Instruction::Drop);
@@ -307,7 +307,7 @@ impl FeedState {
                         type_index: self.opts.env.function_ty,
                         table_index: self.opts.env.table,
                     });
-                    apply_env_tco_end(&self.opts.env, f);
+                    apply_env_tco_end(&self.opts.env, f, self.opts.env.params);
                     for a in (0..self.opts.env.params).rev() {
                         if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                             f.instruction(&Instruction::Drop);
@@ -378,23 +378,23 @@ impl FeedState {
         }
     }
 }
-fn apply_env_tco(env: &Env, f: &mut Function) {
+pub fn apply_env_tco(env: &Env, f: &mut Function) {
     if env.tail_calls_disabled {
         f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
             env.function_ty,
         )));
     }
 }
-fn apply_env_tco_end(env: &Env, f: &mut Function) {
+pub fn apply_env_tco_end(env: &Env, f: &mut Function, local: u32) {
     if env.tail_calls_disabled {
-        f.instruction(&Instruction::LocalTee(env.params))
+        f.instruction(&Instruction::LocalTee(local))
             .instruction(&match env.xlen {
                 xLen::_32 => Instruction::I32Eqz,
                 xLen::_64 => Instruction::I64Eqz,
             })
             .instruction(&Instruction::I32Eqz)
             .instruction(&Instruction::If(wasm_encoder::BlockType::Empty))
-            .instruction(&Instruction::LocalGet(env.params))
+            .instruction(&Instruction::LocalGet(local))
             .instruction(&Instruction::CallIndirect {
                 type_index: env.function_ty,
                 table_index: env.table,
@@ -402,7 +402,7 @@ fn apply_env_tco_end(env: &Env, f: &mut Function) {
             .instruction(&Instruction::Br(0))
             .instruction(&Instruction::Else)
             .instruction(&Instruction::End)
-            .instruction(&Instruction::LocalGet(env.params))
+            .instruction(&Instruction::LocalGet(local))
             .instruction(&Instruction::End)
             .instruction(&Instruction::Drop);
     }
