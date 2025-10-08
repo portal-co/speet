@@ -120,8 +120,8 @@ impl FeedState {
     fn fi_jmp(&mut self, fi: usize, offset: i32, lcall: Option<Link>) {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
-        let soff = self.id_for_offset(-(self.functions.len() as u32 as i32));
-        let sidx = self.functions.len();
+        // let soff = self.id_for_offset(-(self.functions.len() as u32 as i32));
+        // let sidx = self.functions.len();
         if let Some(off) = off {
             self.opts.pinned.flag(
                 off.wrapping_sub(self.opts.env.offset)
@@ -191,7 +191,8 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if self.opts.env.tail_calls_disabled {
-            self.opts.pinned.flag(sidx.wrapping_add(self.opts.env.table_offset as usize));
+            let soff = next.wrapping_sub(self.opts.env.offset).wrapping_add(self.opts.env.table_offset);
+            self.opts.pinned.flag(soff as usize);
             f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(soff as u64 as i64),
                 xLen::_32 => Instruction::I32Const(soff as i32),
