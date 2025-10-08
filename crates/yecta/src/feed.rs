@@ -191,7 +191,7 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         if self.opts.env.tail_calls_disabled {
-            self.opts.pinned.flag(sidx);
+            self.opts.pinned.flag(sidx.wrapping_add(self.opts.env.table_offset as usize));
             f.instruction(&match self.opts.env.xlen {
                 xLen::_64 => Instruction::I64Const(soff as u64 as i64),
                 xLen::_32 => Instruction::I32Const(soff as i32),
