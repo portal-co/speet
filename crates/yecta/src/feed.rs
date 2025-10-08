@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{opts::*, *};
 pub struct FeedState {
     functions: Vec<(Function, Option<u32>)>,
     counters: VecDeque<Option<u32>>,
