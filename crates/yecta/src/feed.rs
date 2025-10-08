@@ -39,10 +39,14 @@ impl FeedState {
             self.instr(&Instruction::Call(i));
 
             self.instr(&Instruction::If(wasm_encoder::BlockType::Empty));
-            self.instr(&Instruction::ReturnCallIndirect {
-                type_index: self.opts.env.function_ty,
-                table_index: self.opts.env.table,
-            });
+            if self.opts.env.tail_calls_disabled {
+                self.instr(&Instruction::Return);
+            } else {
+                self.instr(&Instruction::ReturnCallIndirect {
+                    type_index: self.opts.env.function_ty,
+                    table_index: self.opts.env.table,
+                });
+            }
             self.instr(&Instruction::Else);
             for p in (0..self.opts.env.params).rev() {
                 self.instr(&Instruction::LocalSet(p));
@@ -100,6 +104,7 @@ impl FeedState {
     fn fi_jmp(&mut self, fi: usize, offset: i32, lcall: Option<Link>) {
         let next = self.id_for_offset(offset);
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
+        let soff = self.id_for_offset(-(self.functions.len() as u32 as i32));
         if let Some(off) = off {
             self.opts.pinned.flag(
                 off.wrapping_sub(self.opts.env.offset)
@@ -148,7 +153,9 @@ impl FeedState {
                     }
                     f.instruction(&Instruction::LocalGet(a));
                 }
+                apply_env_tco(&self.opts.env, f);
                 f.instruction(&Instruction::Call(next));
+                apply_env_tco_end(&self.opts.env, f);
                 for a in (0..self.opts.env.params).rev() {
                     if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                         f.instruction(&Instruction::Drop);
@@ -166,7 +173,15 @@ impl FeedState {
         for a in 0..self.opts.env.params {
             f.instruction(&Instruction::LocalGet(a));
         }
-        f.instruction(&Instruction::ReturnCall(next));
+        if self.opts.env.tail_calls_disabled {
+            f.instruction(&match self.opts.env.xlen {
+                xLen::_64 => Instruction::I64Const(soff as u64 as i64),
+                xLen::_32 => Instruction::I32Const(soff as i32),
+            })
+            .instruction(&Instruction::Return);
+        } else {
+            f.instruction(&Instruction::ReturnCall(next));
+        }
         if flr {
             f.instruction(&Instruction::End);
         }
@@ -269,10 +284,12 @@ impl FeedState {
                         f.instruction(&Instruction::LocalGet(a));
                     }
                     table_index!();
+                    apply_env_tco(&self.opts.env, f);
                     f.instruction(&Instruction::CallIndirect {
                         type_index: self.opts.env.function_ty,
                         table_index: self.opts.env.table,
                     });
+                    apply_env_tco_end(&self.opts.env, f);
                     for a in (0..self.opts.env.params).rev() {
                         if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
                             f.instruction(&Instruction::Drop);
@@ -312,6 +329,12 @@ impl FeedState {
             for a in 0..self.opts.env.params {
                 f.instruction(&Instruction::LocalGet(a));
             }
+            if self.opts.env.tail_calls_disabled {
+                f.instruction(&match self.opts.env.xlen {
+                    xLen::_64 => Instruction::I64Const(0),
+                    xLen::_32 => Instruction::I32Const(0),
+                });
+            }
             f.instruction(&Instruction::Return);
             f.instruction(&Instruction::Else);
 
@@ -321,15 +344,45 @@ impl FeedState {
             f.instruction(&Instruction::LocalGet(a));
         }
         table_index!();
-        f.instruction(&Instruction::ReturnCallIndirect {
-            type_index: self.opts.env.function_ty,
-            table_index: self.opts.env.table,
-        });
+        if self.opts.env.tail_calls_disabled {
+            f.instruction(&Instruction::Return);
+        } else {
+            f.instruction(&Instruction::ReturnCallIndirect {
+                type_index: self.opts.env.function_ty,
+                table_index: self.opts.env.table,
+            });
+        }
         if needs_end {
             f.instruction(&Instruction::End);
         }
         if flr {
             f.instruction(&Instruction::End);
         }
+    }
+}
+fn apply_env_tco(env: &Env, f: &mut Function) {
+    if env.tail_calls_disabled {
+        f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
+            env.function_ty,
+        )));
+    }
+}
+fn apply_env_tco_end(env: &Env, f: &mut Function) {
+    if env.tail_calls_disabled {
+        f.instruction(&Instruction::LocalTee(env.params))
+            .instruction(&match env.xlen {
+                xLen::_32 => Instruction::I32Eqz,
+                xLen::_64 => Instruction::I64Eqz,
+            })
+            .instruction(&Instruction::I32Eqz)
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty))
+            .instruction(&Instruction::LocalGet(env.params))
+            .instruction(&Instruction::CallIndirect {
+                type_index: env.function_ty,
+                table_index: env.table,
+            })
+            .instruction(&Instruction::Br(0))
+            .instruction(&Instruction::Else)
+            .instruction(&Instruction::End);
     }
 }
