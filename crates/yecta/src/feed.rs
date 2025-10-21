@@ -57,7 +57,6 @@ impl FeedState {
         }
         self.instr(&Instruction::I32Const(self.functions.len() as u32 as i32));
         self.instr(&Instruction::Call(i));
-
         self.instr(&Instruction::If(wasm_encoder::BlockType::Empty));
         if self.opts.env.tail_calls_disabled {
             self.instr(&Instruction::Return);
@@ -142,7 +141,6 @@ impl FeedState {
                 xLen::_64 => Instruction::I64Const(off as i64),
                 xLen::_32 => Instruction::I32Const((off & 0xffff_ffff) as u32 as i32),
             });
-
             f.instruction(&Instruction::LocalSet(l.reg));
             if let Some(fc) = self.opts.fastcall.as_ref()
                 && fc.lr == l.reg
@@ -361,7 +359,6 @@ impl FeedState {
             }
             f.instruction(&Instruction::Return);
             f.instruction(&Instruction::Else);
-
             needs_end = true;
         }
         for a in 0..self.opts.env.params {
