@@ -478,6 +478,7 @@ pub fn apply_env_tco(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
                     f.instruction(&Instruction::I32Const(0))
                         .instruction(&exn.exn_flag.set());
                     reentrancy_ret(exn, f);
+                    snap(env,f);
                     FeedState::do_trap_core(f, *env, *exn, local);
                     f.instruction(&Instruction::Else);
                     snap(env, f);
