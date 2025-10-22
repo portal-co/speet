@@ -24,3 +24,20 @@ pub enum xLen {
     _32,
     _64,
 }
+pub trait InstFeed{
+    fn instr(&mut self, i: &Instruction<'_>);
+}
+pub trait InstFeedExt: InstFeed{
+    fn instruction(&mut self, i: &Instruction<'_>) -> &mut Self{
+        self.instr(i);
+        self
+    }
+}
+impl<T: InstFeed + ?Sized> InstFeedExt for T{
+
+}
+impl InstFeed for Function{
+    fn instr(&mut self, i: &Instruction<'_>) {
+        self.instruction(i);
+    }
+}

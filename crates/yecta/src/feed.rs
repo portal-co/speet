@@ -1,8 +1,22 @@
+use wasm_encoder::Catch;
+
 use crate::{opts::*, *};
 pub struct FeedState {
     functions: Vec<(Function, Option<u32>)>,
     counters: VecDeque<Option<u32>>,
     opts: Opts,
+}
+impl InstFeed for FeedState {
+    fn instr(&mut self, i: &Instruction<'_>) {
+        let mut fi = self.functions.len() - 1;
+        loop {
+            self.functions[fi].0.instr(i);
+            let Some(a) = &self.functions[fi].1 else {
+                return;
+            };
+            fi = *a as usize;
+        }
+    }
 }
 impl FeedState {
     pub fn env(&self) -> Env {
@@ -53,25 +67,25 @@ impl FeedState {
     }
     pub fn ecall(&mut self, i: u32) {
         for p in 0..self.opts.env.params {
-            self.instr(&Instruction::LocalGet(p));
+            self.instruction(&Instruction::LocalGet(p));
         }
-        self.instr(&Instruction::I32Const(self.functions.len() as u32 as i32));
-        self.instr(&Instruction::Call(i));
-        self.instr(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.instruction(&Instruction::I32Const(self.functions.len() as u32 as i32));
+        self.instruction(&Instruction::Call(i));
+        self.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
         if self.opts.env.tail_calls_disabled {
-            self.instr(&Instruction::Return);
+            self.instruction(&Instruction::Return);
         } else {
-            self.instr(&Instruction::ReturnCallIndirect {
+            self.instruction(&Instruction::ReturnCallIndirect {
                 type_index: self.opts.env.function_ty,
                 table_index: self.opts.env.table,
             });
         }
-        self.instr(&Instruction::Else);
+        self.instruction(&Instruction::Else);
         for p in (0..self.opts.env.params).rev() {
-            self.instr(&Instruction::LocalSet(p));
+            self.instruction(&Instruction::LocalSet(p));
         }
-        self.instr(&Instruction::Drop);
-        self.instr(&Instruction::End);
+        self.instruction(&Instruction::Drop);
+        self.instruction(&Instruction::End);
     }
     pub fn end(mut self) -> (Opts, Vec<Function>) {
         for (f, g) in self.functions.iter_mut() {
@@ -79,16 +93,6 @@ impl FeedState {
         }
         // self.functions.reverse();
         return (self.opts, self.functions.into_iter().map(|a| a.0).collect());
-    }
-    pub fn instr<'a>(&'a mut self, i: &Instruction<'_>) -> &'a mut Self {
-        let mut fi = self.functions.len() - 1;
-        loop {
-            self.functions[fi].0.instruction(i);
-            let Some(a) = &self.functions[fi].1 else {
-                return self;
-            };
-            fi = *a as usize;
-        }
     }
     pub fn instrs<'a>(&'a mut self, i: &[Instruction<'_>]) -> &'a mut Self {
         let mut fi = self.functions.len() - 1;
@@ -116,6 +120,30 @@ impl FeedState {
                     return;
                 };
                 fi = a as usize;
+            }
+        }
+    }
+    fn snap_params_for_fastcall(opts: &Opts, f: &mut (dyn InstFeed + '_), fc: &FastCall) {
+        for mut a in 0..opts.env.params {
+            if opts.non_arg_params.contains(&a) {
+                f.instruction(&match opts.env.xlen {
+                    xLen::_32 => Instruction::I32Const(0),
+                    xLen::_64 => Instruction::I64Const(0),
+                });
+                continue;
+            }
+            if a == fc.lr_backup {
+                a = fc.lr
+            }
+            f.instruction(&Instruction::LocalGet(a));
+        }
+    }
+    fn snap_results_for_fastcall(opts: &Opts, f: &mut (dyn InstFeed + '_), fc: &FastCall) {
+        for a in (0..opts.env.params).rev() {
+            if a == fc.lr_backup || opts.non_arg_params.contains(&a) {
+                f.instruction(&Instruction::Drop);
+            } else {
+                f.instruction(&Instruction::LocalSet(a));
             }
         }
     }
@@ -158,29 +186,11 @@ impl FeedState {
                         false
                     }
                 };
-                for mut a in 0..self.opts.env.params {
-                    if self.opts.non_arg_params.contains(&a) {
-                        f.instruction(&match self.opts.env.xlen {
-                            xLen::_32 => Instruction::I32Const(0),
-                            xLen::_64 => Instruction::I64Const(0),
-                        });
-                        continue;
-                    }
-                    if a == fc.lr_backup {
-                        a = fc.lr
-                    }
-                    f.instruction(&Instruction::LocalGet(a));
-                }
-                apply_env_tco(&self.opts.env, f);
+                Self::snap_params_for_fastcall(&self.opts, f, fc);
+                apply_env_tco(&self.opts.env, f, self.opts.env.params);
                 f.instruction(&Instruction::Call(next));
                 apply_env_tco_end(&self.opts.env, f, self.opts.env.params);
-                for a in (0..self.opts.env.params).rev() {
-                    if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
-                        f.instruction(&Instruction::Drop);
-                    } else {
-                        f.instruction(&Instruction::LocalSet(a));
-                    }
-                }
+                Self::snap_results_for_fastcall(&self.opts, f, fc);
                 if fl {
                     return;
                 } else {
@@ -224,6 +234,67 @@ impl FeedState {
                 fi = a as usize;
             }
         }
+    }
+    fn preret(env: Env, f: &mut (dyn InstFeed + '_)) {
+        if env.tail_calls_disabled {
+            let i = match env.xlen {
+                xLen::_64 => Instruction::I64Const(0),
+                xLen::_32 => Instruction::I32Const(0),
+            };
+            f.instruction(&i);
+        }
+    }
+    fn do_trap_core(f: &mut (dyn InstFeed + '_), env: Env, exn: ExceptionMode, idx: u32) {
+        // let exn = self.opts.env.exception_mode.as_ref().cloned()?;
+        macro_rules! table_index {
+            () => {
+                let i = match env.xlen {
+                    xLen::_64 => Instruction::I64Const(
+                        (env.code_offset.wrapping_sub(env.table_offset.into())) as i64,
+                    ),
+                    xLen::_32 => Instruction::I32Const(
+                        (env.code_offset.wrapping_sub(env.table_offset.into()) & 0xffff_ffff) as u32
+                            as i32,
+                    ),
+                };
+                let j = match env.xlen {
+                    xLen::_64 => Instruction::I64Sub,
+                    xLen::_32 => Instruction::I32Sub,
+                };
+                f.instruction(&Instruction::LocalGet(idx))
+                    .instruction(&i)
+                    .instruction(&j);
+            };
+        }
+        for a in 0..env.params {
+            f.instruction(&Instruction::LocalGet(a));
+        }
+        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
+            .instruction(&Instruction::I32Eqz)
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        table_index!();
+        if env.tail_calls_disabled {
+            f.instruction(&Instruction::Return);
+        } else {
+            f.instruction(&Instruction::ReturnCallIndirect {
+                type_index: env.function_ty,
+                table_index: env.table,
+            });
+        }
+        f.instruction(&Instruction::Else);
+        Self::preret(env, f);
+        f.instruction(&Instruction::I32Const(1))
+            .instruction(&Instruction::GlobalSet(exn.exn_flag));
+        match exn.kind {
+            ExceptionModeKind::ReturnBased => {
+                f.instruction(&Instruction::Return);
+            }
+            ExceptionModeKind::Wasm { tag } => {
+                f.instruction(&Instruction::Throw(tag));
+            }
+        }
+        f.instruction(&Instruction::End);
+        // Some(())
     }
     fn fi_jr(&mut self, fi: usize, idx: u32, lcall: Option<Link>) {
         let off = lcall.as_ref().map(|l| self.id_for_offset(l.last_len));
@@ -292,33 +363,16 @@ impl FeedState {
                             false
                         }
                     };
-                    for mut a in 0..self.opts.env.params {
-                        if self.opts.non_arg_params.contains(&a) {
-                            f.instruction(&match self.opts.env.xlen {
-                                xLen::_32 => Instruction::I32Const(0),
-                                xLen::_64 => Instruction::I64Const(0),
-                            });
-                            continue;
-                        }
-                        if a == fc.lr_backup {
-                            a = fc.lr
-                        }
-                        f.instruction(&Instruction::LocalGet(a));
-                    }
+                    Self::snap_params_for_fastcall(&self.opts, f, fc);
                     table_index!();
-                    apply_env_tco(&self.opts.env, f);
+                    apply_env_tco(&self.opts.env, f, self.opts.env.params);
                     f.instruction(&Instruction::CallIndirect {
                         type_index: self.opts.env.function_ty,
                         table_index: self.opts.env.table,
                     });
                     apply_env_tco_end(&self.opts.env, f, self.opts.env.params);
-                    for a in (0..self.opts.env.params).rev() {
-                        if a == fc.lr_backup || self.opts.non_arg_params.contains(&a) {
-                            f.instruction(&Instruction::Drop);
-                        } else {
-                            f.instruction(&Instruction::LocalSet(a));
-                        }
-                    }
+
+                    Self::snap_results_for_fastcall(&self.opts, f, fc);
                     if fl {
                         return;
                     } else {
@@ -351,12 +405,7 @@ impl FeedState {
             for a in 0..self.opts.env.params {
                 f.instruction(&Instruction::LocalGet(a));
             }
-            if self.opts.env.tail_calls_disabled {
-                f.instruction(&match self.opts.env.xlen {
-                    xLen::_64 => Instruction::I64Const(0),
-                    xLen::_32 => Instruction::I32Const(0),
-                });
-            }
+            Self::preret(self.opts.env, f);
             f.instruction(&Instruction::Return);
             f.instruction(&Instruction::Else);
             needs_end = true;
@@ -381,14 +430,54 @@ impl FeedState {
         }
     }
 }
-pub fn apply_env_tco(env: &Env, f: &mut Function) {
+pub fn apply_env_tco(env: &Env, f: &mut Function, local: u32) {
+    if let Some(exn) = env.exception_mode.as_ref() {
+        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
+            .instruction(&Instruction::I32Const(1))
+            .instruction(&Instruction::I32Add)
+            .instruction(&Instruction::GlobalSet(exn.reentrancy));
+    }
     if env.tail_calls_disabled {
         f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
             env.function_ty,
         )));
     }
+    if let Some(exn) = env.exception_mode.as_ref() {
+        match exn.kind {
+            ExceptionModeKind::Wasm { tag } => {
+                if env.tail_calls_disabled {
+                    f.instruction(&Instruction::TryTable(
+                        wasm_encoder::BlockType::FunctionType(env.function_ty),
+                        [Catch::One { tag, label: 0 }].into_iter().collect(),
+                    ));
+                } else {
+                    f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
+                        env.function_ty,
+                    )));
+                    f.instruction(&Instruction::TryTable(
+                        wasm_encoder::BlockType::FunctionType(env.function_ty),
+                        [Catch::One { tag, label: 0 }].into_iter().collect(),
+                    ));
+                }
+            }
+            ExceptionModeKind::ReturnBased => {}
+        }
+        f.instruction(&Instruction::LocalSet(local))
+            .instruction(&Instruction::GlobalGet(exn.exn_flag))
+            .instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
+                env.function_ty,
+            )))
+            .instruction(&Instruction::I32Const(0))
+            .instruction(&Instruction::GlobalSet(exn.exn_flag));
+        FeedState::do_trap_core(f, *env, *exn, local);
+        f.instruction(&Instruction::Else);
+    }
 }
-pub fn apply_env_tco_end(env: &Env, f: &mut Function, local: u32) {
+pub fn apply_env_tco_end(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
+    let mut ended = true;
+    if let Some(exn) = env.exception_mode.as_ref() {
+        ended = false;
+    }
     if env.tail_calls_disabled {
         f.instruction(&Instruction::LocalTee(local))
             .instruction(&match env.xlen {
@@ -404,9 +493,37 @@ pub fn apply_env_tco_end(env: &Env, f: &mut Function, local: u32) {
             })
             .instruction(&Instruction::Br(0))
             .instruction(&Instruction::Else)
-            .instruction(&Instruction::End)
-            .instruction(&Instruction::LocalGet(local))
+            .instruction(&Instruction::End);
+        if !ended {
+            ended = true;
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::LocalGet(local))
             .instruction(&Instruction::End)
             .instruction(&Instruction::Drop);
+    }
+    if let Some(exn) = env.exception_mode.as_ref() {
+        match exn.kind {
+            ExceptionModeKind::Wasm { tag } => {
+                if !env.tail_calls_disabled {
+                    if !ended {
+                        ended = true;
+                        f.instruction(&Instruction::End);
+                    }
+                    f.instruction(&Instruction::LocalGet(local))
+                        .instruction(&Instruction::End)
+                        .instruction(&Instruction::Drop);
+                }
+            }
+            ExceptionModeKind::ReturnBased => {}
+        };
+        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
+            .instruction(&Instruction::I32Const(1))
+            .instruction(&Instruction::I32Sub)
+            .instruction(&Instruction::GlobalSet(exn.reentrancy));
+        if !ended {
+            ended = true;
+            f.instruction(&Instruction::End);
+        }
     }
 }

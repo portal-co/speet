@@ -12,6 +12,7 @@ pub struct Env {
     pub inst_start: Option<u32>,
     pub feat_flags: Option<u32>,
     pub tail_calls_disabled: bool,
+    pub exception_mode: Option<ExceptionMode>,
 }
 #[non_exhaustive]
 pub struct Opts {
@@ -31,4 +32,15 @@ impl From<Env> for Opts {
             non_arg_params: Default::default(),
         }
     }
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ExceptionMode {
+    pub reentrancy: u32,
+    pub exn_flag: u32,
+    pub kind: ExceptionModeKind,
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ExceptionModeKind {
+    Wasm { tag: u32 },
+    ReturnBased,
 }
