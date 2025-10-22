@@ -269,7 +269,7 @@ impl FeedState {
         for a in 0..env.params {
             f.instruction(&Instruction::LocalGet(a));
         }
-        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
+        f.instruction(&exn.reentrancy.get())
             .instruction(&Instruction::I32Eqz)
             .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
         table_index!();
@@ -283,8 +283,12 @@ impl FeedState {
         }
         f.instruction(&Instruction::Else);
         Self::preret(env, f);
+        for p in (0..env.params).rev() {
+            f.instruction(&Instruction::LocalSet(p));
+        }
         f.instruction(&Instruction::I32Const(1))
-            .instruction(&Instruction::GlobalSet(exn.exn_flag));
+            .instruction(&exn.exn_flag.set());
+        snap(&env, f);
         match exn.kind {
             ExceptionModeKind::ReturnBased => {
                 f.instruction(&Instruction::Return);
@@ -410,9 +414,7 @@ impl FeedState {
             f.instruction(&Instruction::Else);
             needs_end = true;
         }
-        for a in 0..self.opts.env.params {
-            f.instruction(&Instruction::LocalGet(a));
-        }
+        snap(&self.opts.env, f);
         table_index!();
         if self.opts.env.tail_calls_disabled {
             f.instruction(&Instruction::Return);
@@ -430,12 +432,12 @@ impl FeedState {
         }
     }
 }
-pub fn apply_env_tco(env: &Env, f: &mut Function, local: u32) {
+pub fn apply_env_tco(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
     if let Some(exn) = env.exception_mode.as_ref() {
-        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
+        f.instruction(&exn.reentrancy.get())
             .instruction(&Instruction::I32Const(1))
             .instruction(&Instruction::I32Add)
-            .instruction(&Instruction::GlobalSet(exn.reentrancy));
+            .instruction(&exn.reentrancy.set());
     }
     if env.tail_calls_disabled {
         f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
@@ -443,6 +445,36 @@ pub fn apply_env_tco(env: &Env, f: &mut Function, local: u32) {
         )));
     }
     if let Some(exn) = env.exception_mode.as_ref() {
+        let mut x = true;
+        macro_rules! handle {
+            () => {
+                if core::mem::take(&mut x) {
+                    f.instruction(&Instruction::LocalTee(local));
+                    for p in (0..env.params).rev() {
+                        if p == local {
+                            f.instruction(&Instruction::Drop);
+                        } else {
+                            f.instruction(&Instruction::LocalSet(p));
+                        }
+                    }
+                    if env.tail_calls_disabled {
+                        f.instruction(&exn.exn_flag.get());
+                    } else {
+                        f.instruction(&Instruction::I32Const(1));
+                    };
+                    f.instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
+                        env.function_ty,
+                    )));
+
+                    f.instruction(&Instruction::I32Const(0))
+                        .instruction(&exn.exn_flag.set());
+                    reentrancy_ret(exn, f);
+                    FeedState::do_trap_core(f, *env, *exn, local);
+                    f.instruction(&Instruction::Else);
+                    snap(env, f);
+                }
+            };
+        }
         match exn.kind {
             ExceptionModeKind::Wasm { tag } => {
                 if env.tail_calls_disabled {
@@ -454,29 +486,47 @@ pub fn apply_env_tco(env: &Env, f: &mut Function, local: u32) {
                     f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
                         env.function_ty,
                     )));
+                    handle!();
                     f.instruction(&Instruction::TryTable(
                         wasm_encoder::BlockType::FunctionType(env.function_ty),
                         [Catch::One { tag, label: 0 }].into_iter().collect(),
                     ));
                 }
             }
-            ExceptionModeKind::ReturnBased => {}
+            ExceptionModeKind::ReturnBased => {
+                if !env.tail_calls_disabled {
+                    f.instruction(&Instruction::Loop(wasm_encoder::BlockType::FunctionType(
+                        env.function_ty,
+                    )));
+                    handle!();
+                }
+            }
         }
-        f.instruction(&Instruction::LocalSet(local))
-            .instruction(&Instruction::GlobalGet(exn.exn_flag))
-            .instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
-                env.function_ty,
-            )))
-            .instruction(&Instruction::I32Const(0))
-            .instruction(&Instruction::GlobalSet(exn.exn_flag));
-        FeedState::do_trap_core(f, *env, *exn, local);
-        f.instruction(&Instruction::Else);
+        handle!();
     }
+}
+fn reentrancy_ret(exn: &ExceptionMode, f: &mut (dyn InstFeed + '_)) {
+    f.instruction(&exn.reentrancy.get())
+        .instruction(&Instruction::I32Const(1))
+        .instruction(&Instruction::I32Sub)
+        .instruction(&exn.reentrancy.set());
 }
 pub fn apply_env_tco_end(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
     let mut ended = true;
     if let Some(exn) = env.exception_mode.as_ref() {
         ended = false;
+    }
+    if let Some(exn) = env.exception_mode.as_ref() {
+        match exn.kind {
+            ExceptionModeKind::Wasm { tag } => {
+                f.instruction(&Instruction::End);
+            }
+            ExceptionModeKind::ReturnBased => {
+                f.instruction(&Instruction::LocalTee(local));
+                f.instruction(&exn.exn_flag.get())
+                    .instruction(&Instruction::BrIf(0));
+            }
+        };
     }
     if env.tail_calls_disabled {
         f.instruction(&Instruction::LocalTee(local))
@@ -503,27 +553,24 @@ pub fn apply_env_tco_end(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
             .instruction(&Instruction::Drop);
     }
     if let Some(exn) = env.exception_mode.as_ref() {
-        match exn.kind {
-            ExceptionModeKind::Wasm { tag } => {
-                if !env.tail_calls_disabled {
-                    if !ended {
-                        ended = true;
-                        f.instruction(&Instruction::End);
-                    }
-                    f.instruction(&Instruction::LocalGet(local))
-                        .instruction(&Instruction::End)
-                        .instruction(&Instruction::Drop);
-                }
+        if !env.tail_calls_disabled {
+            if !ended {
+                ended = true;
+                f.instruction(&Instruction::End);
             }
-            ExceptionModeKind::ReturnBased => {}
-        };
-        f.instruction(&Instruction::GlobalGet(exn.reentrancy))
-            .instruction(&Instruction::I32Const(1))
-            .instruction(&Instruction::I32Sub)
-            .instruction(&Instruction::GlobalSet(exn.reentrancy));
+            f.instruction(&Instruction::LocalGet(local))
+                .instruction(&Instruction::End)
+                .instruction(&Instruction::Drop);
+        }
+        reentrancy_ret(exn, f);
         if !ended {
             ended = true;
             f.instruction(&Instruction::End);
         }
+    }
+}
+fn snap(env: &Env, f: &mut (dyn InstFeed + '_)) {
+    for p in 0..env.params {
+        f.instruction(&Instruction::LocalGet(p));
     }
 }

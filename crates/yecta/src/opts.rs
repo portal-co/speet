@@ -35,12 +35,33 @@ impl From<Env> for Opts {
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ExceptionMode {
-    pub reentrancy: u32,
-    pub exn_flag: u32,
+    pub reentrancy: Glocal,
+    pub exn_flag: Glocal,
     pub kind: ExceptionModeKind,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum ExceptionModeKind {
     Wasm { tag: u32 },
     ReturnBased,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Glocal {
+    Global(u32),
+    Local(u32),
+}
+
+impl Glocal {
+    pub fn get<'a>(&self) -> Instruction<'a> {
+        match self {
+            Glocal::Global(a) => Instruction::GlobalGet(*a),
+            Glocal::Local(a) => Instruction::LocalGet(*a),
+        }
+    }
+    pub fn set<'a>(&self) -> Instruction<'a> {
+        match self {
+            Glocal::Global(a) => Instruction::GlobalSet(*a),
+            Glocal::Local(a) => Instruction::LocalSet(*a),
+        }
+    }
 }
