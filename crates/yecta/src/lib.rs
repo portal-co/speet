@@ -1,5 +1,5 @@
 #![no_std]
-use crate::pin::PinTracker;
+use crate::{opts::Glocal, pin::PinTracker};
 use alloc::{
     collections::{btree_set::BTreeSet, vec_deque::VecDeque},
     sync::Arc,
@@ -12,7 +12,7 @@ pub mod opts;
 pub mod pin;
 pub struct FastCall {
     pub lr: u32,
-    pub lr_backup: u32,
+    pub lr_backup: Glocal,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Link {

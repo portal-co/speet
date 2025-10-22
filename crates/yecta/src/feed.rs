@@ -132,15 +132,26 @@ impl FeedState {
                 });
                 continue;
             }
-            if a == fc.lr_backup {
+            if match &fc.lr_backup {
+                Glocal::Local(b) => *b == a,
+                _ => false,
+            } {
                 a = fc.lr
             }
             f.instruction(&Instruction::LocalGet(a));
         }
+        if let Glocal::Global(b) = &fc.lr_backup {
+            f.instruction(&Instruction::LocalGet(fc.lr))
+                .instruction(&Instruction::GlobalSet(*b));
+        }
     }
     fn snap_results_for_fastcall(opts: &Opts, f: &mut (dyn InstFeed + '_), fc: &FastCall) {
         for a in (0..opts.env.params).rev() {
-            if a == fc.lr_backup || opts.non_arg_params.contains(&a) {
+            if match &fc.lr_backup {
+                Glocal::Local(b) => *b == a,
+                _ => false,
+            } || opts.non_arg_params.contains(&a)
+            {
                 f.instruction(&Instruction::Drop);
             } else {
                 f.instruction(&Instruction::LocalSet(a));
@@ -389,7 +400,7 @@ impl FeedState {
             && !peg
         {
             f.instruction(&Instruction::LocalGet(fc.lr));
-            f.instruction(&Instruction::LocalGet(fc.lr_backup));
+            f.instruction(&fc.lr_backup.get());
             f.instruction(&match self.opts.env.xlen {
                 xLen::_32 => Instruction::I32Eq,
                 xLen::_64 => Instruction::I64Eq,
