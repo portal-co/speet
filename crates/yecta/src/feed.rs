@@ -266,9 +266,7 @@ impl FeedState {
                     .instruction(&j);
             };
         }
-        for a in 0..env.params {
-            f.instruction(&Instruction::LocalGet(a));
-        }
+        snap(&env, f);
         f.instruction(&exn.reentrancy.get())
             .instruction(&Instruction::I32Eqz)
             .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
