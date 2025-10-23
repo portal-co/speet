@@ -466,11 +466,11 @@ pub fn apply_env_tco(env: &Env, f: &mut (dyn InstFeed + '_), local: u32) {
                             f.instruction(&Instruction::LocalSet(p));
                         }
                     }
-                    if env.tail_calls_disabled {
+                    // if env.tail_calls_disabled {
                         f.instruction(&exn.exn_flag.get());
-                    } else {
-                        f.instruction(&Instruction::I32Const(1));
-                    };
+                    // } else {
+                    //     f.instruction(&Instruction::I32Const(1));
+                    // };
                     f.instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
                         env.function_ty,
                     )));
