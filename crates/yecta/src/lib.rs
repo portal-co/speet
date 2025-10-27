@@ -145,7 +145,22 @@ impl Reactor {
         condition: Option<&(dyn Snippet + '_)>,
     ) {
         if let Some(c) = condition.as_deref() {
-            self.fns.last_mut().unwrap().if_stmts += 1;
+            let mut queue = VecDeque::new();
+            queue.push_back((self.fns.len() - 1) as u32);
+            let mut cache = BTreeSet::new();
+            while let Some(q) = queue.pop_front() {
+                if cache.contains(&q) {
+                    continue;
+                };
+                cache.insert(q);
+                // self.fns[q as usize].function.instruction(instruction);
+                for p in self.fns[q as usize].preds.iter().cloned() {
+                    queue.push_back(p);
+                }
+            }
+            for c in cache {
+                self.fns[c as usize].if_stmts += 1;
+            }
         }
         match call {
             Some(tag) => {
@@ -178,14 +193,22 @@ impl Reactor {
                         s.emit(&mut |a| self.feed(a));
                         self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
                     }
-                    for (i, f) in fixups.iter() {
-                        f.emit(&mut |a| self.feed(a));
-                        self.feed(&Instruction::LocalSet(*i));
-                    }
+
                     if let Some(s) = condition.as_deref() {
+                        for p in 0..params {
+                            if let Some(f) = fixups.get(&p) {
+                                f.emit(&mut |a| self.feed(a));
+                            } else {
+                                self.feed(&Instruction::LocalGet(p));
+                            }
+                        }
                         self.feed(&Instruction::ReturnCall(func));
                         self.feed(&Instruction::Else);
                     } else {
+                        for (i, f) in fixups.iter() {
+                            f.emit(&mut |a| self.feed(a));
+                            self.feed(&Instruction::LocalSet(*i));
+                        }
                         self.jmp(func, params)
                     }
                 }
@@ -271,16 +294,6 @@ impl Reactor {
         }
     }
     fn total_ifs(&self, p: u32) -> usize {
-        let mut deps = self.fns[p as usize]
-            .preds
-            .iter()
-            .cloned()
-            .map(|a| self.total_ifs(a));
-        let a = deps.next();
-        let a = match a {
-            None => 0,
-            Some(i) => i,
-        };
-        return self.fns[p as usize].if_stmts + a;
+        return self.fns[p as usize].if_stmts;
     }
 }
