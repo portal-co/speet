@@ -10,6 +10,11 @@ license-file = "COPYING.md"
 wasmparser = { version = "0.240.0", default-features = false }
 wasm-encoder = { version = "0.240.0", default-features = false,features = ["wasmparser"] }
 
+wax-core = {version = "0.1.0",git = "https://github.com/portal-co/wax.git",branch = "main"}
+
+portal-solutions-asm-semantics = {version = "0.1.0",git = "https://github.com/portal-co/asm-arch.git"}
+asim-core = { version = "0.1.0", git = "https://github.com/portal-co/asim.git", branch = "main" }
+
 portal-pc-asm-common = {version = "0.1.1",git = "https://github.com/portal-co/asm-common.git"}
 portal-solutions-asm-x86-64 = {version = "0.1.0",git = "https://github.com/portal-co/asm-arch.git"}
 rv-asm = {version = "*",git = "https://github.com/portal-co/rv-utils.git"}
