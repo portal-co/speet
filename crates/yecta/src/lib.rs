@@ -144,12 +144,13 @@ impl Reactor {
     }
     /// Add a predecessor edge from pred to succ in the control flow graph.
     fn add_pred(&mut self, succ: FuncIdx, pred: FuncIdx) {
-        match self.fns.get_mut(succ.0 as usize) {
+        let FuncIdx(succ_idx) = succ;
+        match self.fns.get_mut(succ_idx as usize) {
             Some(a) => {
                 a.preds.insert(pred);
             }
             None => {
-                let len = (self.fns.len() - succ.0 as usize) as u32;
+                let len = (self.fns.len() - succ_idx as usize) as u32;
                 while self.lens.len() != len as usize + 1 {
                     self.lens.push_back(Default::default());
                 }
@@ -170,19 +171,22 @@ impl Reactor {
                 continue;
             };
             cache.insert(q);
-            // self.fns[q.0 as usize].function.instruction(instruction);
-            for p in self.fns[q.0 as usize].preds.iter().cloned() {
+            let FuncIdx(q_idx) = q;
+            // self.fns[q_idx as usize].function.instruction(instruction);
+            for p in self.fns[q_idx as usize].preds.iter().cloned() {
                 queue.push_back(p);
             }
         }
         if cache.contains(&succ) {
+            let FuncIdx(succ_idx) = succ;
             for k in cache {
-                let f = &mut self.fns[k.0 as usize];
+                let FuncIdx(k_idx) = k;
+                let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
                 for p in 0..params {
                     f.function.instruction(&Instruction::LocalGet(p));
                 }
-                f.function.instruction(&Instruction::ReturnCall(succ.0));
+                f.function.instruction(&Instruction::ReturnCall(succ_idx));
                 for _ in 0..ifs {
                     f.function.instruction(&Instruction::End);
                 }
@@ -199,23 +203,24 @@ impl Reactor {
     /// * `tag` - Exception tag configuration for escape handling
     /// * `pool` - Pool configuration for indirect calls
     pub fn call(&mut self, target: Target, tag: EscapeTag, pool: Pool) {
-        let EscapeTag { tag, ty } = tag;
+        let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = tag;
         self.feed(&Instruction::Block(wasm_encoder::BlockType::FunctionType(
-            ty.0,
+            ty_idx,
         )));
         self.feed(&Instruction::TryTable(
-            wasm_encoder::BlockType::FunctionType(ty.0),
-            [Catch::One { tag: tag.0, label: 0 }].into_iter().collect(),
+            wasm_encoder::BlockType::FunctionType(ty_idx),
+            [Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
         ));
         match target {
-            Target::Static { func } => {
-                self.feed(&Instruction::Call(func.0));
+            Target::Static { func: FuncIdx(func_idx) } => {
+                self.feed(&Instruction::Call(func_idx));
             }
             Target::Dynamic { idx } => {
                 idx.emit(&mut |a| self.feed(a));
+                let Pool { ty: TypeIdx(pool_ty), table: TableIdx(pool_table) } = pool;
                 self.feed(&Instruction::CallIndirect {
-                    type_index: pool.ty.0,
-                    table_index: pool.table.0,
+                    type_index: pool_ty,
+                    table_index: pool_table,
                 });
             }
         }
@@ -230,11 +235,11 @@ impl Reactor {
     /// * `params` - Number of parameters to pass through the exception
     /// * `tag` - Exception tag to throw
     pub fn ret(&mut self, params: u32, tag: EscapeTag) {
-        let EscapeTag { tag, ty: _ } = tag;
+        let EscapeTag { tag: TagIdx(tag_idx), ty: _ } = tag;
         for p in 0..params {
             self.feed(&Instruction::LocalGet(p));
         }
-        self.feed(&Instruction::Throw(tag.0));
+        self.feed(&Instruction::Throw(tag_idx));
     }
     /// Emit a jump or call instruction, optionally conditional.
     /// 
@@ -269,13 +274,15 @@ impl Reactor {
                     continue;
                 };
                 cache.insert(q);
-                // self.fns[q.0 as usize].function.instruction(instruction);
-                for p in self.fns[q.0 as usize].preds.iter().cloned() {
+                let FuncIdx(q_idx) = q;
+                // self.fns[q_idx as usize].function.instruction(instruction);
+                for p in self.fns[q_idx as usize].preds.iter().cloned() {
                     queue.push_back(p);
                 }
             }
             for c in cache {
-                self.fns[c.0 as usize].if_stmts += 1;
+                let FuncIdx(c_idx) = c;
+                self.fns[c_idx as usize].if_stmts += 1;
             }
         }
         match call {
@@ -304,7 +311,7 @@ impl Reactor {
                 }
             }
             None => match target {
-                Target::Static { func } => {
+                Target::Static { func: FuncIdx(func_idx) } => {
                     if let Some(_s) = condition.as_deref() {
                         _s.emit(&mut |a| self.feed(a));
                         self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
@@ -318,14 +325,14 @@ impl Reactor {
                                 self.feed(&Instruction::LocalGet(p));
                             }
                         }
-                        self.feed(&Instruction::ReturnCall(func.0));
+                        self.feed(&Instruction::ReturnCall(func_idx));
                         self.feed(&Instruction::Else);
                     } else {
                         for (i, f) in fixups.iter() {
                             f.emit(&mut |a| self.feed(a));
                             self.feed(&Instruction::LocalSet(*i));
                         }
-                        self.jmp(func, params)
+                        self.jmp(FuncIdx(func_idx), params)
                     }
                 }
                 Target::Dynamic { idx } => {
@@ -341,16 +348,17 @@ impl Reactor {
                         }
                     }
                     idx.emit(&mut |a| self.feed(a));
+                    let Pool { ty: TypeIdx(pool_ty), table: TableIdx(pool_table) } = pool;
                     if let Some(_s) = condition.as_deref() {
                         self.feed(&Instruction::ReturnCallIndirect {
-                            type_index: pool.ty.0,
-                            table_index: pool.table.0,
+                            type_index: pool_ty,
+                            table_index: pool_table,
                         });
                         self.feed(&Instruction::Else);
                     } else {
                         self.seal(&Instruction::ReturnCallIndirect {
-                            type_index: pool.ty.0,
-                            table_index: pool.table.0,
+                            type_index: pool_ty,
+                            table_index: pool_table,
                         });
                     }
                 }
@@ -372,8 +380,9 @@ impl Reactor {
                 continue;
             };
             cache.insert(q);
-            // self.fns[q.0 as usize].function.instruction(instruction);
-            for p in self.fns[q.0 as usize].preds.iter().cloned() {
+            let FuncIdx(q_idx) = q;
+            // self.fns[q_idx as usize].function.instruction(instruction);
+            for p in self.fns[q_idx as usize].preds.iter().cloned() {
                 queue.push_back(p);
             }
         }
@@ -392,8 +401,9 @@ impl Reactor {
                 continue;
             };
             cache.insert(q);
-            self.fns[q.0 as usize].function.instruction(instruction);
-            for p in self.fns[q.0 as usize].preds.iter().cloned() {
+            let FuncIdx(q_idx) = q;
+            self.fns[q_idx as usize].function.instruction(instruction);
+            for p in self.fns[q_idx as usize].preds.iter().cloned() {
                 queue.push_back(p);
             }
         }
@@ -410,18 +420,19 @@ impl Reactor {
                 continue;
             };
             cache.insert(q);
-            self.fns[q.0 as usize].function.instruction(instruction);
+            let FuncIdx(q_idx) = q;
+            self.fns[q_idx as usize].function.instruction(instruction);
             for _ in 0..ifs {
-                self.fns[q.0 as usize].function.instruction(&Instruction::End);
+                self.fns[q_idx as usize].function.instruction(&Instruction::End);
             }
-            for p in take(&mut self.fns[q.0 as usize].preds) {
+            for p in take(&mut self.fns[q_idx as usize].preds) {
                 queue.push_back(p);
             }
         }
     }
     
     /// Get the total number of nested if statements for a function.
-    fn total_ifs(&self, p: FuncIdx) -> usize {
-        return self.fns[p.0 as usize].if_stmts;
+    fn total_ifs(&self, FuncIdx(p_idx): FuncIdx) -> usize {
+        return self.fns[p_idx as usize].if_stmts;
     }
 }
