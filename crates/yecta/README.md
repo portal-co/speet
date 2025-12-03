@@ -7,7 +7,7 @@ Yecta is a `no_std` library for generating WebAssembly functions with complex co
 - **No standard library dependency** - Works in embedded and constrained environments
 - **Type-safe indices** - Uses newtype wrappers for function, tag, table, type, and local indices
 - **Control flow graph management** - Automatically tracks predecessors and successors
-- **Exception-based escapes** - Implements non-local control flow using WebAssembly exceptions
+- **Exception-based escapes** - Implements non-local control flow using WebAssembly exceptions, facilitating separation of function-like logic into functions while preserving original non-local control flow
 - **Cycle detection** - Automatically converts cyclic control flow to tail calls
 - **Conditional jumps** - Support for conditional branches with automatic if-statement closure
 - **Dynamic code generation** - `Snippet` trait for composable code fragments
@@ -98,7 +98,7 @@ Use `next()` to create a new function:
 // Create function with locals: 2 i32s, 1 i64
 reactor.next(
     [(2, ValType::I32), (1, ValType::I64)].into_iter(),
-    0  // control flow distance
+    0  // control flow distance (binary lifters can use this to signal instruction length for automatic sequential jumps)
 );
 ```
 
@@ -123,7 +123,26 @@ reactor.jmp(FuncIdx(0), 2);  // Jump to function 0 with 2 parameters
 
 ### Conditional Operations
 
-Use `ji()` for complex control flow with conditions:
+For simple cases, use `JumpCallParams` helper constructors with `ji_with_params()`:
+
+```rust
+use yecta::JumpCallParams;
+
+// Simple unconditional jump
+let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
+reactor.ji_with_params(params);
+
+// Conditional jump
+let params = JumpCallParams::conditional_jump(FuncIdx(1), 2, &condition_snippet, pool);
+reactor.ji_with_params(params);
+
+// Jump with parameter fixup
+let params = JumpCallParams::jump(FuncIdx(1), 2, pool)
+    .with_fixup(0, &fixup_snippet);
+reactor.ji_with_params(params);
+```
+
+For complex cases with multiple options, use `ji()` directly:
 
 ```rust
 use alloc::collections::BTreeMap;

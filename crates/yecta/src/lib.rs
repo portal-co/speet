@@ -88,6 +88,125 @@ pub struct Pool {
     pub table: TableIdx,
     pub ty: TypeIdx,
 }
+
+/// Parameters for the `ji` (jump/call instruction) operation.
+/// 
+/// This struct encapsulates all the parameters needed for emitting jumps or calls,
+/// providing helper constructors for common use cases.
+#[derive(Clone)]
+pub struct JumpCallParams<'a> {
+    /// Number of parameters to pass to the target function.
+    pub params: u32,
+    /// Map of parameter indices to snippets that compute modified values.
+    pub fixups: BTreeMap<u32, &'a (dyn Snippet + 'a)>,
+    /// The target function (static or dynamic).
+    pub target: Target<'a>,
+    /// If Some, emit a call with exception handling; if None, emit a jump.
+    pub call: Option<EscapeTag>,
+    /// Pool configuration for indirect calls.
+    pub pool: Pool,
+    /// If Some, make the jump/call conditional on this snippet.
+    pub condition: Option<&'a (dyn Snippet + 'a)>,
+}
+
+impl<'a> JumpCallParams<'a> {
+    /// Create parameters for an unconditional jump to a static function.
+    /// 
+    /// # Arguments
+    /// * `func` - The target function index
+    /// * `params` - Number of parameters to pass
+    /// * `pool` - Pool configuration (can use default values if not doing indirect calls)
+    pub fn jump(func: FuncIdx, params: u32, pool: Pool) -> Self {
+        Self {
+            params,
+            fixups: BTreeMap::new(),
+            target: Target::Static { func },
+            call: None,
+            pool,
+            condition: None,
+        }
+    }
+
+    /// Create parameters for an unconditional call to a static function with exception handling.
+    /// 
+    /// # Arguments
+    /// * `func` - The target function index
+    /// * `params` - Number of parameters to pass
+    /// * `escape_tag` - Exception tag for non-local returns
+    /// * `pool` - Pool configuration (can use default values if not doing indirect calls)
+    pub fn call(func: FuncIdx, params: u32, escape_tag: EscapeTag, pool: Pool) -> Self {
+        Self {
+            params,
+            fixups: BTreeMap::new(),
+            target: Target::Static { func },
+            call: Some(escape_tag),
+            pool,
+            condition: None,
+        }
+    }
+
+    /// Create parameters for a conditional jump to a static function.
+    /// 
+    /// # Arguments
+    /// * `func` - The target function index
+    /// * `params` - Number of parameters to pass
+    /// * `condition` - Snippet that computes the condition (non-zero = true)
+    /// * `pool` - Pool configuration
+    pub fn conditional_jump(
+        func: FuncIdx,
+        params: u32,
+        condition: &'a (dyn Snippet + 'a),
+        pool: Pool,
+    ) -> Self {
+        Self {
+            params,
+            fixups: BTreeMap::new(),
+            target: Target::Static { func },
+            call: None,
+            pool,
+            condition: Some(condition),
+        }
+    }
+
+    /// Create parameters for an unconditional jump to a dynamic (indirect) function.
+    /// 
+    /// # Arguments
+    /// * `idx` - Snippet that computes the function table index
+    /// * `params` - Number of parameters to pass
+    /// * `pool` - Pool configuration for the indirect call
+    pub fn indirect_jump(idx: &'a (dyn Snippet + 'a), params: u32, pool: Pool) -> Self {
+        Self {
+            params,
+            fixups: BTreeMap::new(),
+            target: Target::Dynamic { idx },
+            call: None,
+            pool,
+            condition: None,
+        }
+    }
+
+    /// Add a parameter fixup that modifies a parameter value before the jump/call.
+    /// 
+    /// # Arguments
+    /// * `param_idx` - Index of the parameter to modify
+    /// * `fixup` - Snippet that computes the new value
+    pub fn with_fixup(mut self, param_idx: u32, fixup: &'a (dyn Snippet + 'a)) -> Self {
+        self.fixups.insert(param_idx, fixup);
+        self
+    }
+
+    /// Set the condition for this jump/call.
+    pub fn with_condition(mut self, condition: &'a (dyn Snippet + 'a)) -> Self {
+        self.condition = Some(condition);
+        self
+    }
+
+    /// Convert this jump to a call with exception handling.
+    pub fn with_call(mut self, escape_tag: EscapeTag) -> Self {
+        self.call = Some(escape_tag);
+        self
+    }
+}
 /// Target for a jump or call operation.
 /// Can be either a static function reference or a dynamic indirect call.
 #[derive(Clone, Copy)]
@@ -241,6 +360,37 @@ impl Reactor {
         }
         self.feed(&Instruction::Throw(tag_idx));
     }
+    /// Emit a jump or call instruction using a parameter struct.
+    /// 
+    /// This is the main control flow primitive that can emit:
+    /// - Unconditional jumps
+    /// - Conditional jumps
+    /// - Calls (with exception handling)
+    /// - With parameter fixups (modifications to parameters before the jump/call)
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use yecta::{Reactor, JumpCallParams, FuncIdx, Pool, TableIdx, TypeIdx};
+    /// # use wasm_encoder::ValType;
+    /// # let mut reactor = Reactor::default();
+    /// # let pool = Pool { table: TableIdx(0), ty: TypeIdx(0) };
+    /// // Simple unconditional jump
+    /// let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
+    /// reactor.ji_with_params(params);
+    /// ```
+    pub fn ji_with_params(&mut self, params: JumpCallParams) {
+        let JumpCallParams {
+            params: param_count,
+            fixups,
+            target,
+            call,
+            pool,
+            condition,
+        } = params;
+        
+        self.ji(param_count, &fixups, target, call, pool, condition);
+    }
+
     /// Emit a jump or call instruction, optionally conditional.
     /// 
     /// This is the main control flow primitive that can emit:
@@ -248,6 +398,9 @@ impl Reactor {
     /// - Conditional jumps
     /// - Calls (with exception handling)
     /// - With parameter fixups (modifications to parameters before the jump/call)
+    /// 
+    /// For simpler cases, consider using [`JumpCallParams`] helper constructors
+    /// and calling [`ji_with_params`](Self::ji_with_params) instead.
     /// 
     /// # Arguments
     /// * `params` - Number of parameters to pass
