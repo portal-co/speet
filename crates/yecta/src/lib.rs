@@ -248,11 +248,19 @@ impl<E, T: wax_core::build::InstructionSource<E> + ?Sized> Snippet<E> for T {
 }
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
-#[derive(Default)]
 pub struct Reactor<E = Infallible, F: InstructionSink<E> = Function> {
     fns: Vec<Entry<F>>,
     lens: VecDeque<BTreeSet<FuncIdx>>,
     phantom: PhantomData<E>,
+}
+impl<E, F: InstructionSink<E>> Default for Reactor<E, F> {
+    fn default() -> Self {
+        Self {
+            fns: Default::default(),
+            lens: Default::default(),
+            phantom: Default::default(),
+        }
+    }
 }
 
 /// Internal entry representing a function being generated.
