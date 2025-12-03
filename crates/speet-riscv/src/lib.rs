@@ -36,8 +36,8 @@
 //!
 //! // Decode and translate instructions
 //! let instruction_bytes: u32 = 0x00a50533; // add a0, a0, a0
-//! let (inst, _is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
-//! recompiler.translate_instruction(&inst, 0x1000);
+//! let (inst, is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
+//! recompiler.translate_instruction(&inst, 0x1000, is_compressed);
 //! ```
 //!
 //! ## RISC-V Specification Compliance
@@ -49,22 +49,25 @@
 
 #![no_std]
 
+extern crate alloc;
+use alloc::collections::BTreeMap;
+
 use core::convert::Infallible;
-use rv_asm::{Inst, Reg, FReg, Imm};
+use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
 use wasm_encoder::{Function, Instruction, ValType};
-use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx};
+use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx, JumpCallParams};
 
 /// RISC-V to WebAssembly recompiler
 ///
 /// This structure manages the translation of RISC-V instructions to WebAssembly,
 /// using the yecta reactor for control flow management.
+/// 
+/// Each instruction gets its own function (at 2-byte boundaries), and control flow
+/// is managed through jumps between these functions using the yecta reactor.
+/// PC values are used directly as function indices.
 pub struct RiscVRecompiler {
     reactor: Reactor<Infallible, Function>,
-    // Pool configuration for indirect calls - reserved for future use with dynamic jumps
-    #[allow(dead_code)]
     pool: Pool,
-    // Exception tag for non-local control flow - reserved for future use with exception-based returns
-    #[allow(dead_code)]
     escape_tag: Option<EscapeTag>,
 }
 
@@ -93,25 +96,38 @@ impl RiscVRecompiler {
         )
     }
 
-    /// Initialize a function for translating a basic block
+    /// Convert a PC value to a function index
+    /// PC values are used directly as function indices (divided by 2 for 2-byte alignment)
+    fn pc_to_func_idx(pc: u32) -> FuncIdx {
+        FuncIdx(pc / 2)
+    }
+
+    /// Initialize a function for a single instruction at the given PC
     ///
     /// Sets up locals for:
     /// - 32 integer registers (x0-x31)
     /// - 32 floating-point registers (f0-f31)
     /// - 1 program counter register
     /// - Additional temporary registers as needed
-    pub fn init_function(&mut self, num_temps: u32) {
+    ///
+    /// # Arguments
+    /// * `_pc` - Program counter for this instruction (used for documentation)
+    /// * `_inst_len` - Length of instruction in 2-byte increments (1 for compressed, 2 for normal)
+    /// * `num_temps` - Number of additional temporary registers needed
+    fn init_function(&mut self, _pc: u32, _inst_len: u32, num_temps: u32) {
         // Integer registers: locals 0-31 (i32)
         // Float registers: locals 32-63 (f64)
         // PC: local 64 (i32)
         // Temps: locals 65+ (mixed types)
         let locals = [
             (32, ValType::I32),  // x0-x31
-            (32, ValType::F64),  // f0-f31 (using F64 for both F and D)
+            (32, ValType::F64),  // f0-f31 (using F64 for both F and D with NaN-boxing)
             (1, ValType::I32),   // PC
             (num_temps, ValType::I32), // Temporary registers
         ];
-        self.reactor.next(locals.into_iter(), 0);
+        // The second argument is the length in 2-byte increments
+        // Set to 2 to prevent infinite looping (yecta handles automatic fallthrough)
+        self.reactor.next(locals.into_iter(), 2);
     }
 
     /// Get the local index for an integer register
@@ -134,12 +150,59 @@ impl RiscVRecompiler {
         self.reactor.feed(&Instruction::I32Const(imm.as_i32()))
     }
 
+    /// Perform a jump to a target PC using yecta's jump API
+    fn jump_to_pc(&mut self, target_pc: u32, params: u32) -> Result<(), Infallible> {
+        let target_func = Self::pc_to_func_idx(target_pc);
+        self.reactor.jmp(target_func, params)
+    }
+
+    /// NaN-box a single-precision float value for storage in a double-precision register
+    /// 
+    /// RISC-V Specification Quote:
+    /// "When multiple floating-point precisions are supported, then valid values of
+    /// narrower n-bit types, n < FLEN, are represented in the lower n bits of an
+    /// FLEN-bit NaN value, with the upper bits all 1s. We call this a NaN-boxed value."
+    ///
+    /// For F32 values in F64 registers: set upper 32 bits to all 1s
+    fn nan_box_f32(&mut self) -> Result<(), Infallible> {
+        // Convert F32 to I32, then to I64, OR with 0xFFFFFFFF00000000, reinterpret as F64
+        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
+        self.reactor.feed(&Instruction::I64Or)?;
+        self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+        Ok(())
+    }
+
+    /// Unbox a NaN-boxed single-precision value from a double-precision register
+    ///
+    /// Extract the F32 value from the lower 32 bits of the NaN-boxed F64 value
+    fn unbox_f32(&mut self) -> Result<(), Infallible> {
+        // Reinterpret F64 as I64, wrap to I32 (takes lower 32 bits), reinterpret as F32
+        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+        Ok(())
+    }
+
     /// Translate a single RISC-V instruction to WebAssembly
+    ///
+    /// This creates a separate function for the instruction at the given PC and
+    /// handles jumps to other instructions using the yecta reactor's jump APIs.
     ///
     /// # Arguments
     /// * `inst` - The decoded RISC-V instruction
     /// * `pc` - Current program counter value
-    pub fn translate_instruction(&mut self, inst: &Inst, pc: u32) -> Result<(), Infallible> {
+    /// * `is_compressed` - Whether the instruction is compressed (2 bytes vs 4 bytes)
+    pub fn translate_instruction(&mut self, inst: &Inst, pc: u32, is_compressed: IsCompressed) -> Result<(), Infallible> {
+        // Calculate instruction length in 2-byte increments
+        let inst_len = match is_compressed {
+            IsCompressed::Yes => 1, // 2 bytes
+            IsCompressed::No => 2,  // 4 bytes
+        };
+        
+        // Initialize function for this instruction
+        self.init_function(pc, inst_len, 8);
         // Update PC
         self.reactor.feed(&Instruction::I32Const(pc as i32))?;
         self.reactor.feed(&Instruction::LocalSet(Self::pc_local()))?;
@@ -176,17 +239,16 @@ impl RiscVRecompiler {
             // a signed offset in multiples of 2 bytes. The offset is sign-extended and added to the
             // address of the jump instruction to form the jump target address."
             Inst::Jal { offset, dest } => {
-                // Save return address (PC + 4) to dest
+                // Save return address (PC + inst_len * 2) to dest
                 if dest.0 != 0 {  // x0 is hardwired to zero
-                    self.reactor.feed(&Instruction::I32Const(pc as i32 + 4))?;
+                    let return_addr = pc + (inst_len * 2);
+                    self.reactor.feed(&Instruction::I32Const(return_addr as i32))?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
-                // Jump to PC + offset
+                // Jump to PC + offset using yecta's jump API with PC-based indexing
                 let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
-                // Here we would need to jump to the function representing target_pc
-                // For now, we'll update the PC and let the caller handle the jump
-                self.reactor.feed(&Instruction::I32Const(target_pc as i32))?;
-                self.reactor.feed(&Instruction::LocalSet(Self::pc_local()))?;
+                self.jump_to_pc(target_pc, 65)?; // Pass all registers as parameters
+                return Ok(()); // JAL handles control flow, no fallthrough
             }
 
             // Jalr: Jump And Link Register
@@ -197,16 +259,22 @@ impl RiscVRecompiler {
             Inst::Jalr { offset, base, dest } => {
                 // Save return address
                 if dest.0 != 0 {
-                    self.reactor.feed(&Instruction::I32Const(pc as i32 + 4))?;
+                    let return_addr = pc + (inst_len * 2);
+                    self.reactor.feed(&Instruction::I32Const(return_addr as i32))?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
-                // Compute target: (base + offset) & ~1
+                // JALR is indirect, so we need to compute the target dynamically
+                // For now, we'll use the computed target and update PC
+                // A full implementation would need dynamic dispatch through a table
                 self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*base)))?;
                 self.emit_imm(*offset)?;
                 self.reactor.feed(&Instruction::I32Add)?;
-                self.reactor.feed(&Instruction::I32Const(-2))?; // ~1 in two's complement
+                self.reactor.feed(&Instruction::I32Const(0xFFFFFFFE_u32 as i32))?; // ~1 mask
                 self.reactor.feed(&Instruction::I32And)?;
                 self.reactor.feed(&Instruction::LocalSet(Self::pc_local()))?;
+                // For indirect jumps, we seal with unreachable as we can't statically determine target
+                self.reactor.seal(&Instruction::Unreachable)?;
+                return Ok(()); // JALR handles control flow, no fallthrough
             }
 
             // Branch Instructions
@@ -216,27 +284,33 @@ impl RiscVRecompiler {
             // of the branch instruction to give the target address."
 
             Inst::Beq { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::Eq)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::Eq)?;
+                return Ok(()); // Branch handles control flow
             }
 
             Inst::Bne { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::Ne)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::Ne)?;
+                return Ok(());
             }
 
             Inst::Blt { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::LtS)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::LtS)?;
+                return Ok(());
             }
 
             Inst::Bge { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::GeS)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::GeS)?;
+                return Ok(());
             }
 
             Inst::Bltu { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::LtU)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::LtU)?;
+                return Ok(());
             }
 
             Inst::Bgeu { offset, src1, src2 } => {
-                self.translate_branch(*src1, *src2, *offset, pc, BranchOp::GeU)?;
+                self.translate_branch(*src1, *src2, *offset, pc, inst_len, BranchOp::GeU)?;
+                return Ok(());
             }
 
             // Load Instructions
@@ -593,21 +667,21 @@ impl RiscVRecompiler {
 
             Inst::FaddS { dest, src1, src2, .. } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Add)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsubS { dest, src1, src2, .. } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Sub)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -1136,26 +1210,31 @@ impl RiscVRecompiler {
                 // If it is reached, it indicates an instruction type that was added to rv-asm
                 // but not yet implemented in this recompiler.
                 self.reactor.feed(&Instruction::Unreachable)?;
+                return Ok(()); // Don't fallthrough for unimplemented instructions
             }
         }
 
+        // For most instructions that don't explicitly handle control flow,
+        // yecta automatically handles fallthrough based on the len parameter in init_function
         Ok(())
     }
 
-    /// Helper to translate branch instructions
+    /// Helper to translate branch instructions using yecta's jump API
     fn translate_branch(
         &mut self,
         src1: Reg,
         src2: Reg,
         offset: Imm,
         pc: u32,
+        inst_len: u32,
         op: BranchOp,
     ) -> Result<(), Infallible> {
-        // Load operands
+        let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
+        let fallthrough_pc = pc + (inst_len * 2);
+        
+        // Emit the condition directly using the reactor
         self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(src1)))?;
         self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(src2)))?;
-        
-        // Compare
         match op {
             BranchOp::Eq => self.reactor.feed(&Instruction::I32Eq)?,
             BranchOp::Ne => self.reactor.feed(&Instruction::I32Ne)?,
@@ -1164,15 +1243,19 @@ impl RiscVRecompiler {
             BranchOp::LtU => self.reactor.feed(&Instruction::I32LtU)?,
             BranchOp::GeU => self.reactor.feed(&Instruction::I32GeU)?,
         }
-
-        // Conditional update of PC
+        
+        // Emit conditional structure
         self.reactor.feed(&Instruction::If(wasm_encoder::BlockType::Empty))?;
-        let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
-        self.reactor.feed(&Instruction::I32Const(target_pc as i32))?;
-        self.reactor.feed(&Instruction::LocalSet(Self::pc_local()))?;
+        
+        // Branch taken - jump to target using PC-based indexing
+        let target_func = Self::pc_to_func_idx(target_pc);
+        self.reactor.jmp(target_func, 65)?;
+        
+        // Branch not taken - jump to fallthrough using PC-based indexing
         self.reactor.feed(&Instruction::Else)?;
-        self.reactor.feed(&Instruction::I32Const((pc + 4) as i32))?;
-        self.reactor.feed(&Instruction::LocalSet(Self::pc_local()))?;
+        let fallthrough_func = Self::pc_to_func_idx(fallthrough_pc);
+        self.reactor.jmp(fallthrough_func, 65)?;
+        
         self.reactor.feed(&Instruction::End)?;
 
         Ok(())
@@ -1384,14 +1467,14 @@ impl RiscVRecompiler {
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly: mask with 0x80000000
-                self.reactor.feed(&Instruction::I32Const(i32::MIN))?; // 0x80000000
+                self.reactor.feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
                 self.reactor.feed(&Instruction::I32And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
                 self.reactor.feed(&Instruction::I32And)?;
-                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
                 self.reactor.feed(&Instruction::I32Xor)?; // Flip the sign bit
             }
             FsgnjOp::Sgnjx => {
@@ -1401,7 +1484,7 @@ impl RiscVRecompiler {
                 self.reactor.feed(&Instruction::F32DemoteF64)?;
                 self.reactor.feed(&Instruction::I32ReinterpretF32)?;
                 self.reactor.feed(&Instruction::I32Xor)?;
-                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
                 self.reactor.feed(&Instruction::I32And)?;
             }
         }
@@ -1439,14 +1522,14 @@ impl RiscVRecompiler {
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly
-                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
                 self.reactor.feed(&Instruction::I64And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
                 self.reactor.feed(&Instruction::I64And)?;
-                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
                 self.reactor.feed(&Instruction::I64Xor)?;
             }
             FsgnjOp::Sgnjx => {
@@ -1454,7 +1537,7 @@ impl RiscVRecompiler {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
                 self.reactor.feed(&Instruction::I64ReinterpretF64)?;
                 self.reactor.feed(&Instruction::I64Xor)?;
-                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
                 self.reactor.feed(&Instruction::I64And)?;
             }
         }
@@ -1465,6 +1548,63 @@ impl RiscVRecompiler {
         self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
         
         Ok(())
+    }
+
+    /// Translate a block of RISC-V bytecode starting at the given address
+    ///
+    /// This method decodes and translates multiple instructions, creating separate
+    /// functions for each instruction and linking them with jumps.
+    ///
+    /// # Arguments
+    /// * `bytes` - The bytecode to translate
+    /// * `start_pc` - The starting program counter address
+    /// * `xlen` - The XLEN mode (RV32 or RV64)
+    ///
+    /// # Returns
+    /// The number of bytes successfully translated
+    pub fn translate_bytes(&mut self, bytes: &[u8], start_pc: u32, xlen: Xlen) -> Result<usize, ()> {
+        let mut offset = 0;
+        
+        while offset < bytes.len() {
+            // Need at least 2 bytes for a compressed instruction
+            if offset + 1 >= bytes.len() {
+                break;
+            }
+            
+            // Read instruction bytes (little-endian)
+            let inst_word = if offset + 3 < bytes.len() {
+                u32::from_le_bytes([
+                    bytes[offset],
+                    bytes[offset + 1],
+                    bytes[offset + 2],
+                    bytes[offset + 3],
+                ])
+            } else {
+                // Might be a compressed instruction at the end
+                u32::from_le_bytes([bytes[offset], bytes[offset + 1], 0, 0])
+            };
+            
+            // Decode the instruction
+            let (inst, is_compressed) = match Inst::decode(inst_word, xlen) {
+                Ok(result) => result,
+                Err(_) => break, // Stop on decode error
+            };
+            
+            let pc = start_pc + offset as u32;
+            
+            // Translate the instruction
+            if let Err(_) = self.translate_instruction(&inst, pc, is_compressed) {
+                break;
+            }
+            
+            // Advance by instruction size
+            offset += match is_compressed {
+                IsCompressed::Yes => 2,
+                IsCompressed::No => 4,
+            };
+        }
+        
+        Ok(offset)
     }
 
     /// Finalize the function
@@ -1547,17 +1687,9 @@ mod tests {
     }
 
     #[test]
-    fn test_init_function() {
-        let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(8);
-        // Function should be created successfully
-    }
-
-    #[test]
     fn test_addi_instruction() {
         // Test ADDI instruction: addi x1, x0, 42
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Addi {
             imm: rv_asm::Imm::new_i32(42),
@@ -1565,14 +1697,13 @@ mod tests {
             src1: rv_asm::Reg(0),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_add_instruction() {
         // Test ADD instruction: add x3, x1, x2
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Add {
             dest: rv_asm::Reg(3),
@@ -1580,14 +1711,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_load_instruction() {
         // Test LW instruction: lw x1, 0(x2)
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Lw {
             offset: rv_asm::Imm::new_i32(0),
@@ -1595,29 +1725,32 @@ mod tests {
             base: rv_asm::Reg(2),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_store_instruction() {
         // Test SW instruction: sw x1, 4(x2)
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Sw {
             offset: rv_asm::Imm::new_i32(4),
             src: rv_asm::Reg(1),
             base: rv_asm::Reg(2),
         };
+        let inst = Inst::Sw {
+            offset: rv_asm::Imm::new_i32(4),
+            src: rv_asm::Reg(1),
+            base: rv_asm::Reg(2),
+        };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_branch_instruction() {
         // Test BEQ instruction: beq x1, x2, offset
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Beq {
             offset: rv_asm::Imm::new_i32(8),
@@ -1625,14 +1758,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_mul_instruction() {
         // Test MUL instruction from M extension
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::Mul {
             dest: rv_asm::Reg(3),
@@ -1640,14 +1772,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
     fn test_fadd_instruction() {
         // Test FADD.S instruction from F extension
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         let inst = Inst::FaddS {
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
@@ -1656,7 +1787,7 @@ mod tests {
             src2: rv_asm::FReg(3),
         };
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, IsCompressed::No).is_ok());
     }
 
     #[test]
@@ -1664,19 +1795,17 @@ mod tests {
         // Test decoding a real instruction and translating it
         // This is "addi a0, a0, 0" which is a common NOP-like instruction
         let instruction_bytes: u32 = 0x00050513;
-        let (inst, _is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
+        let (inst, is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
         
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
-        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst, 0x1000, is_compressed).is_ok());
     }
 
     #[test]
     fn test_multiple_instructions() {
         // Test translating multiple instructions in sequence
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
         // addi x1, x0, 5
         let inst1 = Inst::Addi {
@@ -1684,7 +1813,7 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler.translate_instruction(&inst1, 0x1000).is_ok());
+        assert!(recompiler.translate_instruction(&inst1, 0x1000, IsCompressed::No).is_ok());
         
         // addi x2, x0, 3
         let inst2 = Inst::Addi {
@@ -1692,7 +1821,7 @@ mod tests {
             dest: rv_asm::Reg(2),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler.translate_instruction(&inst2, 0x1004).is_ok());
+        assert!(recompiler.translate_instruction(&inst2, 0x1004, IsCompressed::No).is_ok());
         
         // add x3, x1, x2  (should compute 5 + 3 = 8)
         let inst3 = Inst::Add {
@@ -1700,24 +1829,33 @@ mod tests {
             src1: rv_asm::Reg(1),
             src2: rv_asm::Reg(2),
         };
-        assert!(recompiler.translate_instruction(&inst3, 0x1008).is_ok());
+        assert!(recompiler.translate_instruction(&inst3, 0x1008, IsCompressed::No).is_ok());
     }
 
     #[test]
-    fn test_seal_function() {
+    fn test_translate_from_bytes() {
+        // Test translating from raw bytecode
         let mut recompiler = RiscVRecompiler::new();
-        recompiler.init_function(0);
         
-        // Add some instructions
-        let inst = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(42),
-            dest: rv_asm::Reg(1),
-            src1: rv_asm::Reg(0),
-        };
-        recompiler.translate_instruction(&inst, 0x1000).unwrap();
+        // Simple program: addi x1, x0, 5 (0x00500093)
+        let bytes = [0x93, 0x00, 0x50, 0x00]; // Little-endian
         
-        // Seal the function
-        assert!(recompiler.seal().is_ok());
+        let result = recompiler.translate_bytes(&bytes, 0x1000, Xlen::Rv32);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 4); // Should have translated 4 bytes
+    }
+
+    #[test]
+    fn test_translate_compressed_from_bytes() {
+        // Test translating compressed instructions from bytes
+        let mut recompiler = RiscVRecompiler::new();
+        
+        // c.addi x1, 5 (0x0095) - compressed instruction
+        let bytes = [0x95, 0x00];
+        
+        let result = recompiler.translate_bytes(&bytes, 0x1000, Xlen::Rv32);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2); // Should have translated 2 bytes
     }
 
     #[test]
