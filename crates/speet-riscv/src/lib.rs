@@ -678,10 +678,459 @@ impl RiscVRecompiler {
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
-            // For other instructions, emit a placeholder
+            // Floating-point min/max operations
+            Inst::FminS { dest, src1, src2 } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Min)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FmaxS { dest, src1, src2 } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Max)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FminD { dest, src1, src2 } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Min)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FmaxD { dest, src1, src2 } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Max)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            // Floating-point comparison operations
+            Inst::FeqS { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::F32Eq)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FltS { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::F32Lt)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FleS { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::F32Le)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FeqD { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F64Eq)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FltD { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F64Lt)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FleD { dest, src1, src2 } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.reactor.feed(&Instruction::F64Le)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            // Floating-point conversion operations
+            // RISC-V Specification Quote:
+            // "Floating-point-to-integer and integer-to-floating-point conversion instructions
+            // are encoded in the OP-FP major opcode space."
+
+            Inst::FcvtWS { dest, src, .. } => {
+                // Convert single to signed 32-bit integer
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::I32TruncF32S)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FcvtWuS { dest, src, .. } => {
+                // Convert single to unsigned 32-bit integer
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::I32TruncF32U)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FcvtSW { dest, src, .. } => {
+                // Convert signed 32-bit integer to single
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F32ConvertI32S)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FcvtSWu { dest, src, .. } => {
+                // Convert unsigned 32-bit integer to single
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F32ConvertI32U)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FcvtWD { dest, src, .. } => {
+                // Convert double to signed 32-bit integer
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::I32TruncF64S)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FcvtWuD { dest, src, .. } => {
+                // Convert double to unsigned 32-bit integer
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::I32TruncF64U)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FcvtDW { dest, src, .. } => {
+                // Convert signed 32-bit integer to double
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F64ConvertI32S)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FcvtDWu { dest, src, .. } => {
+                // Convert unsigned 32-bit integer to double
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F64ConvertI32U)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FcvtSD { dest, src, .. } => {
+                // Convert double to single
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FcvtDS { dest, src, .. } => {
+                // Convert single to double (already stored as double, just move)
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            // Floating-point move operations
+            Inst::FmvXW { dest, src } => {
+                // Move bits from float register to integer register
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::FmvWX { dest, src } => {
+                // Move bits from integer register to float register
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            // Sign-injection operations for single-precision
+            // RISC-V Specification Quote:
+            // "FSGNJ.S, FSGNJN.S, and FSGNJX.S produce a result that takes all bits except
+            // the sign bit from rs1."
+            Inst::FsgnjS { dest, src1, src2 } => {
+                // Result = magnitude(src1) with sign(src2)
+                // We'll use a simple implementation using bit manipulation
+                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+            }
+
+            Inst::FsgnjnS { dest, src1, src2 } => {
+                // Result = magnitude(src1) with NOT(sign(src2))
+                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+            }
+
+            Inst::FsgnjxS { dest, src1, src2 } => {
+                // Result = magnitude(src1) with sign(src1) XOR sign(src2)
+                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+            }
+
+            Inst::FsgnjD { dest, src1, src2 } => {
+                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+            }
+
+            Inst::FsgnjnD { dest, src1, src2 } => {
+                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+            }
+
+            Inst::FsgnjxD { dest, src1, src2 } => {
+                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+            }
+
+            // Fused multiply-add operations
+            // Note: WebAssembly doesn't have fused multiply-add, so we emulate with separate ops
+            Inst::FmaddS { dest, src1, src2, src3, .. } => {
+                // dest = (src1 * src2) + src3
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Add)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FmsubS { dest, src1, src2, src3, .. } => {
+                // dest = (src1 * src2) - src3
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FnmsubS { dest, src1, src2, src3, .. } => {
+                // dest = -(src1 * src2) + src3 = src3 - (src1 * src2)
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FnmaddS { dest, src1, src2, src3, .. } => {
+                // dest = -(src1 * src2) - src3
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(&Instruction::F32Neg)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FmaddD { dest, src1, src2, src3, .. } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F64Add)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FmsubD { dest, src1, src2, src3, .. } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FnmsubD { dest, src1, src2, src3, .. } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            Inst::FnmaddD { dest, src1, src2, src3, .. } => {
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(&Instruction::F64Neg)?;
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+            }
+
+            // Atomic operations (A extension)
+            // RISC-V Specification Quote:
+            // "The atomic instruction set is divided into two subsets: the standard atomic
+            // instructions (AMO) and load-reserved/store-conditional (LR/SC) instructions."
+            // Note: WebAssembly atomics require special handling
+            Inst::LrW { dest, addr, .. } => {
+                // Load-reserved word
+                // In WebAssembly, we'll implement this as a regular atomic load
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                    self.reactor.feed(&Instruction::I32AtomicLoad(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }))?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            Inst::ScW { dest, addr, src, .. } => {
+                // Store-conditional word
+                // In a simplified model, always succeed (return 0)
+                // A full implementation would track reservations
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                self.reactor.feed(&Instruction::I32AtomicStore(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }))?;
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::I32Const(0))?; // Success
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            // CSR Instructions (Zicsr extension)
+            // RISC-V Specification Quote:
+            // "The SYSTEM major opcode is used to encode all privileged instructions, as well
+            // as the ECALL and EBREAK instructions and CSR instructions."
+            // Note: CSR operations are system-specific and may need special runtime support
+            Inst::Csrrw { dest, src, .. } |
+            Inst::Csrrs { dest, src, .. } |
+            Inst::Csrrc { dest, src, .. } => {
+                // For now, we'll stub these out as they require system support
+                // A real implementation would need to call into a CSR handler
+                if dest.0 != 0 {
+                    // Return zero as placeholder
+                    self.reactor.feed(&Instruction::I32Const(0))?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+                // Silently ignore the write for now
+                _ = src;
+            }
+
+            Inst::Csrrwi { dest, .. } |
+            Inst::Csrrsi { dest, .. } |
+            Inst::Csrrci { dest, .. } => {
+                if dest.0 != 0 {
+                    self.reactor.feed(&Instruction::I32Const(0))?;
+                    self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
+            }
+
+            // RV64 instructions - these are supported but require different handling
+            Inst::Lwu { .. } |
+            Inst::Ld { .. } |
+            Inst::Sd { .. } |
+            Inst::AddiW { .. } |
+            Inst::SlliW { .. } |
+            Inst::SrliW { .. } |
+            Inst::SraiW { .. } |
+            Inst::AddW { .. } |
+            Inst::SubW { .. } |
+            Inst::SllW { .. } |
+            Inst::SrlW { .. } |
+            Inst::SraW { .. } |
+            Inst::MulW { .. } |
+            Inst::DivW { .. } |
+            Inst::DivuW { .. } |
+            Inst::RemW { .. } |
+            Inst::RemuW { .. } => {
+                // RV64-specific instructions
+                // For RV32 mode, these should not be executed
+                // Stub them out with unreachable for now
+                self.reactor.feed(&Instruction::Unreachable)?;
+            }
+
+            // RV64 floating-point conversions
+            Inst::FcvtLS { .. } |
+            Inst::FcvtLuS { .. } |
+            Inst::FcvtSL { .. } |
+            Inst::FcvtSLu { .. } |
+            Inst::FcvtLD { .. } |
+            Inst::FcvtLuD { .. } |
+            Inst::FmvXD { .. } |
+            Inst::FcvtDL { .. } |
+            Inst::FcvtDLu { .. } |
+            Inst::FmvDX { .. } => {
+                // RV64 floating-point operations
+                self.reactor.feed(&Instruction::Unreachable)?;
+            }
+
+            // Atomic memory operations
+            Inst::AmoW { .. } => {
+                // Atomic memory operations would need special WebAssembly atomic support
+                // Stub for now
+                self.reactor.feed(&Instruction::Unreachable)?;
+            }
+
+            // Floating-point classify
+            Inst::FclassS { .. } |
+            Inst::FclassD { .. } => {
+                // Floating-point classify requires special handling
+                // Stub for now
+                self.reactor.feed(&Instruction::Unreachable)?;
+            }
+
+            // Catch-all for any unhandled instructions
             _ => {
-                // Unimplemented instructions - emit unreachable for now
-                // A full implementation would handle all instruction variants
+                // Unimplemented or unrecognized instruction
+                // In a production system, this might log or report the error
+                self.reactor.feed(&Instruction::Unreachable)?;
             }
         }
 
@@ -902,6 +1351,117 @@ impl RiscVRecompiler {
         Ok(())
     }
 
+    /// Helper to emit sign-injection for single-precision floats
+    fn emit_fsgnj_s(
+        &mut self,
+        dest: FReg,
+        src1: FReg,
+        src2: FReg,
+        op: FsgnjOp,
+    ) -> Result<(), Infallible> {
+        // Sign injection uses bit manipulation on the float representation
+        // Get magnitude from src1, sign from src2 (possibly modified)
+        
+        // Convert src1 to i32 to manipulate bits
+        self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        self.reactor.feed(&Instruction::F32DemoteF64)?;
+        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+        
+        // Mask to keep only magnitude (clear sign bit): 0x7FFFFFFF
+        self.reactor.feed(&Instruction::I32Const(0x7FFFFFFF))?;
+        self.reactor.feed(&Instruction::I32And)?;
+        
+        // Get sign bit from src2
+        self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        self.reactor.feed(&Instruction::F32DemoteF64)?;
+        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+        
+        match op {
+            FsgnjOp::Sgnj => {
+                // Use sign from src2 directly: mask with 0x80000000
+                self.reactor.feed(&Instruction::I32Const(i32::MIN))?; // 0x80000000
+                self.reactor.feed(&Instruction::I32And)?;
+            }
+            FsgnjOp::Sgnjn => {
+                // Use negated sign from src2
+                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32And)?;
+                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32Xor)?; // Flip the sign bit
+            }
+            FsgnjOp::Sgnjx => {
+                // XOR sign bits of src1 and src2
+                // Need original src1 sign
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+                self.reactor.feed(&Instruction::I32Xor)?;
+                self.reactor.feed(&Instruction::I32Const(i32::MIN))?;
+                self.reactor.feed(&Instruction::I32And)?;
+            }
+        }
+        
+        // Combine magnitude and sign
+        self.reactor.feed(&Instruction::I32Or)?;
+        self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+        self.reactor.feed(&Instruction::F64PromoteF32)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        
+        Ok(())
+    }
+
+    /// Helper to emit sign-injection for double-precision floats
+    fn emit_fsgnj_d(
+        &mut self,
+        dest: FReg,
+        src1: FReg,
+        src2: FReg,
+        op: FsgnjOp,
+    ) -> Result<(), Infallible> {
+        // Similar to single-precision but using i64
+        // Convert src1 to i64 to manipulate bits
+        self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+        
+        // Mask to keep only magnitude (clear sign bit)
+        self.reactor.feed(&Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?;
+        
+        // Get sign bit from src2
+        self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+        
+        match op {
+            FsgnjOp::Sgnj => {
+                // Use sign from src2 directly
+                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64And)?;
+            }
+            FsgnjOp::Sgnjn => {
+                // Use negated sign from src2
+                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64And)?;
+                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64Xor)?;
+            }
+            FsgnjOp::Sgnjx => {
+                // XOR sign bits
+                self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+                self.reactor.feed(&Instruction::I64Xor)?;
+                self.reactor.feed(&Instruction::I64Const(i64::MIN))?;
+                self.reactor.feed(&Instruction::I64And)?;
+            }
+        }
+        
+        // Combine magnitude and sign
+        self.reactor.feed(&Instruction::I64Or)?;
+        self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        
+        Ok(())
+    }
+
     /// Finalize the function
     pub fn seal(&mut self) -> Result<(), Infallible> {
         self.reactor.seal(&Instruction::Unreachable)
@@ -960,4 +1520,12 @@ enum FLoadOp {
 enum FStoreOp {
     F32,  // Store single-precision float
     F64,  // Store double-precision float
+}
+
+/// Sign-injection operation types
+#[derive(Debug, Clone, Copy)]
+enum FsgnjOp {
+    Sgnj,   // Copy sign from src2
+    Sgnjn,  // Copy negated sign from src2
+    Sgnjx,  // XOR signs of src1 and src2
 }
