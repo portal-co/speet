@@ -55,7 +55,7 @@ use alloc::collections::BTreeMap;
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
 use wasm_encoder::{Function, Instruction, ValType};
-use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx, JumpCallParams};
+use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx};
 
 /// RISC-V to WebAssembly recompiler
 ///
@@ -1241,44 +1241,81 @@ impl RiscVRecompiler {
         Ok(())
     }
 
-    /// Helper to translate branch instructions using yecta's jump API
+    /// Helper to translate branch instructions using yecta's ji API with custom Snippet
     fn translate_branch(
         &mut self,
         src1: Reg,
         src2: Reg,
         offset: Imm,
         pc: u32,
-        inst_len: u32,
+        _inst_len: u32,
         op: BranchOp,
     ) -> Result<(), Infallible> {
         let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
-        let fallthrough_pc = pc + (inst_len * 2);
         
-        // Emit the condition directly using the reactor
-        self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(src1)))?;
-        self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(src2)))?;
-        match op {
-            BranchOp::Eq => self.reactor.feed(&Instruction::I32Eq)?,
-            BranchOp::Ne => self.reactor.feed(&Instruction::I32Ne)?,
-            BranchOp::LtS => self.reactor.feed(&Instruction::I32LtS)?,
-            BranchOp::GeS => self.reactor.feed(&Instruction::I32GeS)?,
-            BranchOp::LtU => self.reactor.feed(&Instruction::I32LtU)?,
-            BranchOp::GeU => self.reactor.feed(&Instruction::I32GeU)?,
+        // Create a custom Snippet for the branch condition using a closure
+        // The closure captures the registers and operation
+        struct BranchCondition {
+            src1: u32,
+            src2: u32,
+            op: BranchOp,
         }
         
-        // Emit conditional structure
-        self.reactor.feed(&Instruction::If(wasm_encoder::BlockType::Empty))?;
+        impl wax_core::build::InstructionOperatorSource<Infallible> for BranchCondition {
+            fn emit(&self, sink: &mut (dyn wax_core::build::InstructionOperatorSink<Infallible> + '_)) -> Result<(), Infallible> {
+                // Emit the same instructions as emit_instruction
+                sink.instruction(&Instruction::LocalGet(self.src1))?;
+                sink.instruction(&Instruction::LocalGet(self.src2))?;
+                sink.instruction(&match self.op {
+                    BranchOp::Eq => Instruction::I32Eq,
+                    BranchOp::Ne => Instruction::I32Ne,
+                    BranchOp::LtS => Instruction::I32LtS,
+                    BranchOp::GeS => Instruction::I32GeS,
+                    BranchOp::LtU => Instruction::I32LtU,
+                    BranchOp::GeU => Instruction::I32GeU,
+                })?;
+                Ok(())
+            }
+        }
         
-        // Branch taken - jump to target using PC-based indexing with offset
+        impl wax_core::build::InstructionSource<Infallible> for BranchCondition {
+            fn emit_instruction(
+                &self,
+                sink: &mut (dyn wax_core::build::InstructionSink<Infallible> + '_),
+            ) -> Result<(), Infallible> {
+                sink.instruction(&Instruction::LocalGet(self.src1))?;
+                sink.instruction(&Instruction::LocalGet(self.src2))?;
+                sink.instruction(&match self.op {
+                    BranchOp::Eq => Instruction::I32Eq,
+                    BranchOp::Ne => Instruction::I32Ne,
+                    BranchOp::LtS => Instruction::I32LtS,
+                    BranchOp::GeS => Instruction::I32GeS,
+                    BranchOp::LtU => Instruction::I32LtU,
+                    BranchOp::GeU => Instruction::I32GeU,
+                })?;
+                Ok(())
+            }
+        }
+        
+        let condition = BranchCondition {
+            src1: Self::reg_to_local(src1),
+            src2: Self::reg_to_local(src2),
+            op,
+        };
+        
+        // Use ji with condition for branch taken path
+        // When condition is true, jump to target; yecta handles else/end automatically
         let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(target_func, 65)?;
+        let target = yecta::Target::Static { func: target_func };
         
-        // Branch not taken - jump to fallthrough using PC-based indexing with offset
-        self.reactor.feed(&Instruction::Else)?;
-        let fallthrough_func = self.pc_to_func_idx(fallthrough_pc);
-        self.reactor.jmp(fallthrough_func, 65)?;
-        
-        self.reactor.feed(&Instruction::End)?;
+        self.reactor.ji(
+            65,                     // params: pass all registers
+            &BTreeMap::new(),       // fixups: none needed
+            target,                 // target: branch target
+            None,                   // call: not an escape call
+            self.pool,              // pool: for indirect calls
+            Some(&condition),       // condition: branch condition
+        )?;
 
         Ok(())
     }

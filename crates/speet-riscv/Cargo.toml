@@ -10,3 +10,4 @@ license-file.workspace = true
 wasm-encoder.workspace = true
 yecta = {path = "../yecta"}
 rv-asm.workspace = true
+wax-core.workspace = true

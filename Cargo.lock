@@ -69,6 +69,7 @@ version = "0.1.0"
 dependencies = [
  "rv-asm",
  "wasm-encoder",
+ "wax-core",
  "yecta",
 ]
 
