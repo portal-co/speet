@@ -15,15 +15,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
-name = "portal-solutions-yecta"
-version = "0.1.0"
-dependencies = [
- "wasm-encoder",
-]
+name = "powerpc"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9cac36a8d92f3c9d38ebfa606e3bbbbec229a8d757f03de0999898522856e33"
+
+[[package]]
+name = "rv-asm"
+version = "0.2.1"
+source = "git+https://github.com/portal-co/rv-utils.git#28aa94c48c3d52819866d425ea9285035cf47d47"
 
 [[package]]
 name = "speet-powerpc"
 version = "0.1.0"
+dependencies = [
+ "powerpc",
+ "wasm-encoder",
+ "yecta",
+]
+
+[[package]]
+name = "speet-riscv"
+version = "0.1.0"
+dependencies = [
+ "rv-asm",
+ "wasm-encoder",
+ "yecta",
+]
 
 [[package]]
 name = "wasm-encoder"
@@ -42,4 +60,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b722dcf61e0ea47440b53ff83ccb5df8efec57a69d150e4f24882e4eba7e24a4"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "yecta"
+version = "0.1.0"
+dependencies = [
+ "wasm-encoder",
 ]
