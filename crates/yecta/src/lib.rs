@@ -196,12 +196,24 @@ impl<'a> JumpCallParams<'a> {
     }
 
     /// Set the condition for this jump/call.
+    /// 
+    /// The condition snippet should compute an i32 value. If the value is zero,
+    /// the jump/call is skipped; otherwise it executes.
+    /// 
+    /// # Arguments
+    /// * `condition` - Snippet that evaluates the condition (non-zero = true)
     pub fn with_condition(mut self, condition: &'a (dyn Snippet + 'a)) -> Self {
         self.condition = Some(condition);
         self
     }
 
     /// Convert this jump to a call with exception handling.
+    /// 
+    /// When set, the target is called with a try-catch wrapper that handles
+    /// non-local returns via the specified exception tag.
+    /// 
+    /// # Arguments
+    /// * `escape_tag` - The exception tag used for non-local returns
     pub fn with_call(mut self, escape_tag: EscapeTag) -> Self {
         self.call = Some(escape_tag);
         self

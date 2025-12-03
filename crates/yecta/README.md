@@ -96,9 +96,10 @@ Use `next()` to create a new function:
 
 ```rust
 // Create function with locals: 2 i32s, 1 i64
+// The control flow distance parameter can signal instruction length in binary lifters
 reactor.next(
     [(2, ValType::I32), (1, ValType::I64)].into_iter(),
-    0  // control flow distance (binary lifters can use this to signal instruction length for automatic sequential jumps)
+    0  // control flow distance
 );
 ```
 
