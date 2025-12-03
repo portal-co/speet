@@ -1529,3 +1529,199 @@ enum FsgnjOp {
     Sgnjn,  // Copy negated sign from src2
     Sgnjx,  // XOR signs of src1 and src2
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rv_asm::{Inst, Xlen};
+
+    #[test]
+    fn test_recompiler_creation() {
+        let _recompiler = RiscVRecompiler::new();
+        // Just ensure it can be created without panicking
+    }
+
+    #[test]
+    fn test_init_function() {
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(8);
+        // Function should be created successfully
+    }
+
+    #[test]
+    fn test_addi_instruction() {
+        // Test ADDI instruction: addi x1, x0, 42
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(42),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_add_instruction() {
+        // Test ADD instruction: add x3, x1, x2
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Add {
+            dest: rv_asm::Reg(3),
+            src1: rv_asm::Reg(1),
+            src2: rv_asm::Reg(2),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_load_instruction() {
+        // Test LW instruction: lw x1, 0(x2)
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Lw {
+            offset: rv_asm::Imm::new_i32(0),
+            dest: rv_asm::Reg(1),
+            base: rv_asm::Reg(2),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_store_instruction() {
+        // Test SW instruction: sw x1, 4(x2)
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Sw {
+            offset: rv_asm::Imm::new_i32(4),
+            src: rv_asm::Reg(1),
+            base: rv_asm::Reg(2),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_branch_instruction() {
+        // Test BEQ instruction: beq x1, x2, offset
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Beq {
+            offset: rv_asm::Imm::new_i32(8),
+            src1: rv_asm::Reg(1),
+            src2: rv_asm::Reg(2),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_mul_instruction() {
+        // Test MUL instruction from M extension
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::Mul {
+            dest: rv_asm::Reg(3),
+            src1: rv_asm::Reg(1),
+            src2: rv_asm::Reg(2),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_fadd_instruction() {
+        // Test FADD.S instruction from F extension
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        let inst = Inst::FaddS {
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+            dest: rv_asm::FReg(1),
+            src1: rv_asm::FReg(2),
+            src2: rv_asm::FReg(3),
+        };
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_decode_and_translate() {
+        // Test decoding a real instruction and translating it
+        // This is "addi a0, a0, 0" which is a common NOP-like instruction
+        let instruction_bytes: u32 = 0x00050513;
+        let (inst, _is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
+        
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        assert!(recompiler.translate_instruction(&inst, 0x1000).is_ok());
+    }
+
+    #[test]
+    fn test_multiple_instructions() {
+        // Test translating multiple instructions in sequence
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        // addi x1, x0, 5
+        let inst1 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(5),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&inst1, 0x1000).is_ok());
+        
+        // addi x2, x0, 3
+        let inst2 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(3),
+            dest: rv_asm::Reg(2),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&inst2, 0x1004).is_ok());
+        
+        // add x3, x1, x2  (should compute 5 + 3 = 8)
+        let inst3 = Inst::Add {
+            dest: rv_asm::Reg(3),
+            src1: rv_asm::Reg(1),
+            src2: rv_asm::Reg(2),
+        };
+        assert!(recompiler.translate_instruction(&inst3, 0x1008).is_ok());
+    }
+
+    #[test]
+    fn test_seal_function() {
+        let mut recompiler = RiscVRecompiler::new();
+        recompiler.init_function(0);
+        
+        // Add some instructions
+        let inst = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(42),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        recompiler.translate_instruction(&inst, 0x1000).unwrap();
+        
+        // Seal the function
+        assert!(recompiler.seal().is_ok());
+    }
+
+    #[test]
+    fn test_register_mapping() {
+        // Test that register indices map correctly
+        assert_eq!(RiscVRecompiler::reg_to_local(rv_asm::Reg(0)), 0);
+        assert_eq!(RiscVRecompiler::reg_to_local(rv_asm::Reg(31)), 31);
+        assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(0)), 32);
+        assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(31)), 63);
+        assert_eq!(RiscVRecompiler::pc_local(), 64);
+    }
+}
