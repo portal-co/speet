@@ -32,7 +32,7 @@
 //! use rv_asm::{Inst, Xlen};
 //!
 //! // Create a recompiler instance
-//! let mut recompiler = RiscVRecompiler::new();
+//! let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
 //!
 //! // Decode and translate instructions
 //! let instruction_bytes: u32 = 0x00a50533; // add a0, a0, a0
@@ -64,11 +64,13 @@ use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx, JumpCallParams
 /// 
 /// Each instruction gets its own function (at 2-byte boundaries), and control flow
 /// is managed through jumps between these functions using the yecta reactor.
-/// PC values are used directly as function indices.
+/// PC values are used directly as function indices, offset by base_pc.
 pub struct RiscVRecompiler {
     reactor: Reactor<Infallible, Function>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
+    /// Base PC address - subtracted from PC values to compute function indices
+    base_pc: u32,
 }
 
 impl RiscVRecompiler {
@@ -77,15 +79,18 @@ impl RiscVRecompiler {
     /// # Arguments
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
-    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>) -> Self {
+    /// * `base_pc` - Base PC address to offset function indices
+    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self {
         Self {
             reactor: Reactor::default(),
             pool,
             escape_tag,
+            base_pc,
         }
     }
 
     /// Create a new RISC-V recompiler with default configuration
+    /// Uses base_pc of 0
     pub fn new() -> Self {
         Self::new_with_config(
             Pool {
@@ -93,13 +98,30 @@ impl RiscVRecompiler {
                 ty: TypeIdx(0),
             },
             None,
+            0,
+        )
+    }
+
+    /// Create a new RISC-V recompiler with a specified base PC
+    ///
+    /// # Arguments
+    /// * `base_pc` - Base PC address - this is subtracted from instruction PCs to compute function indices
+    pub fn new_with_base_pc(base_pc: u32) -> Self {
+        Self::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            base_pc,
         )
     }
 
     /// Convert a PC value to a function index
-    /// PC values are used directly as function indices (divided by 2 for 2-byte alignment)
-    fn pc_to_func_idx(pc: u32) -> FuncIdx {
-        FuncIdx(pc / 2)
+    /// PC values are offset by base_pc and then divided by 2 for 2-byte alignment
+    fn pc_to_func_idx(&self, pc: u32) -> FuncIdx {
+        let offset_pc = pc.wrapping_sub(self.base_pc);
+        FuncIdx(offset_pc / 2)
     }
 
     /// Initialize a function for a single instruction at the given PC
@@ -152,7 +174,7 @@ impl RiscVRecompiler {
 
     /// Perform a jump to a target PC using yecta's jump API
     fn jump_to_pc(&mut self, target_pc: u32, params: u32) -> Result<(), Infallible> {
-        let target_func = Self::pc_to_func_idx(target_pc);
+        let target_func = self.pc_to_func_idx(target_pc);
         self.reactor.jmp(target_func, params)
     }
 
@@ -1247,13 +1269,13 @@ impl RiscVRecompiler {
         // Emit conditional structure
         self.reactor.feed(&Instruction::If(wasm_encoder::BlockType::Empty))?;
         
-        // Branch taken - jump to target using PC-based indexing
-        let target_func = Self::pc_to_func_idx(target_pc);
+        // Branch taken - jump to target using PC-based indexing with offset
+        let target_func = self.pc_to_func_idx(target_pc);
         self.reactor.jmp(target_func, 65)?;
         
-        // Branch not taken - jump to fallthrough using PC-based indexing
+        // Branch not taken - jump to fallthrough using PC-based indexing with offset
         self.reactor.feed(&Instruction::Else)?;
-        let fallthrough_func = Self::pc_to_func_idx(fallthrough_pc);
+        let fallthrough_func = self.pc_to_func_idx(fallthrough_pc);
         self.reactor.jmp(fallthrough_func, 65)?;
         
         self.reactor.feed(&Instruction::End)?;
@@ -1682,14 +1704,15 @@ mod tests {
 
     #[test]
     fn test_recompiler_creation() {
-        let _recompiler = RiscVRecompiler::new();
+        let _recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         // Just ensure it can be created without panicking
     }
 
     #[test]
     fn test_addi_instruction() {
         // Test ADDI instruction: addi x1, x0, 42
-        let mut recompiler = RiscVRecompiler::new();
+        // Use base_pc to offset high addresses
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Addi {
             imm: rv_asm::Imm::new_i32(42),
@@ -1703,7 +1726,7 @@ mod tests {
     #[test]
     fn test_add_instruction() {
         // Test ADD instruction: add x3, x1, x2
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Add {
             dest: rv_asm::Reg(3),
@@ -1717,7 +1740,7 @@ mod tests {
     #[test]
     fn test_load_instruction() {
         // Test LW instruction: lw x1, 0(x2)
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Lw {
             offset: rv_asm::Imm::new_i32(0),
@@ -1731,7 +1754,7 @@ mod tests {
     #[test]
     fn test_store_instruction() {
         // Test SW instruction: sw x1, 4(x2)
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Sw {
             offset: rv_asm::Imm::new_i32(4),
@@ -1750,7 +1773,7 @@ mod tests {
     #[test]
     fn test_branch_instruction() {
         // Test BEQ instruction: beq x1, x2, offset
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Beq {
             offset: rv_asm::Imm::new_i32(8),
@@ -1764,7 +1787,7 @@ mod tests {
     #[test]
     fn test_mul_instruction() {
         // Test MUL instruction from M extension
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::Mul {
             dest: rv_asm::Reg(3),
@@ -1778,7 +1801,7 @@ mod tests {
     #[test]
     fn test_fadd_instruction() {
         // Test FADD.S instruction from F extension
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         let inst = Inst::FaddS {
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
@@ -1797,7 +1820,7 @@ mod tests {
         let instruction_bytes: u32 = 0x00050513;
         let (inst, is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
         
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         assert!(recompiler.translate_instruction(&inst, 0x1000, is_compressed).is_ok());
     }
@@ -1805,7 +1828,7 @@ mod tests {
     #[test]
     fn test_multiple_instructions() {
         // Test translating multiple instructions in sequence
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         // addi x1, x0, 5
         let inst1 = Inst::Addi {
@@ -1835,7 +1858,7 @@ mod tests {
     #[test]
     fn test_translate_from_bytes() {
         // Test translating from raw bytecode
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         // Simple program: addi x1, x0, 5 (0x00500093)
         let bytes = [0x93, 0x00, 0x50, 0x00]; // Little-endian
@@ -1848,7 +1871,7 @@ mod tests {
     #[test]
     fn test_translate_compressed_from_bytes() {
         // Test translating compressed instructions from bytes
-        let mut recompiler = RiscVRecompiler::new();
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
         // c.addi x1, 5 (0x0095) - compressed instruction
         let bytes = [0x95, 0x00];
