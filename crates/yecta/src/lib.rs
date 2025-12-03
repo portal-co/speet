@@ -265,105 +265,171 @@ impl Reactor {
         pool: Pool,
         condition: Option<&(dyn Snippet + '_)>,
     ) {
-        if let Some(_c) = condition.as_deref() {
-            let mut queue = VecDeque::new();
-            queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
-            let mut cache = BTreeSet::new();
-            while let Some(q) = queue.pop_front() {
-                if cache.contains(&q) {
-                    continue;
-                };
-                cache.insert(q);
-                let FuncIdx(q_idx) = q;
-                // self.fns[q_idx as usize].function.instruction(instruction);
-                for p in self.fns[q_idx as usize].preds.iter().cloned() {
-                    queue.push_back(p);
-                }
+        // Track if statements for conditional branches
+        if condition.is_some() {
+            self.increment_if_stmts_for_predecessors();
+        }
+        
+        match call {
+            Some(escape_tag) => {
+                self.emit_conditional_call(params, fixups, target, escape_tag, pool, condition);
             }
-            for c in cache {
-                let FuncIdx(c_idx) = c;
-                self.fns[c_idx as usize].if_stmts += 1;
+            None => {
+                self.emit_conditional_jump(params, fixups, target, pool, condition);
             }
         }
-        match call {
-            Some(tag) => {
-                if let Some(s) = condition.as_deref() {
-                    s.emit(&mut |a| self.feed(a));
-                    self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
-                }
-                for p in 0..params {
-                    if let Some(f) = fixups.get(&p) {
-                        f.emit(&mut |a| self.feed(a));
-                    } else {
-                        self.feed(&Instruction::LocalGet(p));
-                    }
-                }
-                self.call(target, tag, pool);
-                for p in (0..params).rev() {
-                    if let Some(_f) = fixups.get(&p) {
-                        self.feed(&Instruction::Drop);
-                    } else {
-                        self.feed(&Instruction::LocalSet(p));
-                    }
-                }
-                if let Some(_s) = condition.as_deref() {
-                    self.feed(&Instruction::Else);
-                }
-            }
-            None => match target {
-                Target::Static { func } => {
-                    if let Some(_s) = condition.as_deref() {
-                        _s.emit(&mut |a| self.feed(a));
-                        self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
-                    }
+    }
 
-                    if let Some(_s) = condition.as_deref() {
-                        let FuncIdx(func_idx) = func;
-                        for p in 0..params {
-                            if let Some(f) = fixups.get(&p) {
-                                f.emit(&mut |a| self.feed(a));
-                            } else {
-                                self.feed(&Instruction::LocalGet(p));
-                            }
-                        }
-                        self.feed(&Instruction::ReturnCall(func_idx));
-                        self.feed(&Instruction::Else);
-                    } else {
-                        for (i, f) in fixups.iter() {
-                            f.emit(&mut |a| self.feed(a));
-                            self.feed(&Instruction::LocalSet(*i));
-                        }
-                        self.jmp(func, params)
-                    }
-                }
-                Target::Dynamic { idx } => {
-                    if let Some(_s) = condition.as_deref() {
-                        _s.emit(&mut |a| self.feed(a));
-                        self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
-                    }
-                    for p in 0..params {
-                        if let Some(f) = fixups.get(&p) {
-                            f.emit(&mut |a| self.feed(a));
-                        } else {
-                            self.feed(&Instruction::LocalGet(p));
-                        }
-                    }
-                    idx.emit(&mut |a| self.feed(a));
-                    let Pool { ty: TypeIdx(pool_ty), table: TableIdx(pool_table) } = pool;
-                    if let Some(_s) = condition.as_deref() {
-                        self.feed(&Instruction::ReturnCallIndirect {
-                            type_index: pool_ty,
-                            table_index: pool_table,
-                        });
-                        self.feed(&Instruction::Else);
-                    } else {
-                        self.seal(&Instruction::ReturnCallIndirect {
-                            type_index: pool_ty,
-                            table_index: pool_table,
-                        });
-                    }
-                }
-            },
+    /// Increment if statement counter for all predecessor functions.
+    fn increment_if_stmts_for_predecessors(&mut self) {
+        let reachable_funcs = self.collect_reachable_predecessors();
+        for func_idx in reachable_funcs {
+            let FuncIdx(idx) = func_idx;
+            self.fns[idx as usize].if_stmts += 1;
+        }
+    }
+
+    /// Collect all functions reachable by following predecessor edges.
+    fn collect_reachable_predecessors(&self) -> BTreeSet<FuncIdx> {
+        let mut queue = VecDeque::new();
+        queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
+        let mut visited = BTreeSet::new();
+        
+        while let Some(current_func) = queue.pop_front() {
+            if visited.contains(&current_func) {
+                continue;
+            }
+            visited.insert(current_func);
+            
+            let FuncIdx(func_idx) = current_func;
+            for predecessor in self.fns[func_idx as usize].preds.iter().cloned() {
+                queue.push_back(predecessor);
+            }
+        }
+        
+        visited
+    }
+
+    /// Emit parameters with fixups applied.
+    fn emit_params_with_fixups(&mut self, params: u32, fixups: &BTreeMap<u32, &(dyn Snippet + '_)>) {
+        for param_idx in 0..params {
+            if let Some(fixup) = fixups.get(&param_idx) {
+                fixup.emit(&mut |instr| self.feed(instr));
+            } else {
+                self.feed(&Instruction::LocalGet(param_idx));
+            }
+        }
+    }
+
+    /// Restore parameters after a call, dropping fixed-up values and restoring original locals.
+    fn restore_params_after_call(&mut self, params: u32, fixups: &BTreeMap<u32, &(dyn Snippet + '_)>) {
+        for param_idx in (0..params).rev() {
+            if fixups.contains_key(&param_idx) {
+                self.feed(&Instruction::Drop);
+            } else {
+                self.feed(&Instruction::LocalSet(param_idx));
+            }
+        }
+    }
+
+    /// Emit a conditional call with exception handling.
+    fn emit_conditional_call(
+        &mut self,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet + '_)>,
+        target: Target,
+        escape_tag: EscapeTag,
+        pool: Pool,
+        condition: Option<&(dyn Snippet + '_)>,
+    ) {
+        if let Some(cond_snippet) = condition {
+            cond_snippet.emit(&mut |instr| self.feed(instr));
+            self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
+        }
+        
+        self.emit_params_with_fixups(params, fixups);
+        self.call(target, escape_tag, pool);
+        self.restore_params_after_call(params, fixups);
+        
+        if condition.is_some() {
+            self.feed(&Instruction::Else);
+        }
+    }
+
+    /// Emit a conditional jump (no exception handling).
+    fn emit_conditional_jump(
+        &mut self,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet + '_)>,
+        target: Target,
+        pool: Pool,
+        condition: Option<&(dyn Snippet + '_)>,
+    ) {
+        match target {
+            Target::Static { func } => {
+                self.emit_static_jump(params, fixups, func, condition);
+            }
+            Target::Dynamic { idx } => {
+                self.emit_dynamic_jump(params, fixups, idx, pool, condition);
+            }
+        }
+    }
+
+    /// Emit a static (direct) jump to a known function.
+    fn emit_static_jump(
+        &mut self,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet + '_)>,
+        func: FuncIdx,
+        condition: Option<&(dyn Snippet + '_)>,
+    ) {
+        if let Some(cond_snippet) = condition {
+            cond_snippet.emit(&mut |instr| self.feed(instr));
+            self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
+            
+            let FuncIdx(func_idx) = func;
+            self.emit_params_with_fixups(params, fixups);
+            self.feed(&Instruction::ReturnCall(func_idx));
+            self.feed(&Instruction::Else);
+        } else {
+            // Unconditional jump: apply fixups to locals, then jump
+            for (local_idx, fixup) in fixups.iter() {
+                fixup.emit(&mut |instr| self.feed(instr));
+                self.feed(&Instruction::LocalSet(*local_idx));
+            }
+            self.jmp(func, params);
+        }
+    }
+
+    /// Emit a dynamic (indirect) jump through a table.
+    fn emit_dynamic_jump(
+        &mut self,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet + '_)>,
+        idx: &(dyn Snippet + '_),
+        pool: Pool,
+        condition: Option<&(dyn Snippet + '_)>,
+    ) {
+        if let Some(cond_snippet) = condition {
+            cond_snippet.emit(&mut |instr| self.feed(instr));
+            self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
+        }
+        
+        self.emit_params_with_fixups(params, fixups);
+        idx.emit(&mut |instr| self.feed(instr));
+        
+        let Pool { ty: TypeIdx(pool_ty), table: TableIdx(pool_table) } = pool;
+        if condition.is_some() {
+            self.feed(&Instruction::ReturnCallIndirect {
+                type_index: pool_ty,
+                table_index: pool_table,
+            });
+            self.feed(&Instruction::Else);
+        } else {
+            self.seal(&Instruction::ReturnCallIndirect {
+                type_index: pool_ty,
+                table_index: pool_table,
+            });
         }
     }
     /// Emit an unconditional jump to the target function.
