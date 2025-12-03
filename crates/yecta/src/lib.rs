@@ -283,6 +283,11 @@ impl<E> Reactor<E> {
         self.next_with(Function::new(locals), len);
     }
 }
+impl<E, F: InstructionSink<E>> InstructionSink<E> for Reactor<E, F> {
+    fn instruction(&mut self, instruction: &Instruction<'_>) -> Result<(), E> {
+        self.feed(instruction)
+    }
+}
 impl<E, F: InstructionSink<E>> Reactor<E, F> {
     /// Create a new function with the given locals and control flow distance.
     ///
