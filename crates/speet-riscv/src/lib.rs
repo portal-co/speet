@@ -7,11 +7,14 @@
 //!
 //! - **RV32I**: Base integer instruction set
 //! - **M**: Integer multiplication and division
-//! - **A**: Atomic instructions
-//! - **C**: Compressed instructions
-//! - **Zicsr**: Control and Status Register instructions
+//! - **A**: Atomic instructions (LR/SC subset)
+//! - **Zicsr**: Control and Status Register instructions (stubbed for runtime)
 //! - **F**: Single-precision floating-point
 //! - **D**: Double-precision floating-point
+//!
+//! Note: Compressed instructions (C extension) are automatically handled by the rv-asm
+//! decoder, which transparently expands them to their full-length equivalents before
+//! translation.
 //!
 //! ## Architecture
 //!
@@ -45,7 +48,6 @@
 //! Key specification quotes are included as documentation comments throughout the code.
 
 #![no_std]
-extern crate alloc;
 
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm};
@@ -58,8 +60,10 @@ use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx};
 /// using the yecta reactor for control flow management.
 pub struct RiscVRecompiler {
     reactor: Reactor<Infallible, Function>,
+    // Pool configuration for indirect calls - reserved for future use with dynamic jumps
     #[allow(dead_code)]
     pool: Pool,
+    // Exception tag for non-local control flow - reserved for future use with exception-based returns
     #[allow(dead_code)]
     escape_tag: Option<EscapeTag>,
 }
@@ -1060,7 +1064,7 @@ impl RiscVRecompiler {
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
                 // Silently ignore the write for now
-                _ = src;
+                let _ = src;
             }
 
             Inst::Csrrwi { dest, .. } |
@@ -1072,7 +1076,9 @@ impl RiscVRecompiler {
                 }
             }
 
-            // RV64 instructions - these are supported but require different handling
+            // RV64 instructions
+            // These are RV64-specific and not supported in RV32 mode.
+            // We emit a trap instruction to signal unsupported operation.
             Inst::Lwu { .. } |
             Inst::Ld { .. } |
             Inst::Sd { .. } |
@@ -1089,14 +1095,7 @@ impl RiscVRecompiler {
             Inst::DivW { .. } |
             Inst::DivuW { .. } |
             Inst::RemW { .. } |
-            Inst::RemuW { .. } => {
-                // RV64-specific instructions
-                // For RV32 mode, these should not be executed
-                // Stub them out with unreachable for now
-                self.reactor.feed(&Instruction::Unreachable)?;
-            }
-
-            // RV64 floating-point conversions
+            Inst::RemuW { .. } |
             Inst::FcvtLS { .. } |
             Inst::FcvtLuS { .. } |
             Inst::FcvtSL { .. } |
@@ -1107,29 +1106,35 @@ impl RiscVRecompiler {
             Inst::FcvtDL { .. } |
             Inst::FcvtDLu { .. } |
             Inst::FmvDX { .. } => {
-                // RV64 floating-point operations
+                // RV64-specific instructions are not supported in this RV32 implementation.
+                // In a real system, this could trigger an illegal instruction exception.
+                // For now, we emit unreachable which will trap if executed.
                 self.reactor.feed(&Instruction::Unreachable)?;
             }
 
-            // Atomic memory operations
+            // Advanced atomic memory operations
+            // These require more sophisticated atomic support than simple LR/SC
             Inst::AmoW { .. } => {
-                // Atomic memory operations would need special WebAssembly atomic support
-                // Stub for now
+                // AMO operations (AMOSWAP, AMOADD, etc.) need WebAssembly atomic RMW operations
+                // Future implementation should map these to appropriate wasm atomic instructions
                 self.reactor.feed(&Instruction::Unreachable)?;
             }
 
             // Floating-point classify
+            // These require examining the floating-point value's bit pattern
             Inst::FclassS { .. } |
             Inst::FclassD { .. } => {
-                // Floating-point classify requires special handling
-                // Stub for now
+                // FCLASS returns a 10-bit mask indicating the class of the floating-point number
+                // (positive/negative infinity, normal, subnormal, zero, NaN, etc.)
+                // This requires complex bit pattern analysis not yet implemented
                 self.reactor.feed(&Instruction::Unreachable)?;
             }
 
-            // Catch-all for any unhandled instructions
+            // Catch-all for any other unhandled instructions
             _ => {
-                // Unimplemented or unrecognized instruction
-                // In a production system, this might log or report the error
+                // This should ideally never be reached if all instruction variants are handled.
+                // If it is reached, it indicates an instruction type that was added to rv-asm
+                // but not yet implemented in this recompiler.
                 self.reactor.feed(&Instruction::Unreachable)?;
             }
         }
