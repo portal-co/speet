@@ -311,13 +311,14 @@ impl Reactor {
                 }
             }
             None => match target {
-                Target::Static { func: FuncIdx(func_idx) } => {
+                Target::Static { func } => {
                     if let Some(_s) = condition.as_deref() {
                         _s.emit(&mut |a| self.feed(a));
                         self.feed(&Instruction::If(wasm_encoder::BlockType::Empty));
                     }
 
                     if let Some(_s) = condition.as_deref() {
+                        let FuncIdx(func_idx) = func;
                         for p in 0..params {
                             if let Some(f) = fixups.get(&p) {
                                 f.emit(&mut |a| self.feed(a));
@@ -332,7 +333,7 @@ impl Reactor {
                             f.emit(&mut |a| self.feed(a));
                             self.feed(&Instruction::LocalSet(*i));
                         }
-                        self.jmp(FuncIdx(func_idx), params)
+                        self.jmp(func, params)
                     }
                 }
                 Target::Dynamic { idx } => {
