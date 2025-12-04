@@ -119,6 +119,12 @@ if recompiler.is_memory64_enabled() {
 }
 ```
 
+**Supported RV64 Instructions:**
+- RV64I: LD, SD, LWU, ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, SLLW, SRLW, SRAW
+- RV64M: MULW, DIVW, DIVUW, REMW, REMUW
+
+**Note**: RV64 floating-point conversion instructions (FCVT.L.S, FCVT.D.L, etc.) are currently stubbed with `unreachable` and require additional implementation.
+
 ### HINT Instruction Tracking
 
 RISC-V HINT instructions are special instructions that write to register `x0` (which is hardwired to zero) and thus have no architectural effect. In the [rv-corpus](https://github.com/portal-co/rv-corpus) test suite, these instructions (typically `addi x0, x0, N`) are used as markers to indicate test case boundaries, where `N` is the test case number.
@@ -325,59 +331,6 @@ WebAssembly doesn't have native fused multiply-add instructions. The implementat
 ### Atomic Operations
 
 WebAssembly's atomic operations are used where possible. The LR/SC (load-reserved/store-conditional) implementation is simplified and may need enhancement for full correctness in multi-threaded environments.
-
-### RV64 Support
-
-RV64 support is now available and can be enabled at runtime using configuration flags. When enabled, the recompiler:
-
-- Uses i64 locals for integer registers instead of i32
-- Supports all RV64I instructions (LD, SD, LWU, ADDIW, ADDW, SUBW, etc.)
-- Supports RV64M multiplication and division instructions (MULW, DIVW, REMW, etc.)
-- Optionally uses i64 addresses for memory operations when memory64 is enabled
-
-To enable RV64 support:
-
-```rust
-use speet_riscv::RiscVRecompiler;
-use yecta::{Pool, TableIdx, TypeIdx};
-
-// Create a recompiler with RV64 enabled
-let mut recompiler = RiscVRecompiler::new_with_full_config(
-    Pool { table: TableIdx(0), ty: TypeIdx(0) },
-    None,
-    0x1000,  // base_pc
-    false,   // disable HINT tracking
-    true,    // enable RV64
-    false,   // disable memory64 (use i32 addresses)
-);
-
-// For memory64 support (i64 addresses):
-let mut recompiler_mem64 = RiscVRecompiler::new_with_full_config(
-    Pool { table: TableIdx(0), ty: TypeIdx(0) },
-    None,
-    0x1000,  // base_pc
-    false,   // disable HINT tracking
-    true,    // enable RV64
-    true,    // enable memory64 (use i64 addresses)
-);
-```
-
-You can also enable/disable RV64 and memory64 dynamically:
-
-```rust
-// Enable RV64 support
-recompiler.set_rv64_support(true);
-
-// Enable memory64 mode
-recompiler.set_memory64(true);
-
-// Check current settings
-if recompiler.is_rv64_enabled() {
-    println!("RV64 is enabled");
-}
-```
-
-**Note**: RV64 floating-point conversion instructions (FCVT.L.S, FCVT.D.L, etc.) are currently stubbed with `unreachable` and require additional implementation.
 
 ## References
 
