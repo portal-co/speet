@@ -99,6 +99,33 @@ impl<'a> HintContext<'a> {
     }
 }
 
+/// Trait for HINT instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when HINT
+/// instructions are encountered during translation. Implementations receive
+/// both the HINT information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait HintCallback {
+    /// Process a HINT instruction
+    ///
+    /// # Arguments
+    /// * `hint` - Information about the detected HINT instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of HintCallback for FnMut closures
+impl<F> HintCallback for F
+where
+    F: FnMut(&HintInfo, &mut HintContext),
+{
+    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext) {
+        self(hint, ctx)
+    }
+}
+
 /// RISC-V to WebAssembly recompiler
 ///
 /// This structure manages the translation of RISC-V instructions to WebAssembly,
@@ -108,8 +135,10 @@ impl<'a> HintContext<'a> {
 /// is managed through jumps between these functions using the yecta reactor.
 /// PC values are used directly as function indices, offset by base_pc.
 /// 
-/// The lifetime parameter `'cb` represents the lifetime of the HINT callback.
-pub struct RiscVRecompiler<'cb> {
+/// The lifetime parameters:
+/// - `'cb` represents the lifetime of the callback reference
+/// - `'ctx` represents the lifetime of data the callback may capture
+pub struct RiscVRecompiler<'cb, 'ctx> {
     reactor: Reactor<Infallible, Function>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
@@ -120,10 +149,10 @@ pub struct RiscVRecompiler<'cb> {
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<&'cb mut (dyn FnMut(&HintInfo, &mut HintContext) + 'cb)>,
+    hint_callback: Option<&'cb mut (dyn HintCallback + 'ctx)>,
 }
 
-impl<'cb> RiscVRecompiler<'cb> {
+impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
     /// Create a new RISC-V recompiler instance with full configuration
     ///
     /// # Arguments
@@ -237,7 +266,7 @@ impl<'cb> RiscVRecompiler<'cb> {
     /// };
     /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
-    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn FnMut(&HintInfo, &mut HintContext) + 'cb)) {
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback + 'ctx)) {
         self.hint_callback = Some(callback);
     }
 
@@ -530,7 +559,7 @@ impl<'cb> RiscVRecompiler<'cb> {
                         let mut ctx = HintContext {
                             reactor: &mut self.reactor,
                         };
-                        callback(&hint_info, &mut ctx);
+                        callback.call(&hint_info, &mut ctx);
                     }
                     
                     // No WebAssembly code generation needed - this is a true no-op
@@ -1837,7 +1866,7 @@ impl<'cb> RiscVRecompiler<'cb> {
     }
 }
 
-impl<'cb> Default for RiscVRecompiler<'cb> {
+impl<'cb, 'ctx> Default for RiscVRecompiler<'cb, 'ctx> {
     fn default() -> Self {
         Self::new()
     }
