@@ -317,7 +317,15 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
                 a.preds.insert(pred);
             }
             None => {
-                let len = (self.fns.len() - succ_idx as usize) as u32;
+                // succ_idx is beyond the current fns vector
+                // Calculate the offset into the lens queue
+                // lens[0] = preds for fns.len(), lens[1] = preds for fns.len()+1, etc.
+                let len = (succ_idx as usize)
+                    .checked_sub(self.fns.len())
+                    .expect("add_pred: succ_idx should be >= fns.len() in None branch")
+                    as u32;
+                
+                // Ensure lens is large enough to hold this offset
                 while self.lens.len() != len as usize + 1 {
                     self.lens.push_back(Default::default());
                 }
