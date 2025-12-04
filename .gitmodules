@@ -1,0 +1,3 @@
+[submodule "test-data/rv-corpus"]
+	path = test-data/rv-corpus
+	url = https://github.com/portal-co/rv-corpus.git
