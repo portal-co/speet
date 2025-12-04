@@ -3,8 +3,11 @@
 //! This example shows how to enable and use HINT instruction tracking
 //! to identify test case boundaries in RISC-V code (as used in rv-corpus).
 
-use rv_asm::{Inst, Reg, Imm, IsCompressed};
+use std::convert::Infallible;
+
+use rv_asm::{Imm, Inst, IsCompressed, Reg};
 use speet_riscv::RiscVRecompiler;
+use wasm_encoder::Function;
 use yecta::{Pool, TableIdx, TypeIdx};
 
 fn main() {
@@ -12,14 +15,14 @@ fn main() {
     println!("======================================\n");
 
     // Create a recompiler with HINT tracking enabled
-    let mut recompiler = RiscVRecompiler::new_with_full_config(
+    let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
         Pool {
             table: TableIdx(0),
             ty: TypeIdx(0),
         },
         None,
-        0x1000,  // base PC
-        true,    // enable HINT tracking
+        0x1000, // base PC
+        true,   // enable HINT tracking
     );
 
     println!("HINT tracking is enabled\n");
@@ -28,22 +31,103 @@ fn main() {
     // Each test case is marked with a HINT: addi x0, x0, N
     let test_program = vec![
         // Test case 1: Basic arithmetic
-        (Inst::Addi { imm: Imm::new_i32(1), dest: Reg(0), src1: Reg(0) }, "HINT: Test case 1"),
-        (Inst::Addi { imm: Imm::new_i32(5), dest: Reg(1), src1: Reg(0) }, "li x1, 5"),
-        (Inst::Addi { imm: Imm::new_i32(3), dest: Reg(2), src1: Reg(0) }, "li x2, 3"),
-        (Inst::Add { dest: Reg(3), src1: Reg(1), src2: Reg(2) }, "add x3, x1, x2"),
-        
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(1),
+                dest: Reg(0),
+                src1: Reg(0),
+            },
+            "HINT: Test case 1",
+        ),
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(5),
+                dest: Reg(1),
+                src1: Reg(0),
+            },
+            "li x1, 5",
+        ),
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(3),
+                dest: Reg(2),
+                src1: Reg(0),
+            },
+            "li x2, 3",
+        ),
+        (
+            Inst::Add {
+                dest: Reg(3),
+                src1: Reg(1),
+                src2: Reg(2),
+            },
+            "add x3, x1, x2",
+        ),
         // Test case 2: Multiplication
-        (Inst::Addi { imm: Imm::new_i32(2), dest: Reg(0), src1: Reg(0) }, "HINT: Test case 2"),
-        (Inst::Addi { imm: Imm::new_i32(10), dest: Reg(4), src1: Reg(0) }, "li x4, 10"),
-        (Inst::Addi { imm: Imm::new_i32(20), dest: Reg(5), src1: Reg(0) }, "li x5, 20"),
-        (Inst::Mul { dest: Reg(6), src1: Reg(4), src2: Reg(5) }, "mul x6, x4, x5"),
-        
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(2),
+                dest: Reg(0),
+                src1: Reg(0),
+            },
+            "HINT: Test case 2",
+        ),
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(10),
+                dest: Reg(4),
+                src1: Reg(0),
+            },
+            "li x4, 10",
+        ),
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(20),
+                dest: Reg(5),
+                src1: Reg(0),
+            },
+            "li x5, 20",
+        ),
+        (
+            Inst::Mul {
+                dest: Reg(6),
+                src1: Reg(4),
+                src2: Reg(5),
+            },
+            "mul x6, x4, x5",
+        ),
         // Test case 3: Load/store
-        (Inst::Addi { imm: Imm::new_i32(3), dest: Reg(0), src1: Reg(0) }, "HINT: Test case 3"),
-        (Inst::Lui { uimm: Imm::new_i32(0x1000), dest: Reg(7) }, "lui x7, 0x1000"),
-        (Inst::Sw { offset: Imm::new_i32(0), src: Reg(3), base: Reg(7) }, "sw x3, 0(x7)"),
-        (Inst::Lw { offset: Imm::new_i32(0), dest: Reg(8), base: Reg(7) }, "lw x8, 0(x7)"),
+        (
+            Inst::Addi {
+                imm: Imm::new_i32(3),
+                dest: Reg(0),
+                src1: Reg(0),
+            },
+            "HINT: Test case 3",
+        ),
+        (
+            Inst::Lui {
+                uimm: Imm::new_i32(0x1000),
+                dest: Reg(7),
+            },
+            "lui x7, 0x1000",
+        ),
+        (
+            Inst::Sw {
+                offset: Imm::new_i32(0),
+                src: Reg(3),
+                base: Reg(7),
+            },
+            "sw x3, 0(x7)",
+        ),
+        (
+            Inst::Lw {
+                offset: Imm::new_i32(0),
+                dest: Reg(8),
+                base: Reg(7),
+            },
+            "lw x8, 0(x7)",
+        ),
     ];
 
     // Translate the program
@@ -51,68 +135,89 @@ fn main() {
     let mut pc = 0x1000_u32;
     for (inst, description) in &test_program {
         println!("  0x{:08x}: {}", pc, description);
-        
-        if let Err(e) = recompiler.translate_instruction(inst, pc, IsCompressed::No) {
+
+        if let Err(e) = recompiler.translate_instruction(inst, pc, IsCompressed::No, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        }) {
             eprintln!("Error translating instruction: {:?}", e);
             break;
         }
-        
+
         pc = pc.wrapping_add(4);
     }
-    
+
     println!("\nTranslation complete!\n");
 
     // Retrieve and display collected HINT information
     let hints = recompiler.get_hints();
-    
+
     println!("Detected {} test case boundaries:", hints.len());
     for hint in hints {
         println!("  Test case {} at PC 0x{:08x}", hint.value, hint.pc);
     }
-    
+
     println!("\nNote: HINT instructions have no architectural effect.");
     println!("They are used purely as markers for debugging and test identification.");
 
     // Demonstrate clearing hints
     println!("\nClearing collected hints...");
     recompiler.clear_hints();
-    println!("Hints cleared. Current count: {}", recompiler.get_hints().len());
+    println!(
+        "Hints cleared. Current count: {}",
+        recompiler.get_hints().len()
+    );
 
     // Demonstrate toggling
     println!("\nDisabling HINT tracking...");
     recompiler.set_hint_tracking(false);
-    
+
     // Translate another HINT - it won't be tracked
     let pc = 0x2000;
-    let hint = Inst::Addi { imm: Imm::new_i32(4), dest: Reg(0), src1: Reg(0) };
-    let _ = recompiler.translate_instruction(&hint, pc, IsCompressed::No);
-    
+    let hint = Inst::Addi {
+        imm: Imm::new_i32(4),
+        dest: Reg(0),
+        src1: Reg(0),
+    };
+    let _ = recompiler.translate_instruction(&hint, pc, IsCompressed::No, &mut |a| {
+        Function::new(a.collect::<Vec<_>>())
+    });
+
     println!("Translated HINT at 0x{:08x}, but it wasn't tracked", pc);
     println!("Current hint count: {}", recompiler.get_hints().len());
-    
+
     // Demonstrate callback functionality
     println!("\n--- Callback Demo ---");
     let mut callback_recompiler = RiscVRecompiler::new();
-    
+
     println!("Setting a callback for real-time HINT processing with code generation...");
-    let mut my_callback = |hint: &speet_riscv::HintInfo, ctx: &mut speet_riscv::HintContext| {
-        println!("  [CALLBACK] Test case {} at PC 0x{:08x}", hint.value, hint.pc);
-        // Optionally emit a NOP instruction for each HINT
-        use wasm_encoder::Instruction;
-        ctx.emit(&Instruction::Nop).ok();
-    };
-    
+    let mut my_callback =
+        |hint: &speet_riscv::HintInfo, ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
+            println!(
+                "  [CALLBACK] Test case {} at PC 0x{:08x}",
+                hint.value, hint.pc
+            );
+            // Optionally emit a NOP instruction for each HINT
+            use wasm_encoder::Instruction;
+            ctx.emit(&Instruction::Nop).ok();
+        };
+
     callback_recompiler.set_hint_callback(&mut my_callback);
-    
+
     println!("Translating HINTs with callback:");
     for i in 1..=3 {
-        let hint = Inst::Addi { imm: Imm::new_i32(i), dest: Reg(0), src1: Reg(0) };
+        let hint = Inst::Addi {
+            imm: Imm::new_i32(i),
+            dest: Reg(0),
+            src1: Reg(0),
+        };
         let pc = 0x3000 + (i as u32 * 4);
-        let _ = callback_recompiler.translate_instruction(&hint, pc, IsCompressed::No);
+        let _ = callback_recompiler.translate_instruction(&hint, pc, IsCompressed::No, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        });
     }
-    
+
     println!("\nNote: Callbacks are invoked immediately and work independently of tracking.");
     println!("The HintContext parameter allows emitting WebAssembly instructions.");
-    
+
     println!("\n=== Demo Complete ===");
 }

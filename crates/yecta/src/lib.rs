@@ -324,7 +324,7 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
                     .checked_sub(self.fns.len())
                     .expect("add_pred: succ_idx should be >= fns.len() in None branch")
                     as u32;
-                
+
                 // Ensure lens is large enough to hold this offset
                 while self.lens.len() != len as usize + 1 {
                     self.lens.push_back(Default::default());
