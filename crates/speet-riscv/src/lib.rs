@@ -97,7 +97,9 @@ pub type HintCallback = Box<dyn FnMut(&HintInfo) + Send>;
 /// Each instruction gets its own function (at 2-byte boundaries), and control flow
 /// is managed through jumps between these functions using the yecta reactor.
 /// PC values are used directly as function indices, offset by base_pc.
-pub struct RiscVRecompiler {
+/// 
+/// The lifetime parameter `'cb` represents the lifetime of the HINT callback.
+pub struct RiscVRecompiler<'cb> {
     reactor: Reactor<Infallible, Function>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
@@ -108,10 +110,10 @@ pub struct RiscVRecompiler {
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<HintCallback>,
+    hint_callback: Option<&'cb mut (dyn FnMut(&HintInfo) + 'cb)>,
 }
 
-impl RiscVRecompiler {
+impl<'cb> RiscVRecompiler<'cb> {
     /// Create a new RISC-V recompiler instance with full configuration
     ///
     /// # Arguments
@@ -211,21 +213,19 @@ impl RiscVRecompiler {
     /// The callback can be used alongside or instead of hint tracking.
     ///
     /// # Arguments
-    /// * `callback` - A closure or function that takes a `&HintInfo` reference
+    /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` reference
     ///
     /// # Example
     /// ```no_run
     /// # use speet_riscv::RiscVRecompiler;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// recompiler.set_hint_callback(Box::new(|hint| {
+    /// let mut my_callback = |hint: &speet_riscv::HintInfo| {
     ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
-    /// }));
+    /// };
+    /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
-    pub fn set_hint_callback<F>(&mut self, callback: F)
-    where
-        F: FnMut(&HintInfo) + Send + 'static,
-    {
-        self.hint_callback = Some(Box::new(callback));
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn FnMut(&HintInfo) + 'cb)) {
+        self.hint_callback = Some(callback);
     }
 
     /// Clear the HINT callback
@@ -1821,7 +1821,7 @@ impl RiscVRecompiler {
     }
 }
 
-impl Default for RiscVRecompiler {
+impl<'cb> Default for RiscVRecompiler<'cb> {
     fn default() -> Self {
         Self::new()
     }
@@ -2256,19 +2256,17 @@ mod tests {
     #[test]
     fn test_hint_callback_basic() {
         // Test basic callback functionality
-        extern crate std;
-        use std::sync::{Arc, Mutex};
         use alloc::vec::Vec;
         
         let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
-        // Use Arc<Mutex<>> for thread-safe shared state
-        let collected = Arc::new(Mutex::new(Vec::new()));
-        let collected_clone = collected.clone();
+        let mut collected = Vec::new();
         
-        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
-            collected_clone.lock().unwrap().push(*hint);
-        }));
+        let mut callback = |hint: &HintInfo| {
+            collected.push(*hint);
+        };
+        
+        recompiler.set_hint_callback(&mut callback);
         
         // Translate some HINT instructions
         let hint1 = Inst::Addi {
@@ -2286,7 +2284,6 @@ mod tests {
         assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
         
         // Verify callback was invoked
-        let collected = collected.lock().unwrap();
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].pc, 0x1000);
         assert_eq!(collected[0].value, 1);
@@ -2297,8 +2294,6 @@ mod tests {
     #[test]
     fn test_hint_callback_with_tracking() {
         // Test that callback and tracking work together
-        extern crate std;
-        use std::sync::{Arc, Mutex};
         use alloc::vec::Vec;
         
         let mut recompiler = RiscVRecompiler::new_with_full_config(
@@ -2311,23 +2306,28 @@ mod tests {
             true, // Enable tracking
         );
         
-        let callback_hints = Arc::new(Mutex::new(Vec::new()));
-        let callback_hints_clone = callback_hints.clone();
+        let mut callback_hints = Vec::new();
         
-        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
-            callback_hints_clone.lock().unwrap().push(*hint);
-        }));
-        
-        // Translate a HINT
-        let hint = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(42),
-            dest: rv_asm::Reg(0),
-            src1: rv_asm::Reg(0),
-        };
-        assert!(recompiler.translate_instruction(&hint, 0x2000, IsCompressed::No).is_ok());
+        {
+            let mut callback = |hint: &HintInfo| {
+                callback_hints.push(*hint);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate a HINT
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(42),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint, 0x2000, IsCompressed::No).is_ok());
+            
+            // Clear callback to release borrow
+            recompiler.clear_hint_callback();
+        }
         
         // Both callback and tracking should have captured it
-        let callback_hints = callback_hints.lock().unwrap();
         assert_eq!(callback_hints.len(), 1);
         assert_eq!(callback_hints[0].value, 42);
         
@@ -2340,62 +2340,76 @@ mod tests {
     #[test]
     fn test_hint_callback_clear() {
         // Test clearing the callback
-        extern crate std;
-        use std::sync::{Arc, Mutex};
+        use alloc::vec::Vec;
         
-        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        let mut collected = Vec::new();
         
-        let counter = Arc::new(Mutex::new(0));
-        let counter_clone = counter.clone();
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            let mut callback = |hint: &HintInfo| {
+                collected.push(hint.value);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(1),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            
+            // First HINT should invoke callback
+            assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+            
+            // Clear callback
+            recompiler.clear_hint_callback();
+            
+            // Translate another HINT - callback should not be invoked
+            let hint2 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(2),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+        }
         
-        recompiler.set_hint_callback(Box::new(move |_hint: &HintInfo| {
-            *counter_clone.lock().unwrap() += 1;
-        }));
-        
-        let hint = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(1),
-            dest: rv_asm::Reg(0),
-            src1: rv_asm::Reg(0),
-        };
-        
-        // First HINT should invoke callback
-        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
-        assert_eq!(*counter.lock().unwrap(), 1);
-        
-        // Clear callback
-        recompiler.clear_hint_callback();
-        
-        // Second HINT should not invoke callback
-        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
-        assert_eq!(*counter.lock().unwrap(), 1); // Still 1
+        // Verify callback was invoked only once
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], 1);
     }
 
     #[test]
     fn test_hint_callback_without_tracking() {
         // Test that callback works even when tracking is disabled
-        extern crate std;
-        use std::sync::{Arc, Mutex};
+        use alloc::vec::Vec;
         
         let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         // Tracking is disabled by default
         
-        let invoked = Arc::new(Mutex::new(false));
-        let invoked_clone = invoked.clone();
+        let mut callback_values = Vec::new();
         
-        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
-            assert_eq!(hint.value, 99);
-            *invoked_clone.lock().unwrap() = true;
-        }));
-        
-        let hint = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(99),
-            dest: rv_asm::Reg(0),
-            src1: rv_asm::Reg(0),
-        };
-        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        {
+            let mut callback = |hint: &HintInfo| {
+                assert_eq!(hint.value, 99);
+                callback_values.push(hint.value);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(99),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+            
+            // Clear callback to release borrow
+            recompiler.clear_hint_callback();
+        }
         
         // Callback should have been invoked
-        assert!(*invoked.lock().unwrap());
+        assert_eq!(callback_values.len(), 1);
+        assert_eq!(callback_values[0], 99);
         
         // But tracking should not have collected anything
         assert_eq!(recompiler.get_hints().len(), 0);
@@ -2404,17 +2418,15 @@ mod tests {
     #[test]
     fn test_hint_callback_no_invoke_for_regular_addi() {
         // Test that callback is NOT invoked for regular ADDI instructions
-        extern crate std;
-        use std::sync::{Arc, Mutex};
-        
         let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
         
-        let invoked = Arc::new(Mutex::new(false));
-        let invoked_clone = invoked.clone();
+        let mut invoked = false;
         
-        recompiler.set_hint_callback(Box::new(move |_hint: &HintInfo| {
-            *invoked_clone.lock().unwrap() = true;
-        }));
+        let mut callback = |_hint: &HintInfo| {
+            invoked = true;
+        };
+        
+        recompiler.set_hint_callback(&mut callback);
         
         // Regular addi x1, x0, 5 (not a HINT)
         let regular_addi = Inst::Addi {
@@ -2425,6 +2437,6 @@ mod tests {
         assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
         
         // Callback should NOT have been invoked
-        assert!(!*invoked.lock().unwrap());
+        assert!(!invoked);
     }
 }
