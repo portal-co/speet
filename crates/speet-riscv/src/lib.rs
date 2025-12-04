@@ -224,6 +224,10 @@ pub struct RiscVRecompiler<'cb, 'ctx> {
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
     hint_callback: Option<&'cb mut (dyn HintCallback + 'ctx)>,
+    /// Optional callback for ECALL instructions
+    ecall_callback: Option<&'cb mut (dyn EcallCallback + 'ctx)>,
+    /// Optional callback for EBREAK instructions
+    ebreak_callback: Option<&'cb mut (dyn EbreakCallback + 'ctx)>,
 }
 
 impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
@@ -248,6 +252,8 @@ impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
             track_hints,
             hints: Vec::new(),
             hint_callback: None,
+            ecall_callback: None,
+            ebreak_callback: None,
         }
     }
 
@@ -349,6 +355,70 @@ impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
     /// Removes any previously set HINT callback.
     pub fn clear_hint_callback(&mut self) {
         self.hint_callback = None;
+    }
+
+    /// Set a callback for ECALL instructions
+    ///
+    /// When a callback is set, it will be invoked immediately when an ECALL instruction
+    /// is encountered during translation. This allows for custom handling of environment
+    /// calls, including generating custom WebAssembly code.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that takes an `&EcallInfo` and `&mut HintContext`
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext| {
+    ///     println!("ECALL at PC 0x{:x}", ecall.pc);
+    ///     // Optionally emit WebAssembly instructions for the ecall
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// };
+    /// recompiler.set_ecall_callback(&mut my_callback);
+    /// ```
+    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback + 'ctx)) {
+        self.ecall_callback = Some(callback);
+    }
+
+    /// Clear the ECALL callback
+    ///
+    /// Removes any previously set ECALL callback.
+    pub fn clear_ecall_callback(&mut self) {
+        self.ecall_callback = None;
+    }
+
+    /// Set a callback for EBREAK instructions
+    ///
+    /// When a callback is set, it will be invoked immediately when an EBREAK instruction
+    /// is encountered during translation. This allows for custom handling of breakpoints,
+    /// including generating custom WebAssembly code.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that takes an `&EbreakInfo` and `&mut HintContext`
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext| {
+    ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
+    ///     // Optionally emit WebAssembly instructions for the ebreak
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// };
+    /// recompiler.set_ebreak_callback(&mut my_callback);
+    /// ```
+    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback + 'ctx)) {
+        self.ebreak_callback = Some(callback);
+    }
+
+    /// Clear the EBREAK callback
+    ///
+    /// Removes any previously set EBREAK callback.
+    pub fn clear_ebreak_callback(&mut self) {
+        self.ebreak_callback = None;
     }
 
     /// Convert a PC value to a function index
@@ -824,14 +894,34 @@ impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
 
             // System calls
             Inst::Ecall => {
-                // Environment call - implementation specific
-                // Would need to be handled by runtime
-                self.reactor.feed(&Instruction::Unreachable)?;
+                let ecall_info = EcallInfo { pc };
+                
+                // Invoke callback if set
+                if let Some(ref mut callback) = self.ecall_callback {
+                    let mut ctx = HintContext {
+                        reactor: &mut self.reactor,
+                    };
+                    callback.call(&ecall_info, &mut ctx);
+                } else {
+                    // Default behavior: environment call - implementation specific
+                    // Would need to be handled by runtime
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
             }
 
             Inst::Ebreak => {
-                // Breakpoint - implementation specific
-                self.reactor.feed(&Instruction::Unreachable)?;
+                let ebreak_info = EbreakInfo { pc };
+                
+                // Invoke callback if set
+                if let Some(ref mut callback) = self.ebreak_callback {
+                    let mut ctx = HintContext {
+                        reactor: &mut self.reactor,
+                    };
+                    callback.call(&ebreak_info, &mut ctx);
+                } else {
+                    // Default behavior: breakpoint - implementation specific
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
             }
 
             // M Extension: Integer Multiplication and Division
@@ -2607,5 +2697,167 @@ mod tests {
         assert_eq!(hint_values[0], 1);
         assert_eq!(hint_values[1], 2);
         assert_eq!(hint_values[2], 3);
+    }
+
+    #[test]
+    fn test_ecall_callback_basic() {
+        // Test basic ecall callback functionality
+        use alloc::vec::Vec;
+        
+        let mut ecall_pcs = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |ecall: &EcallInfo, _ctx: &mut HintContext| {
+                ecall_pcs.push(ecall.pc);
+            };
+            
+            recompiler.set_ecall_callback(&mut callback);
+            
+            // Translate an ECALL instruction
+            let ecall = Inst::Ecall;
+            assert!(recompiler.translate_instruction(&ecall, 0x2000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked
+        assert_eq!(ecall_pcs.len(), 1);
+        assert_eq!(ecall_pcs[0], 0x2000);
+    }
+
+    #[test]
+    fn test_ebreak_callback_basic() {
+        // Test basic ebreak callback functionality
+        use alloc::vec::Vec;
+        
+        let mut ebreak_pcs = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |ebreak: &EbreakInfo, _ctx: &mut HintContext| {
+                ebreak_pcs.push(ebreak.pc);
+            };
+            
+            recompiler.set_ebreak_callback(&mut callback);
+            
+            // Translate an EBREAK instruction
+            let ebreak = Inst::Ebreak;
+            assert!(recompiler.translate_instruction(&ebreak, 0x3000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked
+        assert_eq!(ebreak_pcs.len(), 1);
+        assert_eq!(ebreak_pcs[0], 0x3000);
+    }
+
+    #[test]
+    fn test_ecall_callback_with_code_generation() {
+        // Test that ecall callback can generate WebAssembly instructions
+        use alloc::vec::Vec;
+        
+        let mut ecall_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_ecall: &EcallInfo, ctx: &mut HintContext| {
+                ecall_count += 1;
+                // Generate a NOP instruction for each ECALL
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_ecall_callback(&mut callback);
+            
+            // Translate multiple ECALL instructions
+            for i in 0..3 {
+                let ecall = Inst::Ecall;
+                let pc = 0x1000 + (i * 4);
+                assert!(recompiler.translate_instruction(&ecall, pc, IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all ECALLs
+        assert_eq!(ecall_count, 3);
+    }
+
+    #[test]
+    fn test_ebreak_callback_with_code_generation() {
+        // Test that ebreak callback can generate WebAssembly instructions
+        use alloc::vec::Vec;
+        
+        let mut ebreak_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_ebreak: &EbreakInfo, ctx: &mut HintContext| {
+                ebreak_count += 1;
+                // Generate a NOP instruction for each EBREAK
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_ebreak_callback(&mut callback);
+            
+            // Translate multiple EBREAK instructions
+            for i in 0..3 {
+                let ebreak = Inst::Ebreak;
+                let pc = 0x2000 + (i * 4);
+                assert!(recompiler.translate_instruction(&ebreak, pc, IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all EBREAKs
+        assert_eq!(ebreak_count, 3);
+    }
+
+    #[test]
+    fn test_ecall_ebreak_callbacks_clear() {
+        // Test clearing the ecall and ebreak callbacks
+        use alloc::vec::Vec;
+        
+        let mut ecall_count = 0;
+        let mut ebreak_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut ecall_cb = |_ecall: &EcallInfo, _ctx: &mut HintContext| {
+                ecall_count += 1;
+            };
+            
+            let mut ebreak_cb = |_ebreak: &EbreakInfo, _ctx: &mut HintContext| {
+                ebreak_count += 1;
+            };
+            
+            recompiler.set_ecall_callback(&mut ecall_cb);
+            recompiler.set_ebreak_callback(&mut ebreak_cb);
+            
+            // First ECALL and EBREAK should invoke callbacks
+            assert!(recompiler.translate_instruction(&Inst::Ecall, 0x1000, IsCompressed::No).is_ok());
+            assert!(recompiler.translate_instruction(&Inst::Ebreak, 0x1004, IsCompressed::No).is_ok());
+            
+            // Clear callbacks
+            recompiler.clear_ecall_callback();
+            recompiler.clear_ebreak_callback();
+            
+            // Second ECALL and EBREAK should not invoke callbacks (will use default behavior)
+            assert!(recompiler.translate_instruction(&Inst::Ecall, 0x1008, IsCompressed::No).is_ok());
+            assert!(recompiler.translate_instruction(&Inst::Ebreak, 0x100c, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callbacks were invoked only once
+        assert_eq!(ecall_count, 1);
+        assert_eq!(ebreak_count, 1);
     }
 }

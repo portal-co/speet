@@ -123,6 +123,37 @@ You can also implement the `HintCallback` trait for custom types to create more 
 
 **Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs. Callbacks have minimal overhead and can be used independently. The callback's `HintContext` parameter provides access to emit WebAssembly instructions, allowing you to generate custom code in response to test markers.
 
+#### ECALL and EBREAK Callbacks
+
+Similar callback systems are available for ECALL (environment call) and EBREAK (breakpoint) instructions. These use the same trait-based design with dual lifetimes:
+
+```rust
+use speet_riscv::{RiscVRecompiler, EcallInfo, EbreakInfo, HintContext};
+use wasm_encoder::Instruction;
+
+let mut recompiler = RiscVRecompiler::new();
+
+// Set an ECALL callback
+let mut ecall_handler = |ecall: &EcallInfo, ctx: &mut HintContext| {
+    println!("ECALL at PC 0x{:x}", ecall.pc);
+    // Generate custom WebAssembly code for the environment call
+    ctx.emit(&Instruction::Call(42)).ok();  // Example: call a WebAssembly function
+};
+recompiler.set_ecall_callback(&mut ecall_handler);
+
+// Set an EBREAK callback
+let mut ebreak_handler = |ebreak: &EbreakInfo, ctx: &mut HintContext| {
+    println!("EBREAK at PC 0x{:x}", ebreak.pc);
+    // Generate custom WebAssembly code for the breakpoint
+    ctx.emit(&Instruction::Nop).ok();
+};
+recompiler.set_ebreak_callback(&mut ebreak_handler);
+
+// Without callbacks, ECALL and EBREAK default to emitting Unreachable instructions
+```
+
+Both `EcallCallback` and `EbreakCallback` traits are automatically implemented for `FnMut` closures with the appropriate signature. The callbacks receive the instruction information and a context for emitting WebAssembly instructions, providing full flexibility to handle these system instructions according to your runtime requirements.
+
 ## Instruction Set Extensions
 
 ### RV32I - Base Integer Instructions
