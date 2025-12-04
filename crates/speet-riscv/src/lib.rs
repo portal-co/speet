@@ -52,6 +52,7 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
@@ -73,6 +74,21 @@ pub struct HintInfo {
     pub value: i32,
 }
 
+/// Callback function type for processing HINT instructions
+///
+/// This callback is invoked when a HINT instruction is encountered during translation.
+/// The callback receives a reference to the `HintInfo` describing the HINT.
+///
+/// # Example
+/// ```no_run
+/// use speet_riscv::HintInfo;
+///
+/// fn my_hint_callback(hint: &HintInfo) {
+///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+/// }
+/// ```
+pub type HintCallback = Box<dyn FnMut(&HintInfo) + Send>;
+
 /// RISC-V to WebAssembly recompiler
 ///
 /// This structure manages the translation of RISC-V instructions to WebAssembly,
@@ -91,6 +107,8 @@ pub struct RiscVRecompiler {
     track_hints: bool,
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
+    /// Optional callback for inline HINT processing
+    hint_callback: Option<HintCallback>,
 }
 
 impl RiscVRecompiler {
@@ -114,6 +132,7 @@ impl RiscVRecompiler {
             base_pc,
             track_hints,
             hints: Vec::new(),
+            hint_callback: None,
         }
     }
 
@@ -181,6 +200,39 @@ impl RiscVRecompiler {
     /// Clear the collected HINT instructions
     pub fn clear_hints(&mut self) {
         self.hints.clear();
+    }
+
+    /// Set a callback for inline HINT processing
+    ///
+    /// When a callback is set, it will be invoked immediately when a HINT instruction
+    /// is encountered during translation. This allows for real-time processing of
+    /// test case markers without needing to collect them all first.
+    ///
+    /// The callback can be used alongside or instead of hint tracking.
+    ///
+    /// # Arguments
+    /// * `callback` - A closure or function that takes a `&HintInfo` reference
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::RiscVRecompiler;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// recompiler.set_hint_callback(Box::new(|hint| {
+    ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+    /// }));
+    /// ```
+    pub fn set_hint_callback<F>(&mut self, callback: F)
+    where
+        F: FnMut(&HintInfo) + Send + 'static,
+    {
+        self.hint_callback = Some(Box::new(callback));
+    }
+
+    /// Clear the HINT callback
+    ///
+    /// Removes any previously set HINT callback.
+    pub fn clear_hint_callback(&mut self) {
+        self.hint_callback = None;
     }
 
     /// Convert a PC value to a function index
@@ -450,13 +502,21 @@ impl RiscVRecompiler {
                     // This has no architectural effect since x0 is hardwired to zero.
                     // In rv-corpus, this is used to mark test case boundaries.
                     
+                    let hint_info = HintInfo {
+                        pc,
+                        value: imm.as_i32(),
+                    };
+                    
                     // Track the HINT if tracking is enabled
                     if self.track_hints {
-                        self.hints.push(HintInfo {
-                            pc,
-                            value: imm.as_i32(),
-                        });
+                        self.hints.push(hint_info);
                     }
+                    
+                    // Invoke callback if set
+                    if let Some(ref mut callback) = self.hint_callback {
+                        callback(&hint_info);
+                    }
+                    
                     // No WebAssembly code generation needed - this is a true no-op
                 } else if src1.0 == 0 {
                     // li (load immediate) pseudoinstruction
@@ -2191,5 +2251,180 @@ mod tests {
         for (i, hint) in hints.iter().enumerate() {
             assert_eq!(hint.value, (i as i32) + 1);
         }
+    }
+
+    #[test]
+    fn test_hint_callback_basic() {
+        // Test basic callback functionality
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        use alloc::vec::Vec;
+        
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        // Use Arc<Mutex<>> for thread-safe shared state
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let collected_clone = collected.clone();
+        
+        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
+            collected_clone.lock().unwrap().push(*hint);
+        }));
+        
+        // Translate some HINT instructions
+        let hint1 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
+        
+        let hint2 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(2),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+        
+        // Verify callback was invoked
+        let collected = collected.lock().unwrap();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].pc, 0x1000);
+        assert_eq!(collected[0].value, 1);
+        assert_eq!(collected[1].pc, 0x1004);
+        assert_eq!(collected[1].value, 2);
+    }
+
+    #[test]
+    fn test_hint_callback_with_tracking() {
+        // Test that callback and tracking work together
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        use alloc::vec::Vec;
+        
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true, // Enable tracking
+        );
+        
+        let callback_hints = Arc::new(Mutex::new(Vec::new()));
+        let callback_hints_clone = callback_hints.clone();
+        
+        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
+            callback_hints_clone.lock().unwrap().push(*hint);
+        }));
+        
+        // Translate a HINT
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(42),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x2000, IsCompressed::No).is_ok());
+        
+        // Both callback and tracking should have captured it
+        let callback_hints = callback_hints.lock().unwrap();
+        assert_eq!(callback_hints.len(), 1);
+        assert_eq!(callback_hints[0].value, 42);
+        
+        let tracked_hints = recompiler.get_hints();
+        assert_eq!(tracked_hints.len(), 1);
+        assert_eq!(tracked_hints[0].value, 42);
+        assert_eq!(tracked_hints[0].pc, 0x2000);
+    }
+
+    #[test]
+    fn test_hint_callback_clear() {
+        // Test clearing the callback
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        let counter = Arc::new(Mutex::new(0));
+        let counter_clone = counter.clone();
+        
+        recompiler.set_hint_callback(Box::new(move |_hint: &HintInfo| {
+            *counter_clone.lock().unwrap() += 1;
+        }));
+        
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        
+        // First HINT should invoke callback
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        assert_eq!(*counter.lock().unwrap(), 1);
+        
+        // Clear callback
+        recompiler.clear_hint_callback();
+        
+        // Second HINT should not invoke callback
+        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
+        assert_eq!(*counter.lock().unwrap(), 1); // Still 1
+    }
+
+    #[test]
+    fn test_hint_callback_without_tracking() {
+        // Test that callback works even when tracking is disabled
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        // Tracking is disabled by default
+        
+        let invoked = Arc::new(Mutex::new(false));
+        let invoked_clone = invoked.clone();
+        
+        recompiler.set_hint_callback(Box::new(move |hint: &HintInfo| {
+            assert_eq!(hint.value, 99);
+            *invoked_clone.lock().unwrap() = true;
+        }));
+        
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(99),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        
+        // Callback should have been invoked
+        assert!(*invoked.lock().unwrap());
+        
+        // But tracking should not have collected anything
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_callback_no_invoke_for_regular_addi() {
+        // Test that callback is NOT invoked for regular ADDI instructions
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        let invoked = Arc::new(Mutex::new(false));
+        let invoked_clone = invoked.clone();
+        
+        recompiler.set_hint_callback(Box::new(move |_hint: &HintInfo| {
+            *invoked_clone.lock().unwrap() = true;
+        }));
+        
+        // Regular addi x1, x0, 5 (not a HINT)
+        let regular_addi = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(5),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+        
+        // Callback should NOT have been invoked
+        assert!(!*invoked.lock().unwrap());
     }
 }

@@ -90,5 +90,23 @@ fn main() {
     println!("Translated HINT at 0x{:08x}, but it wasn't tracked", pc);
     println!("Current hint count: {}", recompiler.get_hints().len());
     
+    // Demonstrate callback functionality
+    println!("\n--- Callback Demo ---");
+    let mut callback_recompiler = RiscVRecompiler::new();
+    
+    println!("Setting a callback for real-time HINT processing...");
+    callback_recompiler.set_hint_callback(Box::new(|hint: &speet_riscv::HintInfo| {
+        println!("  [CALLBACK] Test case {} at PC 0x{:08x}", hint.value, hint.pc);
+    }));
+    
+    println!("Translating HINTs with callback:");
+    for i in 1..=3 {
+        let hint = Inst::Addi { imm: Imm::new_i32(i), dest: Reg(0), src1: Reg(0) };
+        let pc = 0x3000 + (i as u32 * 4);
+        let _ = callback_recompiler.translate_instruction(&hint, pc, IsCompressed::No);
+    }
+    
+    println!("\nNote: Callbacks are invoked immediately and work independently of tracking.");
+    
     println!("\n=== Demo Complete ===");
 }

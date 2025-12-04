@@ -60,6 +60,8 @@ let reactor = recompiler.into_reactor();
 
 RISC-V HINT instructions are special instructions that write to register `x0` (which is hardwired to zero) and thus have no architectural effect. In the [rv-corpus](https://github.com/portal-co/rv-corpus) test suite, these instructions (typically `addi x0, x0, N`) are used as markers to indicate test case boundaries, where `N` is the test case number.
 
+#### Collecting HINTs
+
 The recompiler can optionally track these HINT instructions to aid in debugging and test case identification:
 
 ```rust
@@ -89,7 +91,27 @@ recompiler.clear_hints();
 recompiler.set_hint_tracking(false);
 ```
 
-**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs.
+#### HINT Callbacks
+
+For real-time processing of HINTs during translation, you can set a callback function:
+
+```rust
+use speet_riscv::RiscVRecompiler;
+
+let mut recompiler = RiscVRecompiler::new();
+
+// Set a callback for inline HINT processing
+recompiler.set_hint_callback(Box::new(|hint| {
+    println!("Encountered test case {} at PC 0x{:x}", hint.value, hint.pc);
+}));
+
+// The callback will be invoked immediately when HINTs are encountered
+// translate_instruction(...);
+
+// Callbacks work independently of tracking - you can use both together or separately
+```
+
+**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs. Callbacks have minimal overhead and can be used independently.
 
 ## Instruction Set Extensions
 
