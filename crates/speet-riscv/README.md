@@ -10,6 +10,7 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 - **F Extension**: Single-precision floating-point instructions
 - **D Extension**: Double-precision floating-point instructions
 - **Zicsr Extension**: Control and Status Register instructions (stubbed for runtime support)
+- **HINT Instruction Tracking**: Optional runtime-gated tracking of RISC-V HINT instructions (e.g., `addi x0, x0, N`) used in rv-corpus test markers
 - **Comprehensive Coverage**: Includes fused multiply-add, sign-injection, conversions, and more
 
 ## Architecture
@@ -28,6 +29,8 @@ This implementation follows the [RISC-V Unprivileged Specification](https://docs
 The instruction decoding is handled by the [rv-asm](https://github.com/portal-co/rv-utils) library, which provides a robust, panic-free decoder tested exhaustively on all 32-bit values.
 
 ## Usage
+
+### Basic Translation
 
 ```rust
 use speet_riscv::RiscVRecompiler;
@@ -52,6 +55,41 @@ recompiler.seal();
 // Get the reactor to generate WebAssembly
 let reactor = recompiler.into_reactor();
 ```
+
+### HINT Instruction Tracking
+
+RISC-V HINT instructions are special instructions that write to register `x0` (which is hardwired to zero) and thus have no architectural effect. In the [rv-corpus](https://github.com/portal-co/rv-corpus) test suite, these instructions (typically `addi x0, x0, N`) are used as markers to indicate test case boundaries, where `N` is the test case number.
+
+The recompiler can optionally track these HINT instructions to aid in debugging and test case identification:
+
+```rust
+use speet_riscv::RiscVRecompiler;
+use yecta::{Pool, TableIdx, TypeIdx};
+
+// Create a recompiler with HINT tracking enabled
+let mut recompiler = RiscVRecompiler::new_with_full_config(
+    Pool { table: TableIdx(0), ty: TypeIdx(0) },
+    None,
+    0x1000,  // base_pc
+    true,    // enable HINT tracking
+);
+
+// Translate some code containing HINT markers...
+// translate_instruction(...);
+
+// Retrieve collected HINT information
+for hint in recompiler.get_hints() {
+    println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+}
+
+// Clear collected hints if needed
+recompiler.clear_hints();
+
+// Toggle tracking on/off dynamically
+recompiler.set_hint_tracking(false);
+```
+
+**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs.
 
 ## Instruction Set Extensions
 

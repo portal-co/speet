@@ -51,11 +51,27 @@
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
 use wasm_encoder::{Function, Instruction, ValType};
 use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx};
+
+/// Information about a detected HINT instruction
+///
+/// RISC-V HINT instructions are instructions that write to x0 (which is hardwired
+/// to zero) and thus have no architectural effect. In the rv-corpus test suite,
+/// these are used as markers to indicate test case boundaries.
+///
+/// Common pattern: `addi x0, x0, N` where N is the test case number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HintInfo {
+    /// Program counter where the HINT was encountered
+    pub pc: u32,
+    /// The immediate value from the HINT instruction (typically the test case number)
+    pub value: i32,
+}
 
 /// RISC-V to WebAssembly recompiler
 ///
@@ -71,9 +87,36 @@ pub struct RiscVRecompiler {
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
+    /// Whether to track HINT instructions (disabled by default)
+    track_hints: bool,
+    /// Collected HINT instructions (when tracking is enabled)
+    hints: Vec<HintInfo>,
 }
 
 impl RiscVRecompiler {
+    /// Create a new RISC-V recompiler instance with full configuration
+    ///
+    /// # Arguments
+    /// * `pool` - Pool configuration for indirect calls
+    /// * `escape_tag` - Optional exception tag for non-local control flow
+    /// * `base_pc` - Base PC address to offset function indices
+    /// * `track_hints` - Whether to track HINT instructions for debugging/testing
+    pub fn new_with_full_config(
+        pool: Pool,
+        escape_tag: Option<EscapeTag>,
+        base_pc: u32,
+        track_hints: bool,
+    ) -> Self {
+        Self {
+            reactor: Reactor::default(),
+            pool,
+            escape_tag,
+            base_pc,
+            track_hints,
+            hints: Vec::new(),
+        }
+    }
+
     /// Create a new RISC-V recompiler instance
     ///
     /// # Arguments
@@ -81,12 +124,7 @@ impl RiscVRecompiler {
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
     pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self {
-        Self {
-            reactor: Reactor::default(),
-            pool,
-            escape_tag,
-            base_pc,
-        }
+        Self::new_with_full_config(pool, escape_tag, base_pc, false)
     }
 
     /// Create a new RISC-V recompiler with default configuration
@@ -115,6 +153,34 @@ impl RiscVRecompiler {
             None,
             base_pc,
         )
+    }
+
+    /// Enable or disable HINT instruction tracking
+    ///
+    /// When enabled, the recompiler will collect information about HINT instructions
+    /// (instructions that write to x0). This is useful for debugging and understanding
+    /// test case boundaries in rv-corpus test files.
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable HINT tracking
+    pub fn set_hint_tracking(&mut self, enable: bool) {
+        self.track_hints = enable;
+        if !enable {
+            self.hints.clear();
+        }
+    }
+
+    /// Get the collected HINT instructions
+    ///
+    /// Returns a slice of all HINT instructions encountered during translation
+    /// when tracking is enabled.
+    pub fn get_hints(&self) -> &[HintInfo] {
+        &self.hints
+    }
+
+    /// Clear the collected HINT instructions
+    pub fn clear_hints(&mut self) {
+        self.hints.clear();
     }
 
     /// Convert a PC value to a function index
@@ -380,7 +446,18 @@ impl RiscVRecompiler {
 
             Inst::Addi { imm, dest, src1 } => {
                 if src1.0 == 0 && dest.0 == 0 {
-                    // nop - do nothing
+                    // HINT instruction: addi x0, x0, imm
+                    // This has no architectural effect since x0 is hardwired to zero.
+                    // In rv-corpus, this is used to mark test case boundaries.
+                    
+                    // Track the HINT if tracking is enabled
+                    if self.track_hints {
+                        self.hints.push(HintInfo {
+                            pc,
+                            value: imm.as_i32(),
+                        });
+                    }
+                    // No WebAssembly code generation needed - this is a true no-op
                 } else if src1.0 == 0 {
                     // li (load immediate) pseudoinstruction
                     self.emit_imm(*imm)?;
@@ -1933,5 +2010,186 @@ mod tests {
         assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(0)), 32);
         assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(31)), 63);
         assert_eq!(RiscVRecompiler::pc_local(), 64);
+    }
+
+    #[test]
+    fn test_hint_tracking_disabled_by_default() {
+        // HINT tracking should be disabled by default
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        // Translate a HINT instruction: addi x0, x0, 1
+        let hint_inst = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        
+        assert!(recompiler.translate_instruction(&hint_inst, 0x1000, IsCompressed::No).is_ok());
+        
+        // Should not have collected any hints since tracking is disabled
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_tracking_enabled() {
+        // Test HINT tracking when explicitly enabled
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true, // Enable HINT tracking
+        );
+        
+        // Translate a HINT instruction: addi x0, x0, 1
+        let hint1 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
+        
+        // Translate another HINT: addi x0, x0, 2
+        let hint2 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(2),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+        
+        // Should have collected both hints
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].pc, 0x1000);
+        assert_eq!(hints[0].value, 1);
+        assert_eq!(hints[1].pc, 0x1004);
+        assert_eq!(hints[1].value, 2);
+    }
+
+    #[test]
+    fn test_hint_vs_regular_addi() {
+        // Test that regular ADDI instructions are not tracked as HINTs
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true, // Enable HINT tracking
+        );
+        
+        // Regular addi x1, x0, 5 (not a HINT)
+        let regular_addi = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(5),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+        
+        // Should not be tracked as a HINT
+        assert_eq!(recompiler.get_hints().len(), 0);
+        
+        // Now translate a real HINT: addi x0, x0, 1
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
+        
+        // Should only have the HINT
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pc, 0x1004);
+        assert_eq!(hints[0].value, 1);
+    }
+
+    #[test]
+    fn test_hint_clear() {
+        // Test clearing collected HINTs
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true,
+        );
+        
+        // Collect some hints
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 1);
+        
+        // Clear hints
+        recompiler.clear_hints();
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_tracking_toggle() {
+        // Test toggling HINT tracking on and off
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        
+        // Initially disabled
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 0);
+        
+        // Enable tracking
+        recompiler.set_hint_tracking(true);
+        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 1);
+        
+        // Disable tracking (should clear existing hints)
+        recompiler.set_hint_tracking(false);
+        assert_eq!(recompiler.get_hints().len(), 0);
+        assert!(recompiler.translate_instruction(&hint, 0x1008, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_from_rv_corpus_pattern() {
+        // Test the actual pattern used in rv-corpus test files
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true,
+        );
+        
+        // Simulate test case markers from rv-corpus
+        for test_case in 1..=5 {
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(test_case),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            let pc = 0x1000 + (test_case as u32 * 4);
+            assert!(recompiler.translate_instruction(&hint, pc, IsCompressed::No).is_ok());
+        }
+        
+        // Verify all test case markers were collected
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 5);
+        for (i, hint) in hints.iter().enumerate() {
+            assert_eq!(hint.value, (i as i32) + 1);
+        }
     }
 }
