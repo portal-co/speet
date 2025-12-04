@@ -73,6 +73,26 @@ pub struct HintInfo {
     pub value: i32,
 }
 
+/// Information about an encountered ECALL instruction
+///
+/// RISC-V ECALL (environment call) is used to make a request to the
+/// execution environment (e.g., operating system).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcallInfo {
+    /// Program counter where the ECALL was encountered
+    pub pc: u32,
+}
+
+/// Information about an encountered EBREAK instruction
+///
+/// RISC-V EBREAK (environment break) is used for debugging,
+/// typically to transfer control to a debugger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EbreakInfo {
+    /// Program counter where the EBREAK was encountered
+    pub pc: u32,
+}
+
 /// Context provided to HINT callbacks for code generation
 ///
 /// This struct provides access to the WebAssembly instruction emitter,
@@ -123,6 +143,60 @@ where
 {
     fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext) {
         self(hint, ctx)
+    }
+}
+
+/// Trait for ECALL instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when ECALL
+/// instructions are encountered during translation. Implementations receive
+/// both the ECALL information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait EcallCallback {
+    /// Process an ECALL instruction
+    ///
+    /// # Arguments
+    /// * `ecall` - Information about the detected ECALL instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of EcallCallback for FnMut closures
+impl<F> EcallCallback for F
+where
+    F: FnMut(&EcallInfo, &mut HintContext),
+{
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext) {
+        self(ecall, ctx)
+    }
+}
+
+/// Trait for EBREAK instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when EBREAK
+/// instructions are encountered during translation. Implementations receive
+/// both the EBREAK information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait EbreakCallback {
+    /// Process an EBREAK instruction
+    ///
+    /// # Arguments
+    /// * `ebreak` - Information about the detected EBREAK instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of EbreakCallback for FnMut closures
+impl<F> EbreakCallback for F
+where
+    F: FnMut(&EbreakInfo, &mut HintContext),
+{
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext) {
+        self(ebreak, ctx)
     }
 }
 
