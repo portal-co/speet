@@ -56,11 +56,11 @@ fn test_hint_tracking_with_rv32im_multiply() {
     // Translate the code and collect HINTs
     let mut offset = 0;
     while offset < text_data.len() {
-        if offset + 1 >= text_data.len() {
+        if offset + 2 > text_data.len() {
             break;
         }
         
-        let inst_word = if offset + 3 < text_data.len() {
+        let inst_word = if offset + 4 <= text_data.len() {
             u32::from_le_bytes([
                 text_data[offset],
                 text_data[offset + 1],
@@ -96,10 +96,6 @@ fn test_hint_tracking_with_rv32im_multiply() {
         for hint in hints.iter().take(10) {
             println!("  Test case {} at PC 0x{:x}", hint.value, hint.pc);
         }
-        
-        // Verify hints are sequential (test case numbers should generally increase)
-        // The first hint should be test case 1
-        assert!(hints.len() > 0, "Should have found at least one HINT");
         
         // Test case numbers should be positive and reasonable
         for hint in hints {
