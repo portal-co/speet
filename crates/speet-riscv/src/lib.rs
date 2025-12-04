@@ -51,11 +51,154 @@
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
 use wasm_encoder::{Function, Instruction, ValType};
 use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx};
+
+/// Information about a detected HINT instruction
+///
+/// RISC-V HINT instructions are instructions that write to x0 (which is hardwired
+/// to zero) and thus have no architectural effect. In the rv-corpus test suite,
+/// these are used as markers to indicate test case boundaries.
+///
+/// Common pattern: `addi x0, x0, N` where N is the test case number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HintInfo {
+    /// Program counter where the HINT was encountered
+    pub pc: u32,
+    /// The immediate value from the HINT instruction (typically the test case number)
+    pub value: i32,
+}
+
+/// Information about an encountered ECALL instruction
+///
+/// RISC-V ECALL (environment call) is used to make a request to the
+/// execution environment (e.g., operating system).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcallInfo {
+    /// Program counter where the ECALL was encountered
+    pub pc: u32,
+}
+
+/// Information about an encountered EBREAK instruction
+///
+/// RISC-V EBREAK (environment break) is used for debugging,
+/// typically to transfer control to a debugger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EbreakInfo {
+    /// Program counter where the EBREAK was encountered
+    pub pc: u32,
+}
+
+/// Context provided to HINT callbacks for code generation
+///
+/// This struct provides access to the WebAssembly instruction emitter,
+/// allowing callbacks to generate code in response to HINT instructions.
+pub struct HintContext<'a> {
+    /// Reference to the reactor for emitting WebAssembly instructions
+    pub reactor: &'a mut Reactor<Infallible, Function>,
+}
+
+impl<'a> HintContext<'a> {
+    /// Emit a WebAssembly instruction
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::HintContext;
+    /// # use wasm_encoder::Instruction;
+    /// fn my_callback(hint: &speet_riscv::HintInfo, ctx: &mut HintContext) {
+    ///     // Emit a NOP or other instruction based on the hint
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// }
+    /// ```
+    pub fn emit(&mut self, instruction: &Instruction) -> Result<(), Infallible> {
+        self.reactor.feed(instruction)
+    }
+}
+
+/// Trait for HINT instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when HINT
+/// instructions are encountered during translation. Implementations receive
+/// both the HINT information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait HintCallback {
+    /// Process a HINT instruction
+    ///
+    /// # Arguments
+    /// * `hint` - Information about the detected HINT instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of HintCallback for FnMut closures
+impl<F> HintCallback for F
+where
+    F: FnMut(&HintInfo, &mut HintContext),
+{
+    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext) {
+        self(hint, ctx)
+    }
+}
+
+/// Trait for ECALL instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when ECALL
+/// instructions are encountered during translation. Implementations receive
+/// both the ECALL information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait EcallCallback {
+    /// Process an ECALL instruction
+    ///
+    /// # Arguments
+    /// * `ecall` - Information about the detected ECALL instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of EcallCallback for FnMut closures
+impl<F> EcallCallback for F
+where
+    F: FnMut(&EcallInfo, &mut HintContext),
+{
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext) {
+        self(ecall, ctx)
+    }
+}
+
+/// Trait for EBREAK instruction callbacks
+///
+/// This trait defines the interface for callbacks that are invoked when EBREAK
+/// instructions are encountered during translation. Implementations receive
+/// both the EBREAK information and a context for generating WebAssembly code.
+///
+/// The trait is automatically implemented for all `FnMut` closures with the
+/// appropriate signature.
+pub trait EbreakCallback {
+    /// Process an EBREAK instruction
+    ///
+    /// # Arguments
+    /// * `ebreak` - Information about the detected EBREAK instruction
+    /// * `ctx` - Context for emitting WebAssembly instructions
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext);
+}
+
+/// Blanket implementation of EbreakCallback for FnMut closures
+impl<F> EbreakCallback for F
+where
+    F: FnMut(&EbreakInfo, &mut HintContext),
+{
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext) {
+        self(ebreak, ctx)
+    }
+}
 
 /// RISC-V to WebAssembly recompiler
 ///
@@ -65,15 +208,55 @@ use yecta::{Reactor, Pool, EscapeTag, TableIdx, TypeIdx, FuncIdx};
 /// Each instruction gets its own function (at 2-byte boundaries), and control flow
 /// is managed through jumps between these functions using the yecta reactor.
 /// PC values are used directly as function indices, offset by base_pc.
-pub struct RiscVRecompiler {
+/// 
+/// The lifetime parameters:
+/// - `'cb` represents the lifetime of the callback reference
+/// - `'ctx` represents the lifetime of data the callback may capture
+pub struct RiscVRecompiler<'cb, 'ctx> {
     reactor: Reactor<Infallible, Function>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
+    /// Whether to track HINT instructions (disabled by default)
+    track_hints: bool,
+    /// Collected HINT instructions (when tracking is enabled)
+    hints: Vec<HintInfo>,
+    /// Optional callback for inline HINT processing
+    hint_callback: Option<&'cb mut (dyn HintCallback + 'ctx)>,
+    /// Optional callback for ECALL instructions
+    ecall_callback: Option<&'cb mut (dyn EcallCallback + 'ctx)>,
+    /// Optional callback for EBREAK instructions
+    ebreak_callback: Option<&'cb mut (dyn EbreakCallback + 'ctx)>,
 }
 
-impl RiscVRecompiler {
+impl<'cb, 'ctx> RiscVRecompiler<'cb, 'ctx> {
+    /// Create a new RISC-V recompiler instance with full configuration
+    ///
+    /// # Arguments
+    /// * `pool` - Pool configuration for indirect calls
+    /// * `escape_tag` - Optional exception tag for non-local control flow
+    /// * `base_pc` - Base PC address to offset function indices
+    /// * `track_hints` - Whether to track HINT instructions for debugging/testing
+    pub fn new_with_full_config(
+        pool: Pool,
+        escape_tag: Option<EscapeTag>,
+        base_pc: u32,
+        track_hints: bool,
+    ) -> Self {
+        Self {
+            reactor: Reactor::default(),
+            pool,
+            escape_tag,
+            base_pc,
+            track_hints,
+            hints: Vec::new(),
+            hint_callback: None,
+            ecall_callback: None,
+            ebreak_callback: None,
+        }
+    }
+
     /// Create a new RISC-V recompiler instance
     ///
     /// # Arguments
@@ -81,12 +264,7 @@ impl RiscVRecompiler {
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
     pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self {
-        Self {
-            reactor: Reactor::default(),
-            pool,
-            escape_tag,
-            base_pc,
-        }
+        Self::new_with_full_config(pool, escape_tag, base_pc, false)
     }
 
     /// Create a new RISC-V recompiler with default configuration
@@ -115,6 +293,132 @@ impl RiscVRecompiler {
             None,
             base_pc,
         )
+    }
+
+    /// Enable or disable HINT instruction tracking
+    ///
+    /// When enabled, the recompiler will collect information about HINT instructions
+    /// (instructions that write to x0). This is useful for debugging and understanding
+    /// test case boundaries in rv-corpus test files.
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable HINT tracking
+    pub fn set_hint_tracking(&mut self, enable: bool) {
+        self.track_hints = enable;
+        if !enable {
+            self.hints.clear();
+        }
+    }
+
+    /// Get the collected HINT instructions
+    ///
+    /// Returns a slice of all HINT instructions encountered during translation
+    /// when tracking is enabled.
+    pub fn get_hints(&self) -> &[HintInfo] {
+        &self.hints
+    }
+
+    /// Clear the collected HINT instructions
+    pub fn clear_hints(&mut self) {
+        self.hints.clear();
+    }
+
+    /// Set a callback for inline HINT processing
+    ///
+    /// When a callback is set, it will be invoked immediately when a HINT instruction
+    /// is encountered during translation. This allows for real-time processing of
+    /// test case markers without needing to collect them all first.
+    ///
+    /// The callback receives both the HINT information and a context for code generation.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` and `&mut HintContext`
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext| {
+    ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+    ///     // Optionally emit WebAssembly instructions
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// };
+    /// recompiler.set_hint_callback(&mut my_callback);
+    /// ```
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback + 'ctx)) {
+        self.hint_callback = Some(callback);
+    }
+
+    /// Clear the HINT callback
+    ///
+    /// Removes any previously set HINT callback.
+    pub fn clear_hint_callback(&mut self) {
+        self.hint_callback = None;
+    }
+
+    /// Set a callback for ECALL instructions
+    ///
+    /// When a callback is set, it will be invoked immediately when an ECALL instruction
+    /// is encountered during translation. This allows for custom handling of environment
+    /// calls, including generating custom WebAssembly code.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that takes an `&EcallInfo` and `&mut HintContext`
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext| {
+    ///     println!("ECALL at PC 0x{:x}", ecall.pc);
+    ///     // Optionally emit WebAssembly instructions for the ecall
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// };
+    /// recompiler.set_ecall_callback(&mut my_callback);
+    /// ```
+    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback + 'ctx)) {
+        self.ecall_callback = Some(callback);
+    }
+
+    /// Clear the ECALL callback
+    ///
+    /// Removes any previously set ECALL callback.
+    pub fn clear_ecall_callback(&mut self) {
+        self.ecall_callback = None;
+    }
+
+    /// Set a callback for EBREAK instructions
+    ///
+    /// When a callback is set, it will be invoked immediately when an EBREAK instruction
+    /// is encountered during translation. This allows for custom handling of breakpoints,
+    /// including generating custom WebAssembly code.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that takes an `&EbreakInfo` and `&mut HintContext`
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext| {
+    ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
+    ///     // Optionally emit WebAssembly instructions for the ebreak
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// };
+    /// recompiler.set_ebreak_callback(&mut my_callback);
+    /// ```
+    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback + 'ctx)) {
+        self.ebreak_callback = Some(callback);
+    }
+
+    /// Clear the EBREAK callback
+    ///
+    /// Removes any previously set EBREAK callback.
+    pub fn clear_ebreak_callback(&mut self) {
+        self.ebreak_callback = None;
     }
 
     /// Convert a PC value to a function index
@@ -380,7 +684,29 @@ impl RiscVRecompiler {
 
             Inst::Addi { imm, dest, src1 } => {
                 if src1.0 == 0 && dest.0 == 0 {
-                    // nop - do nothing
+                    // HINT instruction: addi x0, x0, imm
+                    // This has no architectural effect since x0 is hardwired to zero.
+                    // In rv-corpus, this is used to mark test case boundaries.
+                    
+                    let hint_info = HintInfo {
+                        pc,
+                        value: imm.as_i32(),
+                    };
+                    
+                    // Track the HINT if tracking is enabled
+                    if self.track_hints {
+                        self.hints.push(hint_info);
+                    }
+                    
+                    // Invoke callback if set
+                    if let Some(ref mut callback) = self.hint_callback {
+                        let mut ctx = HintContext {
+                            reactor: &mut self.reactor,
+                        };
+                        callback.call(&hint_info, &mut ctx);
+                    }
+                    
+                    // No WebAssembly code generation needed - this is a true no-op
                 } else if src1.0 == 0 {
                     // li (load immediate) pseudoinstruction
                     self.emit_imm(*imm)?;
@@ -568,14 +894,34 @@ impl RiscVRecompiler {
 
             // System calls
             Inst::Ecall => {
-                // Environment call - implementation specific
-                // Would need to be handled by runtime
-                self.reactor.feed(&Instruction::Unreachable)?;
+                let ecall_info = EcallInfo { pc };
+                
+                // Invoke callback if set
+                if let Some(ref mut callback) = self.ecall_callback {
+                    let mut ctx = HintContext {
+                        reactor: &mut self.reactor,
+                    };
+                    callback.call(&ecall_info, &mut ctx);
+                } else {
+                    // Default behavior: environment call - implementation specific
+                    // Would need to be handled by runtime
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
             }
 
             Inst::Ebreak => {
-                // Breakpoint - implementation specific
-                self.reactor.feed(&Instruction::Unreachable)?;
+                let ebreak_info = EbreakInfo { pc };
+                
+                // Invoke callback if set
+                if let Some(ref mut callback) = self.ebreak_callback {
+                    let mut ctx = HintContext {
+                        reactor: &mut self.reactor,
+                    };
+                    callback.call(&ebreak_info, &mut ctx);
+                } else {
+                    // Default behavior: breakpoint - implementation specific
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
             }
 
             // M Extension: Integer Multiplication and Division
@@ -1684,7 +2030,7 @@ impl RiscVRecompiler {
     }
 }
 
-impl Default for RiscVRecompiler {
+impl<'cb, 'ctx> Default for RiscVRecompiler<'cb, 'ctx> {
     fn default() -> Self {
         Self::new()
     }
@@ -1933,5 +2279,581 @@ mod tests {
         assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(0)), 32);
         assert_eq!(RiscVRecompiler::freg_to_local(rv_asm::FReg(31)), 63);
         assert_eq!(RiscVRecompiler::pc_local(), 64);
+    }
+
+    #[test]
+    fn test_hint_tracking_disabled_by_default() {
+        // HINT tracking should be disabled by default
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        // Translate a HINT instruction: addi x0, x0, 1
+        let hint_inst = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        
+        assert!(recompiler.translate_instruction(&hint_inst, 0x1000, IsCompressed::No).is_ok());
+        
+        // Should not have collected any hints since tracking is disabled
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_tracking_enabled() {
+        // Test HINT tracking when explicitly enabled
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true, // Enable HINT tracking
+        );
+        
+        // Translate a HINT instruction: addi x0, x0, 1
+        let hint1 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
+        
+        // Translate another HINT: addi x0, x0, 2
+        let hint2 = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(2),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+        
+        // Should have collected both hints
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].pc, 0x1000);
+        assert_eq!(hints[0].value, 1);
+        assert_eq!(hints[1].pc, 0x1004);
+        assert_eq!(hints[1].value, 2);
+    }
+
+    #[test]
+    fn test_hint_vs_regular_addi() {
+        // Test that regular ADDI instructions are not tracked as HINTs
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true, // Enable HINT tracking
+        );
+        
+        // Regular addi x1, x0, 5 (not a HINT)
+        let regular_addi = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(5),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+        
+        // Should not be tracked as a HINT
+        assert_eq!(recompiler.get_hints().len(), 0);
+        
+        // Now translate a real HINT: addi x0, x0, 1
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
+        
+        // Should only have the HINT
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pc, 0x1004);
+        assert_eq!(hints[0].value, 1);
+    }
+
+    #[test]
+    fn test_hint_clear() {
+        // Test clearing collected HINTs
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true,
+        );
+        
+        // Collect some hints
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 1);
+        
+        // Clear hints
+        recompiler.clear_hints();
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_tracking_toggle() {
+        // Test toggling HINT tracking on and off
+        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+        
+        let hint = Inst::Addi {
+            imm: rv_asm::Imm::new_i32(1),
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(0),
+        };
+        
+        // Initially disabled
+        assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 0);
+        
+        // Enable tracking
+        recompiler.set_hint_tracking(true);
+        assert!(recompiler.translate_instruction(&hint, 0x1004, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 1);
+        
+        // Disable tracking (should clear existing hints)
+        recompiler.set_hint_tracking(false);
+        assert_eq!(recompiler.get_hints().len(), 0);
+        assert!(recompiler.translate_instruction(&hint, 0x1008, IsCompressed::No).is_ok());
+        assert_eq!(recompiler.get_hints().len(), 0);
+    }
+
+    #[test]
+    fn test_hint_from_rv_corpus_pattern() {
+        // Test the actual pattern used in rv-corpus test files
+        let mut recompiler = RiscVRecompiler::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true,
+        );
+        
+        // Simulate test case markers from rv-corpus
+        for test_case in 1..=5 {
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(test_case),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            let pc = 0x1000 + (test_case as u32 * 4);
+            assert!(recompiler.translate_instruction(&hint, pc, IsCompressed::No).is_ok());
+        }
+        
+        // Verify all test case markers were collected
+        let hints = recompiler.get_hints();
+        assert_eq!(hints.len(), 5);
+        for (i, hint) in hints.iter().enumerate() {
+            assert_eq!(hint.value, (i as i32) + 1);
+        }
+    }
+
+    #[test]
+    fn test_hint_callback_basic() {
+        // Test basic callback functionality
+        use alloc::vec::Vec;
+        
+        let mut collected = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
+                collected.push(*hint);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate some HINT instructions
+            let hint1 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(1),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
+            
+            let hint2 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(2),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+            
+            // Drop recompiler before checking results
+        }
+        
+        // Verify callback was invoked
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].pc, 0x1000);
+        assert_eq!(collected[0].value, 1);
+        assert_eq!(collected[1].pc, 0x1004);
+        assert_eq!(collected[1].value, 2);
+    }
+
+    #[test]
+    fn test_hint_callback_with_tracking() {
+        // Test that callback and tracking work together
+        use alloc::vec::Vec;
+        
+        let mut callback_hints = Vec::new();
+        let tracked_hints_result;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_full_config(
+                Pool {
+                    table: TableIdx(0),
+                    ty: TypeIdx(0),
+                },
+                None,
+                0x1000,
+                true, // Enable tracking
+            );
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
+                callback_hints.push(*hint);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate a HINT
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(42),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint, 0x2000, IsCompressed::No).is_ok());
+            
+            // Clear callback and get tracked hints before dropping
+            recompiler.clear_hint_callback();
+            tracked_hints_result = recompiler.get_hints().to_vec();
+            
+            // Drop recompiler
+        }
+        
+        // Both callback and tracking should have captured it
+        assert_eq!(callback_hints.len(), 1);
+        assert_eq!(callback_hints[0].value, 42);
+        
+        assert_eq!(tracked_hints_result.len(), 1);
+        assert_eq!(tracked_hints_result[0].value, 42);
+        assert_eq!(tracked_hints_result[0].pc, 0x2000);
+    }
+
+    #[test]
+    fn test_hint_callback_clear() {
+        // Test clearing the callback
+        use alloc::vec::Vec;
+        
+        let mut collected = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
+                collected.push(hint.value);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(1),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            
+            // First HINT should invoke callback
+            assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+            
+            // Clear callback
+            recompiler.clear_hint_callback();
+            
+            // Translate another HINT - callback should not be invoked
+            let hint2 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(2),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked only once
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], 1);
+    }
+
+    #[test]
+    fn test_hint_callback_without_tracking() {
+        // Test that callback works even when tracking is disabled
+        use alloc::vec::Vec;
+        
+        let mut callback_values = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            // Tracking is disabled by default
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
+                assert_eq!(hint.value, 99);
+                callback_values.push(hint.value);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            let hint = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(99),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
+            
+            // Get hints before dropping
+            assert_eq!(recompiler.get_hints().len(), 0);
+            
+            // Drop recompiler
+        }
+        
+        // Callback should have been invoked
+        assert_eq!(callback_values.len(), 1);
+        assert_eq!(callback_values[0], 99);
+    }
+
+    #[test]
+    fn test_hint_callback_no_invoke_for_regular_addi() {
+        // Test that callback is NOT invoked for regular ADDI instructions
+        let mut invoked = false;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_hint: &HintInfo, _ctx: &mut HintContext| {
+                invoked = true;
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Regular addi x1, x0, 5 (not a HINT)
+            let regular_addi = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(5),
+                dest: rv_asm::Reg(1),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Callback should NOT have been invoked
+        assert!(!invoked);
+    }
+
+    #[test]
+    fn test_hint_callback_with_code_generation() {
+        // Test that callback can generate WebAssembly instructions
+        use alloc::vec::Vec;
+        
+        let mut hint_values = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |hint: &HintInfo, ctx: &mut HintContext| {
+                hint_values.push(hint.value);
+                // Generate a NOP instruction for each HINT
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate HINTs
+            for i in 1..=3 {
+                let hint = Inst::Addi {
+                    imm: rv_asm::Imm::new_i32(i),
+                    dest: rv_asm::Reg(0),
+                    src1: rv_asm::Reg(0),
+                };
+                assert!(recompiler.translate_instruction(&hint, 0x1000 + (i as u32 * 4), IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all HINTs
+        assert_eq!(hint_values.len(), 3);
+        assert_eq!(hint_values[0], 1);
+        assert_eq!(hint_values[1], 2);
+        assert_eq!(hint_values[2], 3);
+    }
+
+    #[test]
+    fn test_ecall_callback_basic() {
+        // Test basic ecall callback functionality
+        use alloc::vec::Vec;
+        
+        let mut ecall_pcs = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |ecall: &EcallInfo, _ctx: &mut HintContext| {
+                ecall_pcs.push(ecall.pc);
+            };
+            
+            recompiler.set_ecall_callback(&mut callback);
+            
+            // Translate an ECALL instruction
+            let ecall = Inst::Ecall;
+            assert!(recompiler.translate_instruction(&ecall, 0x2000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked
+        assert_eq!(ecall_pcs.len(), 1);
+        assert_eq!(ecall_pcs[0], 0x2000);
+    }
+
+    #[test]
+    fn test_ebreak_callback_basic() {
+        // Test basic ebreak callback functionality
+        use alloc::vec::Vec;
+        
+        let mut ebreak_pcs = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |ebreak: &EbreakInfo, _ctx: &mut HintContext| {
+                ebreak_pcs.push(ebreak.pc);
+            };
+            
+            recompiler.set_ebreak_callback(&mut callback);
+            
+            // Translate an EBREAK instruction
+            let ebreak = Inst::Ebreak;
+            assert!(recompiler.translate_instruction(&ebreak, 0x3000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked
+        assert_eq!(ebreak_pcs.len(), 1);
+        assert_eq!(ebreak_pcs[0], 0x3000);
+    }
+
+    #[test]
+    fn test_ecall_callback_with_code_generation() {
+        // Test that ecall callback can generate WebAssembly instructions
+        use alloc::vec::Vec;
+        
+        let mut ecall_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_ecall: &EcallInfo, ctx: &mut HintContext| {
+                ecall_count += 1;
+                // Generate a NOP instruction for each ECALL
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_ecall_callback(&mut callback);
+            
+            // Translate multiple ECALL instructions
+            for i in 0..3 {
+                let ecall = Inst::Ecall;
+                let pc = 0x1000 + (i * 4);
+                assert!(recompiler.translate_instruction(&ecall, pc, IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all ECALLs
+        assert_eq!(ecall_count, 3);
+    }
+
+    #[test]
+    fn test_ebreak_callback_with_code_generation() {
+        // Test that ebreak callback can generate WebAssembly instructions
+        let mut ebreak_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_ebreak: &EbreakInfo, ctx: &mut HintContext| {
+                ebreak_count += 1;
+                // Generate a NOP instruction for each EBREAK
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_ebreak_callback(&mut callback);
+            
+            // Translate multiple EBREAK instructions
+            for i in 0..3 {
+                let ebreak = Inst::Ebreak;
+                let pc = 0x2000 + (i * 4);
+                assert!(recompiler.translate_instruction(&ebreak, pc, IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all EBREAKs
+        assert_eq!(ebreak_count, 3);
+    }
+
+    #[test]
+    fn test_ecall_ebreak_callbacks_clear() {
+        // Test clearing the ecall and ebreak callbacks
+        let mut ecall_count = 0;
+        let mut ebreak_count = 0;
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut ecall_cb = |_ecall: &EcallInfo, _ctx: &mut HintContext| {
+                ecall_count += 1;
+            };
+            
+            let mut ebreak_cb = |_ebreak: &EbreakInfo, _ctx: &mut HintContext| {
+                ebreak_count += 1;
+            };
+            
+            recompiler.set_ecall_callback(&mut ecall_cb);
+            recompiler.set_ebreak_callback(&mut ebreak_cb);
+            
+            // First ECALL and EBREAK should invoke callbacks
+            assert!(recompiler.translate_instruction(&Inst::Ecall, 0x1000, IsCompressed::No).is_ok());
+            assert!(recompiler.translate_instruction(&Inst::Ebreak, 0x1004, IsCompressed::No).is_ok());
+            
+            // Clear callbacks
+            recompiler.clear_ecall_callback();
+            recompiler.clear_ebreak_callback();
+            
+            // Second ECALL and EBREAK should not invoke callbacks (will use default behavior)
+            assert!(recompiler.translate_instruction(&Inst::Ecall, 0x1008, IsCompressed::No).is_ok());
+            assert!(recompiler.translate_instruction(&Inst::Ebreak, 0x100c, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
+        
+        // Verify callbacks were invoked only once
+        assert_eq!(ecall_count, 1);
+        assert_eq!(ebreak_count, 1);
     }
 }

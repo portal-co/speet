@@ -10,6 +10,7 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 - **F Extension**: Single-precision floating-point instructions
 - **D Extension**: Double-precision floating-point instructions
 - **Zicsr Extension**: Control and Status Register instructions (stubbed for runtime support)
+- **HINT Instruction Tracking**: Optional runtime-gated tracking of RISC-V HINT instructions (e.g., `addi x0, x0, N`) used in rv-corpus test markers
 - **Comprehensive Coverage**: Includes fused multiply-add, sign-injection, conversions, and more
 
 ## Architecture
@@ -28,6 +29,8 @@ This implementation follows the [RISC-V Unprivileged Specification](https://docs
 The instruction decoding is handled by the [rv-asm](https://github.com/portal-co/rv-utils) library, which provides a robust, panic-free decoder tested exhaustively on all 32-bit values.
 
 ## Usage
+
+### Basic Translation
 
 ```rust
 use speet_riscv::RiscVRecompiler;
@@ -52,6 +55,104 @@ recompiler.seal();
 // Get the reactor to generate WebAssembly
 let reactor = recompiler.into_reactor();
 ```
+
+### HINT Instruction Tracking
+
+RISC-V HINT instructions are special instructions that write to register `x0` (which is hardwired to zero) and thus have no architectural effect. In the [rv-corpus](https://github.com/portal-co/rv-corpus) test suite, these instructions (typically `addi x0, x0, N`) are used as markers to indicate test case boundaries, where `N` is the test case number.
+
+#### Collecting HINTs
+
+The recompiler can optionally track these HINT instructions to aid in debugging and test case identification:
+
+```rust
+use speet_riscv::RiscVRecompiler;
+use yecta::{Pool, TableIdx, TypeIdx};
+
+// Create a recompiler with HINT tracking enabled
+let mut recompiler = RiscVRecompiler::new_with_full_config(
+    Pool { table: TableIdx(0), ty: TypeIdx(0) },
+    None,
+    0x1000,  // base_pc
+    true,    // enable HINT tracking
+);
+
+// Translate some code containing HINT markers...
+// translate_instruction(...);
+
+// Retrieve collected HINT information
+for hint in recompiler.get_hints() {
+    println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+}
+
+// Clear collected hints if needed
+recompiler.clear_hints();
+
+// Toggle tracking on/off dynamically
+recompiler.set_hint_tracking(false);
+```
+
+#### HINT Callbacks
+
+For real-time processing of HINTs during translation, you can set a callback function. The callback uses the `HintCallback` trait, which is automatically implemented for all `FnMut` closures with the appropriate signature. The callback receives both the HINT information and a context for generating WebAssembly instructions:
+
+```rust
+use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
+use wasm_encoder::Instruction;
+
+let mut recompiler = RiscVRecompiler::new();
+
+// Set a callback for inline HINT processing with code generation capability
+// The HintCallback trait is automatically implemented for FnMut closures
+let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext| {
+    println!("Encountered test case {} at PC 0x{:x}", hint.value, hint.pc);
+    
+    // Optionally emit WebAssembly instructions based on the HINT
+    // For example, emit a NOP or custom marker instruction
+    ctx.emit(&Instruction::Nop).ok();
+};
+
+recompiler.set_hint_callback(&mut my_callback);
+
+// The callback will be invoked immediately when HINTs are encountered
+// translate_instruction(...);
+
+// Callbacks work independently of tracking - you can use both together or separately
+```
+
+You can also implement the `HintCallback` trait for custom types to create more complex callback handlers.
+
+**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs. Callbacks have minimal overhead and can be used independently. The callback's `HintContext` parameter provides access to emit WebAssembly instructions, allowing you to generate custom code in response to test markers.
+
+#### ECALL and EBREAK Callbacks
+
+Similar callback systems are available for ECALL (environment call) and EBREAK (breakpoint) instructions. These use the same trait-based design with dual lifetimes:
+
+```rust
+use speet_riscv::{RiscVRecompiler, EcallInfo, EbreakInfo, HintContext};
+use wasm_encoder::Instruction;
+
+let mut recompiler = RiscVRecompiler::new();
+
+// Set an ECALL callback
+let mut ecall_handler = |ecall: &EcallInfo, ctx: &mut HintContext| {
+    println!("ECALL at PC 0x{:x}", ecall.pc);
+    // Generate custom WebAssembly code for the environment call
+    ctx.emit(&Instruction::Call(42)).ok();  // Example: call a WebAssembly function
+};
+recompiler.set_ecall_callback(&mut ecall_handler);
+
+// Set an EBREAK callback
+let mut ebreak_handler = |ebreak: &EbreakInfo, ctx: &mut HintContext| {
+    println!("EBREAK at PC 0x{:x}", ebreak.pc);
+    // Generate custom WebAssembly code for the breakpoint
+    ctx.emit(&Instruction::Nop).ok();
+};
+recompiler.set_ebreak_callback(&mut ebreak_handler);
+
+// Without callbacks, ECALL and EBREAK default to emitting Unreachable instructions
+```
+
+Both `EcallCallback` and `EbreakCallback` traits are automatically implemented for `FnMut` closures with the appropriate signature. The callbacks receive the instruction information and a context for emitting WebAssembly instructions, providing full flexibility to handle these system instructions according to your runtime requirements.
 
 ## Instruction Set Extensions
 
