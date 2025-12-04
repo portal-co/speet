@@ -229,6 +229,11 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     ecall_callback: Option<&'cb mut (dyn EcallCallback<E, F> + 'ctx)>,
     /// Optional callback for EBREAK instructions
     ebreak_callback: Option<&'cb mut (dyn EbreakCallback<E, F> + 'ctx)>,
+    /// Whether to enable RV64 instruction support (disabled by default)
+    enable_rv64: bool,
+    /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
+    /// Only relevant when enable_rv64 is true
+    use_memory64: bool,
 }
 
 impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
@@ -239,11 +244,15 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
     /// * `track_hints` - Whether to track HINT instructions for debugging/testing
+    /// * `enable_rv64` - Whether to enable RV64 instruction support
+    /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_full_config(
         pool: Pool,
         escape_tag: Option<EscapeTag>,
         base_pc: u32,
         track_hints: bool,
+        enable_rv64: bool,
+        use_memory64: bool,
     ) -> Self {
         Self {
             reactor: Reactor::default(),
@@ -255,6 +264,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             hint_callback: None,
             ecall_callback: None,
             ebreak_callback: None,
+            enable_rv64,
+            use_memory64,
         }
     }
 
@@ -265,7 +276,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
     pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self {
-        Self::new_with_full_config(pool, escape_tag, base_pc, false)
+        Self::new_with_full_config(pool, escape_tag, base_pc, false, false, false)
     }
 
     /// Create a new RISC-V recompiler with default configuration
@@ -422,6 +433,40 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         self.ebreak_callback = None;
     }
 
+    /// Enable or disable RV64 instruction support
+    ///
+    /// When enabled, RV64-specific instructions will be translated instead of
+    /// emitting unreachable. This includes 64-bit loads/stores and W-suffix
+    /// instructions (ADDIW, ADDW, etc.).
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable RV64 support
+    pub fn set_rv64_support(&mut self, enable: bool) {
+        self.enable_rv64 = enable;
+    }
+
+    /// Check if RV64 support is enabled
+    pub fn is_rv64_enabled(&self) -> bool {
+        self.enable_rv64
+    }
+
+    /// Enable or disable memory64 mode
+    ///
+    /// When enabled (and RV64 is enabled), memory operations will use i64
+    /// addresses instead of i32 addresses. This is required for accessing
+    /// memory beyond 4GB in WebAssembly.
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable memory64 mode
+    pub fn set_memory64(&mut self, enable: bool) {
+        self.use_memory64 = enable;
+    }
+
+    /// Check if memory64 mode is enabled
+    pub fn is_memory64_enabled(&self) -> bool {
+        self.use_memory64
+    }
+
     /// Convert a PC value to a function index
     /// PC values are offset by base_pc and then divided by 2 for 2-byte alignment
     fn pc_to_func_idx(&self, pc: u32) -> FuncIdx {
@@ -448,15 +493,20 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) {
-        // Integer registers: locals 0-31 (i32)
+        // Integer registers: locals 0-31 (i32 for RV32, i64 for RV64)
         // Float registers: locals 32-63 (f64)
         // PC: local 64 (i32)
         // Temps: locals 65+ (mixed types)
+        let int_type = if self.enable_rv64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         let locals = [
-            (32, ValType::I32),        // x0-x31
+            (32, int_type),            // x0-x31
             (32, ValType::F64),        // f0-f31 (using F64 for both F and D with NaN-boxing)
             (1, ValType::I32),         // PC
-            (num_temps, ValType::I32), // Temporary registers
+            (num_temps, int_type),     // Temporary registers (match integer register type)
         ];
         // The second argument is the length in 2-byte increments
         // Set to 2 to prevent infinite looping (yecta handles automatic fallthrough)
@@ -480,7 +530,102 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
     /// Emit instructions to load an immediate value
     fn emit_imm(&mut self, imm: Imm) -> Result<(), E> {
-        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))
+        if self.enable_rv64 {
+            // Sign-extend the 32-bit immediate to 64 bits
+            self.reactor.feed(&Instruction::I64Const(imm.as_i32() as i64))
+        } else {
+            self.reactor.feed(&Instruction::I32Const(imm.as_i32()))
+        }
+    }
+
+    /// Emit an integer constant (i32 or i64 depending on RV64 mode)
+    fn emit_int_const(&mut self, value: i32) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Const(value as i64))
+        } else {
+            self.reactor.feed(&Instruction::I32Const(value))
+        }
+    }
+
+    /// Emit an add instruction (I32Add or I64Add depending on RV64 mode)
+    fn emit_add(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Add)
+        } else {
+            self.reactor.feed(&Instruction::I32Add)
+        }
+    }
+
+    /// Emit a sub instruction (I32Sub or I64Sub depending on RV64 mode)
+    fn emit_sub(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Sub)
+        } else {
+            self.reactor.feed(&Instruction::I32Sub)
+        }
+    }
+
+    /// Emit a multiply instruction (I32Mul or I64Mul depending on RV64 mode)
+    fn emit_mul(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Mul)
+        } else {
+            self.reactor.feed(&Instruction::I32Mul)
+        }
+    }
+
+    /// Emit a logical and instruction (I32And or I64And depending on RV64 mode)
+    fn emit_and(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64And)
+        } else {
+            self.reactor.feed(&Instruction::I32And)
+        }
+    }
+
+    /// Emit a logical or instruction (I32Or or I64Or depending on RV64 mode)
+    fn emit_or(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Or)
+        } else {
+            self.reactor.feed(&Instruction::I32Or)
+        }
+    }
+
+    /// Emit a logical xor instruction (I32Xor or I64Xor depending on RV64 mode)
+    fn emit_xor(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Xor)
+        } else {
+            self.reactor.feed(&Instruction::I32Xor)
+        }
+    }
+
+    /// Emit a shift left instruction (I32Shl or I64Shl depending on RV64 mode)
+    fn emit_shl(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Shl)
+        } else {
+            self.reactor.feed(&Instruction::I32Shl)
+        }
+    }
+
+    /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on RV64 mode)
+    fn emit_shr_u(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64ShrU)
+        } else {
+            self.reactor.feed(&Instruction::I32ShrU)
+        }
+    }
+
+    /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on RV64 mode)
+    fn emit_shr_s(&mut self) -> Result<(), E> {
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64ShrS)
+        } else {
+            self.reactor.feed(&Instruction::I32ShrS)
+        }
     }
 
     /// Perform a jump to a target PC using yecta's jump API
@@ -738,7 +883,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32Add)?;
+                    self.emit_add()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -771,7 +916,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32Xor)?;
+                    self.emit_xor()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -782,7 +927,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32Or)?;
+                    self.emit_or()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -793,7 +938,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32And)?;
+                    self.emit_and()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -804,7 +949,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32Shl)?;
+                    self.emit_shl()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -815,7 +960,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32ShrU)?;
+                    self.emit_shr_u()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -826,7 +971,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32ShrS)?;
+                    self.emit_shr_s()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -839,7 +984,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Add)?;
+                    self.emit_add()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -851,7 +996,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Sub)?;
+                    self.emit_sub()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -863,7 +1008,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Shl)?;
+                    self.emit_shl()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -899,7 +1044,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Xor)?;
+                    self.emit_xor()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -911,7 +1056,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32ShrU)?;
+                    self.emit_shr_u()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -923,7 +1068,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32ShrS)?;
+                    self.emit_shr_s()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -935,7 +1080,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Or)?;
+                    self.emit_or()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -947,7 +1092,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32And)?;
+                    self.emit_and()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1006,7 +1151,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32Mul)?;
+                    self.emit_mul()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1805,26 +1950,292 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             }
 
             // RV64 instructions
-            // These are RV64-specific and not supported in RV32 mode.
-            // We emit a trap instruction to signal unsupported operation.
-            Inst::Lwu { .. }
-            | Inst::Ld { .. }
-            | Inst::Sd { .. }
-            | Inst::AddiW { .. }
-            | Inst::SlliW { .. }
-            | Inst::SrliW { .. }
-            | Inst::SraiW { .. }
-            | Inst::AddW { .. }
-            | Inst::SubW { .. }
-            | Inst::SllW { .. }
-            | Inst::SrlW { .. }
-            | Inst::SraW { .. }
-            | Inst::MulW { .. }
-            | Inst::DivW { .. }
-            | Inst::DivuW { .. }
-            | Inst::RemW { .. }
-            | Inst::RemuW { .. }
-            | Inst::FcvtLS { .. }
+            // These are RV64-specific. When RV64 is disabled, we emit unreachable.
+            Inst::Lwu { offset, dest, base } => {
+                if self.enable_rv64 {
+                    self.translate_load(*base, *offset, *dest, LoadOp::U32)?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::Ld { offset, dest, base } => {
+                if self.enable_rv64 {
+                    self.translate_load(*base, *offset, *dest, LoadOp::I64)?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::Sd { offset, base, src } => {
+                if self.enable_rv64 {
+                    self.translate_store(*base, *offset, *src, StoreOp::I64)?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            // RV64I: Word arithmetic instructions (operate on lower 32 bits)
+            Inst::AddiW { imm, dest, src1 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.emit_imm(*imm)?;
+                        self.reactor.feed(&Instruction::I64Add)?;
+                        // Sign-extend lower 32 bits to 64 bits
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SlliW { imm, dest, src1 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(&Instruction::I32Shl)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SrliW { imm, dest, src1 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(&Instruction::I32ShrU)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SraiW { imm, dest, src1 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(&Instruction::I32ShrS)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::AddW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64Add)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SubW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64Sub)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SllW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32Shl)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SrlW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32ShrU)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::SraW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32ShrS)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            // RV64M: Multiplication and division word instructions
+            Inst::MulW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64Mul)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::DivW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32DivS)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::DivuW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32DivU)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::RemW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32RemS)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            Inst::RemuW { dest, src1, src2 } => {
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::I32RemU)?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+            
+            // RV64F/D: Floating-point conversion instructions
+            // For now, stub these with unreachable as they need careful handling
+            Inst::FcvtLS { .. }
             | Inst::FcvtLuS { .. }
             | Inst::FcvtSL { .. }
             | Inst::FcvtSLu { .. }
@@ -1834,9 +2245,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             | Inst::FcvtDL { .. }
             | Inst::FcvtDLu { .. }
             | Inst::FmvDX { .. } => {
-                // RV64-specific instructions are not supported in this RV32 implementation.
-                // In a real system, this could trigger an illegal instruction exception.
-                // For now, we emit unreachable which will trap if executed.
+                // RV64 floating-point conversions need special handling
+                // For now, emit unreachable
                 self.reactor.feed(&Instruction::Unreachable)?;
             }
 
@@ -1964,47 +2374,146 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(offset)?;
-        self.reactor.feed(&Instruction::I32Add)?;
+        
+        // Add instruction depends on whether we're using memory64 and RV64
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Add)?;
+            // If not using memory64, wrap to 32-bit address
+            if !self.use_memory64 {
+                self.reactor.feed(&Instruction::I32WrapI64)?;
+            }
+        } else {
+            self.reactor.feed(&Instruction::I32Add)?;
+        }
 
         // Load from memory
         match op {
             LoadOp::I8 => {
-                self.reactor
-                    .feed(&Instruction::I32Load8S(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load8S(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load8S(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                    // If RV64 but not memory64, extend to i64
+                    if self.enable_rv64 {
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                    }
+                }
             }
             LoadOp::U8 => {
-                self.reactor
-                    .feed(&Instruction::I32Load8U(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load8U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load8U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                    }
+                }
             }
             LoadOp::I16 => {
-                self.reactor
-                    .feed(&Instruction::I32Load16S(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 1,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load16S(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load16S(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                    }
+                }
             }
             LoadOp::U16 => {
-                self.reactor
-                    .feed(&Instruction::I32Load16U(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 1,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load16U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load16U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                    }
+                }
             }
             LoadOp::I32 => {
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load32S(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                    }
+                }
+            }
+            LoadOp::U32 => {
+                // RV64 LWU instruction - load word unsigned (zero-extended)
+                if self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Load32U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Load(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                    self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                }
+            }
+            LoadOp::I64 => {
+                // RV64 LD instruction - load double-word
                 self.reactor
-                    .feed(&Instruction::I32Load(wasm_encoder::MemArg {
+                    .feed(&Instruction::I64Load(wasm_encoder::MemArg {
                         offset: 0,
-                        align: 2,
+                        align: 3,
                         memory_index: 0,
                     }))?;
             }
@@ -2021,35 +2530,87 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(offset)?;
-        self.reactor.feed(&Instruction::I32Add)?;
+        
+        // Add instruction depends on whether we're using memory64 and RV64
+        if self.enable_rv64 {
+            self.reactor.feed(&Instruction::I64Add)?;
+            // If not using memory64, wrap to 32-bit address
+            if !self.use_memory64 {
+                self.reactor.feed(&Instruction::I32WrapI64)?;
+            }
+        } else {
+            self.reactor.feed(&Instruction::I32Add)?;
+        }
 
         // Load value to store
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(src)))?;
+        
+        // If RV64 but not memory64, need to wrap i64 value to i32 for 32-bit stores
+        let need_wrap = self.enable_rv64 && !self.use_memory64 && !matches!(op, StoreOp::I64);
+        if need_wrap {
+            self.reactor.feed(&Instruction::I32WrapI64)?;
+        }
 
         // Store to memory
         match op {
             StoreOp::I8 => {
-                self.reactor
-                    .feed(&Instruction::I32Store8(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Store8(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Store8(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }))?;
+                }
             }
             StoreOp::I16 => {
-                self.reactor
-                    .feed(&Instruction::I32Store16(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 1,
-                        memory_index: 0,
-                    }))?;
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Store16(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Store16(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 1,
+                            memory_index: 0,
+                        }))?;
+                }
             }
             StoreOp::I32 => {
+                if self.enable_rv64 && self.use_memory64 {
+                    self.reactor
+                        .feed(&Instruction::I64Store32(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                } else {
+                    self.reactor
+                        .feed(&Instruction::I32Store(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }))?;
+                }
+            }
+            StoreOp::I64 => {
+                // RV64 SD instruction - store double-word
                 self.reactor
-                    .feed(&Instruction::I32Store(wasm_encoder::MemArg {
+                    .feed(&Instruction::I64Store(wasm_encoder::MemArg {
                         offset: 0,
-                        align: 2,
+                        align: 3,
                         memory_index: 0,
                     }))?;
             }
@@ -2355,6 +2916,8 @@ enum LoadOp {
     I16, // Load halfword (sign-extended)
     U16, // Load halfword (zero-extended)
     I32, // Load word
+    U32, // Load word (zero-extended, for RV64 LWU)
+    I64, // Load double-word (for RV64 LD)
 }
 
 /// Store operation types
@@ -2363,6 +2926,7 @@ enum StoreOp {
     I8,  // Store byte
     I16, // Store halfword
     I32, // Store word
+    I64, // Store double-word (for RV64 SD)
 }
 
 /// Floating-point load operation types
@@ -2701,6 +3265,8 @@ mod tests {
             None,
             0x1000,
             true, // Enable HINT tracking
+            false, // Disable RV64
+            false, // Disable memory64
         );
 
         // Translate a HINT instruction: addi x0, x0, 1
@@ -2751,6 +3317,8 @@ mod tests {
             None,
             0x1000,
             true, // Enable HINT tracking
+            false, // Disable RV64
+            false, // Disable memory64
         );
 
         // Regular addi x1, x0, 5 (not a HINT)
@@ -2802,6 +3370,8 @@ mod tests {
             None,
             0x1000,
             true,
+            false, // Disable RV64
+            false, // Disable memory64
         );
 
         // Collect some hints
@@ -2880,6 +3450,8 @@ mod tests {
             None,
             0x1000,
             true,
+            false, // Disable RV64
+            false, // Disable memory64
         );
 
         // Simulate test case markers from rv-corpus
@@ -2984,6 +3556,8 @@ mod tests {
                 None,
                 0x1000,
                 true, // Enable tracking
+                false, // Disable RV64
+                false, // Disable memory64
             );
 
             let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
