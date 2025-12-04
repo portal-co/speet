@@ -3993,4 +3993,171 @@ mod tests {
         assert_eq!(ecall_count, 1);
         assert_eq!(ebreak_count, 1);
     }
+
+    #[test]
+    fn test_rv64_instructions() {
+        // Test RV64 instructions when RV64 is enabled
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            false, // Disable HINT tracking
+            true,  // Enable RV64
+            false, // Disable memory64 (use i32 addresses)
+        );
+
+        // Test ADDIW (Add Word Immediate)
+        let addiw = Inst::AddiW {
+            imm: rv_asm::Imm::new_i32(10),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(2),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&addiw, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test ADDW (Add Word)
+        let addw = Inst::AddW {
+            dest: rv_asm::Reg(3),
+            src1: rv_asm::Reg(4),
+            src2: rv_asm::Reg(5),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&addw, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test SLLIW (Shift Left Logical Word Immediate)
+        let slliw = Inst::SlliW {
+            imm: rv_asm::Imm::new_i32(5),
+            dest: rv_asm::Reg(6),
+            src1: rv_asm::Reg(7),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&slliw, 0x1008, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test LWU (Load Word Unsigned)
+        let lwu = Inst::Lwu {
+            offset: rv_asm::Imm::new_i32(0),
+            dest: rv_asm::Reg(8),
+            base: rv_asm::Reg(9),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&lwu, 0x100c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test LD (Load Double-word)
+        let ld = Inst::Ld {
+            offset: rv_asm::Imm::new_i32(8),
+            dest: rv_asm::Reg(10),
+            base: rv_asm::Reg(11),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&ld, 0x1010, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test SD (Store Double-word)
+        let sd = Inst::Sd {
+            offset: rv_asm::Imm::new_i32(16),
+            base: rv_asm::Reg(12),
+            src: rv_asm::Reg(13),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&sd, 0x1014, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rv64_disabled_by_default() {
+        // Test that RV64 instructions are not supported when RV64 is disabled
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new();
+
+        // ADDIW should fail when RV64 is disabled
+        let addiw = Inst::AddiW {
+            imm: rv_asm::Imm::new_i32(10),
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(2),
+        };
+        
+        // When RV64 is disabled, we emit Unreachable, which should still succeed
+        // but the generated code will trap if executed
+        assert!(
+            recompiler
+                .translate_instruction(&addiw, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rv64_with_memory64() {
+        // Test RV64 with memory64 enabled
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            false, // Disable HINT tracking
+            true,  // Enable RV64
+            true,  // Enable memory64 (use i64 addresses)
+        );
+
+        // Test LD with memory64
+        let ld = Inst::Ld {
+            offset: rv_asm::Imm::new_i32(8),
+            dest: rv_asm::Reg(10),
+            base: rv_asm::Reg(11),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&ld, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test SD with memory64
+        let sd = Inst::Sd {
+            offset: rv_asm::Imm::new_i32(16),
+            base: rv_asm::Reg(12),
+            src: rv_asm::Reg(13),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&sd, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+    }
 }

@@ -5,11 +5,13 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 ## Features
 
 - **RV32I Base Integer Instruction Set**: Complete support for the base integer instructions
-- **M Extension**: Integer multiplication and division instructions
+- **RV64I Base Integer Instruction Set**: Runtime-gated support for RV64 instructions (64-bit integers)
+- **M Extension**: Integer multiplication and division instructions (RV32M and RV64M)
 - **A Extension**: Atomic memory operations (load-reserved/store-conditional)
 - **F Extension**: Single-precision floating-point instructions
 - **D Extension**: Double-precision floating-point instructions
 - **Zicsr Extension**: Control and Status Register instructions (stubbed for runtime support)
+- **Memory64 Support**: Optional i64 address calculations for WebAssembly memory64 mode
 - **HINT Instruction Tracking**: Optional runtime-gated tracking of RISC-V HINT instructions (e.g., `addi x0, x0, N`) used in rv-corpus test markers
 - **Comprehensive Coverage**: Includes fused multiply-add, sign-injection, conversions, and more
 
@@ -17,10 +19,14 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 
 The recompiler uses a register mapping approach where RISC-V registers are mapped to WebAssembly local variables:
 
-- **Locals 0-31**: Integer registers `x0`-`x31`
+- **Locals 0-31**: Integer registers `x0`-`x31` (i32 for RV32, i64 for RV64)
 - **Locals 32-63**: Floating-point registers `f0`-`f31` (stored as f64)
 - **Local 64**: Program counter (PC)
 - **Locals 65+**: Temporary variables for complex operations
+
+### RV64 Mode
+
+When RV64 support is enabled at runtime, the recompiler uses i64 locals for integer registers instead of i32. This allows proper handling of 64-bit integer operations. When memory64 is also enabled, memory operations use i64 addresses instead of i32 addresses, enabling access to memory beyond 4GB.
 
 ## RISC-V Specification Compliance
 

@@ -23,6 +23,8 @@ fn main() {
         None,
         0x1000, // base PC
         true,   // enable HINT tracking
+        false,  // disable RV64
+        false,  // disable memory64
     );
 
     println!("HINT tracking is enabled\n");

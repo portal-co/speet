@@ -52,6 +52,8 @@ fn test_hint_tracking_with_rv32im_multiply() {
         None,
         start_addr as u32,
         true, // Enable HINT tracking
+        false, // Disable RV64
+        false, // Disable memory64
     );
 
     // Translate the code and collect HINTs
@@ -148,6 +150,8 @@ fn test_hint_tracking_performance() {
         None,
         0x1000,
         true,
+        false, // Disable RV64
+        false, // Disable memory64
     );
 
     // Create a sequence of instructions including some HINTs
