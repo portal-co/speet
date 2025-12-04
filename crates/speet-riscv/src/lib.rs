@@ -52,7 +52,6 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 
 use core::convert::Infallible;
 use rv_asm::{Inst, Reg, FReg, Imm, Xlen, IsCompressed};
@@ -74,20 +73,31 @@ pub struct HintInfo {
     pub value: i32,
 }
 
-/// Callback function type for processing HINT instructions
+/// Context provided to HINT callbacks for code generation
 ///
-/// This callback is invoked when a HINT instruction is encountered during translation.
-/// The callback receives a reference to the `HintInfo` describing the HINT.
-///
-/// # Example
-/// ```no_run
-/// use speet_riscv::HintInfo;
-///
-/// fn my_hint_callback(hint: &HintInfo) {
-///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
-/// }
-/// ```
-pub type HintCallback = Box<dyn FnMut(&HintInfo) + Send>;
+/// This struct provides access to the WebAssembly instruction emitter,
+/// allowing callbacks to generate code in response to HINT instructions.
+pub struct HintContext<'a> {
+    /// Reference to the reactor for emitting WebAssembly instructions
+    pub reactor: &'a mut Reactor<Infallible, Function>,
+}
+
+impl<'a> HintContext<'a> {
+    /// Emit a WebAssembly instruction
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::HintContext;
+    /// # use wasm_encoder::Instruction;
+    /// fn my_callback(hint: &speet_riscv::HintInfo, ctx: &mut HintContext) {
+    ///     // Emit a NOP or other instruction based on the hint
+    ///     ctx.emit(&Instruction::Nop).ok();
+    /// }
+    /// ```
+    pub fn emit(&mut self, instruction: &Instruction) -> Result<(), Infallible> {
+        self.reactor.feed(instruction)
+    }
+}
 
 /// RISC-V to WebAssembly recompiler
 ///
@@ -110,7 +120,7 @@ pub struct RiscVRecompiler<'cb> {
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<&'cb mut (dyn FnMut(&HintInfo) + 'cb)>,
+    hint_callback: Option<&'cb mut (dyn FnMut(&HintInfo, &mut HintContext) + 'cb)>,
 }
 
 impl<'cb> RiscVRecompiler<'cb> {
@@ -210,21 +220,24 @@ impl<'cb> RiscVRecompiler<'cb> {
     /// is encountered during translation. This allows for real-time processing of
     /// test case markers without needing to collect them all first.
     ///
-    /// The callback can be used alongside or instead of hint tracking.
+    /// The callback receives both the HINT information and a context for code generation.
     ///
     /// # Arguments
-    /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` reference
+    /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` and `&mut HintContext`
     ///
     /// # Example
     /// ```no_run
-    /// # use speet_riscv::RiscVRecompiler;
+    /// # use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
+    /// # use wasm_encoder::Instruction;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |hint: &speet_riscv::HintInfo| {
+    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext| {
     ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
+    ///     // Optionally emit WebAssembly instructions
+    ///     ctx.emit(&Instruction::Nop).ok();
     /// };
     /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
-    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn FnMut(&HintInfo) + 'cb)) {
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn FnMut(&HintInfo, &mut HintContext) + 'cb)) {
         self.hint_callback = Some(callback);
     }
 
@@ -514,7 +527,10 @@ impl<'cb> RiscVRecompiler<'cb> {
                     
                     // Invoke callback if set
                     if let Some(ref mut callback) = self.hint_callback {
-                        callback(&hint_info);
+                        let mut ctx = HintContext {
+                            reactor: &mut self.reactor,
+                        };
+                        callback(&hint_info, &mut ctx);
                     }
                     
                     // No WebAssembly code generation needed - this is a true no-op
@@ -2258,30 +2274,34 @@ mod tests {
         // Test basic callback functionality
         use alloc::vec::Vec;
         
-        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
-        
         let mut collected = Vec::new();
         
-        let mut callback = |hint: &HintInfo| {
-            collected.push(*hint);
-        };
-        
-        recompiler.set_hint_callback(&mut callback);
-        
-        // Translate some HINT instructions
-        let hint1 = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(1),
-            dest: rv_asm::Reg(0),
-            src1: rv_asm::Reg(0),
-        };
-        assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
-        
-        let hint2 = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(2),
-            dest: rv_asm::Reg(0),
-            src1: rv_asm::Reg(0),
-        };
-        assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
+                collected.push(*hint);
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate some HINT instructions
+            let hint1 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(1),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint1, 0x1000, IsCompressed::No).is_ok());
+            
+            let hint2 = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(2),
+                dest: rv_asm::Reg(0),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+            
+            // Drop recompiler before checking results
+        }
         
         // Verify callback was invoked
         assert_eq!(collected.len(), 2);
@@ -2296,20 +2316,21 @@ mod tests {
         // Test that callback and tracking work together
         use alloc::vec::Vec;
         
-        let mut recompiler = RiscVRecompiler::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            true, // Enable tracking
-        );
-        
         let mut callback_hints = Vec::new();
+        let tracked_hints_result;
         
         {
-            let mut callback = |hint: &HintInfo| {
+            let mut recompiler = RiscVRecompiler::new_with_full_config(
+                Pool {
+                    table: TableIdx(0),
+                    ty: TypeIdx(0),
+                },
+                None,
+                0x1000,
+                true, // Enable tracking
+            );
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
                 callback_hints.push(*hint);
             };
             
@@ -2323,18 +2344,20 @@ mod tests {
             };
             assert!(recompiler.translate_instruction(&hint, 0x2000, IsCompressed::No).is_ok());
             
-            // Clear callback to release borrow
+            // Clear callback and get tracked hints before dropping
             recompiler.clear_hint_callback();
+            tracked_hints_result = recompiler.get_hints().to_vec();
+            
+            // Drop recompiler
         }
         
         // Both callback and tracking should have captured it
         assert_eq!(callback_hints.len(), 1);
         assert_eq!(callback_hints[0].value, 42);
         
-        let tracked_hints = recompiler.get_hints();
-        assert_eq!(tracked_hints.len(), 1);
-        assert_eq!(tracked_hints[0].value, 42);
-        assert_eq!(tracked_hints[0].pc, 0x2000);
+        assert_eq!(tracked_hints_result.len(), 1);
+        assert_eq!(tracked_hints_result[0].value, 42);
+        assert_eq!(tracked_hints_result[0].pc, 0x2000);
     }
 
     #[test]
@@ -2346,7 +2369,7 @@ mod tests {
         
         {
             let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
-            let mut callback = |hint: &HintInfo| {
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
                 collected.push(hint.value);
             };
             
@@ -2371,6 +2394,8 @@ mod tests {
                 src1: rv_asm::Reg(0),
             };
             assert!(recompiler.translate_instruction(&hint2, 0x1004, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
         }
         
         // Verify callback was invoked only once
@@ -2383,13 +2408,13 @@ mod tests {
         // Test that callback works even when tracking is disabled
         use alloc::vec::Vec;
         
-        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
-        // Tracking is disabled by default
-        
         let mut callback_values = Vec::new();
         
         {
-            let mut callback = |hint: &HintInfo| {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            // Tracking is disabled by default
+            
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext| {
                 assert_eq!(hint.value, 99);
                 callback_values.push(hint.value);
             };
@@ -2403,40 +2428,81 @@ mod tests {
             };
             assert!(recompiler.translate_instruction(&hint, 0x1000, IsCompressed::No).is_ok());
             
-            // Clear callback to release borrow
-            recompiler.clear_hint_callback();
+            // Get hints before dropping
+            assert_eq!(recompiler.get_hints().len(), 0);
+            
+            // Drop recompiler
         }
         
         // Callback should have been invoked
         assert_eq!(callback_values.len(), 1);
         assert_eq!(callback_values[0], 99);
-        
-        // But tracking should not have collected anything
-        assert_eq!(recompiler.get_hints().len(), 0);
     }
 
     #[test]
     fn test_hint_callback_no_invoke_for_regular_addi() {
         // Test that callback is NOT invoked for regular ADDI instructions
-        let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
-        
         let mut invoked = false;
         
-        let mut callback = |_hint: &HintInfo| {
-            invoked = true;
-        };
-        
-        recompiler.set_hint_callback(&mut callback);
-        
-        // Regular addi x1, x0, 5 (not a HINT)
-        let regular_addi = Inst::Addi {
-            imm: rv_asm::Imm::new_i32(5),
-            dest: rv_asm::Reg(1),
-            src1: rv_asm::Reg(0),
-        };
-        assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |_hint: &HintInfo, _ctx: &mut HintContext| {
+                invoked = true;
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Regular addi x1, x0, 5 (not a HINT)
+            let regular_addi = Inst::Addi {
+                imm: rv_asm::Imm::new_i32(5),
+                dest: rv_asm::Reg(1),
+                src1: rv_asm::Reg(0),
+            };
+            assert!(recompiler.translate_instruction(&regular_addi, 0x1000, IsCompressed::No).is_ok());
+            
+            // Drop recompiler
+        }
         
         // Callback should NOT have been invoked
         assert!(!invoked);
+    }
+
+    #[test]
+    fn test_hint_callback_with_code_generation() {
+        // Test that callback can generate WebAssembly instructions
+        use alloc::vec::Vec;
+        
+        let mut hint_values = Vec::new();
+        
+        {
+            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+            let mut callback = |hint: &HintInfo, ctx: &mut HintContext| {
+                hint_values.push(hint.value);
+                // Generate a NOP instruction for each HINT
+                ctx.emit(&Instruction::Nop).ok();
+            };
+            
+            recompiler.set_hint_callback(&mut callback);
+            
+            // Translate HINTs
+            for i in 1..=3 {
+                let hint = Inst::Addi {
+                    imm: rv_asm::Imm::new_i32(i),
+                    dest: rv_asm::Reg(0),
+                    src1: rv_asm::Reg(0),
+                };
+                assert!(recompiler.translate_instruction(&hint, 0x1000 + (i as u32 * 4), IsCompressed::No).is_ok());
+            }
+            
+            // Drop recompiler
+        }
+        
+        // Verify callback was invoked for all HINTs
+        assert_eq!(hint_values.len(), 3);
+        assert_eq!(hint_values[0], 1);
+        assert_eq!(hint_values[1], 2);
+        assert_eq!(hint_values[2], 3);
     }
 }

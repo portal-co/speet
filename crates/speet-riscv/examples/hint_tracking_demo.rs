@@ -94,10 +94,15 @@ fn main() {
     println!("\n--- Callback Demo ---");
     let mut callback_recompiler = RiscVRecompiler::new();
     
-    println!("Setting a callback for real-time HINT processing...");
-    callback_recompiler.set_hint_callback(Box::new(|hint: &speet_riscv::HintInfo| {
+    println!("Setting a callback for real-time HINT processing with code generation...");
+    let mut my_callback = |hint: &speet_riscv::HintInfo, ctx: &mut speet_riscv::HintContext| {
         println!("  [CALLBACK] Test case {} at PC 0x{:08x}", hint.value, hint.pc);
-    }));
+        // Optionally emit a NOP instruction for each HINT
+        use wasm_encoder::Instruction;
+        ctx.emit(&Instruction::Nop).ok();
+    };
+    
+    callback_recompiler.set_hint_callback(&mut my_callback);
     
     println!("Translating HINTs with callback:");
     for i in 1..=3 {
@@ -107,6 +112,7 @@ fn main() {
     }
     
     println!("\nNote: Callbacks are invoked immediately and work independently of tracking.");
+    println!("The HintContext parameter allows emitting WebAssembly instructions.");
     
     println!("\n=== Demo Complete ===");
 }

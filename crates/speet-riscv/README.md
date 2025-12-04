@@ -93,17 +93,24 @@ recompiler.set_hint_tracking(false);
 
 #### HINT Callbacks
 
-For real-time processing of HINTs during translation, you can set a callback function:
+For real-time processing of HINTs during translation, you can set a callback function. The callback receives both the HINT information and a context for generating WebAssembly instructions:
 
 ```rust
-use speet_riscv::RiscVRecompiler;
+use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
+use wasm_encoder::Instruction;
 
 let mut recompiler = RiscVRecompiler::new();
 
-// Set a callback for inline HINT processing
-recompiler.set_hint_callback(Box::new(|hint| {
+// Set a callback for inline HINT processing with code generation capability
+let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext| {
     println!("Encountered test case {} at PC 0x{:x}", hint.value, hint.pc);
-}));
+    
+    // Optionally emit WebAssembly instructions based on the HINT
+    // For example, emit a NOP or custom marker instruction
+    ctx.emit(&Instruction::Nop).ok();
+};
+
+recompiler.set_hint_callback(&mut my_callback);
 
 // The callback will be invoked immediately when HINTs are encountered
 // translate_instruction(...);
@@ -111,7 +118,7 @@ recompiler.set_hint_callback(Box::new(|hint| {
 // Callbacks work independently of tracking - you can use both together or separately
 ```
 
-**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs. Callbacks have minimal overhead and can be used independently.
+**Note**: HINT tracking is disabled by default for performance. Enable it only when debugging or analyzing test programs. Callbacks have minimal overhead and can be used independently. The callback's `HintContext` parameter provides access to emit WebAssembly instructions, allowing you to generate custom code in response to test markers.
 
 ## Instruction Set Extensions
 
