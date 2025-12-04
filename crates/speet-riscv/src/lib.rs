@@ -709,29 +709,29 @@ impl RiscVRecompiler {
 
             Inst::FmulS { dest, src1, src2, .. } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Mul)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FdivS { dest, src1, src2, .. } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Div)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsqrtS { dest, src, .. } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Sqrt)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -781,21 +781,21 @@ impl RiscVRecompiler {
             // Floating-point min/max operations
             Inst::FminS { dest, src1, src2 } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Min)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaxS { dest, src1, src2 } => {
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Max)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -817,9 +817,9 @@ impl RiscVRecompiler {
             Inst::FeqS { dest, src1, src2 } => {
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::F32Eq)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -828,9 +828,9 @@ impl RiscVRecompiler {
             Inst::FltS { dest, src1, src2 } => {
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::F32Lt)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -839,9 +839,9 @@ impl RiscVRecompiler {
             Inst::FleS { dest, src1, src2 } => {
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::F32Le)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -883,7 +883,7 @@ impl RiscVRecompiler {
                 // Convert single to signed 32-bit integer
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::I32TruncF32S)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -893,7 +893,7 @@ impl RiscVRecompiler {
                 // Convert single to unsigned 32-bit integer
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::I32TruncF32U)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -903,7 +903,7 @@ impl RiscVRecompiler {
                 // Convert signed 32-bit integer to single
                 self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 self.reactor.feed(&Instruction::F32ConvertI32S)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -911,7 +911,7 @@ impl RiscVRecompiler {
                 // Convert unsigned 32-bit integer to single
                 self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 self.reactor.feed(&Instruction::F32ConvertI32U)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -948,16 +948,23 @@ impl RiscVRecompiler {
             }
 
             Inst::FcvtSD { dest, src, .. } => {
-                // Convert double to single
+                // RISC-V Specification Quote:
+                // "FCVT.S.D converts double-precision float to single-precision float,
+                // rounding according to the dynamic rounding mode."
+                // Convert double to single with proper NaN-boxing
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                 self.reactor.feed(&Instruction::F32DemoteF64)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtDS { dest, src, .. } => {
-                // Convert single to double (already stored as double, just move)
+                // RISC-V Specification Quote:
+                // "FCVT.D.S converts single-precision float to double-precision float."
+                // Unbox the NaN-boxed single value, then promote to double
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.unbox_f32()?;
+                self.reactor.feed(&Instruction::F64PromoteF32)?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -966,7 +973,7 @@ impl RiscVRecompiler {
                 // Move bits from float register to integer register
                 if dest.0 != 0 {
                     self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F32DemoteF64)?;
+                    self.unbox_f32()?;
                     self.reactor.feed(&Instruction::I32ReinterpretF32)?;
                     self.reactor.feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -976,7 +983,7 @@ impl RiscVRecompiler {
                 // Move bits from integer register to float register
                 self.reactor.feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 self.reactor.feed(&Instruction::F32ReinterpretI32)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -1017,57 +1024,57 @@ impl RiscVRecompiler {
             Inst::FmaddS { dest, src1, src2, src3, .. } => {
                 // dest = (src1 * src2) + src3
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Mul)?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Add)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmsubS { dest, src1, src2, src3, .. } => {
                 // dest = (src1 * src2) - src3
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Mul)?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Sub)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmsubS { dest, src1, src2, src3, .. } => {
                 // dest = -(src1 * src2) + src3 = src3 - (src1 * src2)
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Mul)?;
                 self.reactor.feed(&Instruction::F32Sub)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmaddS { dest, src1, src2, src3, .. } => {
                 // dest = -(src1 * src2) - src3
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Mul)?;
                 self.reactor.feed(&Instruction::F32Neg)?;
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::F32Sub)?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.nan_box_f32()?;
                 self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
@@ -1511,7 +1518,7 @@ impl RiscVRecompiler {
         
         // Convert src1 to i32 to manipulate bits
         self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        self.reactor.feed(&Instruction::F32DemoteF64)?;
+        self.unbox_f32()?;
         self.reactor.feed(&Instruction::I32ReinterpretF32)?;
         
         // Mask to keep only magnitude (clear sign bit): 0x7FFFFFFF
@@ -1520,7 +1527,7 @@ impl RiscVRecompiler {
         
         // Get sign bit from src2
         self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        self.reactor.feed(&Instruction::F32DemoteF64)?;
+        self.unbox_f32()?;
         self.reactor.feed(&Instruction::I32ReinterpretF32)?;
         
         match op {
@@ -1540,7 +1547,7 @@ impl RiscVRecompiler {
                 // XOR sign bits of src1 and src2
                 // Need original src1 sign
                 self.reactor.feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.unbox_f32()?;
                 self.reactor.feed(&Instruction::I32ReinterpretF32)?;
                 self.reactor.feed(&Instruction::I32Xor)?;
                 self.reactor.feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
@@ -1551,7 +1558,7 @@ impl RiscVRecompiler {
         // Combine magnitude and sign
         self.reactor.feed(&Instruction::I32Or)?;
         self.reactor.feed(&Instruction::F32ReinterpretI32)?;
-        self.reactor.feed(&Instruction::F64PromoteF32)?;
+        self.nan_box_f32()?;
         self.reactor.feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
         
         Ok(())
