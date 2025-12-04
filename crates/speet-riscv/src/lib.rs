@@ -2790,8 +2790,6 @@ mod tests {
     #[test]
     fn test_ebreak_callback_with_code_generation() {
         // Test that ebreak callback can generate WebAssembly instructions
-        use alloc::vec::Vec;
-        
         let mut ebreak_count = 0;
         
         {
@@ -2822,8 +2820,6 @@ mod tests {
     #[test]
     fn test_ecall_ebreak_callbacks_clear() {
         // Test clearing the ecall and ebreak callbacks
-        use alloc::vec::Vec;
-        
         let mut ecall_count = 0;
         let mut ebreak_count = 0;
         
