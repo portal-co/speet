@@ -31,7 +31,7 @@ fn test_elf_recompilation(elf_path: &Path) -> Result<usize, Box<dyn std::error::
 
     // Create recompiler with the start address as base_pc
     let mut recompiler =
-        RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr as u32);
+        RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr);
 
     // Translate the entire .text section
     let bytes_translated = recompiler
@@ -239,7 +239,7 @@ fn test_detailed_instruction_translation() {
     match extract_text_section(&corpus_path) {
         Ok((text_data, start_addr)) => {
             let mut recompiler =
-                RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr as u32);
+                RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr);
 
             // Try to decode and translate instruction by instruction
             let mut offset = 0;

@@ -218,7 +218,8 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
-    base_pc: u32,
+    /// For RV64, this is a 64-bit address
+    base_pc: u64,
     /// Whether to track HINT instructions (disabled by default)
     track_hints: bool,
     /// Collected HINT instructions (when tracking is enabled)
@@ -242,14 +243,14 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// # Arguments
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
-    /// * `base_pc` - Base PC address to offset function indices
+    /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
     /// * `track_hints` - Whether to track HINT instructions for debugging/testing
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_full_config(
         pool: Pool,
         escape_tag: Option<EscapeTag>,
-        base_pc: u32,
+        base_pc: u64,
         track_hints: bool,
         enable_rv64: bool,
         use_memory64: bool,
@@ -274,8 +275,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// # Arguments
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
-    /// * `base_pc` - Base PC address to offset function indices
-    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self {
+    /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
+    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u64) -> Self {
         Self::new_with_full_config(pool, escape_tag, base_pc, false, false, false)
     }
 
@@ -295,8 +296,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// Create a new RISC-V recompiler with a specified base PC
     ///
     /// # Arguments
-    /// * `base_pc` - Base PC address - this is subtracted from instruction PCs to compute function indices
-    pub fn new_with_base_pc(base_pc: u32) -> Self {
+    /// * `base_pc` - Base PC address - this is subtracted from instruction PCs to compute function indices (64-bit for RV64 support)
+    pub fn new_with_base_pc(base_pc: u64) -> Self {
         Self::new_with_config(
             Pool {
                 table: TableIdx(0),
@@ -469,9 +470,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
     /// Convert a PC value to a function index
     /// PC values are offset by base_pc and then divided by 2 for 2-byte alignment
-    fn pc_to_func_idx(&self, pc: u32) -> FuncIdx {
+    /// For RV64, accepts 64-bit PC values
+    fn pc_to_func_idx(&self, pc: u64) -> FuncIdx {
         let offset_pc = pc.wrapping_sub(self.base_pc);
-        FuncIdx(offset_pc / 2)
+        FuncIdx((offset_pc / 2) as u32)
     }
 
     /// Initialize a function for a single instruction at the given PC
@@ -629,7 +631,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     }
 
     /// Perform a jump to a target PC using yecta's jump API
-    fn jump_to_pc(&mut self, target_pc: u32, params: u32) -> Result<(), E> {
+    fn jump_to_pc(&mut self, target_pc: u64, params: u32) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
         self.reactor.jmp(target_func, params)
     }
@@ -714,11 +716,21 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             // 12 bits with zeros, adds this offset to the address of the AUIPC instruction, then places
             // the result in register rd."
             Inst::Auipc { uimm, dest } => {
-                self.reactor.feed(&Instruction::I32Const(pc as i32))?;
-                self.emit_imm(*uimm)?;
-                self.reactor.feed(&Instruction::I32Add)?;
-                self.reactor
-                    .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                if self.enable_rv64 {
+                    // RV64: Use full 64-bit PC
+                    self.reactor.feed(&Instruction::I64Const(pc as i64))?;
+                    self.emit_imm(*uimm)?;
+                    self.emit_add()?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                } else {
+                    // RV32: Use 32-bit PC
+                    self.reactor.feed(&Instruction::I32Const(pc as i32))?;
+                    self.emit_imm(*uimm)?;
+                    self.reactor.feed(&Instruction::I32Add)?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                }
             }
 
             // Jal: Jump And Link
@@ -730,14 +742,29 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                 // Save return address (PC + inst_len * 2) to dest
                 if dest.0 != 0 {
                     // x0 is hardwired to zero
-                    let return_addr = pc + (inst_len * 2);
-                    self.reactor
-                        .feed(&Instruction::I32Const(return_addr as i32))?;
-                    self.reactor
-                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    let return_addr = pc as u64 + (inst_len * 2) as u64;
+                    if self.enable_rv64 {
+                        // RV64: Store full 64-bit return address
+                        self.reactor
+                            .feed(&Instruction::I64Const(return_addr as i64))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    } else {
+                        // RV32: Store 32-bit return address
+                        self.reactor
+                            .feed(&Instruction::I32Const(return_addr as i32))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
                 }
                 // Jump to PC + offset using yecta's jump API with PC-based indexing
-                let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
+                let target_pc = if self.enable_rv64 {
+                    // RV64: Use 64-bit PC arithmetic
+                    (pc as i64).wrapping_add(offset.as_i32() as i64) as u64
+                } else {
+                    // RV32: Use 32-bit PC arithmetic  
+                    (pc as i32).wrapping_add(offset.as_i32()) as u32 as u64
+                };
                 self.jump_to_pc(target_pc, 65)?; // Pass all registers as parameters
                 return Ok(()); // JAL handles control flow, no fallthrough
             }
@@ -750,11 +777,20 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             Inst::Jalr { offset, base, dest } => {
                 // Save return address
                 if dest.0 != 0 {
-                    let return_addr = pc + (inst_len * 2);
-                    self.reactor
-                        .feed(&Instruction::I32Const(return_addr as i32))?;
-                    self.reactor
-                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    let return_addr = pc as u64 + (inst_len * 2) as u64;
+                    if self.enable_rv64 {
+                        // RV64: Store full 64-bit return address
+                        self.reactor
+                            .feed(&Instruction::I64Const(return_addr as i64))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    } else {
+                        // RV32: Store 32-bit return address
+                        self.reactor
+                            .feed(&Instruction::I32Const(return_addr as i32))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
                 }
                 // JALR is indirect, so we need to compute the target dynamically
                 // For now, we'll use the computed target and update PC
@@ -762,10 +798,18 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*base)))?;
                 self.emit_imm(*offset)?;
-                self.reactor.feed(&Instruction::I32Add)?;
-                self.reactor
-                    .feed(&Instruction::I32Const(0xFFFFFFFE_u32 as i32))?; // ~1 mask
-                self.reactor.feed(&Instruction::I32And)?;
+                self.emit_add()?;
+                if self.enable_rv64 {
+                    // RV64: Clear LSB with 64-bit mask
+                    self.reactor
+                        .feed(&Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?; // ~1 mask
+                    self.reactor.feed(&Instruction::I64And)?;
+                } else {
+                    // RV32: Clear LSB with 32-bit mask
+                    self.reactor
+                        .feed(&Instruction::I32Const(0xFFFFFFFE_u32 as i32))?; // ~1 mask
+                    self.reactor.feed(&Instruction::I32And)?;
+                }
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::pc_local()))?;
                 // For indirect jumps, we seal with unreachable as we can't statically determine target
@@ -2450,7 +2494,13 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         _inst_len: u32,
         op: BranchOp,
     ) -> Result<(), E> {
-        let target_pc = (pc as i32).wrapping_add(offset.as_i32()) as u32;
+        let target_pc = if self.enable_rv64 {
+            // RV64: Use 64-bit PC arithmetic
+            (pc as i64).wrapping_add(offset.as_i32() as i64) as u64
+        } else {
+            // RV32: Use 32-bit PC arithmetic
+            (pc as i32).wrapping_add(offset.as_i32()) as u32 as u64
+        };
 
         // Create a custom Snippet for the branch condition using a closure
         // The closure captures the registers and operation
@@ -2458,6 +2508,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             src1: u32,
             src2: u32,
             op: BranchOp,
+            enable_rv64: bool,
         }
 
         impl<E> wax_core::build::InstructionOperatorSource<E> for BranchCondition {
@@ -2468,14 +2519,25 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
                 // Emit the same instructions as emit_instruction
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
                 sink.instruction(&Instruction::LocalGet(self.src2))?;
-                sink.instruction(&match self.op {
-                    BranchOp::Eq => Instruction::I32Eq,
-                    BranchOp::Ne => Instruction::I32Ne,
-                    BranchOp::LtS => Instruction::I32LtS,
-                    BranchOp::GeS => Instruction::I32GeS,
-                    BranchOp::LtU => Instruction::I32LtU,
-                    BranchOp::GeU => Instruction::I32GeU,
-                })?;
+                if self.enable_rv64 {
+                    sink.instruction(&match self.op {
+                        BranchOp::Eq => Instruction::I64Eq,
+                        BranchOp::Ne => Instruction::I64Ne,
+                        BranchOp::LtS => Instruction::I64LtS,
+                        BranchOp::GeS => Instruction::I64GeS,
+                        BranchOp::LtU => Instruction::I64LtU,
+                        BranchOp::GeU => Instruction::I64GeU,
+                    })?;
+                } else {
+                    sink.instruction(&match self.op {
+                        BranchOp::Eq => Instruction::I32Eq,
+                        BranchOp::Ne => Instruction::I32Ne,
+                        BranchOp::LtS => Instruction::I32LtS,
+                        BranchOp::GeS => Instruction::I32GeS,
+                        BranchOp::LtU => Instruction::I32LtU,
+                        BranchOp::GeU => Instruction::I32GeU,
+                    })?;
+                }
                 Ok(())
             }
         }
@@ -2487,14 +2549,25 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             ) -> Result<(), E> {
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
                 sink.instruction(&Instruction::LocalGet(self.src2))?;
-                sink.instruction(&match self.op {
-                    BranchOp::Eq => Instruction::I32Eq,
-                    BranchOp::Ne => Instruction::I32Ne,
-                    BranchOp::LtS => Instruction::I32LtS,
-                    BranchOp::GeS => Instruction::I32GeS,
-                    BranchOp::LtU => Instruction::I32LtU,
-                    BranchOp::GeU => Instruction::I32GeU,
-                })?;
+                if self.enable_rv64 {
+                    sink.instruction(&match self.op {
+                        BranchOp::Eq => Instruction::I64Eq,
+                        BranchOp::Ne => Instruction::I64Ne,
+                        BranchOp::LtS => Instruction::I64LtS,
+                        BranchOp::GeS => Instruction::I64GeS,
+                        BranchOp::LtU => Instruction::I64LtU,
+                        BranchOp::GeU => Instruction::I64GeU,
+                    })?;
+                } else {
+                    sink.instruction(&match self.op {
+                        BranchOp::Eq => Instruction::I32Eq,
+                        BranchOp::Ne => Instruction::I32Ne,
+                        BranchOp::LtS => Instruction::I32LtS,
+                        BranchOp::GeS => Instruction::I32GeS,
+                        BranchOp::LtU => Instruction::I32LtU,
+                        BranchOp::GeU => Instruction::I32GeU,
+                    })?;
+                }
                 Ok(())
             }
         }
@@ -2503,6 +2576,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             src1: Self::reg_to_local(src1),
             src2: Self::reg_to_local(src2),
             op,
+            enable_rv64: self.enable_rv64,
         };
 
         // Use ji with condition for branch taken path

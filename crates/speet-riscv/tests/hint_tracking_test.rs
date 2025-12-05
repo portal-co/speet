@@ -50,7 +50,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
             ty: TypeIdx(0),
         },
         None,
-        start_addr as u32,
+        start_addr as u64,
         true, // Enable HINT tracking
         false, // Disable RV64
         false, // Disable memory64
