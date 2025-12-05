@@ -5,11 +5,13 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 ## Features
 
 - **RV32I Base Integer Instruction Set**: Complete support for the base integer instructions
-- **M Extension**: Integer multiplication and division instructions
+- **RV64I Base Integer Instruction Set**: Runtime-gated support for RV64 instructions (64-bit integers)
+- **M Extension**: Integer multiplication and division instructions (RV32M and RV64M)
 - **A Extension**: Atomic memory operations (load-reserved/store-conditional)
-- **F Extension**: Single-precision floating-point instructions
-- **D Extension**: Double-precision floating-point instructions
+- **F Extension**: Single-precision floating-point instructions (RV32F and RV64F)
+- **D Extension**: Double-precision floating-point instructions (RV32D and RV64D)
 - **Zicsr Extension**: Control and Status Register instructions (stubbed for runtime support)
+- **Memory64 Support**: Optional i64 address calculations for WebAssembly memory64 mode
 - **HINT Instruction Tracking**: Optional runtime-gated tracking of RISC-V HINT instructions (e.g., `addi x0, x0, N`) used in rv-corpus test markers
 - **Comprehensive Coverage**: Includes fused multiply-add, sign-injection, conversions, and more
 
@@ -17,10 +19,14 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 
 The recompiler uses a register mapping approach where RISC-V registers are mapped to WebAssembly local variables:
 
-- **Locals 0-31**: Integer registers `x0`-`x31`
+- **Locals 0-31**: Integer registers `x0`-`x31` (i32 for RV32, i64 for RV64)
 - **Locals 32-63**: Floating-point registers `f0`-`f31` (stored as f64)
 - **Local 64**: Program counter (PC)
 - **Locals 65+**: Temporary variables for complex operations
+
+### RV64 Mode
+
+When RV64 support is enabled at runtime, the recompiler uses i64 locals for integer registers instead of i32. This allows proper handling of 64-bit integer operations. When memory64 is also enabled, memory operations use i64 addresses instead of i32 addresses, enabling access to memory beyond 4GB.
 
 ## RISC-V Specification Compliance
 
@@ -56,6 +62,69 @@ recompiler.seal();
 let reactor = recompiler.into_reactor();
 ```
 
+### RV64 Support
+
+To enable RV64 (64-bit) instruction support:
+
+```rust
+use speet_riscv::RiscVRecompiler;
+use yecta::{Pool, TableIdx, TypeIdx};
+
+// Create a recompiler with RV64 enabled
+let mut recompiler = RiscVRecompiler::new_with_full_config(
+    Pool { table: TableIdx(0), ty: TypeIdx(0) },
+    None,
+    0x1000,  // base_pc
+    false,   // disable HINT tracking
+    true,    // enable RV64
+    false,   // disable memory64 (use i32 addresses)
+);
+
+// Now you can translate RV64 instructions like LD, SD, ADDIW, etc.
+```
+
+When RV64 is enabled, integer registers use i64 locals instead of i32. You can optionally enable memory64 to use i64 addresses for memory operations (required for accessing memory beyond 4GB in WebAssembly):
+
+```rust
+// Create a recompiler with both RV64 and memory64 enabled
+let mut recompiler = RiscVRecompiler::new_with_full_config(
+    Pool { table: TableIdx(0), ty: TypeIdx(0) },
+    None,
+    0x1000,  // base_pc
+    false,   // disable HINT tracking
+    true,    // enable RV64
+    true,    // enable memory64
+);
+```
+
+You can also control these settings dynamically:
+
+```rust
+// Create with default settings (RV32)
+let mut recompiler = RiscVRecompiler::new();
+
+// Enable RV64 support
+recompiler.set_rv64_support(true);
+
+// Enable memory64 mode
+recompiler.set_memory64(true);
+
+// Check current settings
+if recompiler.is_rv64_enabled() {
+    println!("RV64 is enabled");
+}
+
+if recompiler.is_memory64_enabled() {
+    println!("Memory64 is enabled");
+}
+```
+
+**Supported RV64 Instructions:**
+- RV64I: LD, SD, LWU, ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, SLLW, SRLW, SRAW
+- RV64M: MULW, DIVW, DIVUW, REMW, REMUW, MULH, MULHU, MULHSU
+- RV64F: FCVT.L.S, FCVT.LU.S, FCVT.S.L, FCVT.S.LU
+- RV64D: FCVT.L.D, FCVT.LU.D, FCVT.D.L, FCVT.D.LU, FMV.X.D, FMV.D.X
+
 ### HINT Instruction Tracking
 
 RISC-V HINT instructions are special instructions that write to register `x0` (which is hardwired to zero) and thus have no architectural effect. In the [rv-corpus](https://github.com/portal-co/rv-corpus) test suite, these instructions (typically `addi x0, x0, N`) are used as markers to indicate test case boundaries, where `N` is the test case number.
@@ -74,6 +143,8 @@ let mut recompiler = RiscVRecompiler::new_with_full_config(
     None,
     0x1000,  // base_pc
     true,    // enable HINT tracking
+    false,   // disable RV64
+    false,   // disable memory64
 );
 
 // Translate some code containing HINT markers...
@@ -260,10 +331,6 @@ WebAssembly doesn't have native fused multiply-add instructions. The implementat
 ### Atomic Operations
 
 WebAssembly's atomic operations are used where possible. The LR/SC (load-reserved/store-conditional) implementation is simplified and may need enhancement for full correctness in multi-threaded environments.
-
-### RV64 Support
-
-RV64-specific instructions are recognized but stubbed with `unreachable` since this implementation targets RV32. Future versions may add full RV64 support.
 
 ## References
 
