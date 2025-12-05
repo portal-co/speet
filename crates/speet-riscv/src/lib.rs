@@ -1158,56 +1158,86 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             }
 
             Inst::Mulh { dest, src1, src2 } => {
-                // Multiply high signed-signed: returns upper 32 bits of 64-bit product
+                // Multiply high signed-signed: returns upper bits of product
+                // RV32: upper 32 bits of 64-bit product
+                // RV64: upper 64 bits of 128-bit product
                 if dest.0 != 0 {
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32S)?;
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32S)?;
-                    self.reactor.feed(&Instruction::I64Mul)?;
-                    self.reactor.feed(&Instruction::I64Const(32))?;
-                    self.reactor.feed(&Instruction::I64ShrS)?;
-                    self.reactor.feed(&Instruction::I32WrapI64)?;
-                    self.reactor
-                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    if self.enable_rv64 {
+                        // For RV64: compute high 64 bits of 128-bit signed multiplication
+                        self.emit_mulh_signed(Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    } else {
+                        // For RV32: use i64 multiply and shift
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Mul)?;
+                        self.reactor.feed(&Instruction::I64Const(32))?;
+                        self.reactor.feed(&Instruction::I64ShrS)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
                 }
             }
 
             Inst::Mulhsu { dest, src1, src2 } => {
                 // Multiply high signed-unsigned
+                // RV32: upper 32 bits of 64-bit product (src1 signed, src2 unsigned)
+                // RV64: upper 64 bits of 128-bit product (src1 signed, src2 unsigned)
                 if dest.0 != 0 {
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32S)?;
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32U)?;
-                    self.reactor.feed(&Instruction::I64Mul)?;
-                    self.reactor.feed(&Instruction::I64Const(32))?;
-                    self.reactor.feed(&Instruction::I64ShrS)?;
-                    self.reactor.feed(&Instruction::I32WrapI64)?;
-                    self.reactor
-                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    if self.enable_rv64 {
+                        // For RV64: compute high 64 bits of 128-bit signed-unsigned multiplication
+                        self.emit_mulh_signed_unsigned(Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    } else {
+                        // For RV32: use i64 multiply with mixed sign extension
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(&Instruction::I64Mul)?;
+                        self.reactor.feed(&Instruction::I64Const(32))?;
+                        self.reactor.feed(&Instruction::I64ShrS)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
                 }
             }
 
             Inst::Mulhu { dest, src1, src2 } => {
                 // Multiply high unsigned-unsigned
+                // RV32: upper 32 bits of 64-bit product
+                // RV64: upper 64 bits of 128-bit product
                 if dest.0 != 0 {
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32U)?;
-                    self.reactor
-                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32U)?;
-                    self.reactor.feed(&Instruction::I64Mul)?;
-                    self.reactor.feed(&Instruction::I64Const(32))?;
-                    self.reactor.feed(&Instruction::I64ShrU)?;
-                    self.reactor.feed(&Instruction::I32WrapI64)?;
-                    self.reactor
-                        .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    if self.enable_rv64 {
+                        // For RV64: compute high 64 bits of 128-bit unsigned multiplication
+                        self.emit_mulh_unsigned(Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    } else {
+                        // For RV32: use i64 multiply and shift
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(&Instruction::I64Mul)?;
+                        self.reactor.feed(&Instruction::I64Const(32))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
                 }
             }
 
@@ -2361,6 +2391,201 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             Some(&condition), // condition: branch condition
         )?;
 
+        Ok(())
+    }
+
+    /// Helper to compute high 64 bits of signed 64x64 -> 128-bit multiplication
+    /// 
+    /// Algorithm: For two 64-bit signed numbers a and b, we compute the high 64 bits
+    /// of their 128-bit product using the formula:
+    /// 
+    /// Let a = a_hi * 2^32 + a_lo and b = b_hi * 2^32 + b_lo
+    /// Then a * b = (a_hi * b_hi * 2^64) + (a_hi * b_lo * 2^32) + (a_lo * b_hi * 2^32) + (a_lo * b_lo)
+    /// 
+    /// The high 64 bits are:
+    /// - a_hi * b_hi (full result)
+    /// - high 32 bits of (a_hi * b_lo)
+    /// - high 32 bits of (a_lo * b_hi)  
+    /// - carries from the middle terms
+    ///
+    /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
+    /// to the high 64 bits, only through carries.
+    fn emit_mulh_signed(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+        // Load src1 and src2 to locals for reuse
+        let temp_a = 65;
+        let temp_b = 66;
+        let temp_mid = 67; // for accumulating middle terms
+        
+        self.reactor.feed(&Instruction::LocalGet(src1))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(&Instruction::LocalGet(src2))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        
+        // Start with a_hi * b_hi
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (sign-extended)
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // b_hi (sign-extended)
+        self.reactor.feed(&Instruction::I64Mul)?; // a_hi * b_hi
+        
+        // Compute middle term: a_hi * b_lo (full 64-bit result)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // b_lo
+        self.reactor.feed(&Instruction::I64Mul)?; // a_hi * b_lo (64-bit result)
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?; // save for carry computation
+        
+        // Add high 32 bits of (a_hi * b_lo) to result
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // arithmetic shift for signed
+        self.reactor.feed(&Instruction::I64Add)?;
+        
+        // Compute other middle term: a_lo * b_hi (full 64-bit result)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // a_lo
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // b_hi
+        self.reactor.feed(&Instruction::I64Mul)?; // a_lo * b_hi (64-bit result)
+        
+        // Add it to the middle term accumulator for carry calculation
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Add)?; // sum of middle terms (low parts)
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        
+        // Add high 32 bits of the summed middle terms
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // arithmetic shift
+        self.reactor.feed(&Instruction::I64Add)?;
+        
+        Ok(())
+    }
+
+    /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
+    fn emit_mulh_unsigned(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+        let temp_a = 65;
+        let temp_b = 66;
+        let temp_mid = 67;
+        
+        self.reactor.feed(&Instruction::LocalGet(src1))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(&Instruction::LocalGet(src2))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        
+        // Start with a_hi * b_hi (all unsigned)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // a_hi (unsigned)
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(&Instruction::I64Mul)?;
+        
+        // Compute middle term: a_hi * b_lo
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // a_hi
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // b_lo
+        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        
+        // Add high 32 bits of (a_hi * b_lo)
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        
+        // Compute other middle term: a_lo * b_hi
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // a_lo
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi
+        self.reactor.feed(&Instruction::I64Mul)?;
+        
+        // Add to middle term for carry calculation
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        
+        // Add high 32 bits of summed middle terms
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        
+        Ok(())
+    }
+
+    /// Helper to compute high 64 bits of signed-unsigned 64x64 -> 128-bit multiplication
+    fn emit_mulh_signed_unsigned(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+        let temp_a = 65;
+        let temp_b = 66;
+        let temp_mid = 67;
+        
+        self.reactor.feed(&Instruction::LocalGet(src1))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(&Instruction::LocalGet(src2))?;
+        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        
+        // src1 is signed, src2 is unsigned
+        
+        // Start with a_hi * b_hi (a_hi signed, b_hi unsigned)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (signed)
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(&Instruction::I64Mul)?;
+        
+        // Compute middle term: a_hi * b_lo (a_hi signed, b_lo unsigned)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (signed)
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // b_lo
+        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        
+        // Add high 32 bits of (a_hi * b_lo) - use signed shift
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        
+        // Compute other middle term: a_lo * b_hi (a_lo unsigned, b_hi unsigned)
+        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(&Instruction::I64And)?; // a_lo
+        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(&Instruction::I64Mul)?;
+        
+        // Add to middle term for carry calculation
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        
+        // Add high 32 bits of summed middle terms - use signed shift
+        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(&Instruction::I64Const(32))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I64Add)?;
+        
         Ok(())
     }
 
@@ -4155,6 +4380,78 @@ mod tests {
         assert!(
             recompiler
                 .translate_instruction(&sd, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rv64_mulh_instructions() {
+        // Test RV64 multiply-high instructions (Mulh, Mulhu, Mulhsu)
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            false, // Disable HINT tracking
+            true,  // Enable RV64
+            false, // Disable memory64
+        );
+
+        // Test MULH (signed x signed)
+        let mulh = Inst::Mulh {
+            dest: rv_asm::Reg(1),
+            src1: rv_asm::Reg(2),
+            src2: rv_asm::Reg(3),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&mulh, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test MULHU (unsigned x unsigned)
+        let mulhu = Inst::Mulhu {
+            dest: rv_asm::Reg(4),
+            src1: rv_asm::Reg(5),
+            src2: rv_asm::Reg(6),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&mulhu, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test MULHSU (signed x unsigned)
+        let mulhsu = Inst::Mulhsu {
+            dest: rv_asm::Reg(7),
+            src1: rv_asm::Reg(8),
+            src2: rv_asm::Reg(9),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&mulhsu, 0x1008, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Verify that writing to x0 is properly ignored
+        let mulh_x0 = Inst::Mulh {
+            dest: rv_asm::Reg(0),
+            src1: rv_asm::Reg(2),
+            src2: rv_asm::Reg(3),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&mulh_x0, 0x100c, IsCompressed::No, &mut |a| Function::new(
                     a.collect::<Vec<_>>()
                 ))
                 .is_ok()
