@@ -8,8 +8,8 @@ A `no_std` compatible RISC-V to WebAssembly static recompiler that translates RI
 - **RV64I Base Integer Instruction Set**: Runtime-gated support for RV64 instructions (64-bit integers)
 - **M Extension**: Integer multiplication and division instructions (RV32M and RV64M)
 - **A Extension**: Atomic memory operations (load-reserved/store-conditional)
-- **F Extension**: Single-precision floating-point instructions
-- **D Extension**: Double-precision floating-point instructions
+- **F Extension**: Single-precision floating-point instructions (RV32F and RV64F)
+- **D Extension**: Double-precision floating-point instructions (RV32D and RV64D)
 - **Zicsr Extension**: Control and Status Register instructions (stubbed for runtime support)
 - **Memory64 Support**: Optional i64 address calculations for WebAssembly memory64 mode
 - **HINT Instruction Tracking**: Optional runtime-gated tracking of RISC-V HINT instructions (e.g., `addi x0, x0, N`) used in rv-corpus test markers
@@ -121,9 +121,9 @@ if recompiler.is_memory64_enabled() {
 
 **Supported RV64 Instructions:**
 - RV64I: LD, SD, LWU, ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, SLLW, SRLW, SRAW
-- RV64M: MULW, DIVW, DIVUW, REMW, REMUW
-
-**Note**: RV64 floating-point conversion instructions (FCVT.L.S, FCVT.D.L, etc.) are currently stubbed with `unreachable` and require additional implementation.
+- RV64M: MULW, DIVW, DIVUW, REMW, REMUW, MULH, MULHU, MULHSU
+- RV64F: FCVT.L.S, FCVT.LU.S, FCVT.S.L, FCVT.S.LU
+- RV64D: FCVT.L.D, FCVT.LU.D, FCVT.D.L, FCVT.D.LU, FMV.X.D, FMV.D.X
 
 ### HINT Instruction Tracking
 

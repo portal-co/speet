@@ -2264,20 +2264,148 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             }
             
             // RV64F/D: Floating-point conversion instructions
-            // For now, stub these with unreachable as they need careful handling
-            Inst::FcvtLS { .. }
-            | Inst::FcvtLuS { .. }
-            | Inst::FcvtSL { .. }
-            | Inst::FcvtSLu { .. }
-            | Inst::FcvtLD { .. }
-            | Inst::FcvtLuD { .. }
-            | Inst::FmvXD { .. }
-            | Inst::FcvtDL { .. }
-            | Inst::FcvtDLu { .. }
-            | Inst::FmvDX { .. } => {
-                // RV64 floating-point conversions need special handling
-                // For now, emit unreachable
-                self.reactor.feed(&Instruction::Unreachable)?;
+            Inst::FcvtLS { dest, src, .. } => {
+                // Convert single-precision float to signed 64-bit integer
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32()?;
+                        self.reactor.feed(&Instruction::I64TruncF32S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtLuS { dest, src, .. } => {
+                // Convert single-precision float to unsigned 64-bit integer
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32()?;
+                        self.reactor.feed(&Instruction::I64TruncF32U)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtSL { dest, src, .. } => {
+                // Convert signed 64-bit integer to single-precision float
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F32ConvertI64S)?;
+                    self.nan_box_f32()?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtSLu { dest, src, .. } => {
+                // Convert unsigned 64-bit integer to single-precision float
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F32ConvertI64U)?;
+                    self.nan_box_f32()?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtLD { dest, src, .. } => {
+                // Convert double-precision float to signed 64-bit integer
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.reactor.feed(&Instruction::I64TruncF64S)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtLuD { dest, src, .. } => {
+                // Convert double-precision float to unsigned 64-bit integer
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.reactor.feed(&Instruction::I64TruncF64U)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtDL { dest, src, .. } => {
+                // Convert signed 64-bit integer to double-precision float
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F64ConvertI64S)?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FcvtDLu { dest, src, .. } => {
+                // Convert unsigned 64-bit integer to double-precision float
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F64ConvertI64U)?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FmvXD { dest, src } => {
+                // Move bits from double-precision float register to 64-bit integer register
+                if self.enable_rv64 {
+                    if dest.0 != 0 {
+                        self.reactor
+                            .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+                        self.reactor
+                            .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    }
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
+            }
+
+            Inst::FmvDX { dest, src } => {
+                // Move bits from 64-bit integer register to double-precision float register
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+                    self.reactor
+                        .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                } else {
+                    self.reactor.feed(&Instruction::Unreachable)?;
+                }
             }
 
             // Advanced atomic memory operations
@@ -4452,6 +4580,174 @@ mod tests {
         assert!(
             recompiler
                 .translate_instruction(&mulh_x0, 0x100c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rv64_float_conversions() {
+        // Test RV64 floating-point conversion instructions
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            false, // Disable HINT tracking
+            true,  // Enable RV64
+            false, // Disable memory64
+        );
+
+        // Test FCVT.L.S (float to signed i64)
+        let fcvt_ls = Inst::FcvtLS {
+            dest: rv_asm::Reg(1),
+            src: rv_asm::FReg(2),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ls, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.LU.S (float to unsigned i64)
+        let fcvt_lus = Inst::FcvtLuS {
+            dest: rv_asm::Reg(3),
+            src: rv_asm::FReg(4),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_lus, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.S.L (signed i64 to float)
+        let fcvt_sl = Inst::FcvtSL {
+            dest: rv_asm::FReg(5),
+            src: rv_asm::Reg(6),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_sl, 0x1008, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.S.LU (unsigned i64 to float)
+        let fcvt_slu = Inst::FcvtSLu {
+            dest: rv_asm::FReg(7),
+            src: rv_asm::Reg(8),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_slu, 0x100c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.L.D (double to signed i64)
+        let fcvt_ld = Inst::FcvtLD {
+            dest: rv_asm::Reg(9),
+            src: rv_asm::FReg(10),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ld, 0x1010, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.LU.D (double to unsigned i64)
+        let fcvt_lud = Inst::FcvtLuD {
+            dest: rv_asm::Reg(11),
+            src: rv_asm::FReg(12),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_lud, 0x1014, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.D.L (signed i64 to double)
+        let fcvt_dl = Inst::FcvtDL {
+            dest: rv_asm::FReg(13),
+            src: rv_asm::Reg(14),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_dl, 0x1018, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FCVT.D.LU (unsigned i64 to double)
+        let fcvt_dlu = Inst::FcvtDLu {
+            dest: rv_asm::FReg(15),
+            src: rv_asm::Reg(16),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_dlu, 0x101c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FMV.X.D (double register to integer register)
+        let fmv_xd = Inst::FmvXD {
+            dest: rv_asm::Reg(17),
+            src: rv_asm::FReg(18),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fmv_xd, 0x1020, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Test FMV.D.X (integer register to double register)
+        let fmv_dx = Inst::FmvDX {
+            dest: rv_asm::FReg(19),
+            src: rv_asm::Reg(20),
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fmv_dx, 0x1024, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
+
+        // Verify that writing to x0 is properly ignored (for conversion to integer)
+        let fcvt_ls_x0 = Inst::FcvtLS {
+            dest: rv_asm::Reg(0),
+            src: rv_asm::FReg(2),
+            rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
+        };
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ls_x0, 0x1028, IsCompressed::No, &mut |a| Function::new(
                     a.collect::<Vec<_>>()
                 ))
                 .is_ok()
