@@ -94,6 +94,48 @@ pub struct EbreakInfo {
     pub pc: u32,
 }
 
+/// Context provided to address mapper callbacks
+///
+/// This struct provides access to the WebAssembly instruction emitter,
+/// allowing the mapper to emit address translation code.
+pub struct MapperContext<'a, E, F: InstructionSink<E>> {
+    /// Reference to the reactor for emitting WebAssembly instructions
+    pub reactor: &'a mut Reactor<E, F>,
+}
+
+impl<'a, E, F: InstructionSink<E>> MapperContext<'a, E, F> {
+    /// Emit a WebAssembly instruction
+    pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
+        self.reactor.feed(instruction)
+    }
+}
+
+/// Trait for address mapping callbacks (paging support)
+///
+/// This trait defines the interface for callbacks that translate virtual addresses
+/// to physical addresses. The callback receives the virtual address on the Wasm stack
+/// and should leave the physical address on the stack.
+///
+/// See PAGING.md for detailed documentation on the paging system.
+pub trait MapperCallback<E, F: InstructionSink<E>> {
+    /// Translate a virtual address to a physical address
+    ///
+    /// # Stack State
+    /// - Input: Virtual address (i64 or i32 depending on use_memory64/enable_rv64)
+    /// - Output: Physical address (same type as input)
+    fn call(&mut self, ctx: &mut MapperContext<E, F>) -> Result<(), E>;
+}
+
+/// Blanket implementation of MapperCallback for FnMut closures
+impl<E, F: InstructionSink<E>, T> MapperCallback<E, F> for T
+where
+    T: FnMut(&mut MapperContext<E, F>) -> Result<(), E>,
+{
+    fn call(&mut self, ctx: &mut MapperContext<E, F>) -> Result<(), E> {
+        self(ctx)
+    }
+}
+
 /// Context provided to HINT callbacks for code generation
 ///
 /// This struct provides access to the WebAssembly instruction emitter,
@@ -230,6 +272,8 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     ecall_callback: Option<&'cb mut (dyn EcallCallback<E, F> + 'ctx)>,
     /// Optional callback for EBREAK instructions
     ebreak_callback: Option<&'cb mut (dyn EbreakCallback<E, F> + 'ctx)>,
+    /// Optional callback for address mapping (paging support - see PAGING.md)
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<E, F> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -265,6 +309,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             hint_callback: None,
             ecall_callback: None,
             ebreak_callback: None,
+            mapper_callback: None,
             enable_rv64,
             use_memory64,
         }
@@ -299,6 +344,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             hint_callback: None,
             ecall_callback: None,
             ebreak_callback: None,
+            mapper_callback: None,
             enable_rv64,
             use_memory64,
         }
@@ -491,6 +537,42 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// Removes any previously set EBREAK callback.
     pub fn clear_ebreak_callback(&mut self) {
         self.ebreak_callback = None;
+    }
+
+    /// Set an address mapping callback for paging support
+    ///
+    /// When a mapper is set, it will be invoked for every memory load/store operation
+    /// to translate virtual addresses to physical addresses. The callback receives the
+    /// virtual address on the WebAssembly stack and should leave the physical address
+    /// on the stack.
+    ///
+    /// See PAGING.md for detailed documentation on the paging system.
+    ///
+    /// # Arguments
+    /// * `callback` - A mutable reference to a closure or function that performs address translation
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use speet_riscv::{RiscVRecompiler, MapperContext};
+    /// # use wasm_encoder::Instruction;
+    /// let mut recompiler = RiscVRecompiler::new();
+    /// let mut my_mapper = |ctx: &mut MapperContext| {
+    ///     // Example: Simple page table lookup
+    ///     // Input: virtual address on stack
+    ///     // Output: physical address on stack
+    ///     Ok(())
+    /// };
+    /// recompiler.set_mapper_callback(&mut my_mapper);
+    /// ```
+    pub fn set_mapper_callback(&mut self, callback: &'cb mut (dyn MapperCallback<E, F> + 'ctx)) {
+        self.mapper_callback = Some(callback);
+    }
+
+    /// Clear the address mapping callback
+    ///
+    /// Removes any previously set mapper callback, returning to identity mapping.
+    pub fn clear_mapper_callback(&mut self) {
+        self.mapper_callback = None;
     }
 
     /// Enable or disable RV64 instruction support
@@ -2872,6 +2954,14 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             self.reactor.feed(&Instruction::I32Add)?;
         }
 
+        // Apply address mapping if provided (for paging support)
+        if let Some(mapper) = self.mapper_callback.as_mut() {
+            let mut ctx = MapperContext {
+                reactor: &mut self.reactor,
+            };
+            mapper.call(&mut ctx)?;
+        }
+
         // Load from memory
         match op {
             LoadOp::I8 => {
@@ -3028,6 +3118,14 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             self.reactor.feed(&Instruction::I32Add)?;
         }
 
+        // Apply address mapping if provided (for paging support)
+        if let Some(mapper) = self.mapper_callback.as_mut() {
+            let mut ctx = MapperContext {
+                reactor: &mut self.reactor,
+            };
+            mapper.call(&mut ctx)?;
+        }
+
         // Load value to store
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(src)))?;
@@ -3119,6 +3217,14 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         self.emit_imm(offset)?;
         self.reactor.feed(&Instruction::I32Add)?;
 
+        // Apply address mapping if provided (for paging support)
+        if let Some(mapper) = self.mapper_callback.as_mut() {
+            let mut ctx = MapperContext {
+                reactor: &mut self.reactor,
+            };
+            mapper.call(&mut ctx)?;
+        }
+
         // Load from memory
         match op {
             FLoadOp::F32 => {
@@ -3158,6 +3264,14 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
             .feed(&Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(offset)?;
         self.reactor.feed(&Instruction::I32Add)?;
+
+        // Apply address mapping if provided (for paging support)
+        if let Some(mapper) = self.mapper_callback.as_mut() {
+            let mut ctx = MapperContext {
+                reactor: &mut self.reactor,
+            };
+            mapper.call(&mut ctx)?;
+        }
 
         // Load value to store
         self.reactor
