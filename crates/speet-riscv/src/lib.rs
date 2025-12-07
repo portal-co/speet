@@ -270,6 +270,65 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
         }
     }
 
+    /// Create a new RISC-V recompiler instance with all configuration options including base function offset
+    ///
+    /// # Arguments
+    /// * `pool` - Pool configuration for indirect calls
+    /// * `escape_tag` - Optional exception tag for non-local control flow
+    /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
+    /// * `base_func_offset` - Offset added to emitted function indices for imports/helpers
+    /// * `track_hints` - Whether to track HINT instructions for debugging/testing
+    /// * `enable_rv64` - Whether to enable RV64 instruction support
+    /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
+    pub fn new_with_all_config(
+        pool: Pool,
+        escape_tag: Option<EscapeTag>,
+        base_pc: u64,
+        base_func_offset: u32,
+        track_hints: bool,
+        enable_rv64: bool,
+        use_memory64: bool,
+    ) -> Self {
+        Self {
+            reactor: Reactor::with_base_func_offset(base_func_offset),
+            pool,
+            escape_tag,
+            base_pc,
+            track_hints,
+            hints: Vec::new(),
+            hint_callback: None,
+            ecall_callback: None,
+            ebreak_callback: None,
+            enable_rv64,
+            use_memory64,
+        }
+    }
+
+    /// Get the current base function offset.
+    ///
+    /// The offset is added to all emitted function indices. This is useful when
+    /// the WebAssembly module has imported functions or helper functions that
+    /// precede the generated functions.
+    pub fn base_func_offset(&self) -> u32 {
+        self.reactor.base_func_offset()
+    }
+
+    /// Set the base function offset.
+    ///
+    /// The offset is added to all emitted function indices. This is useful when
+    /// the WebAssembly module has imported functions or helper functions that
+    /// precede the generated functions.
+    ///
+    /// # Arguments
+    /// * `offset` - Offset added to function indices in emitted instructions
+    ///
+    /// # Example
+    /// If the module has 10 imports and 5 helper functions, use `offset = 15`
+    /// so that generated function 0 emits as WebAssembly function 15.
+    pub fn set_base_func_offset(&mut self, offset: u32) {
+        self.reactor.set_base_func_offset(offset);
+    }
+
     /// Create a new RISC-V recompiler instance
     ///
     /// # Arguments
@@ -4826,5 +4885,33 @@ mod tests {
                 ))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_base_func_offset() {
+        // Test that base_func_offset can be set and retrieved
+        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new();
+        
+        // Default should be 0
+        assert_eq!(recompiler.base_func_offset(), 0);
+        
+        // Set to a new value
+        recompiler.set_base_func_offset(15);
+        assert_eq!(recompiler.base_func_offset(), 15);
+        
+        // Create with offset using new_with_all_config
+        let recompiler2 = RiscVRecompiler::<Infallible, Function>::new_with_all_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            25, // base_func_offset
+            false,
+            false,
+            false,
+        );
+        assert_eq!(recompiler2.base_func_offset(), 25);
     }
 }

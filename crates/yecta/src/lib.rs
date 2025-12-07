@@ -252,6 +252,9 @@ pub struct Reactor<E = Infallible, F: InstructionSink<E> = Function> {
     fns: Vec<Entry<F>>,
     lens: VecDeque<BTreeSet<FuncIdx>>,
     phantom: PhantomData<E>,
+    /// Base offset added to all emitted function indices.
+    /// Used when imports or helper functions precede the generated functions in the module.
+    base_func_offset: u32,
 }
 impl<E, F: InstructionSink<E>> Default for Reactor<E, F> {
     fn default() -> Self {
@@ -259,7 +262,45 @@ impl<E, F: InstructionSink<E>> Default for Reactor<E, F> {
             fns: Default::default(),
             lens: Default::default(),
             phantom: Default::default(),
+            base_func_offset: 0,
         }
+    }
+}
+
+impl<E, F: InstructionSink<E>> Reactor<E, F> {
+    /// Create a new reactor with a base function offset.
+    ///
+    /// The offset is added to all emitted function indices. This is useful when
+    /// the WebAssembly module has imported functions or helper functions that
+    /// precede the generated functions.
+    ///
+    /// # Arguments
+    /// * `base_func_offset` - Offset added to function indices in emitted instructions
+    ///
+    /// # Example
+    /// If the module has 10 imports and 5 helper functions, use `base_func_offset = 15`
+    /// so that generated function 0 emits as WebAssembly function 15.
+    pub fn with_base_func_offset(base_func_offset: u32) -> Self {
+        Self {
+            fns: Default::default(),
+            lens: Default::default(),
+            phantom: Default::default(),
+            base_func_offset,
+        }
+    }
+
+    /// Get the current base function offset.
+    pub fn base_func_offset(&self) -> u32 {
+        self.base_func_offset
+    }
+
+    /// Set the base function offset.
+    ///
+    /// The offset is added to all emitted function indices. This is useful when
+    /// the WebAssembly module has imported functions or helper functions that
+    /// precede the generated functions.
+    pub fn set_base_func_offset(&mut self, offset: u32) {
+        self.base_func_offset = offset;
     }
 }
 
@@ -354,6 +395,7 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
         }
         if cache.contains(&succ) {
             let FuncIdx(succ_idx) = succ;
+            let wasm_func_idx = succ_idx + self.base_func_offset;
             for k in cache {
                 let FuncIdx(k_idx) = k;
                 let f = &mut self.fns[k_idx as usize];
@@ -361,7 +403,7 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
                 for p in 0..params {
                     f.function.instruction(&Instruction::LocalGet(p))?;
                 }
-                f.function.instruction(&Instruction::ReturnCall(succ_idx))?;
+                f.function.instruction(&Instruction::ReturnCall(wasm_func_idx))?;
                 for _ in 0..ifs {
                     f.function.instruction(&Instruction::End)?;
                 }
@@ -399,7 +441,8 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
             Target::Static {
                 func: FuncIdx(func_idx),
             } => {
-                self.feed(&Instruction::Call(func_idx))?;
+                let wasm_func_idx = func_idx + self.base_func_offset;
+                self.feed(&Instruction::Call(wasm_func_idx))?;
             }
             Target::Dynamic { idx } => {
                 idx.emit_snippet(&mut |a| self.feed(a))?;
@@ -624,8 +667,9 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
             self.feed(&Instruction::If(wasm_encoder::BlockType::Empty))?;
 
             let FuncIdx(func_idx) = func;
+            let wasm_func_idx = func_idx + self.base_func_offset;
             self.emit_params_with_fixups(params, fixups)?;
-            self.feed(&Instruction::ReturnCall(func_idx))?;
+            self.feed(&Instruction::ReturnCall(wasm_func_idx))?;
             self.feed(&Instruction::Else)?;
         } else {
             // Unconditional jump: apply fixups to locals, then jump
