@@ -94,21 +94,26 @@ pub struct EbreakInfo {
     pub pc: u32,
 }
 
-/// Context provided to address mapper callbacks
+/// Unified context for all callbacks
 ///
-/// This struct provides access to the WebAssembly instruction emitter,
-/// allowing the mapper to emit address translation code.
-pub struct MapperContext<'a, E, F: InstructionSink<E>> {
+/// This struct provides access to the WebAssembly instruction emitter and other
+/// compilation state. It is passed to all callbacks (HINT, ECALL, EBREAK, mapper).
+pub struct CallbackContext<'a, E, F: InstructionSink<E>> {
     /// Reference to the reactor for emitting WebAssembly instructions
     pub reactor: &'a mut Reactor<E, F>,
 }
 
-impl<'a, E, F: InstructionSink<E>> MapperContext<'a, E, F> {
+impl<'a, E, F: InstructionSink<E>> CallbackContext<'a, E, F> {
     /// Emit a WebAssembly instruction
     pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
         self.reactor.feed(instruction)
     }
 }
+
+/// Legacy type alias for backwards compatibility
+pub type MapperContext<'a, E, F> = CallbackContext<'a, E, F>;
+/// Legacy type alias for backwards compatibility
+pub type HintContext<'a, E, F> = CallbackContext<'a, E, F>;
 
 /// Trait for address mapping callbacks (paging support)
 ///
@@ -123,26 +128,17 @@ pub trait MapperCallback<E, F: InstructionSink<E>> {
     /// # Stack State
     /// - Input: Virtual address (i64 or i32 depending on use_memory64/enable_rv64)
     /// - Output: Physical address (same type as input)
-    fn call(&mut self, ctx: &mut MapperContext<E, F>) -> Result<(), E>;
+    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E>;
 }
 
 /// Blanket implementation of MapperCallback for FnMut closures
 impl<E, F: InstructionSink<E>, T> MapperCallback<E, F> for T
 where
-    T: FnMut(&mut MapperContext<E, F>) -> Result<(), E>,
+    T: FnMut(&mut CallbackContext<E, F>) -> Result<(), E>,
 {
-    fn call(&mut self, ctx: &mut MapperContext<E, F>) -> Result<(), E> {
+    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E> {
         self(ctx)
     }
-}
-
-/// Context provided to HINT callbacks for code generation
-///
-/// This struct provides access to the WebAssembly instruction emitter,
-/// allowing callbacks to generate code in response to HINT instructions.
-pub struct HintContext<'a, E, F: InstructionSink<E>> {
-    /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<E, F>,
 }
 
 impl<'a, E, F: InstructionSink<E>> HintContext<'a, E, F> {
@@ -166,7 +162,7 @@ impl<'a, E, F: InstructionSink<E>> HintContext<'a, E, F> {
 ///
 /// This trait defines the interface for callbacks that are invoked when HINT
 /// instructions are encountered during translation. Implementations receive
-/// both the HINT information and a context for generating WebAssembly code.
+/// both the HINT information and a unified context for generating WebAssembly code.
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
@@ -175,16 +171,16 @@ pub trait HintCallback<E, F: InstructionSink<E>> {
     ///
     /// # Arguments
     /// * `hint` - Information about the detected HINT instruction
-    /// * `ctx` - Context for emitting WebAssembly instructions
-    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext<E, F>);
+    /// * `ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, F>);
 }
 
 /// Blanket implementation of HintCallback for FnMut closures
 impl<E, G: InstructionSink<E>, F> HintCallback<E, G> for F
 where
-    F: FnMut(&HintInfo, &mut HintContext<E, G>),
+    F: FnMut(&HintInfo, &mut CallbackContext<E, G>),
 {
-    fn call(&mut self, hint: &HintInfo, ctx: &mut HintContext<E, G>) {
+    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, G>) {
         self(hint, ctx)
     }
 }
@@ -193,7 +189,7 @@ where
 ///
 /// This trait defines the interface for callbacks that are invoked when ECALL
 /// instructions are encountered during translation. Implementations receive
-/// both the ECALL information and a context for generating WebAssembly code.
+/// both the ECALL information and a unified context for generating WebAssembly code.
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
@@ -202,16 +198,16 @@ pub trait EcallCallback<E, F: InstructionSink<E>> {
     ///
     /// # Arguments
     /// * `ecall` - Information about the detected ECALL instruction
-    /// * `ctx` - Context for emitting WebAssembly instructions
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext<E, F>);
+    /// * `ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, F>);
 }
 
 /// Blanket implementation of EcallCallback for FnMut closures
 impl<E, G: InstructionSink<E>, F> EcallCallback<E, G> for F
 where
-    F: FnMut(&EcallInfo, &mut HintContext<E, G>),
+    F: FnMut(&EcallInfo, &mut CallbackContext<E, G>),
 {
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut HintContext<E, G>) {
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, G>) {
         self(ecall, ctx)
     }
 }
@@ -220,7 +216,7 @@ where
 ///
 /// This trait defines the interface for callbacks that are invoked when EBREAK
 /// instructions are encountered during translation. Implementations receive
-/// both the EBREAK information and a context for generating WebAssembly code.
+/// both the EBREAK information and a unified context for generating WebAssembly code.
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
@@ -229,16 +225,16 @@ pub trait EbreakCallback<E, F: InstructionSink<E>> {
     ///
     /// # Arguments
     /// * `ebreak` - Information about the detected EBREAK instruction
-    /// * `ctx` - Context for emitting WebAssembly instructions
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext<E, F>);
+    /// * `ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, F>);
 }
 
 /// Blanket implementation of EbreakCallback for FnMut closures
 impl<E, G: InstructionSink<E>, F> EbreakCallback<E, G> for F
 where
-    F: FnMut(&EbreakInfo, &mut HintContext<E, G>),
+    F: FnMut(&EbreakInfo, &mut CallbackContext<E, G>),
 {
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut HintContext<E, G>) {
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, G>) {
         self(ebreak, ctx)
     }
 }
@@ -1052,7 +1048,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
                     // Invoke callback if set
                     if let Some(ref mut callback) = self.hint_callback {
-                        let mut ctx = HintContext {
+                        let mut ctx = CallbackContext {
                             reactor: &mut self.reactor,
                         };
                         callback.call(&hint_info, &mut ctx);
@@ -1299,7 +1295,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ecall_callback {
-                    let mut ctx = HintContext {
+                    let mut ctx = CallbackContext {
                         reactor: &mut self.reactor,
                     };
                     callback.call(&ecall_info, &mut ctx);
@@ -1315,7 +1311,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ebreak_callback {
-                    let mut ctx = HintContext {
+                    let mut ctx = CallbackContext {
                         reactor: &mut self.reactor,
                     };
                     callback.call(&ebreak_info, &mut ctx);
@@ -2956,7 +2952,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = MapperContext {
+            let mut ctx = CallbackContext {
                 reactor: &mut self.reactor,
             };
             mapper.call(&mut ctx)?;
@@ -3120,7 +3116,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = MapperContext {
+            let mut ctx = CallbackContext {
                 reactor: &mut self.reactor,
             };
             mapper.call(&mut ctx)?;
@@ -3219,7 +3215,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = MapperContext {
+            let mut ctx = CallbackContext {
                 reactor: &mut self.reactor,
             };
             mapper.call(&mut ctx)?;
@@ -3267,7 +3263,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = MapperContext {
+            let mut ctx = CallbackContext {
                 reactor: &mut self.reactor,
             };
             mapper.call(&mut ctx)?;
