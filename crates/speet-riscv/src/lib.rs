@@ -3593,42 +3593,78 @@ impl PageTableBase {
 pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
     page_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
     let pt_base = page_table_base.into();
+    let sec_dir_base = security_directory_base.into();
+
     if use_i64 {
-        // Get vaddr from local 66
-        ctx.emit(&Instruction::LocalGet(66))?;
+        // 64-bit implementation
+        ctx.emit(&Instruction::LocalGet(66))?; // vaddr
         
-        // Extract page number: vaddr >> 16
+        // page_num = vaddr >> 16
         ctx.emit(&Instruction::I64Const(16))?;
         ctx.emit(&Instruction::I64ShrU)?;
         
-        // Multiply by 8 (shift left by 3)
+        // pte_addr = pt_base + (page_num * 8)
         ctx.emit(&Instruction::I64Const(3))?;
         ctx.emit(&Instruction::I64Shl)?;
-        
-        // Add page table base
         pt_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
         
-        // Load physical page base from page table
+        // page_pointer = [pte_addr]
         ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg {
             offset: 0,
             align: 3,
             memory_index,
         }))?;
         
-        // Extract page offset from original vaddr: vaddr & 0xFFFF
+        // security_index = page_pointer & 0xFFFF
+        ctx.emit(&Instruction::LocalTee(67))?; // Store page_pointer in temp local 67
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        // page_base_low48 = page_pointer >> 16
+        ctx.emit(&Instruction::LocalGet(67))?;
+        ctx.emit(&Instruction::I64Const(16))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::LocalSet(68))?; // Store page_base_low48 in temp local 68
+
+        // sec_entry_addr = sec_dir_base + (security_index * 4)
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, true)?;
+        ctx.emit(&Instruction::I64Add)?;
+        
+        // sec_entry = [sec_entry_addr]
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
+
+        // page_base_top16 = sec_entry >> 16
+        ctx.emit(&Instruction::I64Const(16))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        // phys_page_base = (page_base_top16 << 48) | page_base_low48
+        ctx.emit(&Instruction::I64Const(48))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Or)?;
+
+        // page_offset = vaddr & 0xFFFF
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
         
-        // Combine: phys_page + offset
+        // phys_addr = phys_page_base + page_offset
         ctx.emit(&Instruction::I64Add)?;
+
     } else {
-        // i32 version for RV32/memory32
+        // 32-bit implementation (falls back to old logic for now)
         ctx.emit(&Instruction::LocalGet(66))?;
         
         ctx.emit(&Instruction::I32Const(16))?;
@@ -3679,102 +3715,75 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
     l3_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
     let l3_base = l3_table_base.into();
+    let sec_dir_base = security_directory_base.into();
+
     if use_i64 {
-        // Level 3: Extract bits [63:48]
+        // Level 3
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(48))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
-        // Calculate entry address
         ctx.emit(&Instruction::I64Const(3))?;
         ctx.emit(&Instruction::I64Shl)?;
         l3_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
+        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
         
-        // Load L2 table base
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 3,
-            memory_index,
-        }))?;
-        
-        // Level 2: Extract bits [47:32]
+        // Level 2
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(32))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
         ctx.emit(&Instruction::I64Const(3))?;
         ctx.emit(&Instruction::I64Shl)?;
         ctx.emit(&Instruction::I64Add)?;
+        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
         
-        // Load L1 table base
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 3,
-            memory_index,
-        }))?;
-        
-        // Level 1: Extract bits [31:16]
+        // Level 1
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(16))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
         ctx.emit(&Instruction::I64Const(3))?;
         ctx.emit(&Instruction::I64Shl)?;
         ctx.emit(&Instruction::I64Add)?;
+        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?; // page_pointer
         
-        // Load physical page base
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 3,
-            memory_index,
-        }))?;
+        // Security and final address construction
+        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?; // security_index
+        ctx.emit(&Instruction::LocalGet(67))?;
+        ctx.emit(&Instruction::I64Const(16))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::LocalSet(68))?; // page_base_low48
+        ctx.emit(&Instruction::I64Const(3))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, true)?;
+        ctx.emit(&Instruction::I64Add)?;
+        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        ctx.emit(&Instruction::I64Const(48))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::I64Const(48))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Or)?;
         
-        // Extract page offset: bits [15:0]
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
-        // Combine: phys_page + offset
         ctx.emit(&Instruction::I64Add)?;
     } else {
-        // i32 version - simplified for 32-bit addresses
-        ctx.emit(&Instruction::LocalGet(66))?;
-        
-        // Level 1: Extract bits [31:16]
-        ctx.emit(&Instruction::I32Const(16))?;
-        ctx.emit(&Instruction::I32ShrU)?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
-        
-        ctx.emit(&Instruction::I32Const(2))?;
-        ctx.emit(&Instruction::I32Shl)?;
-        l3_base.emit_load(ctx, false)?;
-        ctx.emit(&Instruction::I32WrapI64)?;
-        ctx.emit(&Instruction::I32Add)?;
-        
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
-        
-        // Extract page offset
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
-        
-        ctx.emit(&Instruction::I32Add)?;
+        // simplified for 32-bit, only single level supported in this path
+        multilevel_page_table_mapper_32(ctx, l3_base, sec_dir_base, memory_index, false)?;
     }
     
     Ok(())
@@ -3797,43 +3806,71 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
     page_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
     let pt_base = page_table_base.into();
+    let sec_dir_base = security_directory_base.into();
     if use_i64 {
-        // Get vaddr from local 66
+        // 64-bit vaddr, 32-bit paddr
         ctx.emit(&Instruction::LocalGet(66))?;
         
-        // Extract page number: vaddr >> 16
+        // page_num = vaddr >> 16
         ctx.emit(&Instruction::I64Const(16))?;
         ctx.emit(&Instruction::I64ShrU)?;
         
-        // Multiply by 4 (shift left by 2) for u32 entries
+        // pte_addr = pt_base + (page_num * 4)
         ctx.emit(&Instruction::I64Const(2))?;
         ctx.emit(&Instruction::I64Shl)?;
-        
-        // Add page table base
         pt_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
-        
-        // Load 32-bit physical page base and extend to 64-bit
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
+
+        // page_pointer = [pte_addr] (u32)
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        ctx.emit(&Instruction::LocalTee(67))?; // temp local 67 for page_pointer
         ctx.emit(&Instruction::I64ExtendI32U)?;
+        ctx.emit(&Instruction::LocalSet(68))?; // temp local 68 for page_pointer as u64
+
+        // security_index = page_pointer & 0xFF
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Const(0xFF))?;
+        ctx.emit(&Instruction::I64And)?;
         
-        // Extract page offset from original vaddr: vaddr & 0xFFFF
+        // page_base_low24 = page_pointer >> 8
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Const(8))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::LocalSet(69))?; // temp local 69 for page_base_low24
+
+        // sec_entry_addr = sec_dir_base + (security_index * 4)
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, true)?;
+        ctx.emit(&Instruction::I64Add)?;
+
+        // sec_entry = [sec_entry_addr] (u32)
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
+
+        // page_base_top8 = sec_entry >> 24
+        ctx.emit(&Instruction::I64Const(24))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        // phys_page_base = (page_base_top8 << 24) | page_base_low24
+        ctx.emit(&Instruction::I64Const(24))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::LocalGet(69))?;
+        ctx.emit(&Instruction::I64Or)?;
+
+        // page_offset = vaddr & 0xFFFF
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
-        // Combine: phys_page + offset
+
         ctx.emit(&Instruction::I64Add)?;
+
     } else {
-        // i32 version for RV32/memory32
+        // 32-bit vaddr, 32-bit paddr
         ctx.emit(&Instruction::LocalGet(66))?;
         
         ctx.emit(&Instruction::I32Const(16))?;
@@ -3841,16 +3878,42 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
         
         ctx.emit(&Instruction::I32Const(2))?;
         ctx.emit(&Instruction::I32Shl)?;
-        
         pt_base.emit_load(ctx, false)?;
         ctx.emit(&Instruction::I32Add)?;
         
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
+
+        // security_index = page_pointer & 0xFF
+        ctx.emit(&Instruction::I32Const(0xFF))?;
+        ctx.emit(&Instruction::I32And)?;
+
+        // page_base_low24 = page_pointer >> 8
+        ctx.emit(&Instruction::LocalGet(67))?;
+        ctx.emit(&Instruction::I32Const(8))?;
+        ctx.emit(&Instruction::I32ShrU)?;
+        ctx.emit(&Instruction::LocalSet(68))?; // page_base_low24
+
+        // sec_entry_addr = sec_dir_base + (security_index * 4)
+        ctx.emit(&Instruction::I32Const(2))?;
+        ctx.emit(&Instruction::I32Shl)?;
+        sec_dir_base.emit_load(ctx, false)?;
+        ctx.emit(&Instruction::I32Add)?;
+
+        // sec_entry = [sec_entry_addr]
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
         
+        // page_base_top8 = sec_entry >> 24
+        ctx.emit(&Instruction::I32Const(24))?;
+        ctx.emit(&Instruction::I32ShrU)?;
+        
+        // phys_page_base = (page_base_top8 << 24) | page_base_low24
+        ctx.emit(&Instruction::I32Const(24))?;
+        ctx.emit(&Instruction::I32Shl)?;
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I32Or)?;
+        
+        // page_offset = vaddr & 0xFFFF
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I32Const(0xFFFF))?;
         ctx.emit(&Instruction::I32And)?;
@@ -3878,105 +3941,80 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
 pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
     l3_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
     let l3_base = l3_table_base.into();
+    let sec_dir_base = security_directory_base.into();
+
     if use_i64 {
-        // Level 3: Extract bits [63:48]
+        // Level 3
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(48))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
-        // Calculate entry address (multiply by 4 for u32)
         ctx.emit(&Instruction::I64Const(2))?;
         ctx.emit(&Instruction::I64Shl)?;
         l3_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
-        
-        // Load L2 table base (u32 -> u64)
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
         ctx.emit(&Instruction::I64ExtendI32U)?;
         
-        // Level 2: Extract bits [47:32]
+        // Level 2
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(32))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
         ctx.emit(&Instruction::I64Const(2))?;
         ctx.emit(&Instruction::I64Shl)?;
         ctx.emit(&Instruction::I64Add)?;
-        
-        // Load L1 table base (u32 -> u64)
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
         ctx.emit(&Instruction::I64ExtendI32U)?;
         
-        // Level 1: Extract bits [31:16]
+        // Level 1
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(16))?;
         ctx.emit(&Instruction::I64ShrU)?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
         ctx.emit(&Instruction::I64Const(2))?;
         ctx.emit(&Instruction::I64Shl)?;
         ctx.emit(&Instruction::I64Add)?;
-        
-        // Load physical page base (u32 -> u64)
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
         ctx.emit(&Instruction::I64ExtendI32U)?;
+        ctx.emit(&Instruction::LocalSet(68))?;
+
+        // Security and final address construction
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Const(0xFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        ctx.emit(&Instruction::LocalGet(68))?;
+        ctx.emit(&Instruction::I64Const(8))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::LocalSet(69))?;
+        ctx.emit(&Instruction::I64Const(3))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, true)?;
+        ctx.emit(&Instruction::I64Add)?;
+        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        ctx.emit(&Instruction::I64Const(56))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::I64Const(24))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::LocalGet(69))?;
+        ctx.emit(&Instruction::I64Or)?;
         
-        // Extract page offset: bits [15:0]
         ctx.emit(&Instruction::LocalGet(66))?;
         ctx.emit(&Instruction::I64Const(0xFFFF))?;
         ctx.emit(&Instruction::I64And)?;
-        
-        // Combine: phys_page + offset
         ctx.emit(&Instruction::I64Add)?;
     } else {
-        // i32 version - simplified for 32-bit addresses
-        ctx.emit(&Instruction::LocalGet(66))?;
-        
-        // Level 1: Extract bits [31:16]
-        ctx.emit(&Instruction::I32Const(16))?;
-        ctx.emit(&Instruction::I32ShrU)?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
-        
-        ctx.emit(&Instruction::I32Const(2))?;
-        ctx.emit(&Instruction::I32Shl)?;
-        l3_base.emit_load(ctx, false)?;
-        ctx.emit(&Instruction::I32WrapI64)?;
-        ctx.emit(&Instruction::I32Add)?;
-        
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
-            offset: 0,
-            align: 2,
-            memory_index,
-        }))?;
-        
-        // Extract page offset
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
-        
-        ctx.emit(&Instruction::I32Add)?;
+        // 32-bit vaddr, 32-bit paddr
+        standard_page_table_mapper_32(ctx, l3_base, sec_dir_base, memory_index, false)?;
     }
     
     Ok(())
