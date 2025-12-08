@@ -141,22 +141,7 @@ where
     }
 }
 
-impl<'a, E, F: InstructionSink<E>> HintContext<'a, E, F> {
-    /// Emit a WebAssembly instruction
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use speet_riscv::HintContext;
-    /// # use wasm_encoder::Instruction;
-    /// fn my_callback(hint: &speet_riscv::HintInfo, ctx: &mut HintContext) {
-    ///     // Emit a NOP or other instruction based on the hint
-    ///     ctx.emit(&Instruction::Nop).ok();
-    /// }
-    /// ```
-    pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
-        self.reactor.feed(instruction)
-    }
-}
+
 
 /// Trait for HINT instruction callbacks
 ///
@@ -3716,6 +3701,207 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
             align: 3,
             memory_index,
         }))?;
+        
+        // Extract page offset: bits [15:0]
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        // Combine: phys_page + offset
+        ctx.emit(&Instruction::I64Add)?;
+    } else {
+        // i32 version - simplified for 32-bit addresses
+        ctx.emit(&Instruction::LocalGet(66))?;
+        
+        // Level 1: Extract bits [31:16]
+        ctx.emit(&Instruction::I32Const(16))?;
+        ctx.emit(&Instruction::I32ShrU)?;
+        ctx.emit(&Instruction::I32Const(0xFFFF))?;
+        ctx.emit(&Instruction::I32And)?;
+        
+        ctx.emit(&Instruction::I32Const(2))?;
+        ctx.emit(&Instruction::I32Shl)?;
+        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        ctx.emit(&Instruction::I32WrapI64)?;
+        ctx.emit(&Instruction::I32Add)?;
+        
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        
+        // Extract page offset
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I32Const(0xFFFF))?;
+        ctx.emit(&Instruction::I32And)?;
+        
+        ctx.emit(&Instruction::I32Add)?;
+    }
+    
+    Ok(())
+}
+
+/// Single-level page table mapper with 32-bit physical addresses
+///
+/// This variant uses 4-byte page table entries for 32-bit physical addresses,
+/// supporting up to 4 GiB of physical memory while maintaining 64-bit virtual addresses.
+///
+/// # Arguments
+/// - `ctx`: Callback context for emitting WebAssembly instructions
+/// - `page_table_base`: Base address of page table
+/// - `memory_index`: Memory index to use
+/// - `use_i64`: Whether to use i64 addressing (true for memory64/RV64)
+///
+/// # Stack State
+/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
+/// - Output: Physical address (same type as input)
+pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
+    ctx: &mut CallbackContext<E, F>,
+    page_table_base: u64,
+    memory_index: u32,
+    use_i64: bool,
+) -> Result<(), E> {
+    if use_i64 {
+        // Get vaddr from local 66
+        ctx.emit(&Instruction::LocalGet(66))?;
+        
+        // Extract page number: vaddr >> 16
+        ctx.emit(&Instruction::I64Const(16))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        
+        // Multiply by 4 (shift left by 2) for u32 entries
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        
+        // Add page table base
+        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
+        ctx.emit(&Instruction::I64Add)?;
+        
+        // Load 32-bit physical page base and extend to 64-bit
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
+        
+        // Extract page offset from original vaddr: vaddr & 0xFFFF
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        // Combine: phys_page + offset
+        ctx.emit(&Instruction::I64Add)?;
+    } else {
+        // i32 version for RV32/memory32
+        ctx.emit(&Instruction::LocalGet(66))?;
+        
+        ctx.emit(&Instruction::I32Const(16))?;
+        ctx.emit(&Instruction::I32ShrU)?;
+        
+        ctx.emit(&Instruction::I32Const(2))?;
+        ctx.emit(&Instruction::I32Shl)?;
+        
+        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
+        ctx.emit(&Instruction::I32WrapI64)?;
+        ctx.emit(&Instruction::I32Add)?;
+        
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I32Const(0xFFFF))?;
+        ctx.emit(&Instruction::I32And)?;
+        
+        ctx.emit(&Instruction::I32Add)?;
+    }
+    
+    Ok(())
+}
+
+/// Multi-level page table mapper with 32-bit physical addresses
+///
+/// This variant uses 4-byte page table entries for 32-bit physical addresses,
+/// supporting up to 4 GiB of physical memory in a 3-level page table structure.
+///
+/// # Arguments
+/// - `ctx`: Callback context for emitting WebAssembly instructions
+/// - `l3_table_base`: Base address of level 3 page table
+/// - `memory_index`: Memory index to use
+/// - `use_i64`: Whether to use i64 addressing
+///
+/// # Stack State
+/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
+/// - Output: Physical address (same type as input)
+pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
+    ctx: &mut CallbackContext<E, F>,
+    l3_table_base: u64,
+    memory_index: u32,
+    use_i64: bool,
+) -> Result<(), E> {
+    if use_i64 {
+        // Level 3: Extract bits [63:48]
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I64Const(48))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        // Calculate entry address (multiply by 4 for u32)
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        ctx.emit(&Instruction::I64Add)?;
+        
+        // Load L2 table base (u32 -> u64)
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
+        
+        // Level 2: Extract bits [47:32]
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I64Const(32))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::I64Add)?;
+        
+        // Load L1 table base (u32 -> u64)
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
+        
+        // Level 1: Extract bits [31:16]
+        ctx.emit(&Instruction::LocalGet(66))?;
+        ctx.emit(&Instruction::I64Const(16))?;
+        ctx.emit(&Instruction::I64ShrU)?;
+        ctx.emit(&Instruction::I64Const(0xFFFF))?;
+        ctx.emit(&Instruction::I64And)?;
+        
+        ctx.emit(&Instruction::I64Const(2))?;
+        ctx.emit(&Instruction::I64Shl)?;
+        ctx.emit(&Instruction::I64Add)?;
+        
+        // Load physical page base (u32 -> u64)
+        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index,
+        }))?;
+        ctx.emit(&Instruction::I64ExtendI32U)?;
         
         // Extract page offset: bits [15:0]
         ctx.emit(&Instruction::LocalGet(66))?;
