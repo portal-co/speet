@@ -3532,6 +3532,43 @@ enum FsgnjOp {
     Sgnjx, // XOR signs of src1 and src2
 }
 
+/// Helper for specifying page table base address location
+pub enum PageTableBase {
+    /// Static constant address
+    Constant(u64),
+    /// Runtime value stored in a WebAssembly local variable
+    Local(u32),
+    /// Runtime value stored in a WebAssembly global variable  
+    Global(u32),
+}
+
+impl From<u64> for PageTableBase {
+    fn from(c: u64) -> Self {
+        PageTableBase::Constant(c)
+    }
+}
+
+impl PageTableBase {
+    /// Emit instructions to get the page table base value onto the stack
+    fn emit_load<E, F: InstructionSink<E>>(&self, ctx: &mut CallbackContext<E, F>, use_i64: bool) -> Result<(), E> {
+        match self {
+            PageTableBase::Constant(addr) => {
+                if use_i64 {
+                    ctx.emit(&Instruction::I64Const(*addr as i64))?;
+                } else {
+                    ctx.emit(&Instruction::I32Const(*addr as i32))?;
+                }
+            }
+            PageTableBase::Local(idx) => {
+                ctx.emit(&Instruction::LocalGet(*idx))?;
+            }
+            PageTableBase::Global(idx) => {
+                ctx.emit(&Instruction::GlobalGet(*idx))?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Standard page table mapper for 64KB single-level paging
 ///
@@ -3546,7 +3583,7 @@ enum FsgnjOp {
 ///
 /// # Arguments
 /// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `page_table_base`: Base address of page table in WebAssembly memory
+/// - `page_table_base`: Page table base (constant u64, local, or global)
 /// - `memory_index`: Memory index to use for loads (usually 0)
 /// - `use_i64`: Whether to use i64 addressing (true for memory64/RV64)
 ///
@@ -3555,10 +3592,11 @@ enum FsgnjOp {
 /// - Output: Physical address (same type as input)
 pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
-    page_table_base: u64,
+    page_table_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
+    let pt_base = page_table_base.into();
     if use_i64 {
         // Get vaddr from local 66
         ctx.emit(&Instruction::LocalGet(66))?;
@@ -3572,7 +3610,7 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
         ctx.emit(&Instruction::I64Shl)?;
         
         // Add page table base
-        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
+        pt_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
         
         // Load physical page base from page table
@@ -3599,8 +3637,7 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
         ctx.emit(&Instruction::I32Const(3))?;
         ctx.emit(&Instruction::I32Shl)?;
         
-        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
-        ctx.emit(&Instruction::I32WrapI64)?;
+        pt_base.emit_load(ctx, false)?;
         ctx.emit(&Instruction::I32Add)?;
         
         ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
@@ -3632,7 +3669,7 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 ///
 /// # Arguments
 /// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `l3_table_base`: Base address of level 3 page table
+/// - `l3_table_base`: Base address of level 3 page table (constant u64, local, or global)
 /// - `memory_index`: Memory index to use for loads (usually 0)
 /// - `use_i64`: Whether to use i64 addressing
 ///
@@ -3641,10 +3678,11 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 /// - Output: Physical address (same type as input)
 pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
-    l3_table_base: u64,
+    l3_table_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
+    let l3_base = l3_table_base.into();
     if use_i64 {
         // Level 3: Extract bits [63:48]
         ctx.emit(&Instruction::LocalGet(66))?;
@@ -3656,7 +3694,7 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
         // Calculate entry address
         ctx.emit(&Instruction::I64Const(3))?;
         ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        l3_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
         
         // Load L2 table base
@@ -3721,7 +3759,7 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
         
         ctx.emit(&Instruction::I32Const(2))?;
         ctx.emit(&Instruction::I32Shl)?;
-        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        l3_base.emit_load(ctx, false)?;
         ctx.emit(&Instruction::I32WrapI64)?;
         ctx.emit(&Instruction::I32Add)?;
         
@@ -3749,7 +3787,7 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 ///
 /// # Arguments
 /// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `page_table_base`: Base address of page table
+/// - `page_table_base`: Base address of page table (constant u64, local, or global)
 /// - `memory_index`: Memory index to use
 /// - `use_i64`: Whether to use i64 addressing (true for memory64/RV64)
 ///
@@ -3758,10 +3796,11 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 /// - Output: Physical address (same type as input)
 pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
-    page_table_base: u64,
+    page_table_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
+    let pt_base = page_table_base.into();
     if use_i64 {
         // Get vaddr from local 66
         ctx.emit(&Instruction::LocalGet(66))?;
@@ -3775,7 +3814,7 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
         ctx.emit(&Instruction::I64Shl)?;
         
         // Add page table base
-        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
+        pt_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
         
         // Load 32-bit physical page base and extend to 64-bit
@@ -3803,8 +3842,7 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
         ctx.emit(&Instruction::I32Const(2))?;
         ctx.emit(&Instruction::I32Shl)?;
         
-        ctx.emit(&Instruction::I64Const(page_table_base as i64))?;
-        ctx.emit(&Instruction::I32WrapI64)?;
+        pt_base.emit_load(ctx, false)?;
         ctx.emit(&Instruction::I32Add)?;
         
         ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
@@ -3839,10 +3877,11 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
 /// - Output: Physical address (same type as input)
 pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
     ctx: &mut CallbackContext<E, F>,
-    l3_table_base: u64,
+    l3_table_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
 ) -> Result<(), E> {
+    let l3_base = l3_table_base.into();
     if use_i64 {
         // Level 3: Extract bits [63:48]
         ctx.emit(&Instruction::LocalGet(66))?;
@@ -3854,7 +3893,7 @@ pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
         // Calculate entry address (multiply by 4 for u32)
         ctx.emit(&Instruction::I64Const(2))?;
         ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        l3_base.emit_load(ctx, true)?;
         ctx.emit(&Instruction::I64Add)?;
         
         // Load L2 table base (u32 -> u64)
@@ -3922,7 +3961,7 @@ pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
         
         ctx.emit(&Instruction::I32Const(2))?;
         ctx.emit(&Instruction::I32Shl)?;
-        ctx.emit(&Instruction::I64Const(l3_table_base as i64))?;
+        l3_base.emit_load(ctx, false)?;
         ctx.emit(&Instruction::I32WrapI64)?;
         ctx.emit(&Instruction::I32Add)?;
         

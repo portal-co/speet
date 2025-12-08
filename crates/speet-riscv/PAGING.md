@@ -19,8 +19,19 @@ All callbacks use `CallbackContext` for consistency.
 
 **Integration:**
 ```rust
+// With static constant
 recompiler.set_mapper_callback(&mut |ctx| {
-    standard_page_table_mapper(ctx, pt_base, 0, use_i64)
+    standard_page_table_mapper(ctx, 0x1000000u64, 0, use_i64)
+});
+
+// With runtime value from local variable (e.g., local 67)
+recompiler.set_mapper_callback(&mut |ctx| {
+    standard_page_table_mapper(ctx, PageTableBase::Local(67), 0, use_i64)
+});
+
+// With runtime value from global variable (e.g., global 0)
+recompiler.set_mapper_callback(&mut |ctx| {
+    standard_page_table_mapper(ctx, PageTableBase::Global(0), 0, use_i64)
 });
 ```
 
