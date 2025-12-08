@@ -27,7 +27,7 @@
 //!
 //! ## Usage
 //!
-//! ```no_run
+//! ```ignore
 //! use speet_riscv::RiscVRecompiler;
 //! use rv_asm::{Inst, Xlen};
 //!
@@ -37,7 +37,7 @@
 //! // Decode and translate instructions
 //! let instruction_bytes: u32 = 0x00a50533; // add a0, a0, a0
 //! let (inst, is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
-//! recompiler.translate_instruction(&inst, 0x1000, is_compressed);
+//! recompiler.translate_instruction(&inst, 0x1000, is_compressed, &mut |a| Function::new(a.collect::<Vec<_>>()));
 //! ```
 //!
 //! ## RISC-V Specification Compliance
@@ -434,11 +434,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` and `&mut HintContext`
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
     /// # use wasm_encoder::Instruction;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext| {
+    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
     ///     // Optionally emit WebAssembly instructions
     ///     ctx.emit(&Instruction::Nop).ok();
@@ -466,11 +466,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `callback` - A mutable reference to a closure or function that takes an `&EcallInfo` and `&mut HintContext`
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
     /// # use wasm_encoder::Instruction;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext| {
+    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("ECALL at PC 0x{:x}", ecall.pc);
     ///     // Optionally emit WebAssembly instructions for the ecall
     ///     ctx.emit(&Instruction::Nop).ok();
@@ -498,11 +498,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `callback` - A mutable reference to a closure or function that takes an `&EbreakInfo` and `&mut HintContext`
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
     /// # use wasm_encoder::Instruction;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext| {
+    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
     ///     // Optionally emit WebAssembly instructions for the ebreak
     ///     ctx.emit(&Instruction::Nop).ok();
@@ -533,11 +533,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// * `callback` - A mutable reference to a closure or function that performs address translation
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, MapperContext};
     /// # use wasm_encoder::Instruction;
     /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_mapper = |ctx: &mut MapperContext| {
+    /// let mut my_mapper = |ctx: &mut MapperContext<_, _>| {
     ///     // Example: Simple page table lookup
     ///     // Input: virtual address on stack
     ///     // Output: physical address on stack

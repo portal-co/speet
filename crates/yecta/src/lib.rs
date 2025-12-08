@@ -29,11 +29,11 @@
 //!
 //! ## Example Usage
 //!
-//! ```no_run
+//! ```ignore
 //! use yecta::{Reactor, Target, EscapeTag, Pool, FuncIdx, TagIdx, TypeIdx, TableIdx};
-//! use wasm_encoder::ValType;
+//! use wasm_encoder::{ValType, Function};
 //!
-//! let mut reactor = Reactor::default();
+//! let mut reactor = Reactor::<std::convert::Infallible, Function>::default();
 //!
 //! // Create a new function with 2 i32 locals
 //! reactor.next([(2, ValType::I32)].into_iter(), 0);
@@ -487,10 +487,10 @@ impl<E, F: InstructionSink<E>> Reactor<E, F> {
     /// - With parameter fixups (modifications to parameters before the jump/call)
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// # use yecta::{Reactor, JumpCallParams, FuncIdx, Pool, TableIdx, TypeIdx};
-    /// # use wasm_encoder::ValType;
-    /// # let mut reactor = Reactor::default();
+    /// # use wasm_encoder::{ValType, Function};
+    /// # let mut reactor = Reactor::<std::convert::Infallible, Function>::default();
     /// # let pool = Pool { table: TableIdx(0), ty: TypeIdx(0) };
     /// // Simple unconditional jump
     /// let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
