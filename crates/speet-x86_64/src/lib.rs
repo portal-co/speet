@@ -7,9 +7,112 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wax_core::build::InstructionSink;
 use wasm_encoder::Instruction;
-use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, TableIdx, TypeIdx};
+use wax_core::build::InstructionSource;
+
 
 use iced_x86::{Decoder, DecoderOptions, Instruction as IxInst, Mnemonic, Register, OpKind};
+
+#[derive(Clone, Copy)]
+enum ConditionType {
+    ZF, NZF, SF_NE_OF, ZF_OR_SF_NE_OF, NZF_AND_SF_EQ_OF, SF_EQ_OF,
+    CF, CF_OR_ZF, NCF_AND_NZF, NCF, SF, NSF, OF, NOF, PF, NPF,
+}
+
+// Struct to represent a condition that can be used as a Snippet
+#[derive(Clone, Copy)]
+struct ConditionSnippet {
+    condition_type: ConditionType,
+}
+
+impl<E> wax_core::build::InstructionOperatorSource<E> for ConditionSnippet {
+    fn emit(&self, sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_)) -> Result<(), E> {
+        // For simple structs, we can delegate to emit_instruction
+        self.emit_instruction(sink)
+    }
+}
+
+impl<E> wax_core::build::InstructionSource<E> for ConditionSnippet {
+    fn emit_instruction(&self, sink: &mut (dyn wax_core::build::InstructionSink<E> + '_)) -> Result<(), E> {
+        match self.condition_type {
+            ConditionType::ZF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+            }
+            ConditionType::NZF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+            ConditionType::SF_NE_OF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+                sink.instruction(&Instruction::I32Xor)?;
+            }
+            ConditionType::ZF_OR_SF_NE_OF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+                sink.instruction(&Instruction::I32Xor)?;
+                sink.instruction(&Instruction::I32Or)?;
+            }
+            ConditionType::NZF_AND_SF_EQ_OF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+                sink.instruction(&Instruction::I32Xor)?;
+                sink.instruction(&Instruction::I32Eqz)?;
+                sink.instruction(&Instruction::I32And)?;
+            }
+            ConditionType::SF_EQ_OF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+                sink.instruction(&Instruction::I32Xor)?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+            ConditionType::CF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL))?;
+            }
+            ConditionType::CF_OR_ZF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL))?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+                sink.instruction(&Instruction::I32Or)?;
+            }
+            ConditionType::NCF_AND_NZF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+                sink.instruction(&Instruction::I32And)?;
+            }
+            ConditionType::NCF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+            ConditionType::SF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+            }
+            ConditionType::NSF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+            ConditionType::OF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+            }
+            ConditionType::NOF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+            ConditionType::PF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::PF_LOCAL))?;
+            }
+            ConditionType::NPF => {
+                sink.instruction(&Instruction::LocalGet(X86Recompiler::<E, wasm_encoder::Function>::PF_LOCAL))?;
+                sink.instruction(&Instruction::I32Eqz)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Simple x86_64 recompiler for integer ops
 pub struct X86Recompiler<E, F: InstructionSink<E>> {
@@ -49,8 +152,15 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
 
     fn init_function(&mut self, _rip: u64, inst_len: u32, num_temps: u32, f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, wasm_encoder::ValType)> + '_)) -> F + '_)) {
         // For simplicity, model 16 general purpose 64-bit regs as locals 0-15
-        // PC in local 16 (i32), temps after that
-        let locals = [ (16, wasm_encoder::ValType::I64), (1, wasm_encoder::ValType::I32), (num_temps, wasm_encoder::ValType::I64) ];
+        // PC in local 16 (i32)
+        // Condition flags: ZF(17), SF(18), CF(19), OF(20), PF(21) as i32
+        // Temps after that
+        let locals = [
+            (16, wasm_encoder::ValType::I64),  // registers
+            (1, wasm_encoder::ValType::I32),   // PC
+            (5, wasm_encoder::ValType::I32),   // condition flags: ZF, SF, CF, OF, PF
+            (num_temps, wasm_encoder::ValType::I64)  // temps
+        ];
         // Pass instruction length to yecta so fallthrough is controlled by instruction size
         self.reactor.next_with(f(&mut locals.into_iter()), inst_len);
     }
@@ -150,6 +260,97 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
     fn emit_i64_shl(&mut self) -> Result<(), E> { self.reactor.feed(&Instruction::I64Shl) }
     fn emit_i64_shr_u(&mut self) -> Result<(), E> { self.reactor.feed(&Instruction::I64ShrU) }
     fn emit_i64_shr_s(&mut self) -> Result<(), E> { self.reactor.feed(&Instruction::I64ShrS) }
+
+    // Condition flag helpers
+    const ZF_LOCAL: u32 = 17;
+    const SF_LOCAL: u32 = 18;
+    const CF_LOCAL: u32 = 19;
+    const OF_LOCAL: u32 = 20;
+    const PF_LOCAL: u32 = 21;
+
+    fn set_zf(&mut self, value: bool) -> Result<(), E> {
+        self.reactor.feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.feed(&Instruction::LocalSet(Self::ZF_LOCAL))
+    }
+
+    fn set_sf(&mut self, value: bool) -> Result<(), E> {
+        self.reactor.feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.feed(&Instruction::LocalSet(Self::SF_LOCAL))
+    }
+
+    fn set_cf(&mut self, value: bool) -> Result<(), E> {
+        self.reactor.feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.feed(&Instruction::LocalSet(Self::CF_LOCAL))
+    }
+
+    fn set_of(&mut self, value: bool) -> Result<(), E> {
+        self.reactor.feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.feed(&Instruction::LocalSet(Self::OF_LOCAL))
+    }
+
+    fn set_pf(&mut self, value: bool) -> Result<(), E> {
+        self.reactor.feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.feed(&Instruction::LocalSet(Self::PF_LOCAL))
+    }
+
+
+
+    // Helper to compute parity flag (even number of 1 bits in lowest byte)
+    fn compute_parity(&mut self) -> Result<(), E> {
+        // Assume value is on stack (i64)
+        // Extract lowest byte: value & 0xFF
+        self.reactor.feed(&Instruction::I64Const(0xFF))?;
+        self.reactor.feed(&Instruction::I64And)?;
+        // Count bits: use popcnt if available, otherwise simulate
+        // For simplicity, we'll implement a basic parity check
+        // This is a simplified version - real parity counts all bits in lowest byte
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        // Simple parity: check if number of 1s is even
+        // For now, just set to 0 (even parity) - this is a simplification
+        self.reactor.feed(&Instruction::Drop)?;
+        self.reactor.feed(&Instruction::I32Const(0))?; // Assume even parity for simplicity
+        self.reactor.feed(&Instruction::LocalSet(Self::PF_LOCAL))
+    }
+
+    // Helper to set flags after arithmetic operation
+    fn set_flags_after_operation(&mut self, result: i64, operand1: i64, operand2: i64, is_subtraction: bool) -> Result<(), E> {
+        // ZF: result == 0
+        self.set_zf(result == 0)?;
+
+        // SF: result < 0 (for signed)
+        self.set_sf(result < 0)?;
+
+        // For CF and OF, we need to detect carry/borrow and overflow
+        // This is simplified - real implementation would need proper overflow detection
+
+        // CF: carry flag (simplified)
+        if is_subtraction {
+            // For subtraction: CF if borrow occurred (operand1 < operand2 for unsigned)
+            self.set_cf((operand1 as u64) < (operand2 as u64))?;
+        } else {
+            // For addition: CF if result < operand1 (unsigned overflow)
+            self.set_cf((result as u64) < (operand1 as u64))?;
+        }
+
+        // OF: overflow flag (simplified - check if sign changed unexpectedly)
+        let op1_sign = operand1 < 0;
+        let op2_sign = operand2 < 0;
+        let result_sign = result < 0;
+        if is_subtraction {
+            // For subtraction: overflow if (op1 positive, op2 negative, result negative) or (op1 negative, op2 positive, result positive)
+            let overflow = (op1_sign && !op2_sign && !result_sign) || (!op1_sign && op2_sign && result_sign);
+            self.set_of(overflow)?;
+        } else {
+            // For addition: overflow if both operands same sign but result different sign
+            let overflow = (op1_sign == op2_sign) && (op1_sign != result_sign);
+            self.set_of(overflow)?;
+        }
+
+        // PF: parity (simplified)
+        self.compute_parity()?;
+
+        Ok(())
+    }
 
     fn emit_memory_load(&mut self, size_bits: u32, signed: bool) -> Result<(), E> {
         use wasm_encoder::MemArg;
@@ -609,8 +810,27 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                         } else { Ok(None) }
                     } else { Ok(None) }
                 },
-                _ => Ok(None),
-            })?;
+                 Mnemonic::Test => self.handle_test(&inst),
+                 Mnemonic::Cmp => self.handle_cmp(&inst),
+                 Mnemonic::Jmp => self.handle_jmp(&inst),
+                 Mnemonic::Je => self.handle_conditional_jump(&inst, ConditionType::ZF),
+                 Mnemonic::Jne => self.handle_conditional_jump(&inst, ConditionType::NZF),
+                 Mnemonic::Jl => self.handle_conditional_jump(&inst, ConditionType::SF_NE_OF),
+                 Mnemonic::Jle => self.handle_conditional_jump(&inst, ConditionType::ZF_OR_SF_NE_OF),
+                 Mnemonic::Jg => self.handle_conditional_jump(&inst, ConditionType::NZF_AND_SF_EQ_OF),
+                 Mnemonic::Jge => self.handle_conditional_jump(&inst, ConditionType::SF_EQ_OF),
+                 Mnemonic::Jb => self.handle_conditional_jump(&inst, ConditionType::CF),
+                 Mnemonic::Jbe => self.handle_conditional_jump(&inst, ConditionType::CF_OR_ZF),
+                 Mnemonic::Ja => self.handle_conditional_jump(&inst, ConditionType::NCF_AND_NZF),
+                 Mnemonic::Jae => self.handle_conditional_jump(&inst, ConditionType::NCF),
+                 Mnemonic::Js => self.handle_conditional_jump(&inst, ConditionType::SF),
+                 Mnemonic::Jns => self.handle_conditional_jump(&inst, ConditionType::NSF),
+                 Mnemonic::Jo => self.handle_conditional_jump(&inst, ConditionType::OF),
+                 Mnemonic::Jno => self.handle_conditional_jump(&inst, ConditionType::NOF),
+                 Mnemonic::Jp => self.handle_conditional_jump(&inst, ConditionType::PF),
+                 Mnemonic::Jnp => self.handle_conditional_jump(&inst, ConditionType::NPF),
+                 _ => Ok(None),
+             })?;
 
             // If handler returned None (undecidable operands), emit unreachable
             if undecidable_option.is_none() {
@@ -824,6 +1044,237 @@ fn handle_binary<T>(&mut self, inst: &IxInst, mut cb: T) -> Result<Option<()>, E
 
         Ok(Some(()))
     }
+
+    fn handle_test(&mut self, inst: &IxInst) -> Result<Option<()>, E> {
+        // TEST performs bitwise AND and sets flags, but doesn't store result
+        let src = match inst.op1_kind() {
+            OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => {
+                Operand::Imm(inst.immediate64() as i64)
+            }
+            OpKind::Register => {
+                if let Some((r_local, r_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) {
+                    Operand::RegWithSize(r_local, r_size, bit)
+                } else { return Ok(None); }
+            }
+            OpKind::Memory => { return Ok(None); } // Memory operands not supported yet
+            _ => return Ok(None),
+        };
+
+        // Get destination (must be register for TEST)
+        let dst_info = match inst.op0_kind() {
+            OpKind::Register => Self::resolve_reg(inst.op0_register()),
+            _ => None,
+        };
+
+        if dst_info.is_none() { return Ok(None); }
+        let (dst_local, dst_size, _dst_zero_ext32, dst_bit_offset) = dst_info.unwrap();
+
+        // Get dst value
+        self.reactor.feed(&Instruction::LocalGet(dst_local))?;
+        if dst_bit_offset > 0 {
+            self.emit_mask_shift_for_read(dst_size, dst_bit_offset)?;
+        }
+
+        // Get src value
+        match src {
+            Operand::Imm(i) => { self.emit_i64_const(i)?; }
+            Operand::Reg(r) => { self.reactor.feed(&Instruction::LocalGet(r))?; }
+            Operand::RegWithSize(r, sz, bit) => {
+                self.reactor.feed(&Instruction::LocalGet(r))?;
+                if bit > 0 { self.emit_mask_shift_for_read(sz, bit)?; }
+            }
+        }
+
+        // Perform AND
+        self.emit_i64_and()?;
+
+        // Store result temporarily and set flags
+        self.reactor.feed(&Instruction::LocalTee(22))?; // temp = result, result still on stack
+
+        // ZF: result == 0
+        self.reactor.feed(&Instruction::I64Const(0))?;
+        self.reactor.feed(&Instruction::I64Eq)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::ZF_LOCAL))?;
+
+        // SF: result < 0
+        self.reactor.feed(&Instruction::LocalGet(22))?;
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::I32Const(1))?;
+        self.reactor.feed(&Instruction::I32And)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::SF_LOCAL))?;
+
+        // CF and OF are always cleared for TEST
+        self.set_cf(false)?;
+        self.set_of(false)?;
+
+        // PF: parity of lowest byte
+        self.reactor.feed(&Instruction::LocalGet(22))?;
+        self.reactor.feed(&Instruction::I64Const(0xFF))?;
+        self.reactor.feed(&Instruction::I64And)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        // Simple parity check - count bits (simplified)
+        self.reactor.feed(&Instruction::I32Popcnt)?;
+        self.reactor.feed(&Instruction::I32Const(1))?;
+        self.reactor.feed(&Instruction::I32And)?; // 1 if odd parity, 0 if even
+        self.reactor.feed(&Instruction::I32Eqz)?; // 1 if even parity, 0 if odd
+        self.reactor.feed(&Instruction::LocalSet(Self::PF_LOCAL))?;
+
+        Ok(Some(()))
+    }
+
+    fn handle_cmp(&mut self, inst: &IxInst) -> Result<Option<()>, E> {
+        // CMP performs subtraction and sets flags, but doesn't store result
+        let src = match inst.op1_kind() {
+            OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => {
+                Operand::Imm(inst.immediate64() as i64)
+            }
+            OpKind::Register => {
+                if let Some((r_local, r_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) {
+                    Operand::RegWithSize(r_local, r_size, bit)
+                } else { return Ok(None); }
+            }
+            OpKind::Memory => { return Ok(None); } // Memory operands not supported yet
+            _ => return Ok(None),
+        };
+
+        // Get destination
+        let dst_info = match inst.op0_kind() {
+            OpKind::Register => Self::resolve_reg(inst.op0_register()),
+            OpKind::Memory => None, // Memory destinations not supported yet
+            _ => None,
+        };
+
+        if dst_info.is_none() { return Ok(None); }
+        let (dst_local, dst_size, _dst_zero_ext32, dst_bit_offset) = dst_info.unwrap();
+
+        // Get dst value
+        self.reactor.feed(&Instruction::LocalGet(dst_local))?;
+        if dst_bit_offset > 0 {
+            self.emit_mask_shift_for_read(dst_size, dst_bit_offset)?;
+        }
+
+        // Get src value
+        match src {
+            Operand::Imm(i) => { self.emit_i64_const(i)?; }
+            Operand::Reg(r) => { self.reactor.feed(&Instruction::LocalGet(r))?; }
+            Operand::RegWithSize(r, sz, bit) => {
+                self.reactor.feed(&Instruction::LocalGet(r))?;
+                if bit > 0 { self.emit_mask_shift_for_read(sz, bit)?; }
+            }
+        }
+
+        // Store operands for flag computation
+        self.reactor.feed(&Instruction::LocalSet(23))?; // src
+        self.reactor.feed(&Instruction::LocalSet(22))?; // dst
+
+        // Compute result = dst - src
+        self.reactor.feed(&Instruction::LocalGet(22))?;
+        self.reactor.feed(&Instruction::LocalGet(23))?;
+        self.emit_i64_sub()?;
+
+        // Store result and set flags
+        self.reactor.feed(&Instruction::LocalTee(24))?; // result
+
+        // ZF: result == 0
+        self.reactor.feed(&Instruction::I64Const(0))?;
+        self.reactor.feed(&Instruction::I64Eq)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::ZF_LOCAL))?;
+
+        // SF: result < 0
+        self.reactor.feed(&Instruction::LocalGet(24))?;
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::I32Const(1))?;
+        self.reactor.feed(&Instruction::I32And)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::SF_LOCAL))?;
+
+        // CF: for subtraction, CF if dst < src (unsigned)
+        self.reactor.feed(&Instruction::LocalGet(22))?;
+        self.reactor.feed(&Instruction::LocalGet(23))?;
+        self.reactor.feed(&Instruction::I64LtU)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::CF_LOCAL))?;
+
+        // OF: overflow for subtraction
+        // Overflow occurs when operands have different signs and result has different sign from dst
+        self.reactor.feed(&Instruction::LocalGet(22))?; // dst
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::LocalGet(23))?; // src
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I32Xor)?; // 1 if different signs
+        self.reactor.feed(&Instruction::LocalGet(22))?; // dst
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::LocalGet(24))?; // result
+        self.reactor.feed(&Instruction::I64Const(63))?;
+        self.reactor.feed(&Instruction::I64ShrS)?;
+        self.reactor.feed(&Instruction::I32Xor)?; // 1 if dst and result have different signs
+        self.reactor.feed(&Instruction::I32And)?; // OF set
+        self.reactor.feed(&Instruction::LocalSet(Self::OF_LOCAL))?;
+
+        // PF: parity of lowest byte
+        self.reactor.feed(&Instruction::LocalGet(24))?;
+        self.reactor.feed(&Instruction::I64Const(0xFF))?;
+        self.reactor.feed(&Instruction::I64And)?;
+        self.reactor.feed(&Instruction::I32WrapI64)?;
+        self.reactor.feed(&Instruction::I32Popcnt)?;
+        self.reactor.feed(&Instruction::I32Const(1))?;
+        self.reactor.feed(&Instruction::I32And)?;
+        self.reactor.feed(&Instruction::I32Eqz)?;
+        self.reactor.feed(&Instruction::LocalSet(Self::PF_LOCAL))?;
+
+        Ok(Some(()))
+    }
+
+    fn handle_jmp(&mut self, inst: &IxInst) -> Result<Option<()>, E> {
+        // JMP target
+        let target = match inst.op0_kind() {
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
+                let offset = inst.near_branch64() as i64;
+                let current_rip = inst.ip() as i64;
+                (current_rip + offset) as u64
+            }
+            _ => return Ok(None),
+        };
+
+        let target_func_idx = self.rip_to_func_idx(target);
+        let pool = self.pool;
+
+        // Unconditional jump
+        self.reactor.jmp(target_func_idx, 0)?; // No params for now
+
+        Ok(Some(()))
+    }
+
+    fn handle_conditional_jump(&mut self, inst: &IxInst, condition_type: ConditionType) -> Result<Option<()>, E> {
+        let target = match inst.op0_kind() {
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
+                let offset = inst.near_branch64() as i64;
+                let current_rip = inst.ip() as i64;
+                (current_rip + offset) as u64
+            }
+            _ => return Ok(None),
+        };
+
+        let target_func_idx = self.rip_to_func_idx(target);
+        let pool = self.pool;
+
+        // Use the proper yecta conditional jump API
+        let condition = ConditionSnippet { condition_type };
+        let params = JumpCallParams::conditional_jump(target_func_idx, 0, &condition, pool);
+        self.reactor.ji_with_params(params)?;
+
+        Ok(Some(()))
+    }
+
+
 }
 
 enum Operand {
