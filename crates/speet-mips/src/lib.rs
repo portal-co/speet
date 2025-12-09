@@ -12,7 +12,7 @@
 //!
 //! - **Base integer operations**: ADD, SUB, MUL, DIV, AND, OR, XOR, NOR, shifts
 //! - **Load/Store**: LW, SW, LH, SH, LB, SB, and their unsigned variants
-//! - **Branch/Jump**: BEQ, BNE, BLEZ, BGTZ, J, JAL, JR, JALR
+//! - **Branch/Jump**: BEQ, BNE, BLEZ, BGTZ, BLTZ, BGEZ, J, JAL, JR, JALR
 //! - **Immediate operations**: ADDI, ADDIU, ANDI, ORI, XORI, LUI
 //! - **Special registers**: MFHI, MTHI, MFLO, MTLO
 //! - **System calls**: SYSCALL, BREAK
@@ -44,11 +44,23 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::collections::BTreeMap;
 use wax_core::build::InstructionSink;
 
 use rabbitizer::{Instruction, InstrId, registers::GprO32};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
-use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, Target, TypeIdx};
+
+/// Branch operation types for conditional branches
+#[derive(Debug, Clone, Copy)]
+enum BranchOp {
+    Eq,
+    Ne,
+    LeZ,
+    GtZ,
+    LtZ,
+    GeZ,
+}
 
 // Shared snippet to compute table index for indirect jumps
 // idx = ((reg_value & ~3) - base_pc) >> 2
@@ -541,6 +553,109 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
         self.reactor.jmp(target_func, params)
     }
 
+    /// Helper to translate branch instructions using yecta's ji API with custom condition
+    fn translate_branch(
+        &mut self,
+        rs: GprO32,
+        rt: Option<GprO32>,
+        offset: i32,
+        pc: u32,
+        op: BranchOp,
+    ) -> Result<(), E> {
+        // Calculate target PC: PC + 4 + (offset << 2)
+        let target_pc = (pc as i32 + 4 + (offset << 2)) as u32;
+
+        // Create a custom Snippet for the branch condition
+        struct BranchCondition {
+            rs_local: u32,
+            rt_local: Option<u32>,
+            op: BranchOp,
+        }
+
+        impl<E> wax_core::build::InstructionOperatorSource<E> for BranchCondition {
+            fn emit(
+                &self,
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+            ) -> Result<(), E> {
+                // Emit comparison instructions
+                sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;
+                match self.op {
+                    BranchOp::Eq | BranchOp::Ne => {
+                        sink.instruction(&WasmInstruction::LocalGet(self.rt_local.unwrap()))?;
+                        sink.instruction(&match self.op {
+                            BranchOp::Eq => WasmInstruction::I32Eq,
+                            BranchOp::Ne => WasmInstruction::I32Ne,
+                            _ => unreachable!(),
+                        })?;
+                    }
+                    BranchOp::LeZ | BranchOp::GtZ | BranchOp::LtZ | BranchOp::GeZ => {
+                        sink.instruction(&WasmInstruction::I32Const(0))?;
+                        sink.instruction(&match self.op {
+                            BranchOp::LeZ => WasmInstruction::I32LeS,
+                            BranchOp::GtZ => WasmInstruction::I32GtS,
+                            BranchOp::LtZ => WasmInstruction::I32LtS,
+                            BranchOp::GeZ => WasmInstruction::I32GeS,
+                            _ => unreachable!(),
+                        })?;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        impl<E> wax_core::build::InstructionSource<E> for BranchCondition {
+            fn emit_instruction(
+                &self,
+                sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+            ) -> Result<(), E> {
+                // Emit the same instructions as emit_instruction
+                sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;
+                match self.op {
+                    BranchOp::Eq | BranchOp::Ne => {
+                        sink.instruction(&WasmInstruction::LocalGet(self.rt_local.unwrap()))?;
+                        sink.instruction(&match self.op {
+                            BranchOp::Eq => WasmInstruction::I32Eq,
+                            BranchOp::Ne => WasmInstruction::I32Ne,
+                            _ => unreachable!(),
+                        })?;
+                    }
+                    BranchOp::LeZ | BranchOp::GtZ | BranchOp::LtZ | BranchOp::GeZ => {
+                        sink.instruction(&WasmInstruction::I32Const(0))?;
+                        sink.instruction(&match self.op {
+                            BranchOp::LeZ => WasmInstruction::I32LeS,
+                            BranchOp::GtZ => WasmInstruction::I32GtS,
+                            BranchOp::LtZ => WasmInstruction::I32LtS,
+                            BranchOp::GeZ => WasmInstruction::I32GeS,
+                            _ => unreachable!(),
+                        })?;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let condition = BranchCondition {
+            rs_local: Self::gpr_to_local(rs),
+            rt_local: rt.map(|r| Self::gpr_to_local(r)),
+            op,
+        };
+
+        // Use ji with condition for branch taken path
+        let target_func = self.pc_to_func_idx(target_pc);
+        let target = Target::Static { func: target_func };
+
+        self.reactor.ji(
+            35,               // params: pass all registers
+            &BTreeMap::new(), // fixups: none needed
+            target,           // target: branch target
+            None,             // call: not an escape call
+            self.pool,        // pool: for indirect calls
+            Some(&condition), // condition: branch condition
+        )?;
+
+        Ok(())
+    }
+
     /// Translate a single MIPS instruction to WebAssembly
     ///
     /// This creates a separate function for instruction at given PC and
@@ -789,6 +904,55 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                     self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
+
+            // Branch instructions
+            InstrId::cpu_beq => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, Some(rt), offset, pc, BranchOp::Eq)?;
+            }
+
+            InstrId::cpu_bne => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, Some(rt), offset, pc, BranchOp::Ne)?;
+            }
+
+            InstrId::cpu_blez => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, None, offset, pc, BranchOp::LeZ)?;
+            }
+
+            InstrId::cpu_bgtz => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, None, offset, pc, BranchOp::GtZ)?;
+            }
+
+            InstrId::cpu_bltz => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, None, offset, pc, BranchOp::LtZ)?;
+            }
+
+            InstrId::cpu_bgez => {
+                let rs: GprO32 = instruction.get_rs_o32();
+                let offset = instruction.get_immediate() as i32;
+
+                self.translate_branch(rs, None, offset, pc, BranchOp::GeZ)?;
+            }
+
+
+
+
 
             // Jump instructions
             InstrId::cpu_j => {

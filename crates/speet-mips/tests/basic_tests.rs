@@ -48,11 +48,46 @@ fn test_load_store() {
 #[test]
 fn test_branch_instructions() {
     let mut recompiler: MipsRecompiler<'_, '_, core::convert::Infallible, _> = MipsRecompiler::new_with_base_pc(0x1000);
-    
+
     // Test BEQ instruction: beq $t0, $t1, target
     let beq_instruction = Instruction::new(0x11290004, 0x1000, InstrCategory::CPU); // beq $t0, $t1, 4
-    
+
     recompiler.translate_instruction(&beq_instruction, &mut |locals| {
+        Function::new(locals.collect::<Vec<_>>())
+    }).unwrap();
+
+    // Test BNE instruction: bne $t0, $t1, target
+    let bne_instruction = Instruction::new(0x15290004, 0x1000, InstrCategory::CPU); // bne $t0, $t1, 4
+
+    recompiler.translate_instruction(&bne_instruction, &mut |locals| {
+        Function::new(locals.collect::<Vec<_>>())
+    }).unwrap();
+
+    // Test BLEZ instruction: blez $t0, target
+    let blez_instruction = Instruction::new(0x19200004, 0x1000, InstrCategory::CPU); // blez $t0, 4
+
+    recompiler.translate_instruction(&blez_instruction, &mut |locals| {
+        Function::new(locals.collect::<Vec<_>>())
+    }).unwrap();
+
+    // Test BGTZ instruction: bgtz $t0, target
+    let bgtz_instruction = Instruction::new(0x1D200004, 0x1000, InstrCategory::CPU); // bgtz $t0, 4
+
+    recompiler.translate_instruction(&bgtz_instruction, &mut |locals| {
+        Function::new(locals.collect::<Vec<_>>())
+    }).unwrap();
+
+    // Test BLTZ instruction: bltz $t0, target
+    let bltz_instruction = Instruction::new(0x05200004, 0x1000, InstrCategory::CPU); // bltz $t0, 4
+
+    recompiler.translate_instruction(&bltz_instruction, &mut |locals| {
+        Function::new(locals.collect::<Vec<_>>())
+    }).unwrap();
+
+    // Test BGEZ instruction: bgez $t0, target
+    let bgez_instruction = Instruction::new(0x05210004, 0x1000, InstrCategory::CPU); // bgez $t0, 4
+
+    recompiler.translate_instruction(&bgez_instruction, &mut |locals| {
         Function::new(locals.collect::<Vec<_>>())
     }).unwrap();
 }

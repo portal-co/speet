@@ -48,12 +48,14 @@ fn main() {
     // Example 5: Branch equal
     println!("\n5. Translating: beq $t0, $t1, target");
     let beq_instruction = Instruction::new(0x11290004, 0x1000, InstrCategory::CPU); // beq $t0, $t1, 4
-    
+
     recompiler.translate_instruction(&beq_instruction, &mut |locals| {
         println!("   Function locals: {:?}", locals.collect::<Vec<_>>());
         Function::new(Vec::new())
     }).unwrap();
-    
+
+
+
     // Example 6: Jump (using a simpler encoding)
     println!("\n6. Translating: j target");
     let j_instruction = Instruction::new(0x08000000, 0x1000, InstrCategory::CPU); // j 0x0 (simpler)
