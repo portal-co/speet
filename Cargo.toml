@@ -1,5 +1,5 @@
 [workspace]
-members=["crates/speet-powerpc", "crates/speet-riscv","crates/yecta","crates/speet-x86_64"]
+members=["crates/speet-powerpc", "crates/speet-riscv","crates/yecta","crates/speet-x86_64","crates/speet-mips"]
 resolver="3"
 
 [workspace.package]
