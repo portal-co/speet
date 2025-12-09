@@ -790,6 +790,161 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 }
             }
 
+            // Load Byte (LB) - signed
+            InstrId::cpu_lb => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if rt != GprO32::zero {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.emit_add()?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        mapper.call(&mut ctx)?;
+                    }
+
+                    if self.enable_mips64 {
+                        // sign-extend from i32 loaded byte
+                        self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    } else {
+                        self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                }
+            }
+
+            // Load Byte Unsigned (LBU)
+            InstrId::cpu_lbu => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if rt != GprO32::zero {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.emit_add()?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        mapper.call(&mut ctx)?;
+                    }
+
+                    if self.enable_mips64 {
+                        self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    } else {
+                        self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                }
+            }
+
+            // Load Halfword (LH) - signed
+            InstrId::cpu_lh => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if rt != GprO32::zero {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.emit_add()?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        mapper.call(&mut ctx)?;
+                    }
+
+                    if self.enable_mips64 {
+                        self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    } else {
+                        self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                }
+            }
+
+            // Load Halfword Unsigned (LHU)
+            InstrId::cpu_lhu => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if rt != GprO32::zero {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.emit_add()?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        mapper.call(&mut ctx)?;
+                    }
+
+                    if self.enable_mips64 {
+                        self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    } else {
+                        self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                }
+            }
+
+            // Store Byte (SB)
+            InstrId::cpu_sb => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                self.emit_add()?;
+
+                if let Some(mapper) = self.mapper_callback.as_mut() {
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                    mapper.call(&mut ctx)?;
+                }
+
+                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                if self.enable_mips64 {
+                    self.reactor.feed(&WasmInstruction::I64Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                } else {
+                    self.reactor.feed(&WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                }
+            }
+
+            // Store Halfword (SH)
+            InstrId::cpu_sh => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt: GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                self.emit_add()?;
+
+                if let Some(mapper) = self.mapper_callback.as_mut() {
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                    mapper.call(&mut ctx)?;
+                }
+
+                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                if self.enable_mips64 {
+                    self.reactor.feed(&WasmInstruction::I64Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                } else {
+                    self.reactor.feed(&WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                }
+            }
+
             // Load Word (LW)
             InstrId::cpu_lw => {
                 let base: GprO32 = instruction.get_rs_o32();
