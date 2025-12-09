@@ -259,7 +259,25 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
 
             // Try to handle the mnemonic; each arm returns Result<Option<()>, E> where None means undecidable operands
             let undecidable_option = (match inst.mnemonic() {
-                Mnemonic::Add => self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
+                Mnemonic::Add => {
+                    // Handle memory destination case first
+                    if inst.op0_kind() == OpKind::Memory {
+                        let size_bits = match inst.op1_kind() {
+                            OpKind::Immediate8 => 8,
+                            OpKind::Immediate16 => 16,
+                            OpKind::Immediate8to32 => 32,
+                            OpKind::Immediate32 => 32,
+                            OpKind::Immediate64 => 64,
+                            OpKind::Register => {
+                                if let Some((_, r_size, _, _)) = Self::resolve_reg(inst.op1_register()) {
+                                    r_size
+                                } else { 64 }
+                            }
+                            _ => 64,
+                        };
+                        self.handle_memory_rmw(&inst, size_bits, |this| this.emit_i64_add())
+                    } else {
+                        self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
                     this.reactor.feed(&Instruction::LocalGet(dst))?;
                     match src {
                         Operand::Imm(i) => { this.emit_i64_const(i)?; }
@@ -279,28 +297,9 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                     } else {
                         this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                     }
-                }),
-                Mnemonic::Sub => self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                    this.reactor.feed(&Instruction::LocalGet(dst))?;
-                    match src {
-                        Operand::Imm(i) => { this.emit_i64_const(i)?; }
-                        Operand::Reg(r) => { this.reactor.feed(&Instruction::LocalGet(r))?; }
-                        Operand::RegWithSize(r, sz, bit) => {
-                            this.reactor.feed(&Instruction::LocalGet(r))?;
-                            this.emit_mask_shift_for_read(sz, bit)?;
-                        }
+                })
                     }
-                    this.emit_i64_sub()?;
-                    if dst_size == 64 && dst_bit_offset == 0 {
-                        this.reactor.feed(&Instruction::LocalSet(dst))
-                    } else if dst_size == 32 {
-                        this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                        this.reactor.feed(&Instruction::I64And)?;
-                        this.reactor.feed(&Instruction::LocalSet(dst))
-                    } else {
-                        this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
-                    }
-                }),
+                },
                 Mnemonic::Imul => self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
                     this.reactor.feed(&Instruction::LocalGet(dst))?;
                     match src {
@@ -623,6 +622,52 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
             dec.set_ip(inst_rip + 1);
         }
         Ok(())
+    }
+
+    // Helper: handle read-modify-write operations for memory destinations
+    fn handle_memory_rmw<Op>(&mut self, inst: &IxInst, size_bits: u32, mut operation: Op) -> Result<Option<()>, E>
+    where
+        Op: FnMut(&mut Self) -> Result<(), E>,
+    {
+        use iced_x86::OpKind;
+        
+        // Load current value from memory
+        self.emit_memory_address(&inst)?;
+        self.emit_memory_load(size_bits, false)?;
+        
+        // Get source value based on operand kind
+        match inst.op1_kind() {
+            OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => {
+                let imm = inst.immediate64() as i64;
+                self.emit_i64_const(imm)?;
+            }
+            OpKind::Register => {
+                if let Some((r_local, r_size, _rz, bit)) = Self::resolve_reg(inst.op1_register()) {
+                    self.reactor.feed(&Instruction::LocalGet(r_local))?;
+                    if bit > 0 {
+                        self.emit_mask_shift_for_read(r_size, bit)?;
+                    }
+                    // Apply mask for sub-registers
+                    match r_size {
+                        8 => { self.reactor.feed(&Instruction::I64Const(0xFF))?; self.reactor.feed(&Instruction::I64And)?; }
+                        16 => { self.reactor.feed(&Instruction::I64Const(0xFFFF))?; self.reactor.feed(&Instruction::I64And)?; }
+                        32 => { /* already zero-extended */ }
+                        64 => { /* full */ }
+                        _ => {}
+                    }
+                } else { return Ok(None); }
+            }
+            _ => return Ok(None),
+        }
+        
+        // Perform the operation (stack now has: old_value, src_value)
+        operation(self)?;
+        
+        // Store result back to memory
+        self.emit_memory_address(&inst)?;
+        self.emit_memory_store(size_bits)?;
+        
+        Ok(Some(()))
     }
 
     // Helper: emit memory effective address for the instruction's memory operand
