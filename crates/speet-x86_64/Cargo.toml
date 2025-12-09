@@ -1,0 +1,15 @@
+[package]
+name = "speet-x86_64"
+version = "0.1.0"
+edition = "2021"
+license-file = "../../COPYING.md"
+description = "x86_64 to WebAssembly recompiler (basic integer ops)"
+
+[dependencies]
+iced-x86 = "1.18.0"
+wasm-encoder = { workspace = true }
+yecta = { path = "../yecta" }
+wax-core = { workspace = true }
+
+[features]
+default = []
