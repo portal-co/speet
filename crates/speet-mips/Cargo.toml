@@ -1,0 +1,15 @@
+[package]
+name = "speet-mips"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+wasm-encoder.workspace = true
+yecta = {path = "../yecta"}
+rabbitizer.workspace = true
+wax-core.workspace = true
+
+[dev-dependencies]
+object = "0.36"
