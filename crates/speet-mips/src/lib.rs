@@ -806,15 +806,13 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                         mapper.call(&mut ctx)?;
                     }
 
+                    // load byte (signed) -> i32
+                    self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    // extend to i64 if needed
                     if self.enable_mips64 {
-                        // sign-extend from i32 loaded byte
-                        self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                         self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
-                    } else {
-                        self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                     }
+                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -834,14 +832,12 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                         mapper.call(&mut ctx)?;
                     }
 
+                    // load byte unsigned -> i32
+                    self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                         self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
-                    } else {
-                        self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                     }
+                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -861,14 +857,12 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                         mapper.call(&mut ctx)?;
                     }
 
+                    // load halfword signed -> i32
+                    self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                         self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
-                    } else {
-                        self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                     }
+                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -888,14 +882,12 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                         mapper.call(&mut ctx)?;
                     }
 
+                    // load halfword unsigned -> i32
+                    self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                         self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
-                    } else {
-                        self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                     }
+                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -914,10 +906,13 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                     mapper.call(&mut ctx)?;
                 }
 
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                // value to store: wrap to i32 then store 8 bits
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::I64Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(&WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                 } else {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(&WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                 }
             }
@@ -937,10 +932,13 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                     mapper.call(&mut ctx)?;
                 }
 
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                // value to store: wrap to i32 then store 16 bits
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::I64Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(&WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                 } else {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(&WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                 }
             }
@@ -963,14 +961,12 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                         mapper.call(&mut ctx)?;
                     }
 
-                    // perform memory load
+                    // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
+                    self.reactor.feed(&WasmInstruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
-                    } else {
-                        self.reactor.feed(&WasmInstruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
-                        self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
                     }
+                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -991,11 +987,13 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                     mapper.call(&mut ctx)?;
                 }
 
-                // load value to store and emit store
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                // value to store: if MIPS64 wrap to i32 then store 32-bit
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(&WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                 } else {
+                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(&WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                 }
             }
