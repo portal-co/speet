@@ -829,7 +829,138 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                  Mnemonic::Jno => self.handle_conditional_jump(&inst, ConditionType::NOF),
                  Mnemonic::Jp => self.handle_conditional_jump(&inst, ConditionType::PF),
                  Mnemonic::Jnp => self.handle_conditional_jump(&inst, ConditionType::NPF),
-                 _ => Ok(None),
+                  Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
+                        // PUSHF variants: push flags with operand-size 16/32/64
+                        let (size_bits, rsp_sub) = if inst.mnemonic() == Mnemonic::Pushf {
+                            (16u32, 2i64)
+                        } else if inst.mnemonic() == Mnemonic::Pushfd {
+                            (32u32, 4i64)
+                        } else { // Pushfq
+                            (64u32, 8i64)
+                        };
+
+                        // decrement RSP by rsp_sub
+                        self.reactor.feed(&Instruction::LocalGet(4))?;
+                        self.reactor.feed(&Instruction::I64Const(rsp_sub))?;
+                        self.reactor.feed(&Instruction::I64Sub)?;
+                        self.reactor.feed(&Instruction::LocalSet(4))?;
+
+                        // address (RSP) on stack
+                        self.reactor.feed(&Instruction::LocalGet(4))?;
+
+                        // build flags value on stack (i64 accumulator)
+                        self.reactor.feed(&Instruction::I64Const(0))?; // acc = 0
+                        // CF -> bit 0
+                        self.reactor.feed(&Instruction::LocalGet(Self::CF_LOCAL))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Const(0))?;
+                        self.reactor.feed(&Instruction::I64Shl)?;
+                        self.reactor.feed(&Instruction::I64Or)?;
+                        // PF -> bit 2
+                        self.reactor.feed(&Instruction::LocalGet(Self::PF_LOCAL))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Const(2))?;
+                        self.reactor.feed(&Instruction::I64Shl)?;
+                        self.reactor.feed(&Instruction::I64Or)?;
+                        // ZF -> bit 6
+                        self.reactor.feed(&Instruction::LocalGet(Self::ZF_LOCAL))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Const(6))?;
+                        self.reactor.feed(&Instruction::I64Shl)?;
+                        self.reactor.feed(&Instruction::I64Or)?;
+                        // SF -> bit 7
+                        self.reactor.feed(&Instruction::LocalGet(Self::SF_LOCAL))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Const(7))?;
+                        self.reactor.feed(&Instruction::I64Shl)?;
+                        self.reactor.feed(&Instruction::I64Or)?;
+                        // OF -> bit 11
+                        self.reactor.feed(&Instruction::LocalGet(Self::OF_LOCAL))?;
+                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(&Instruction::I64Const(11))?;
+                        self.reactor.feed(&Instruction::I64Shl)?;
+                        self.reactor.feed(&Instruction::I64Or)?;
+
+                        // mask down if needed
+                        if size_bits == 16 {
+                            self.reactor.feed(&Instruction::I64Const(0xFFFF))?;
+                            self.reactor.feed(&Instruction::I64And)?;
+                        } else if size_bits == 32 {
+                            self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
+                            self.reactor.feed(&Instruction::I64And)?;
+                        }
+
+                        // store flags at [RSP]
+                        self.emit_memory_store(size_bits)?;
+                        Ok(Some(()))
+                    },
+
+                   Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
+                        // POPF variants: pop flags with operand-size 16/32/64
+                        let (size_bits, rsp_add) = if inst.mnemonic() == Mnemonic::Popf {
+                            (16u32, 2i64)
+                        } else if inst.mnemonic() == Mnemonic::Popfd {
+                            (32u32, 4i64)
+                        } else { (64u32, 8i64) };
+
+                        // load value from [RSP] with appropriate size
+                        self.reactor.feed(&Instruction::LocalGet(4))?;
+                        self.emit_memory_load(size_bits, false)?; // pushes i64 value (zero-extended)
+                        // store popped value into temp local 22
+                        self.reactor.feed(&Instruction::LocalSet(22))?;
+
+                        // increment RSP by rsp_add
+                        self.reactor.feed(&Instruction::LocalGet(4))?;
+                        self.reactor.feed(&Instruction::I64Const(rsp_add))?;
+                        self.reactor.feed(&Instruction::I64Add)?;
+                        self.reactor.feed(&Instruction::LocalSet(4))?;
+
+                        // Now extract bits from local 22 into flag locals. For sizes <64, the value is zero-extended.
+                        // extract CF (bit 0)
+                        self.reactor.feed(&Instruction::LocalGet(22))?;
+                        self.reactor.feed(&Instruction::I64Const(0))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I64Const(1))?;
+                        self.reactor.feed(&Instruction::I64And)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::LocalSet(Self::CF_LOCAL))?;
+                        // extract PF (bit 2)
+                        self.reactor.feed(&Instruction::LocalGet(22))?;
+                        self.reactor.feed(&Instruction::I64Const(2))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I64Const(1))?;
+                        self.reactor.feed(&Instruction::I64And)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::LocalSet(Self::PF_LOCAL))?;
+                        // extract ZF (bit 6)
+                        self.reactor.feed(&Instruction::LocalGet(22))?;
+                        self.reactor.feed(&Instruction::I64Const(6))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I64Const(1))?;
+                        self.reactor.feed(&Instruction::I64And)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::LocalSet(Self::ZF_LOCAL))?;
+                        // extract SF (bit 7)
+                        self.reactor.feed(&Instruction::LocalGet(22))?;
+                        self.reactor.feed(&Instruction::I64Const(7))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I64Const(1))?;
+                        self.reactor.feed(&Instruction::I64And)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::LocalSet(Self::SF_LOCAL))?;
+                        // extract OF (bit 11)
+                        self.reactor.feed(&Instruction::LocalGet(22))?;
+                        self.reactor.feed(&Instruction::I64Const(11))?;
+                        self.reactor.feed(&Instruction::I64ShrU)?;
+                        self.reactor.feed(&Instruction::I64Const(1))?;
+                        self.reactor.feed(&Instruction::I64And)?;
+                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(&Instruction::LocalSet(Self::OF_LOCAL))?;
+
+                        Ok(Some(()))
+                    },
+
+                    _ => Ok(None),
              })?;
 
             // If handler returned None (undecidable operands), emit unreachable
