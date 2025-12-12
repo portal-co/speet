@@ -10,9 +10,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "bitflags"
-version = "2.9.4"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
+checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
 name = "cc"
@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "git+https://github.com/portal-co/rv-utils.git#28aa94c48c3d52819866d425ea9285035cf47d47"
+source = "git+https://github.com/portal-co/rv-utils.git#703fe38e166563c53c463745710b7f32e86dd8a9"
 
 [[package]]
 name = "shlex"
@@ -236,9 +236,9 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "simd-adler32"
-version = "0.3.7"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
+checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "speet-mips"
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "wax-core"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/wax.git?branch=main#7eb3cc89b9024ff08de56af4266aeaad8c9fa4e3"
+source = "git+https://github.com/portal-co/wax.git?branch=main#889c57ac2d360b3e16c3e175a9c3a2bbe90f076c"
 dependencies = [
  "impl-trait-for-tuples",
  "wasm-encoder",
