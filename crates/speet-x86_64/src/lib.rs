@@ -330,3 +330,29 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
         Ok(())
     }
 }
+enum Operand {
+    Imm(i64),
+    Reg(u32),
+    RegWithSize(u32, u32, u32),
+}
+
+impl From<i64> for Operand {
+    fn from(v: i64) -> Self {
+        Operand::Imm(v)
+    }
+}
+
+impl From<u32> for Operand {
+    fn from(v: u32) -> Self {
+        Operand::Reg(v)
+    }
+}
+
+impl Operand {
+    fn with_bit(self, bit_offset: u32) -> Self {
+        match self {
+            Operand::RegWithSize(r, s, _) => Operand::RegWithSize(r, s, bit_offset),
+            other => other,
+        }
+    }
+}
