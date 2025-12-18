@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "wax-core"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/wax.git?branch=main#e9423b1d4f86978ba79d6da9e6680b1e579d1893"
+source = "git+https://github.com/portal-co/wax.git?branch=main#e3b16c1b4e741f45df84c8ba3f15a82d95d03df0"
 dependencies = [
  "impl-trait-for-tuples",
  "wasm-encoder",
