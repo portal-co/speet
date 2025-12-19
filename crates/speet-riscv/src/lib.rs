@@ -98,22 +98,22 @@ pub struct EbreakInfo {
 ///
 /// This struct provides access to the WebAssembly instruction emitter and other
 /// compilation state. It is passed to all callbacks (HINT, ECALL, EBREAK, mapper).
-pub struct CallbackContext<'a, E, F: InstructionSink<E>> {
+pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context, E>> {
     /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<E, F>,
+    pub reactor: &'a mut Reactor<Context, E, F>,
 }
 
-impl<'a, E, F: InstructionSink<E>> CallbackContext<'a, E, F> {
+impl<'a, Context, E, F: InstructionSink<Context, E>> CallbackContext<'a, Context, E, F> {
     /// Emit a WebAssembly instruction
-    pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
-        self.reactor.feed(instruction)
+    pub fn emit(&mut self, ctx: &mut Context, instruction: &Instruction) -> Result<(), E> {
+        self.reactor.feed(ctx, instruction)
     }
 }
 
 /// Legacy type alias for backwards compatibility
-pub type MapperContext<'a, E, F> = CallbackContext<'a, E, F>;
+pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
 /// Legacy type alias for backwards compatibility
-pub type HintContext<'a, E, F> = CallbackContext<'a, E, F>;
+pub type HintContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
 
 /// Trait for address mapping callbacks (paging support)
 ///
@@ -122,22 +122,22 @@ pub type HintContext<'a, E, F> = CallbackContext<'a, E, F>;
 /// and should leave the physical address on the stack.
 ///
 /// See PAGING.md for detailed documentation on the paging system.
-pub trait MapperCallback<E, F: InstructionSink<E>> {
+pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
     /// Translate a virtual address to a physical address
     ///
     /// # Stack State
     /// - Input: Virtual address (i64 or i32 depending on use_memory64/enable_rv64)
     /// - Output: Physical address (same type as input)
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E>;
+    fn call(&mut self, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E>;
 }
 
 /// Blanket implementation of MapperCallback for FnMut closures
-impl<E, F: InstructionSink<E>, T> MapperCallback<E, F> for T
+impl<Context, E, F: InstructionSink<Context, E>, T> MapperCallback<Context, E, F> for T
 where
-    T: FnMut(&mut CallbackContext<E, F>) -> Result<(), E>,
+    T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>,
 {
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E> {
-        self(ctx)
+    fn call(&mut self, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E> {
+        self(ctx, callback_ctx)
     }
 }
 
@@ -151,22 +151,23 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait HintCallback<E, F: InstructionSink<E>> {
+pub trait HintCallback<Context, E, F: InstructionSink<Context, E>> {
     /// Process a HINT instruction
     ///
     /// # Arguments
     /// * `hint` - Information about the detected HINT instruction
-    /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, F>);
+    /// * `ctx` - User context for passing external state
+    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, hint: &HintInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of HintCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> HintCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context, E>, F> HintCallback<Context, E, G> for F
 where
-    F: FnMut(&HintInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&HintInfo, &mut Context, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, G>) {
-        self(hint, ctx)
+    fn call(&mut self, hint: &HintInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, G>) {
+        self(hint, ctx, callback_ctx)
     }
 }
 
@@ -178,22 +179,23 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait EcallCallback<E, F: InstructionSink<E>> {
+pub trait EcallCallback<Context, E, F: InstructionSink<Context, E>> {
     /// Process an ECALL instruction
     ///
     /// # Arguments
     /// * `ecall` - Information about the detected ECALL instruction
-    /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, F>);
+    /// * `ctx` - User context for passing external state
+    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of EcallCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> EcallCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context, E>, F> EcallCallback<Context, E, G> for F
 where
-    F: FnMut(&EcallInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&EcallInfo, &mut Context, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, G>) {
-        self(ecall, ctx)
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, G>) {
+        self(ecall, ctx, callback_ctx)
     }
 }
 
@@ -205,22 +207,23 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait EbreakCallback<E, F: InstructionSink<E>> {
+pub trait EbreakCallback<Context, E, F: InstructionSink<Context, E>> {
     /// Process an EBREAK instruction
     ///
     /// # Arguments
     /// * `ebreak` - Information about the detected EBREAK instruction
-    /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, F>);
+    /// * `ctx` - User context for passing external state
+    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of EbreakCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> EbreakCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context, E>, F> EbreakCallback<Context, E, G> for F
 where
-    F: FnMut(&EbreakInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&EbreakInfo, &mut Context, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, G>) {
-        self(ebreak, ctx)
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, G>) {
+        self(ebreak, ctx, callback_ctx)
     }
 }
 
@@ -236,8 +239,8 @@ where
 /// The lifetime parameters:
 /// - `'cb` represents the lifetime of the callback reference
 /// - `'ctx` represents the lifetime of data the callback may capture
-pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
-    reactor: Reactor<E, F>,
+pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
+    reactor: Reactor<Context, E, F>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
@@ -248,13 +251,13 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<&'cb mut (dyn HintCallback<E, F> + 'ctx)>,
+    hint_callback: Option<&'cb mut (dyn HintCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for ECALL instructions
-    ecall_callback: Option<&'cb mut (dyn EcallCallback<E, F> + 'ctx)>,
+    ecall_callback: Option<&'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for EBREAK instructions
-    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<E, F> + 'ctx)>,
+    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for address mapping (paging support - see PAGING.md)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<E, F> + 'ctx)>,
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -262,7 +265,7 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     use_memory64: bool,
 }
 
-impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     /// Create a new RISC-V recompiler instance with full configuration
     ///
     /// # Arguments
@@ -441,11 +444,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
     ///     // Optionally emit WebAssembly instructions
-    ///     ctx.emit(&Instruction::Nop).ok();
+    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
-    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback<E, F> + 'ctx)) {
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback<Context, E, F> + 'ctx)) {
         self.hint_callback = Some(callback);
     }
 
@@ -473,11 +476,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("ECALL at PC 0x{:x}", ecall.pc);
     ///     // Optionally emit WebAssembly instructions for the ecall
-    ///     ctx.emit(&Instruction::Nop).ok();
+    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_ecall_callback(&mut my_callback);
     /// ```
-    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback<E, F> + 'ctx)) {
+    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)) {
         self.ecall_callback = Some(callback);
     }
 
@@ -505,11 +508,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext<_, _>| {
     ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
     ///     // Optionally emit WebAssembly instructions for the ebreak
-    ///     ctx.emit(&Instruction::Nop).ok();
+    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_ebreak_callback(&mut my_callback);
     /// ```
-    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback<E, F> + 'ctx)) {
+    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)) {
         self.ebreak_callback = Some(callback);
     }
 
@@ -545,7 +548,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// };
     /// recompiler.set_mapper_callback(&mut my_mapper);
     /// ```
-    pub fn set_mapper_callback(&mut self, callback: &'cb mut (dyn MapperCallback<E, F> + 'ctx)) {
+    pub fn set_mapper_callback(&mut self, callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)) {
         self.mapper_callback = Some(callback);
     }
 
@@ -653,109 +656,109 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     }
 
     /// Emit instructions to load an immediate value
-    fn emit_imm(&mut self, imm: Imm) -> Result<(), E> {
+    fn emit_imm(&mut self, ctx: &mut Context, imm: Imm) -> Result<(), E> {
         if self.enable_rv64 {
             // Sign-extend the 32-bit immediate to 64 bits
-            self.reactor.feed(&Instruction::I64Const(imm.as_i32() as i64))
+            self.reactor.feed(ctx, &Instruction::I64Const(imm.as_i32() as i64))
         } else {
-            self.reactor.feed(&Instruction::I32Const(imm.as_i32()))
+            self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))
         }
     }
 
     /// Emit an integer constant (i32 or i64 depending on RV64 mode)
-    fn emit_int_const(&mut self, value: i32) -> Result<(), E> {
+    fn emit_int_const(&mut self, ctx: &mut Context, value: i32) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Const(value as i64))
+            self.reactor.feed(ctx, &Instruction::I64Const(value as i64))
         } else {
-            self.reactor.feed(&Instruction::I32Const(value))
+            self.reactor.feed(ctx, &Instruction::I32Const(value))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on RV64 mode)
-    fn emit_add(&mut self) -> Result<(), E> {
+    fn emit_add(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Add)
+            self.reactor.feed(ctx, &Instruction::I64Add)
         } else {
-            self.reactor.feed(&Instruction::I32Add)
+            self.reactor.feed(ctx, &Instruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on RV64 mode)
-    fn emit_sub(&mut self) -> Result<(), E> {
+    fn emit_sub(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Sub)
+            self.reactor.feed(ctx, &Instruction::I64Sub)
         } else {
-            self.reactor.feed(&Instruction::I32Sub)
+            self.reactor.feed(ctx, &Instruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on RV64 mode)
-    fn emit_mul(&mut self) -> Result<(), E> {
+    fn emit_mul(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Mul)
+            self.reactor.feed(ctx, &Instruction::I64Mul)
         } else {
-            self.reactor.feed(&Instruction::I32Mul)
+            self.reactor.feed(ctx, &Instruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on RV64 mode)
-    fn emit_and(&mut self) -> Result<(), E> {
+    fn emit_and(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64And)
+            self.reactor.feed(ctx, &Instruction::I64And)
         } else {
-            self.reactor.feed(&Instruction::I32And)
+            self.reactor.feed(ctx, &Instruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on RV64 mode)
-    fn emit_or(&mut self) -> Result<(), E> {
+    fn emit_or(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Or)
+            self.reactor.feed(ctx, &Instruction::I64Or)
         } else {
-            self.reactor.feed(&Instruction::I32Or)
+            self.reactor.feed(ctx, &Instruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on RV64 mode)
-    fn emit_xor(&mut self) -> Result<(), E> {
+    fn emit_xor(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Xor)
+            self.reactor.feed(ctx, &Instruction::I64Xor)
         } else {
-            self.reactor.feed(&Instruction::I32Xor)
+            self.reactor.feed(ctx, &Instruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on RV64 mode)
-    fn emit_shl(&mut self) -> Result<(), E> {
+    fn emit_shl(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Shl)
+            self.reactor.feed(ctx, &Instruction::I64Shl)
         } else {
-            self.reactor.feed(&Instruction::I32Shl)
+            self.reactor.feed(ctx, &Instruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on RV64 mode)
-    fn emit_shr_u(&mut self) -> Result<(), E> {
+    fn emit_shr_u(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64ShrU)
+            self.reactor.feed(ctx, &Instruction::I64ShrU)
         } else {
-            self.reactor.feed(&Instruction::I32ShrU)
+            self.reactor.feed(ctx, &Instruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on RV64 mode)
-    fn emit_shr_s(&mut self) -> Result<(), E> {
+    fn emit_shr_s(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64ShrS)
+            self.reactor.feed(ctx, &Instruction::I64ShrS)
         } else {
-            self.reactor.feed(&Instruction::I32ShrS)
+            self.reactor.feed(ctx, &Instruction::I32ShrS)
         }
     }
 
     /// Perform a jump to a target PC using yecta's jump API
-    fn jump_to_pc(&mut self, target_pc: u64, params: u32) -> Result<(), E> {
+    fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u64, params: u32) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(target_func, params)
+        self.reactor.jmp(ctx, target_func, params)
     }
 
     /// NaN-box a single-precision float value for storage in a double-precision register
@@ -766,25 +769,25 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// FLEN-bit NaN value, with the upper bits all 1s. We call this a NaN-boxed value."
     ///
     /// For F32 values in F64 registers: set upper 32 bits to all 1s
-    fn nan_box_f32(&mut self) -> Result<(), E> {
+    fn nan_box_f32(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Convert F32 to I32, then to I64, OR with 0xFFFFFFFF00000000, reinterpret as F64
-        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
-        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+        self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
+        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
         self.reactor
-            .feed(&Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
-        self.reactor.feed(&Instruction::I64Or)?;
-        self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+            .feed(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
+        self.reactor.feed(ctx, &Instruction::I64Or)?;
+        self.reactor.feed(ctx, &Instruction::F64ReinterpretI64)?;
         Ok(())
     }
 
     /// Unbox a NaN-boxed single-precision value from a double-precision register
     ///
     /// Extract the F32 value from the lower 32 bits of the NaN-boxed F64 value
-    fn unbox_f32(&mut self) -> Result<(), E> {
+    fn unbox_f32(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Reinterpret F64 as I64, wrap to I32 (takes lower 32 bits), reinterpret as F32
-        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
-        self.reactor.feed(&Instruction::I32WrapI64)?;
-        self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+        self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
+        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.feed(ctx, &Instruction::F32ReinterpretI32)?;
         Ok(())
     }
 
@@ -804,197 +807,197 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     ///
     /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
     /// to the high 64 bits, only through carries.
-    fn emit_mulh_signed(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+    fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
         // Load src1 and src2 to locals for reuse
         let temp_a = 65;
         let temp_b = 66;
         let temp_mid = 67; // for accumulating middle terms
         
-        self.reactor.feed(&Instruction::LocalGet(src1))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(&Instruction::LocalGet(src2))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
         
         // Start with a_hi * b_hi
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (sign-extended)
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // b_hi (sign-extended)
-        self.reactor.feed(&Instruction::I64Mul)?; // a_hi * b_hi
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (sign-extended)
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // b_hi (sign-extended)
+        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_hi * b_hi
         
         // Compute middle term: a_hi * b_lo (full 64-bit result)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // b_lo
-        self.reactor.feed(&Instruction::I64Mul)?; // a_hi * b_lo (64-bit result)
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?; // save for carry computation
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
+        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_hi * b_lo (64-bit result)
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?; // save for carry computation
         
         // Add high 32 bits of (a_hi * b_lo) to result
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // arithmetic shift for signed
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // arithmetic shift for signed
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         // Compute other middle term: a_lo * b_hi (full 64-bit result)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // a_lo
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // b_hi
-        self.reactor.feed(&Instruction::I64Mul)?; // a_lo * b_hi (64-bit result)
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // b_hi
+        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_lo * b_hi (64-bit result)
         
         // Add it to the middle term accumulator for carry calculation
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Add)?; // sum of middle terms (low parts)
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?; // sum of middle terms (low parts)
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
         
         // Add high 32 bits of the summed middle terms
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // arithmetic shift
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // arithmetic shift
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         Ok(())
     }
 
     /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
-    fn emit_mulh_unsigned(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+    fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
         let temp_a = 65;
         let temp_b = 66;
         let temp_mid = 67;
         
-        self.reactor.feed(&Instruction::LocalGet(src1))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(&Instruction::LocalGet(src2))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
         
         // Start with a_hi * b_hi (all unsigned)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // a_hi (unsigned)
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // a_hi (unsigned)
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
         
         // Compute middle term: a_hi * b_lo
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // a_hi
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // b_lo
-        self.reactor.feed(&Instruction::I64Mul)?;
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // a_hi
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
         
         // Add high 32 bits of (a_hi * b_lo)
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?;
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         // Compute other middle term: a_lo * b_hi
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // a_lo
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi
-        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
         
         // Add to middle term for carry calculation
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Add)?;
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
         
         // Add high 32 bits of summed middle terms
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?;
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         Ok(())
     }
 
     /// Helper to compute high 64 bits of signed-unsigned 64x64 -> 128-bit multiplication
-    fn emit_mulh_signed_unsigned(&mut self, src1: u32, src2: u32) -> Result<(), E> {
+    fn emit_mulh_signed_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
         let temp_a = 65;
         let temp_b = 66;
         let temp_mid = 67;
         
-        self.reactor.feed(&Instruction::LocalGet(src1))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(&Instruction::LocalGet(src2))?;
-        self.reactor.feed(&Instruction::LocalSet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
         
         // src1 is signed, src2 is unsigned
         
         // Start with a_hi * b_hi (a_hi signed, b_hi unsigned)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (signed)
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (signed)
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
         
         // Compute middle term: a_hi * b_lo (a_hi signed, b_lo unsigned)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?; // a_hi (signed)
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // b_lo
-        self.reactor.feed(&Instruction::I64Mul)?;
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (signed)
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
         
         // Add high 32 bits of (a_hi * b_lo) - use signed shift
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?;
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         // Compute other middle term: a_lo * b_hi (a_lo unsigned, b_hi unsigned)
-        self.reactor.feed(&Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?; // a_lo
-        self.reactor.feed(&Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(&Instruction::I64Mul)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
+        self.reactor.feed(ctx, &Instruction::I64Mul)?;
         
         // Add to middle term for carry calculation
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Add)?;
-        self.reactor.feed(&Instruction::LocalSet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
         
         // Add high 32 bits of summed middle terms - use signed shift
-        self.reactor.feed(&Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(&Instruction::I64Const(32))?;
-        self.reactor.feed(&Instruction::I64ShrS)?;
-        self.reactor.feed(&Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
         
         Ok(())
     }
 
     /// Finalize the function
-    pub fn seal(&mut self) -> Result<(), E> {
-        self.reactor.seal(&Instruction::Unreachable)
+    pub fn seal(&mut self, ctx: &mut Context) -> Result<(), E> {
+        self.reactor.seal(ctx, &Instruction::Unreachable)
     }
 
     /// Get the reactor (consumes self)
-    pub fn into_reactor(self) -> Reactor<E, F> {
+    pub fn into_reactor(self) -> Reactor<Context, E, F> {
         self.reactor
     }
 }
 
-impl<'cb, 'ctx, E, F: InstructionSink<E>> Default for RiscVRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> Default for RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1072,20 +1075,20 @@ impl From<u64> for PageTableBase {
 
 impl PageTableBase {
     /// Emit instructions to get the page table base value onto the stack
-    fn emit_load<E, F: InstructionSink<E>>(&self, ctx: &mut CallbackContext<E, F>, use_i64: bool) -> Result<(), E> {
+    fn emit_load<Context, E, F: InstructionSink<Context, E>>(&self, ctx: &mut Context, callback_ctx: &mut CallbackContext<Context, E, F>, use_i64: bool) -> Result<(), E> {
         match self {
             PageTableBase::Constant(addr) => {
                 if use_i64 {
-                    ctx.emit(&Instruction::I64Const(*addr as i64))?;
+                    callback_ctx.emit(ctx, &Instruction::I64Const(*addr as i64))?;
                 } else {
-                    ctx.emit(&Instruction::I32Const(*addr as i32))?;
+                    callback_ctx.emit(ctx, &Instruction::I32Const(*addr as i32))?;
                 }
             }
             PageTableBase::Local(idx) => {
-                ctx.emit(&Instruction::LocalGet(*idx))?;
+                callback_ctx.emit(ctx, &Instruction::LocalGet(*idx))?;
             }
             PageTableBase::Global(idx) => {
-                ctx.emit(&Instruction::GlobalGet(*idx))?;
+                callback_ctx.emit(ctx, &Instruction::GlobalGet(*idx))?;
             }
         }
         Ok(())
@@ -1112,8 +1115,9 @@ impl PageTableBase {
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn standard_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    callback_ctx: &mut CallbackContext<Context, E, F>,
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1124,91 +1128,91 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 
     if use_i64 {
         // 64-bit implementation
-        ctx.emit(&Instruction::LocalGet(66))?; // vaddr
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?; // vaddr
         
         // page_num = vaddr >> 16
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
         
         // pte_addr = pt_base + (page_num * 8)
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        pt_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
         
         // page_pointer = [pte_addr]
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg {
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg {
             offset: 0,
             align: 3,
             memory_index,
         }))?;
         
         // security_index = page_pointer & 0xFFFF
-        ctx.emit(&Instruction::LocalTee(67))?; // Store page_pointer in temp local 67
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // Store page_pointer in temp local 67
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
         
         // page_base_low48 = page_pointer >> 16
-        ctx.emit(&Instruction::LocalGet(67))?;
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::LocalSet(68))?; // Store page_base_low48 in temp local 68
+        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // Store page_base_low48 in temp local 68
 
         // sec_entry_addr = sec_dir_base + (security_index * 4)
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
         
         // sec_entry = [sec_entry_addr]
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg {
             offset: 0,
             align: 2,
             memory_index,
         }))?;
-        ctx.emit(&Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
 
         // page_base_top16 = sec_entry >> 16
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
         // phys_page_base = (page_base_top16 << 48) | page_base_low48
-        ctx.emit(&Instruction::I64Const(48))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Or)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Or)?;
 
         // page_offset = vaddr & 0xFFFF
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
         
         // phys_addr = phys_page_base + page_offset
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
 
     } else {
         // 32-bit implementation (falls back to old logic for now)
-        ctx.emit(&Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
         
-        ctx.emit(&Instruction::I32Const(16))?;
-        ctx.emit(&Instruction::I32ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
         
-        ctx.emit(&Instruction::I32Const(3))?;
-        ctx.emit(&Instruction::I32Shl)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
         
-        pt_base.emit_load(ctx, false)?;
-        ctx.emit(&Instruction::I32Add)?;
+        pt_base.emit_load(ctx, callback_ctx, false)?;
+        callback_ctx.emit(ctx, &Instruction::I32Add)?;
         
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg {
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg {
             offset: 0,
             align: 2,
             memory_index,
         }))?;
         
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I32And)?;
         
-        ctx.emit(&Instruction::I32Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Add)?;
     }
     
     Ok(())
@@ -1234,8 +1238,9 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn multilevel_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    callback_ctx: &mut CallbackContext<Context, E, F>,
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1246,66 +1251,66 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 
     if use_i64 {
         // Level 3
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(48))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        l3_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
         
         // Level 2
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(32))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(32))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
         
         // Level 1
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?; // page_pointer
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?; // page_pointer
         
         // Security and final address construction
-        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?; // security_index
-        ctx.emit(&Instruction::LocalGet(67))?;
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::LocalSet(68))?; // page_base_low48
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
-        ctx.emit(&Instruction::I64Const(48))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(48))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Or)?;
+        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?; // security_index
+        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // page_base_low48
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Or)?;
         
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
     } else {
         // simplified for 32-bit, only single level supported in this path
-        multilevel_page_table_mapper_32(ctx, l3_base, sec_dir_base, memory_index, false)?;
+        multilevel_page_table_mapper_32(ctx, callback_ctx, l3_base, sec_dir_base, memory_index, false)?;
     }
     
     Ok(())
@@ -1325,8 +1330,9 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn standard_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    callback_ctx: &mut CallbackContext<Context, E, F>,
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1336,111 +1342,111 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
     let sec_dir_base = security_directory_base.into();
     if use_i64 {
         // 64-bit vaddr, 32-bit paddr
-        ctx.emit(&Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
         
         // page_num = vaddr >> 16
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
         
         // pte_addr = pt_base + (page_num * 4)
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        pt_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
 
         // page_pointer = [pte_addr] (u32)
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::LocalTee(67))?; // temp local 67 for page_pointer
-        ctx.emit(&Instruction::I64ExtendI32U)?;
-        ctx.emit(&Instruction::LocalSet(68))?; // temp local 68 for page_pointer as u64
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // temp local 67 for page_pointer
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // temp local 68 for page_pointer as u64
 
         // security_index = page_pointer & 0xFF
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Const(0xFF))?;
-        ctx.emit(&Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
         
         // page_base_low24 = page_pointer >> 8
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Const(8))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::LocalSet(69))?; // temp local 69 for page_base_low24
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(8))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(69))?; // temp local 69 for page_base_low24
 
         // sec_entry_addr = sec_dir_base + (security_index * 4)
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
 
         // sec_entry = [sec_entry_addr] (u32)
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
 
         // page_base_top8 = sec_entry >> 24
-        ctx.emit(&Instruction::I64Const(24))?;
-        ctx.emit(&Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
         // phys_page_base = (page_base_top8 << 24) | page_base_low24
-        ctx.emit(&Instruction::I64Const(24))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::LocalGet(69))?;
-        ctx.emit(&Instruction::I64Or)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(69))?;
+        callback_ctx.emit(ctx, &Instruction::I64Or)?;
 
         // page_offset = vaddr & 0xFFFF
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
 
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
 
     } else {
         // 32-bit vaddr, 32-bit paddr
-        ctx.emit(&Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
         
-        ctx.emit(&Instruction::I32Const(16))?;
-        ctx.emit(&Instruction::I32ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
         
-        ctx.emit(&Instruction::I32Const(2))?;
-        ctx.emit(&Instruction::I32Shl)?;
-        pt_base.emit_load(ctx, false)?;
-        ctx.emit(&Instruction::I32Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
+        pt_base.emit_load(ctx, callback_ctx, false)?;
+        callback_ctx.emit(ctx, &Instruction::I32Add)?;
         
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
 
         // security_index = page_pointer & 0xFF
-        ctx.emit(&Instruction::I32Const(0xFF))?;
-        ctx.emit(&Instruction::I32And)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(0xFF))?;
+        callback_ctx.emit(ctx, &Instruction::I32And)?;
 
         // page_base_low24 = page_pointer >> 8
-        ctx.emit(&Instruction::LocalGet(67))?;
-        ctx.emit(&Instruction::I32Const(8))?;
-        ctx.emit(&Instruction::I32ShrU)?;
-        ctx.emit(&Instruction::LocalSet(68))?; // page_base_low24
+        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(8))?;
+        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // page_base_low24
 
         // sec_entry_addr = sec_dir_base + (security_index * 4)
-        ctx.emit(&Instruction::I32Const(2))?;
-        ctx.emit(&Instruction::I32Shl)?;
-        sec_dir_base.emit_load(ctx, false)?;
-        ctx.emit(&Instruction::I32Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
+        sec_dir_base.emit_load(ctx, callback_ctx, false)?;
+        callback_ctx.emit(ctx, &Instruction::I32Add)?;
 
         // sec_entry = [sec_entry_addr]
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
         
         // page_base_top8 = sec_entry >> 24
-        ctx.emit(&Instruction::I32Const(24))?;
-        ctx.emit(&Instruction::I32ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(24))?;
+        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
         
         // phys_page_base = (page_base_top8 << 24) | page_base_low24
-        ctx.emit(&Instruction::I32Const(24))?;
-        ctx.emit(&Instruction::I32Shl)?;
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I32Or)?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(24))?;
+        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I32Or)?;
         
         // page_offset = vaddr & 0xFFFF
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I32Const(0xFFFF))?;
-        ctx.emit(&Instruction::I32And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I32Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I32And)?;
         
-        ctx.emit(&Instruction::I32Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Add)?;
     }
     
     Ok(())
@@ -1460,8 +1466,9 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    callback_ctx: &mut CallbackContext<Context, E, F>,
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1472,71 +1479,71 @@ pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
 
     if use_i64 {
         // Level 3
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(48))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        l3_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
         
         // Level 2
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(32))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(32))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
         
         // Level 1
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(16))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Const(2))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
-        ctx.emit(&Instruction::LocalTee(67))?; // page_pointer
-        ctx.emit(&Instruction::I64ExtendI32U)?;
-        ctx.emit(&Instruction::LocalSet(68))?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
+        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?;
 
         // Security and final address construction
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Const(0xFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::LocalGet(68))?;
-        ctx.emit(&Instruction::I64Const(8))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::LocalSet(69))?;
-        ctx.emit(&Instruction::I64Const(3))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, true)?;
-        ctx.emit(&Instruction::I64Add)?;
-        ctx.emit(&Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
-        ctx.emit(&Instruction::I64Const(56))?;
-        ctx.emit(&Instruction::I64ShrU)?;
-        ctx.emit(&Instruction::I64Const(24))?;
-        ctx.emit(&Instruction::I64Shl)?;
-        ctx.emit(&Instruction::LocalGet(69))?;
-        ctx.emit(&Instruction::I64Or)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(8))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::LocalSet(69))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index }))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(56))?;
+        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
+        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(69))?;
+        callback_ctx.emit(ctx, &Instruction::I64Or)?;
         
-        ctx.emit(&Instruction::LocalGet(66))?;
-        ctx.emit(&Instruction::I64Const(0xFFFF))?;
-        ctx.emit(&Instruction::I64And)?;
-        ctx.emit(&Instruction::I64Add)?;
+        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
+        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+        callback_ctx.emit(ctx, &Instruction::I64And)?;
+        callback_ctx.emit(ctx, &Instruction::I64Add)?;
     } else {
         // 32-bit vaddr, 32-bit paddr
-        standard_page_table_mapper_32(ctx, l3_base, sec_dir_base, memory_index, false)?;
+        standard_page_table_mapper_32(ctx, callback_ctx, l3_base, sec_dir_base, memory_index, false)?;
     }
     
     Ok(())
@@ -2335,7 +2342,7 @@ mod tests {
             let mut callback = |hint: &HintInfo, ctx: &mut HintContext<Infallible, Function>| {
                 hint_values.push(hint.value);
                 // Generate a NOP instruction for each HINT
-                ctx.emit(&Instruction::Nop).ok();
+                callback_ctx.emit(ctx, &Instruction::Nop).ok();
             };
 
             recompiler.set_hint_callback(&mut callback);
@@ -2454,7 +2461,7 @@ mod tests {
             let mut callback = |_ecall: &EcallInfo, ctx: &mut HintContext<Infallible, Function>| {
                 ecall_count += 1;
                 // Generate a NOP instruction for each ECALL
-                ctx.emit(&Instruction::Nop).ok();
+                callback_ctx.emit(ctx, &Instruction::Nop).ok();
             };
 
             recompiler.set_ecall_callback(&mut callback);
@@ -2494,7 +2501,7 @@ mod tests {
                 |_ebreak: &EbreakInfo, ctx: &mut HintContext<Infallible, Function>| {
                     ebreak_count += 1;
                     // Generate a NOP instruction for each EBREAK
-                    ctx.emit(&Instruction::Nop).ok();
+                    callback_ctx.emit(ctx, &Instruction::Nop).ok();
                 };
 
             recompiler.set_ebreak_callback(&mut callback);
