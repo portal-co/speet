@@ -127,15 +127,17 @@ pub struct BreakInfo {
 ///
 /// This struct provides access to the WebAssembly instruction emitter and other
 /// compilation state. It is passed to all callbacks (SYSCALL, BREAK, mapper).
-pub struct CallbackContext<'a, E, F: InstructionSink<E>> {
+pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context,E>> {
     /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<E, F>,
+    pub reactor: &'a mut Reactor<Context, E, F>,
+    /// External user context/state passed to Reactor and callbacks
+    pub ctx: &'a mut Context,
 }
 
-impl<'a, E, F: InstructionSink<E>> CallbackContext<'a, E, F> {
+impl<'a, Context, E, F: InstructionSink<Context,E>> CallbackContext<'a, Context, E, F> {
     /// Emit a WebAssembly instruction
     pub fn emit(&mut self, instruction: &WasmInstruction) -> Result<(), E> {
-        self.reactor.feed(instruction)
+        self.reactor.feed(self.ctx, instruction)
     }
 }
 
@@ -144,21 +146,21 @@ impl<'a, E, F: InstructionSink<E>> CallbackContext<'a, E, F> {
 /// This trait defines interface for callbacks that translate virtual addresses
 /// to physical addresses. The callback receives the virtual address on the Wasm stack
 /// and should leave the physical address on the stack.
-pub trait MapperCallback<E, F: InstructionSink<E>> {
+pub trait MapperCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Translate a virtual address to a physical address
     ///
     /// # Stack State
     /// - Input: Virtual address (i32)
     /// - Output: Physical address (i32)
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E>;
+    fn call(&mut self, ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E>;
 }
 
 /// Blanket implementation of MapperCallback for FnMut closures
-impl<E, F: InstructionSink<E>, T> MapperCallback<E, F> for T
+impl<Context, E, F: InstructionSink<Context,E>, T> MapperCallback<Context, E, F> for T
 where
-    T: FnMut(&mut CallbackContext<E, F>) -> Result<(), E>,
+    T: FnMut(&mut CallbackContext<Context, E, F>) -> Result<(), E>,
 {
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E> {
+    fn call(&mut self, ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E> {
         self(ctx)
     }
 }
@@ -167,21 +169,21 @@ where
 ///
 /// This trait defines the interface for callbacks that are invoked when SYSCALL
 /// instructions are encountered during translation.
-pub trait SyscallCallback<E, F: InstructionSink<E>> {
+pub trait SyscallCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Process a SYSCALL instruction
     ///
     /// # Arguments
     /// * `syscall` - Information about the detected SYSCALL instruction
     /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, syscall: &SyscallInfo, ctx: &mut CallbackContext<E, F>);
+    fn call(&mut self, syscall: &SyscallInfo, ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of SyscallCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> SyscallCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context,E>, F> SyscallCallback<Context, E, G> for F
 where
-    F: FnMut(&SyscallInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&SyscallInfo, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, syscall: &SyscallInfo, ctx: &mut CallbackContext<E, G>) {
+    fn call(&mut self, syscall: &SyscallInfo, ctx: &mut CallbackContext<Context, E, G>) {
         self(syscall, ctx)
     }
 }
@@ -190,21 +192,21 @@ where
 ///
 /// This trait defines the interface for callbacks that are invoked when BREAK
 /// instructions are encountered during translation.
-pub trait BreakCallback<E, F: InstructionSink<E>> {
+pub trait BreakCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Process a BREAK instruction
     ///
     /// # Arguments
     /// * `break_info` - Information about the detected BREAK instruction
     /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, break_info: &BreakInfo, ctx: &mut CallbackContext<E, F>);
+    fn call(&mut self, break_info: &BreakInfo, ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of BreakCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> BreakCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context,E>, F> BreakCallback<Context, E, G> for F
 where
-    F: FnMut(&BreakInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&BreakInfo, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, break_info: &BreakInfo, ctx: &mut CallbackContext<E, G>) {
+    fn call(&mut self, break_info: &BreakInfo, ctx: &mut CallbackContext<Context, E, G>) {
         self(break_info, ctx)
     }
 }
@@ -216,23 +218,23 @@ where
 ///
 /// Each instruction gets its own function, and control flow is managed through
 /// jumps between these functions using the yecta reactor.
-pub struct MipsRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
-    reactor: Reactor<E, F>,
+pub struct MipsRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> {
+    reactor: Reactor<Context, E, F>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
     /// Optional callback for SYSCALL instructions
-    syscall_callback: Option<&'cb mut (dyn SyscallCallback<E, F> + 'ctx)>,
+    syscall_callback: Option<&'cb mut (dyn SyscallCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for BREAK instructions
-    break_callback: Option<&'cb mut (dyn BreakCallback<E, F> + 'ctx)>,
+    break_callback: Option<&'cb mut (dyn BreakCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for address mapping (paging support)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<E, F> + 'ctx)>,
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
     /// Whether to enable MIPS64 instruction support (disabled by default)
     enable_mips64: bool,
 }
 
-impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> MipsRecompiler<'cb, 'ctx, Context, E, F> {
     /// Create a new MIPS recompiler instance with full configuration
     ///
     /// # Arguments
@@ -451,99 +453,99 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
     /// Emit an integer constant (i32 or i64 depending on MIPS64 mode)
     fn emit_int_const(&mut self, value: i32) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Const(value as i64))
+            self.reactor.feed(ctx, &WasmInstruction::I64Const(value as i64))
         } else {
-            self.reactor.feed(&WasmInstruction::I32Const(value))
+            self.reactor.feed(ctx, &WasmInstruction::I32Const(value))
         }
     }
 
     /// Emit an unsigned integer constant (i32 or i64 depending on MIPS64 mode)
     fn emit_uint_const(&mut self, value: u32) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Const(value as i64))
+            self.reactor.feed(ctx, &WasmInstruction::I64Const(value as i64))
         } else {
-            self.reactor.feed(&WasmInstruction::I32Const(value as i32))
+            self.reactor.feed(ctx, &WasmInstruction::I32Const(value as i32))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on MIPS64 mode)
     fn emit_add(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Add)
+            self.reactor.feed(ctx, &WasmInstruction::I64Add)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Add)
+            self.reactor.feed(ctx, &WasmInstruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on MIPS64 mode)
     fn emit_sub(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Sub)
+            self.reactor.feed(ctx, &WasmInstruction::I64Sub)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Sub)
+            self.reactor.feed(ctx, &WasmInstruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on MIPS64 mode)
     fn emit_mul(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Mul)
+            self.reactor.feed(ctx, &WasmInstruction::I64Mul)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Mul)
+            self.reactor.feed(ctx, &WasmInstruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on MIPS64 mode)
     fn emit_and(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64And)
+            self.reactor.feed(ctx, &WasmInstruction::I64And)
         } else {
-            self.reactor.feed(&WasmInstruction::I32And)
+            self.reactor.feed(ctx, &WasmInstruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on MIPS64 mode)
     fn emit_or(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Or)
+            self.reactor.feed(ctx, &WasmInstruction::I64Or)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Or)
+            self.reactor.feed(ctx, &WasmInstruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on MIPS64 mode)
     fn emit_xor(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Xor)
+            self.reactor.feed(ctx, &WasmInstruction::I64Xor)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Xor)
+            self.reactor.feed(ctx, &WasmInstruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on MIPS64 mode)
     fn emit_shl(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64Shl)
+            self.reactor.feed(ctx, &WasmInstruction::I64Shl)
         } else {
-            self.reactor.feed(&WasmInstruction::I32Shl)
+            self.reactor.feed(ctx, &WasmInstruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on MIPS64 mode)
     fn emit_shr_u(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64ShrU)
+            self.reactor.feed(ctx, &WasmInstruction::I64ShrU)
         } else {
-            self.reactor.feed(&WasmInstruction::I32ShrU)
+            self.reactor.feed(ctx, &WasmInstruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on MIPS64 mode)
     fn emit_shr_s(&mut self) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.feed(&WasmInstruction::I64ShrS)
+            self.reactor.feed(ctx, &WasmInstruction::I64ShrS)
         } else {
-            self.reactor.feed(&WasmInstruction::I32ShrS)
+            self.reactor.feed(ctx, &WasmInstruction::I32ShrS)
         }
     }
 
@@ -675,8 +677,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
         self.init_function(pc, 8, f);
         
         // Update PC
-        self.reactor.feed(&WasmInstruction::I32Const(pc as i32))?;
-        self.reactor.feed(&WasmInstruction::LocalSet(Self::pc_local()))?;
+        self.reactor.feed(ctx, &WasmInstruction::I32Const(pc as i32))?;
+        self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::pc_local()))?;
 
         let opcode = instruction.unique_id;
 
@@ -688,10 +690,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_add()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -701,10 +703,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_add()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -714,10 +716,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -727,10 +729,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -740,10 +742,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_sub()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -753,10 +755,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_sub()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -767,10 +769,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_and()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -780,10 +782,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_or()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -793,10 +795,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_xor()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -806,12 +808,12 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rd: GprO32 = instruction.get_rd_o32();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.emit_or()?;
                     self.emit_int_const(-1)?;
                     self.emit_xor()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -821,10 +823,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as u32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_and()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -834,10 +836,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as u32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_or()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -847,10 +849,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as u32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_xor()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -861,10 +863,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let sa = instruction.get_sa();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(sa as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shl()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -874,10 +876,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let sa = instruction.get_sa();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(sa as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shr_u()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -887,10 +889,10 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let sa = instruction.get_sa();
                 
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(sa as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shr_s()?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -900,8 +902,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as u32;
                 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::I32Const((imm << 16) as i32))?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const((imm << 16) as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -960,22 +962,22 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // load byte (signed) -> i32
-                    self.reactor.feed(&WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Load8S(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                     // extend to i64 if needed
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -986,21 +988,21 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // load byte unsigned -> i32
-                    self.reactor.feed(&WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Load8U(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1011,21 +1013,21 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // load halfword signed -> i32
-                    self.reactor.feed(&WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Load16S(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1036,21 +1038,21 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // load halfword unsigned -> i32
-                    self.reactor.feed(&WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Load16U(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1060,23 +1062,23 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add()?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     mapper.call(&mut ctx)?;
                 }
 
                 // value to store: wrap to i32 then store 8 bits
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(&WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                 } else {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store8(wasm_encoder::MemArg { offset: 0, align: 0, memory_index: 0 }))?;
                 }
             }
 
@@ -1086,23 +1088,23 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add()?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     mapper.call(&mut ctx)?;
                 }
 
                 // value to store: wrap to i32 then store 16 bits
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(&WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                 } else {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store16(wasm_encoder::MemArg { offset: 0, align: 1, memory_index: 0 }))?;
                 }
             }
 
@@ -1114,22 +1116,22 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
 
                 if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
-                    self.reactor.feed(&WasmInstruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                     if self.enable_mips64 {
-                        self.reactor.feed(&WasmInstruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1140,24 +1142,24 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 let imm = instruction.get_immediate() as i32;
 
                 // compute effective address: base + imm
-                self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add()?;
 
                 // invoke mapper callback if present (virtual -> physical)
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     mapper.call(&mut ctx)?;
                 }
 
                 // value to store: if MIPS64 wrap to i32 then store 32-bit
                 if self.enable_mips64 {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(&WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                 } else {
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }))?;
                 }
             }
 
@@ -1169,22 +1171,22 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
 
                 if !self.enable_mips64 {
                     // LD is only valid when MIPS64 support is enabled
-                    self.reactor.feed(&WasmInstruction::Unreachable)?;
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
                 } else if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // perform 64-bit memory load
-                    self.reactor.feed(&WasmInstruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1196,22 +1198,22 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
 
                 if !self.enable_mips64 {
                     // SD is only valid when MIPS64 support is enabled
-                    self.reactor.feed(&WasmInstruction::Unreachable)?;
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
                 } else {
                     // compute effective address: base + imm
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.feed(&WasmInstruction::I32Const(imm))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add()?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut ctx = CallbackContext { reactor: &mut self.reactor };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         mapper.call(&mut ctx)?;
                     }
 
                     // store 64-bit value directly
-                    self.reactor.feed(&WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(&WasmInstruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
                 }
             }
 
@@ -1232,8 +1234,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 
                 // Save return address in $ra ($31)
                 let return_addr = pc + 8; // JAL has a delay slot
-                self.reactor.feed(&WasmInstruction::I32Const(return_addr as i32))?;
-                self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)))?;
+                self.reactor.feed(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)))?;
                 
                 self.jump_to_pc(target_pc, 35)?; // Pass all registers as parameters
                 return Ok(()); // JAL handles control flow, no fallthrough
@@ -1261,8 +1263,8 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
                 // Save return address
                 let return_addr = pc + 8; // JALR has a delay slot
                 if rd != GprO32::zero {
-                    self.reactor.feed(&WasmInstruction::I32Const(return_addr as i32))?;
-                    self.reactor.feed(&WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
+                    self.reactor.feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
 
                 // Use shared TableIndexSnippet to compute table index
@@ -1286,13 +1288,11 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.syscall_callback {
-                    let mut ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     callback.call(&syscall_info, &mut ctx);
                 } else {
                     // Default behavior: system call - implementation specific
-                    self.reactor.feed(&WasmInstruction::Unreachable)?;
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
                 }
             }
 
@@ -1302,20 +1302,18 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> MipsRecompiler<'cb, 'ctx, E, F> {
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.break_callback {
-                    let mut ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     callback.call(&break_info, &mut ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
-                    self.reactor.feed(&WasmInstruction::Unreachable)?;
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
                 }
             }
 
             // Unsupported or unimplemented instructions
             _ => {
                 // Emit unreachable for unsupported instructions
-                self.reactor.feed(&WasmInstruction::Unreachable)?;
+                self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
             }
         }
 

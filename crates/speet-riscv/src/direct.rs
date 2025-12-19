@@ -1,9 +1,9 @@
 use crate::*;
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     /// Helper to translate load instructions
-    pub(crate) fn translate_load(
+    pub(crate) fn (
         &mut self,
-        ctx: &mut Context,
+        ctx: &mut Context, ctx: &mut Context,
         base: Reg,
         offset: Imm,
         dest: Reg,
@@ -20,20 +20,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Add)?;
+            self.reactor.feed(ctx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                self.reactor.feed(&Instruction::I32WrapI64)?;
+                self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
             }
         } else {
-            self.reactor.feed(&Instruction::I32Add)?;
+            self.reactor.feed(ctx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
             mapper.call(&mut ctx)?;
         }
 
@@ -56,7 +54,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         }))?;
                     // If RV64 but not memory64, extend to i64
                     if self.enable_rv64 {
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -76,7 +74,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             memory_index: 0,
                         }))?;
                     if self.enable_rv64 {
-                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -96,7 +94,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             memory_index: 0,
                         }))?;
                     if self.enable_rv64 {
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -116,7 +114,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             memory_index: 0,
                         }))?;
                     if self.enable_rv64 {
-                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -136,7 +134,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             memory_index: 0,
                         }))?;
                     if self.enable_rv64 {
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -156,7 +154,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             align: 2,
                             memory_index: 0,
                         }))?;
-                    self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                    self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                 }
             }
             LoadOp::I64 => {
@@ -176,9 +174,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to translate store instructions
-    pub(crate) fn translate_store(
+    pub(crate) fn (
         &mut self,
-        base: Reg,
+        ctx: &mut Context, base: Reg,
         offset: Imm,
         src: Reg,
         op: StoreOp,
@@ -190,20 +188,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            self.reactor.feed(&Instruction::I64Add)?;
+            self.reactor.feed(ctx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                self.reactor.feed(&Instruction::I32WrapI64)?;
+                self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
             }
         } else {
-            self.reactor.feed(&Instruction::I32Add)?;
+            self.reactor.feed(ctx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
             mapper.call(&mut ctx)?;
         }
 
@@ -214,7 +210,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         // If RV64 but not memory64, need to wrap i64 value to i32 for 32-bit stores
         let need_wrap = self.enable_rv64 && !self.use_memory64 && !matches!(op, StoreOp::I64);
         if need_wrap {
-            self.reactor.feed(&Instruction::I32WrapI64)?;
+            self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
         }
 
         // Store to memory
@@ -285,9 +281,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to translate floating-point load instructions
-    pub(crate) fn translate_fload(
+    pub(crate) fn (
         &mut self,
-        base: Reg,
+        ctx: &mut Context, base: Reg,
         offset: Imm,
         dest: FReg,
         op: FLoadOp,
@@ -296,13 +292,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(offset)?;
-        self.reactor.feed(&Instruction::I32Add)?;
+        self.reactor.feed(ctx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
             mapper.call(&mut ctx)?;
         }
 
@@ -315,7 +309,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         align: 2,
                         memory_index: 0,
                     }))?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(ctx, &Instruction::F64PromoteF32)?;
             }
             FLoadOp::F64 => {
                 self.reactor
@@ -333,9 +327,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to translate floating-point store instructions
-    pub(crate) fn translate_fstore(
+    pub(crate) fn (
         &mut self,
-        base: Reg,
+        ctx: &mut Context, base: Reg,
         offset: Imm,
         src: FReg,
         op: FStoreOp,
@@ -344,13 +338,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         self.reactor
             .feed(&Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(offset)?;
-        self.reactor.feed(&Instruction::I32Add)?;
+        self.reactor.feed(ctx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
             mapper.call(&mut ctx)?;
         }
 
@@ -361,7 +353,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         // Store to memory
         match op {
             FStoreOp::F32 => {
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(ctx, &Instruction::F32DemoteF64)?;
                 self.reactor
                     .feed(&Instruction::F32Store(wasm_encoder::MemArg {
                         offset: 0,
@@ -383,9 +375,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to emit sign-injection for single-precision floats
-    pub(crate) fn emit_fsgnj_s(
+    pub(crate) fn (
         &mut self,
-        dest: FReg,
+        ctx: &mut Context, dest: FReg,
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
@@ -397,33 +389,33 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         self.reactor
             .feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
         self.unbox_f32()?;
-        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+        self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
 
         // Mask to keep only magnitude (clear sign bit): 0x7FFFFFFF
-        self.reactor.feed(&Instruction::I32Const(0x7FFFFFFF))?;
-        self.reactor.feed(&Instruction::I32And)?;
+        self.reactor.feed(ctx, &Instruction::I32Const(0x7FFFFFFF))?;
+        self.reactor.feed(ctx, &Instruction::I32And)?;
 
         // Get sign bit from src2
         self.reactor
             .feed(&Instruction::LocalGet(Self::freg_to_local(src2)))?;
         self.unbox_f32()?;
-        self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+        self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly: mask with 0x80000000
                 self.reactor
                     .feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.feed(&Instruction::I32And)?;
+                self.reactor.feed(ctx, &Instruction::I32And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
                 self.reactor
                     .feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.feed(&Instruction::I32And)?;
+                self.reactor.feed(ctx, &Instruction::I32And)?;
                 self.reactor
                     .feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.feed(&Instruction::I32Xor)?; // Flip the sign bit
+                self.reactor.feed(ctx, &Instruction::I32Xor)?; // Flip the sign bit
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits of src1 and src2
@@ -431,17 +423,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::I32ReinterpretF32)?;
-                self.reactor.feed(&Instruction::I32Xor)?;
+                self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
+                self.reactor.feed(ctx, &Instruction::I32Xor)?;
                 self.reactor
                     .feed(&Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.feed(&Instruction::I32And)?;
+                self.reactor.feed(ctx, &Instruction::I32And)?;
             }
         }
 
         // Combine magnitude and sign
-        self.reactor.feed(&Instruction::I32Or)?;
-        self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+        self.reactor.feed(ctx, &Instruction::I32Or)?;
+        self.reactor.feed(ctx, &Instruction::F32ReinterpretI32)?;
         self.nan_box_f32()?;
         self.reactor
             .feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
@@ -450,9 +442,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to emit sign-injection for double-precision floats
-    pub(crate) fn emit_fsgnj_d(
+    pub(crate) fn (
         &mut self,
-        dest: FReg,
+        ctx: &mut Context, dest: FReg,
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
@@ -461,49 +453,49 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         // Convert src1 to i64 to manipulate bits
         self.reactor
             .feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+        self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
 
         // Mask to keep only magnitude (clear sign bit)
         self.reactor
             .feed(&Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
-        self.reactor.feed(&Instruction::I64And)?;
+        self.reactor.feed(ctx, &Instruction::I64And)?;
 
         // Get sign bit from src2
         self.reactor
             .feed(&Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+        self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly
                 self.reactor
                     .feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.feed(&Instruction::I64And)?;
+                self.reactor.feed(ctx, &Instruction::I64And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
                 self.reactor
                     .feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.feed(&Instruction::I64And)?;
+                self.reactor.feed(ctx, &Instruction::I64And)?;
                 self.reactor
                     .feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.feed(&Instruction::I64Xor)?;
+                self.reactor.feed(ctx, &Instruction::I64Xor)?;
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                self.reactor.feed(&Instruction::I64ReinterpretF64)?;
-                self.reactor.feed(&Instruction::I64Xor)?;
+                self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
+                self.reactor.feed(ctx, &Instruction::I64Xor)?;
                 self.reactor
                     .feed(&Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.feed(&Instruction::I64And)?;
+                self.reactor.feed(ctx, &Instruction::I64And)?;
             }
         }
 
         // Combine magnitude and sign
-        self.reactor.feed(&Instruction::I64Or)?;
-        self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+        self.reactor.feed(ctx, &Instruction::I64Or)?;
+        self.reactor.feed(ctx, &Instruction::F64ReinterpretI64)?;
         self.reactor
             .feed(&Instruction::LocalSet(Self::freg_to_local(dest)))?;
 
@@ -598,7 +590,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
         // Initialize function for this instruction
         self.init_function(pc, inst_len, 8, f);
         // Update PC
-        self.reactor.feed(&Instruction::I32Const(pc as i32))?;
+        self.reactor.feed(ctx, &Instruction::I32Const(pc as i32))?;
         self.reactor
             .feed(&Instruction::LocalSet(Self::pc_local()))?;
 
@@ -625,16 +617,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             Inst::Auipc { uimm, dest } => {
                 if self.enable_rv64 {
                     // RV64: Use full 64-bit PC
-                    self.reactor.feed(&Instruction::I64Const(pc as i64))?;
+                    self.reactor.feed(ctx, &Instruction::I64Const(pc as i64))?;
                     self.emit_imm(*uimm)?;
                     self.emit_add()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else {
                     // RV32: Use 32-bit PC
-                    self.reactor.feed(&Instruction::I32Const(pc as i32))?;
+                    self.reactor.feed(ctx, &Instruction::I32Const(pc as i32))?;
                     self.emit_imm(*uimm)?;
-                    self.reactor.feed(&Instruction::I32Add)?;
+                    self.reactor.feed(ctx, &Instruction::I32Add)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -710,12 +702,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     // RV64: Clear LSB with 64-bit mask
                     self.reactor
                         .feed(&Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?; // ~1 mask
-                    self.reactor.feed(&Instruction::I64And)?;
+                    self.reactor.feed(ctx, &Instruction::I64And)?;
                 } else {
                     // RV32: Clear LSB with 32-bit mask
                     self.reactor
                         .feed(&Instruction::I32Const(0xFFFFFFFE_u32 as i32))?; // ~1 mask
-                    self.reactor.feed(&Instruction::I32And)?;
+                    self.reactor.feed(ctx, &Instruction::I32And)?;
                 }
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::pc_local()))?;
@@ -818,9 +810,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
                     // Invoke callback if set
                     if let Some(ref mut callback) = self.hint_callback {
-                        let mut ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                         callback.call(&hint_info, &mut ctx);
                     }
 
@@ -845,7 +835,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32LtS)?;
+                    self.reactor.feed(ctx, &Instruction::I32LtS)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -856,7 +846,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.emit_imm(*imm)?;
-                    self.reactor.feed(&Instruction::I32LtU)?;
+                    self.reactor.feed(ctx, &Instruction::I32LtU)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -971,7 +961,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32LtS)?;
+                    self.reactor.feed(ctx, &Instruction::I32LtS)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -983,7 +973,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32LtU)?;
+                    self.reactor.feed(ctx, &Instruction::I32LtU)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1065,14 +1055,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ecall_callback {
-                    let mut ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     callback.call(&ecall_info, &mut ctx);
                 } else {
                     // Default behavior: environment call - implementation specific
                     // Would need to be handled by runtime
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1081,13 +1069,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ebreak_callback {
-                    let mut ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut ctx = CallbackContext { reactor: &mut self.reactor, ctx };
                     callback.call(&ebreak_info, &mut ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1125,14 +1111,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         // For RV32: use i64 multiply and shift
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
-                        self.reactor.feed(&Instruction::I64Mul)?;
-                        self.reactor.feed(&Instruction::I64Const(32))?;
-                        self.reactor.feed(&Instruction::I64ShrS)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+                        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+                        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
@@ -1156,14 +1142,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         // For RV32: use i64 multiply with mixed sign extension
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
-                        self.reactor.feed(&Instruction::I64Mul)?;
-                        self.reactor.feed(&Instruction::I64Const(32))?;
-                        self.reactor.feed(&Instruction::I64ShrS)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+                        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+                        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
@@ -1187,14 +1173,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         // For RV32: use i64 multiply and shift
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64ExtendI32U)?;
-                        self.reactor.feed(&Instruction::I64Mul)?;
-                        self.reactor.feed(&Instruction::I64Const(32))?;
-                        self.reactor.feed(&Instruction::I64ShrU)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+                        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+                        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
@@ -1207,7 +1193,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32DivS)?;
+                    self.reactor.feed(ctx, &Instruction::I32DivS)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1219,7 +1205,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32DivU)?;
+                    self.reactor.feed(ctx, &Instruction::I32DivU)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1231,7 +1217,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32RemS)?;
+                    self.reactor.feed(ctx, &Instruction::I32RemS)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1243,7 +1229,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::I32RemU)?;
+                    self.reactor.feed(ctx, &Instruction::I32RemU)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1270,7 +1256,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Add)?;
+                self.reactor.feed(ctx, &Instruction::F32Add)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1285,7 +1271,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(ctx, &Instruction::F32Sub)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1300,7 +1286,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(ctx, &Instruction::F32Mul)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1315,7 +1301,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Div)?;
+                self.reactor.feed(ctx, &Instruction::F32Div)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1325,7 +1311,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Sqrt)?;
+                self.reactor.feed(ctx, &Instruction::F32Sqrt)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1347,7 +1333,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Add)?;
+                self.reactor.feed(ctx, &Instruction::F64Add)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1359,7 +1345,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(ctx, &Instruction::F64Sub)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1371,7 +1357,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(ctx, &Instruction::F64Mul)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1383,7 +1369,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Div)?;
+                self.reactor.feed(ctx, &Instruction::F64Div)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1391,7 +1377,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             Inst::FsqrtD { dest, src, .. } => {
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F64Sqrt)?;
+                self.reactor.feed(ctx, &Instruction::F64Sqrt)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1404,7 +1390,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Min)?;
+                self.reactor.feed(ctx, &Instruction::F32Min)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1417,7 +1403,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Max)?;
+                self.reactor.feed(ctx, &Instruction::F32Max)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1428,7 +1414,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Min)?;
+                self.reactor.feed(ctx, &Instruction::F64Min)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1438,7 +1424,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Max)?;
+                self.reactor.feed(ctx, &Instruction::F64Max)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1452,7 +1438,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::F32Eq)?;
+                    self.reactor.feed(ctx, &Instruction::F32Eq)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1466,7 +1452,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::F32Lt)?;
+                    self.reactor.feed(ctx, &Instruction::F32Lt)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1480,7 +1466,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::F32Le)?;
+                    self.reactor.feed(ctx, &Instruction::F32Le)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1492,7 +1478,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F64Eq)?;
+                    self.reactor.feed(ctx, &Instruction::F64Eq)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1504,7 +1490,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F64Lt)?;
+                    self.reactor.feed(ctx, &Instruction::F64Lt)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1516,7 +1502,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.feed(&Instruction::F64Le)?;
+                    self.reactor.feed(ctx, &Instruction::F64Le)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1532,7 +1518,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::I32TruncF32S)?;
+                    self.reactor.feed(ctx, &Instruction::I32TruncF32S)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1544,7 +1530,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::I32TruncF32U)?;
+                    self.reactor.feed(ctx, &Instruction::I32TruncF32U)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1554,7 +1540,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Convert signed 32-bit integer to single
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F32ConvertI32S)?;
+                self.reactor.feed(ctx, &Instruction::F32ConvertI32S)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1564,7 +1550,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Convert unsigned 32-bit integer to single
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F32ConvertI32U)?;
+                self.reactor.feed(ctx, &Instruction::F32ConvertI32U)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1575,7 +1561,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if dest.0 != 0 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::I32TruncF64S)?;
+                    self.reactor.feed(ctx, &Instruction::I32TruncF64S)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1586,7 +1572,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if dest.0 != 0 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::I32TruncF64U)?;
+                    self.reactor.feed(ctx, &Instruction::I32TruncF64U)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1596,7 +1582,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Convert signed 32-bit integer to double
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F64ConvertI32S)?;
+                self.reactor.feed(ctx, &Instruction::F64ConvertI32S)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1605,7 +1591,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Convert unsigned 32-bit integer to double
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F64ConvertI32U)?;
+                self.reactor.feed(ctx, &Instruction::F64ConvertI32U)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1617,7 +1603,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Convert double to single with proper NaN-boxing
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F32DemoteF64)?;
+                self.reactor.feed(ctx, &Instruction::F32DemoteF64)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1630,7 +1616,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F64PromoteF32)?;
+                self.reactor.feed(ctx, &Instruction::F64PromoteF32)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1642,7 +1628,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                     self.unbox_f32()?;
-                    self.reactor.feed(&Instruction::I32ReinterpretF32)?;
+                    self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1652,7 +1638,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // Move bits from integer register to float register
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(&Instruction::F32ReinterpretI32)?;
+                self.reactor.feed(ctx, &Instruction::F32ReinterpretI32)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1706,11 +1692,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(ctx, &Instruction::F32Mul)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Add)?;
+                self.reactor.feed(ctx, &Instruction::F32Add)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1730,11 +1716,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Mul)?;
+                self.reactor.feed(ctx, &Instruction::F32Mul)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(ctx, &Instruction::F32Sub)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1757,8 +1743,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Mul)?;
-                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(ctx, &Instruction::F32Mul)?;
+                self.reactor.feed(ctx, &Instruction::F32Sub)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1778,12 +1764,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Mul)?;
-                self.reactor.feed(&Instruction::F32Neg)?;
+                self.reactor.feed(ctx, &Instruction::F32Mul)?;
+                self.reactor.feed(ctx, &Instruction::F32Neg)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
                 self.unbox_f32()?;
-                self.reactor.feed(&Instruction::F32Sub)?;
+                self.reactor.feed(ctx, &Instruction::F32Sub)?;
                 self.nan_box_f32()?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
@@ -1800,10 +1786,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(ctx, &Instruction::F64Mul)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F64Add)?;
+                self.reactor.feed(ctx, &Instruction::F64Add)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1819,10 +1805,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Mul)?;
+                self.reactor.feed(ctx, &Instruction::F64Mul)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(ctx, &Instruction::F64Sub)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1840,8 +1826,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Mul)?;
-                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(ctx, &Instruction::F64Mul)?;
+                self.reactor.feed(ctx, &Instruction::F64Sub)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1857,11 +1843,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src1)))?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.feed(&Instruction::F64Mul)?;
-                self.reactor.feed(&Instruction::F64Neg)?;
+                self.reactor.feed(ctx, &Instruction::F64Mul)?;
+                self.reactor.feed(ctx, &Instruction::F64Neg)?;
                 self.reactor
                     .feed(&Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.feed(&Instruction::F64Sub)?;
+                self.reactor.feed(ctx, &Instruction::F64Sub)?;
                 self.reactor
                     .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
@@ -1905,7 +1891,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         memory_index: 0,
                     }))?;
                 if dest.0 != 0 {
-                    self.reactor.feed(&Instruction::I32Const(0))?; // Success
+                    self.reactor.feed(ctx, &Instruction::I32Const(0))?; // Success
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1923,7 +1909,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // A real implementation would need to call into a CSR handler
                 if dest.0 != 0 {
                     // Return zero as placeholder
-                    self.reactor.feed(&Instruction::I32Const(0))?;
+                    self.reactor.feed(ctx, &Instruction::I32Const(0))?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1933,7 +1919,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             Inst::Csrrwi { dest, .. } | Inst::Csrrsi { dest, .. } | Inst::Csrrci { dest, .. } => {
                 if dest.0 != 0 {
-                    self.reactor.feed(&Instruction::I32Const(0))?;
+                    self.reactor.feed(ctx, &Instruction::I32Const(0))?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -1945,7 +1931,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.translate_load(*base, *offset, *dest, LoadOp::U32)?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1953,7 +1939,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.translate_load(*base, *offset, *dest, LoadOp::I64)?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1961,7 +1947,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.translate_store(*base, *offset, *src, StoreOp::I64)?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1972,15 +1958,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.emit_imm(*imm)?;
-                        self.reactor.feed(&Instruction::I64Add)?;
+                        self.reactor.feed(ctx, &Instruction::I64Add)?;
                         // Sign-extend lower 32 bits to 64 bits
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1989,15 +1975,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.feed(&Instruction::I32Shl)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(ctx, &Instruction::I32Shl)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2006,15 +1992,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.feed(&Instruction::I32ShrU)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(ctx, &Instruction::I32ShrU)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2023,15 +2009,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.feed(&Instruction::I32ShrS)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor.feed(ctx, &Instruction::I32ShrS)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2042,14 +2028,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64Add)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64Add)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2060,14 +2046,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64Sub)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64Sub)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2076,17 +2062,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32Shl)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32Shl)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2095,17 +2081,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32ShrU)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32ShrU)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2114,17 +2100,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32ShrS)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32ShrS)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2136,14 +2122,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I64Mul)?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64Mul)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2152,17 +2138,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32DivS)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32DivS)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2171,17 +2157,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32DivU)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32DivU)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2190,17 +2176,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32RemS)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32RemS)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2209,17 +2195,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.feed(&Instruction::I32WrapI64)?;
-                        self.reactor.feed(&Instruction::I32RemU)?;
-                        self.reactor.feed(&Instruction::I64ExtendI32S)?;
+                        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                        self.reactor.feed(ctx, &Instruction::I32RemU)?;
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2231,12 +2217,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                         self.unbox_f32()?;
-                        self.reactor.feed(&Instruction::I64TruncF32S)?;
+                        self.reactor.feed(ctx, &Instruction::I64TruncF32S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2247,12 +2233,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
                         self.unbox_f32()?;
-                        self.reactor.feed(&Instruction::I64TruncF32U)?;
+                        self.reactor.feed(ctx, &Instruction::I64TruncF32U)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2261,12 +2247,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F32ConvertI64S)?;
+                    self.reactor.feed(ctx, &Instruction::F32ConvertI64S)?;
                     self.nan_box_f32()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2275,12 +2261,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F32ConvertI64U)?;
+                    self.reactor.feed(ctx, &Instruction::F32ConvertI64U)?;
                     self.nan_box_f32()?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2290,12 +2276,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.feed(&Instruction::I64TruncF64S)?;
+                        self.reactor.feed(ctx, &Instruction::I64TruncF64S)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2305,12 +2291,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.feed(&Instruction::I64TruncF64U)?;
+                        self.reactor.feed(ctx, &Instruction::I64TruncF64U)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2319,11 +2305,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F64ConvertI64S)?;
+                    self.reactor.feed(ctx, &Instruction::F64ConvertI64S)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2332,11 +2318,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F64ConvertI64U)?;
+                    self.reactor.feed(ctx, &Instruction::F64ConvertI64U)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2346,12 +2332,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                     if dest.0 != 0 {
                         self.reactor
                             .feed(&Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.feed(&Instruction::I64ReinterpretF64)?;
+                        self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
                         self.reactor
                             .feed(&Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2360,11 +2346,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 if self.enable_rv64 {
                     self.reactor
                         .feed(&Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.feed(&Instruction::F64ReinterpretI64)?;
+                    self.reactor.feed(ctx, &Instruction::F64ReinterpretI64)?;
                     self.reactor
                         .feed(&Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.feed(&Instruction::Unreachable)?;
+                    self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2373,7 +2359,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             Inst::AmoW { .. } => {
                 // AMO operations (AMOSWAP, AMOADD, etc.) need WebAssembly atomic RMW operations
                 // Future implementation should map these to appropriate wasm atomic instructions
-                self.reactor.feed(&Instruction::Unreachable)?;
+                self.reactor.feed(ctx, &Instruction::Unreachable)?;
             }
 
             // Floating-point classify
@@ -2382,7 +2368,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // FCLASS returns a 10-bit mask indicating the class of the floating-point number
                 // (positive/negative infinity, normal, subnormal, zero, NaN, etc.)
                 // This requires complex bit pattern analysis not yet implemented
-                self.reactor.feed(&Instruction::Unreachable)?;
+                self.reactor.feed(ctx, &Instruction::Unreachable)?;
             }
 
             // Catch-all for any other unhandled instructions
@@ -2390,7 +2376,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
                 // This should ideally never be reached if all instruction variants are handled.
                 // If it is reached, it indicates an instruction type that was added to rv-asm
                 // but not yet implemented in this recompiler.
-                self.reactor.feed(&Instruction::Unreachable)?;
+                self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 return Ok(()); // Don't fallthrough for unimplemented instructions
             }
         }
@@ -2401,9 +2387,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Helper to translate branch instructions using yecta's ji API with custom Snippet
-    pub(crate) fn translate_branch(
+    pub(crate) fn (
         &mut self,
-        src1: Reg,
+        ctx: &mut Context, src1: Reg,
         src2: Reg,
         offset: Imm,
         pc: u32,
