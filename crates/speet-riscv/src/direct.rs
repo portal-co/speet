@@ -1,8 +1,9 @@
 use crate::*;
-impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     /// Helper to translate load instructions
     pub(crate) fn translate_load(
         &mut self,
+        ctx: &mut Context,
         base: Reg,
         offset: Imm,
         dest: Reg,

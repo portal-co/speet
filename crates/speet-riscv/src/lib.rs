@@ -98,22 +98,24 @@ pub struct EbreakInfo {
 ///
 /// This struct provides access to the WebAssembly instruction emitter and other
 /// compilation state. It is passed to all callbacks (HINT, ECALL, EBREAK, mapper).
-pub struct CallbackContext<'a, E, F: InstructionSink<E>> {
+pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context,E>> {
     /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<E, F>,
+    pub reactor: &'a mut Reactor<Context, E, F>,
+    /// External user context/state passed to Reactor and callbacks
+    pub ctx: &'a mut Context,
 }
 
-impl<'a, E, F: InstructionSink<E>> CallbackContext<'a, E, F> {
+impl<'a, Context, E, F: InstructionSink<Context,E>> CallbackContext<'a, Context, E, F> {
     /// Emit a WebAssembly instruction
     pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
-        self.reactor.feed(instruction)
+        self.reactor.feed(self.ctx, instruction)
     }
 }
 
 /// Legacy type alias for backwards compatibility
-pub type MapperContext<'a, E, F> = CallbackContext<'a, E, F>;
+pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
 /// Legacy type alias for backwards compatibility
-pub type HintContext<'a, E, F> = CallbackContext<'a, E, F>;
+pub type HintContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
 
 /// Trait for address mapping callbacks (paging support)
 ///
@@ -122,21 +124,21 @@ pub type HintContext<'a, E, F> = CallbackContext<'a, E, F>;
 /// and should leave the physical address on the stack.
 ///
 /// See PAGING.md for detailed documentation on the paging system.
-pub trait MapperCallback<E, F: InstructionSink<E>> {
+pub trait MapperCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Translate a virtual address to a physical address
     ///
     /// # Stack State
     /// - Input: Virtual address (i64 or i32 depending on use_memory64/enable_rv64)
     /// - Output: Physical address (same type as input)
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E>;
+    fn call(&mut self, ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E>;
 }
 
 /// Blanket implementation of MapperCallback for FnMut closures
-impl<E, F: InstructionSink<E>, T> MapperCallback<E, F> for T
+impl<Context, E, F: InstructionSink<Context,E>, T> MapperCallback<Context, E, F> for T
 where
-    T: FnMut(&mut CallbackContext<E, F>) -> Result<(), E>,
+    T: FnMut(&mut CallbackContext<Context, E, F>) -> Result<(), E>,
 {
-    fn call(&mut self, ctx: &mut CallbackContext<E, F>) -> Result<(), E> {
+    fn call(&mut self, ctx: &mut CallbackContext<Context, E, F>) -> Result<(), E> {
         self(ctx)
     }
 }
@@ -151,21 +153,21 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait HintCallback<E, F: InstructionSink<E>> {
+pub trait HintCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Process a HINT instruction
     ///
     /// # Arguments
     /// * `hint` - Information about the detected HINT instruction
     /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, F>);
+    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of HintCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> HintCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context,E>, F> HintCallback<Context, E, G> for F
 where
-    F: FnMut(&HintInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&HintInfo, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<E, G>) {
+    fn call(&mut self, hint: &HintInfo, ctx: &mut CallbackContext<Context, E, G>) {
         self(hint, ctx)
     }
 }
@@ -178,21 +180,21 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait EcallCallback<E, F: InstructionSink<E>> {
+pub trait EcallCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Process an ECALL instruction
     ///
     /// # Arguments
     /// * `ecall` - Information about the detected ECALL instruction
     /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, F>);
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of EcallCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> EcallCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context,E>, F> EcallCallback<Context, E, G> for F
 where
-    F: FnMut(&EcallInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&EcallInfo, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<E, G>) {
+    fn call(&mut self, ecall: &EcallInfo, ctx: &mut CallbackContext<Context, E, G>) {
         self(ecall, ctx)
     }
 }
@@ -205,21 +207,21 @@ where
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait EbreakCallback<E, F: InstructionSink<E>> {
+pub trait EbreakCallback<Context, E, F: InstructionSink<Context,E>> {
     /// Process an EBREAK instruction
     ///
     /// # Arguments
     /// * `ebreak` - Information about the detected EBREAK instruction
     /// * `ctx` - Unified context for emitting WebAssembly instructions
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, F>);
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<Context, E, F>);
 }
 
 /// Blanket implementation of EbreakCallback for FnMut closures
-impl<E, G: InstructionSink<E>, F> EbreakCallback<E, G> for F
+impl<Context, E, G: InstructionSink<Context,E>, F> EbreakCallback<Context, E, G> for F
 where
-    F: FnMut(&EbreakInfo, &mut CallbackContext<E, G>),
+    F: FnMut(&EbreakInfo, &mut CallbackContext<Context, E, G>),
 {
-    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<E, G>) {
+    fn call(&mut self, ebreak: &EbreakInfo, ctx: &mut CallbackContext<Context, E, G>) {
         self(ebreak, ctx)
     }
 }
@@ -236,8 +238,8 @@ where
 /// The lifetime parameters:
 /// - `'cb` represents the lifetime of the callback reference
 /// - `'ctx` represents the lifetime of data the callback may capture
-pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
-    reactor: Reactor<E, F>,
+pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> {
+    reactor: Reactor<Context, E, F>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
@@ -248,13 +250,13 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<&'cb mut (dyn HintCallback<E, F> + 'ctx)>,
+    hint_callback: Option<&'cb mut (dyn HintCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for ECALL instructions
-    ecall_callback: Option<&'cb mut (dyn EcallCallback<E, F> + 'ctx)>,
+    ecall_callback: Option<&'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for EBREAK instructions
-    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<E, F> + 'ctx)>,
+    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for address mapping (paging support - see PAGING.md)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<E, F> + 'ctx)>,
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -262,7 +264,7 @@ pub struct RiscVRecompiler<'cb, 'ctx, E, F: InstructionSink<E>> {
     use_memory64: bool,
 }
 
-impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     /// Create a new RISC-V recompiler instance with full configuration
     ///
     /// # Arguments
@@ -445,7 +447,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// };
     /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
-    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback<E, F> + 'ctx)) {
+    pub fn set_hint_callback(&mut self, callback: &'cb mut (dyn HintCallback<Context, E, F> + 'ctx)) {
         self.hint_callback = Some(callback);
     }
 
@@ -477,7 +479,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// };
     /// recompiler.set_ecall_callback(&mut my_callback);
     /// ```
-    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback<E, F> + 'ctx)) {
+    pub fn set_ecall_callback(&mut self, callback: &'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)) {
         self.ecall_callback = Some(callback);
     }
 
@@ -509,7 +511,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// };
     /// recompiler.set_ebreak_callback(&mut my_callback);
     /// ```
-    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback<E, F> + 'ctx)) {
+    pub fn set_ebreak_callback(&mut self, callback: &'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)) {
         self.ebreak_callback = Some(callback);
     }
 
@@ -545,7 +547,7 @@ impl<'cb, 'ctx, E, F: InstructionSink<E>> RiscVRecompiler<'cb, 'ctx, E, F> {
     /// };
     /// recompiler.set_mapper_callback(&mut my_mapper);
     /// ```
-    pub fn set_mapper_callback(&mut self, callback: &'cb mut (dyn MapperCallback<E, F> + 'ctx)) {
+    pub fn set_mapper_callback(&mut self, callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)) {
         self.mapper_callback = Some(callback);
     }
 
