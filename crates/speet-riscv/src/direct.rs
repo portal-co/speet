@@ -756,36 +756,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // "Load and store instructions transfer a value between the registers and memory.
             // Loads are encoded in the I-type format and stores are S-type."
             Inst::Lb { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I8)?;
             }
 
             Inst::Lh { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I16)?;
             }
 
             Inst::Lw { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I32)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I32)?;
             }
 
             Inst::Lbu { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::U8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U8)?;
             }
 
             Inst::Lhu { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::U16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U16)?;
             }
 
             // Store Instructions
             Inst::Sb { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I8)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I8)?;
             }
 
             Inst::Sh { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I16)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I16)?;
             }
 
             Inst::Sw { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I32)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I32)?;
             }
 
             // Integer Computational Instructions
@@ -1240,11 +1240,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // "This chapter describes the standard instruction-set extension for single-precision
             // floating-point, which is named 'F'"
             Inst::Flw { offset, dest, base } => {
-                self.translate_fload(*base, *offset, *dest, FLoadOp::F32)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F32)?;
             }
 
             Inst::Fsw { offset, src, base } => {
-                self.translate_fstore(*base, *offset, *src, FStoreOp::F32)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F32)?;
             }
 
             Inst::FaddS {
@@ -1319,11 +1319,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             // Floating-Point Double-Precision (D Extension)
             Inst::Fld { offset, dest, base } => {
-                self.translate_fload(*base, *offset, *dest, FLoadOp::F64)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F64)?;
             }
 
             Inst::Fsd { offset, src, base } => {
-                self.translate_fstore(*base, *offset, *src, FStoreOp::F64)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F64)?;
             }
 
             Inst::FaddD {
@@ -1651,29 +1651,29 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             Inst::FsgnjS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src2)
                 // We'll use a simple implementation using bit manipulation
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with NOT(sign(src2))
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src1) XOR sign(src2)
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             Inst::FsgnjD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             // Fused multiply-add operations
@@ -1929,7 +1929,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // These are RV64-specific. When RV64 is disabled, we emit unreachable.
             Inst::Lwu { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(*base, *offset, *dest, LoadOp::U32)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::U32)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -1937,7 +1937,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             Inst::Ld { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(*base, *offset, *dest, LoadOp::I64)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::I64)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -1945,7 +1945,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             Inst::Sd { offset, base, src } => {
                 if self.enable_rv64 {
-                    self.translate_store(*base, *offset, *src, StoreOp::I64)?;
+                    self.translate_store(ctx, *base, *offset, *src, StoreOp::I64)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -2413,10 +2413,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             enable_rv64: bool,
         }
 
-        impl<E> wax_core::build::InstructionOperatorSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for BranchCondition {
             fn emit(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
             ) -> Result<(), E> {
                 // Emit the same instructions as emit_instruction
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
@@ -2444,10 +2444,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             }
         }
 
-        impl<E> wax_core::build::InstructionSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionSource<Context, E> for BranchCondition {
             fn emit_instruction(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionSink<Context,E> + '_),
             ) -> Result<(), E> {
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
                 sink.instruction(&Instruction::LocalGet(self.src2))?;
@@ -3256,36 +3256,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // "Load and store instructions transfer a value between the registers and memory.
             // Loads are encoded in the I-type format and stores are S-type."
             Inst::Lb { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I8)?;
             }
 
             Inst::Lh { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I16)?;
             }
 
             Inst::Lw { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::I32)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I32)?;
             }
 
             Inst::Lbu { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::U8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U8)?;
             }
 
             Inst::Lhu { offset, dest, base } => {
-                self.translate_load(*base, *offset, *dest, LoadOp::U16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U16)?;
             }
 
             // Store Instructions
             Inst::Sb { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I8)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I8)?;
             }
 
             Inst::Sh { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I16)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I16)?;
             }
 
             Inst::Sw { offset, src, base } => {
-                self.translate_store(*base, *offset, *src, StoreOp::I32)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I32)?;
             }
 
             // Integer Computational Instructions
@@ -3740,11 +3740,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // "This chapter describes the standard instruction-set extension for single-precision
             // floating-point, which is named 'F'"
             Inst::Flw { offset, dest, base } => {
-                self.translate_fload(*base, *offset, *dest, FLoadOp::F32)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F32)?;
             }
 
             Inst::Fsw { offset, src, base } => {
-                self.translate_fstore(*base, *offset, *src, FStoreOp::F32)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F32)?;
             }
 
             Inst::FaddS {
@@ -3819,11 +3819,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             // Floating-Point Double-Precision (D Extension)
             Inst::Fld { offset, dest, base } => {
-                self.translate_fload(*base, *offset, *dest, FLoadOp::F64)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F64)?;
             }
 
             Inst::Fsd { offset, src, base } => {
-                self.translate_fstore(*base, *offset, *src, FStoreOp::F64)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F64)?;
             }
 
             Inst::FaddD {
@@ -4151,29 +4151,29 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             Inst::FsgnjS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src2)
                 // We'll use a simple implementation using bit manipulation
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with NOT(sign(src2))
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src1) XOR sign(src2)
-                self.emit_fsgnj_s(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             Inst::FsgnjD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(*dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             // Fused multiply-add operations
@@ -4429,7 +4429,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             // These are RV64-specific. When RV64 is disabled, we emit unreachable.
             Inst::Lwu { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(*base, *offset, *dest, LoadOp::U32)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::U32)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -4437,7 +4437,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             Inst::Ld { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(*base, *offset, *dest, LoadOp::I64)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::I64)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -4445,7 +4445,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
 
             Inst::Sd { offset, base, src } => {
                 if self.enable_rv64 {
-                    self.translate_store(*base, *offset, *src, StoreOp::I64)?;
+                    self.translate_store(ctx, *base, *offset, *src, StoreOp::I64)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -4913,10 +4913,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             enable_rv64: bool,
         }
 
-        impl<E> wax_core::build::InstructionOperatorSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for BranchCondition {
             fn emit(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
             ) -> Result<(), E> {
                 // Emit the same instructions as emit_instruction
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
@@ -4944,10 +4944,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
             }
         }
 
-        impl<E> wax_core::build::InstructionSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionSource<Context, E> for BranchCondition {
             fn emit_instruction(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionSink<Context,E> + '_),
             ) -> Result<(), E> {
                 sink.instruction(&Instruction::LocalGet(self.src1))?;
                 sink.instruction(&Instruction::LocalGet(self.src2))?;

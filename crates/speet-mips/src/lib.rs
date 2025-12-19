@@ -69,10 +69,10 @@ struct TableIndexSnippet {
     base_pc: u32,
 }
 
-impl<E> wax_core::build::InstructionOperatorSource<E> for TableIndexSnippet {
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for TableIndexSnippet {
     fn emit(
         &self,
-        sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
         sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;
         sink.instruction(&WasmInstruction::I32Const(0xFFFFFFFC_u32 as i32))?;
@@ -85,10 +85,10 @@ impl<E> wax_core::build::InstructionOperatorSource<E> for TableIndexSnippet {
     }
 }
 
-impl<E> wax_core::build::InstructionSource<E> for TableIndexSnippet {
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for TableIndexSnippet {
     fn emit_instruction(
         &self,
-        sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+        sink: &mut (dyn wax_core::build::InstructionSink<Context,E> + '_),
     ) -> Result<(), E> {
         sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;
         sink.instruction(&WasmInstruction::I32Const(0xFFFFFFFC_u32 as i32))?;
@@ -137,7 +137,7 @@ pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context,E>> {
 impl<'a, Context, E, F: InstructionSink<Context,E>> CallbackContext<'a, Context, E, F> {
     /// Emit a WebAssembly instruction
     pub fn emit(&mut self, instruction: &WasmInstruction) -> Result<(), E> {
-        self.reactor.feed(ctx, self.ctx, instruction)
+        self.reactor.feed(self.ctx, instruction)
     }
 }
 
@@ -574,10 +574,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> MipsRecompiler<'cb, '
             op: BranchOp,
         }
 
-        impl<E> wax_core::build::InstructionOperatorSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for BranchCondition {
             fn emit(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
             ) -> Result<(), E> {
                 // Emit comparison instructions
                 sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;
@@ -605,10 +605,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> MipsRecompiler<'cb, '
             }
         }
 
-        impl<E> wax_core::build::InstructionSource<E> for BranchCondition {
+        impl<Context, E> wax_core::build::InstructionSource<Context, E> for BranchCondition {
             fn emit_instruction(
                 &self,
-                sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+                sink: &mut (dyn wax_core::build::InstructionSink<Context,E> + '_),
             ) -> Result<(), E> {
                 // Emit the same instructions as emit_instruction
                 sink.instruction(&WasmInstruction::LocalGet(self.rs_local))?;

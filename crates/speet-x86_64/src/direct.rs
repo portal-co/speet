@@ -33,65 +33,65 @@ struct ConditionSnippet {
     condition_type: ConditionType,
 }
 
-impl<E> wax_core::build::InstructionOperatorSource<E> for ConditionSnippet {
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ConditionSnippet {
     fn emit(
         &self,
-        sink: &mut (dyn wax_core::build::InstructionOperatorSink<E> + '_),
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
         // For simple structs, we can delegate to emit_instruction
         self.emit_instruction(sink)
     }
 }
 
-impl<E> wax_core::build::InstructionSource<E> for ConditionSnippet {
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSnippet {
     fn emit_instruction(
         &self,
-        sink: &mut (dyn wax_core::build::InstructionSink<E> + '_),
+        sink: &mut (dyn wax_core::build::InstructionSink<Context,E> + '_),
     ) -> Result<(), E> {
         match self.condition_type {
             ConditionType::ZF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
             }
             ConditionType::NZF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
             ConditionType::SF_NE_OF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Xor)?;
             }
             ConditionType::ZF_OR_SF_NE_OF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Xor)?;
                 sink.instruction(&Instruction::I32Or)?;
             }
             ConditionType::NZF_AND_SF_EQ_OF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Xor)?;
                 sink.instruction(&Instruction::I32Eqz)?;
@@ -99,75 +99,75 @@ impl<E> wax_core::build::InstructionSource<E> for ConditionSnippet {
             }
             ConditionType::SF_EQ_OF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Xor)?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
             ConditionType::CF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::CF_LOCAL,
                 ))?;
             }
             ConditionType::CF_OR_ZF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::CF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Or)?;
             }
             ConditionType::NCF_AND_NZF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::CF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::ZF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::ZF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
                 sink.instruction(&Instruction::I32And)?;
             }
             ConditionType::NCF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::CF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::CF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
             ConditionType::SF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
             }
             ConditionType::NSF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::SF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::SF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
             ConditionType::OF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
             }
             ConditionType::NOF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::OF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::OF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
             ConditionType::PF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::PF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::PF_LOCAL,
                 ))?;
             }
             ConditionType::NPF => {
                 sink.instruction(&Instruction::LocalGet(
-                    X86Recompiler::<E, wasm_encoder::Function>::PF_LOCAL,
+                    X86Recompiler::<_, E, wasm_encoder::Function>::PF_LOCAL,
                 ))?;
                 sink.instruction(&Instruction::I32Eqz)?;
             }
@@ -176,7 +176,7 @@ impl<E> wax_core::build::InstructionSource<E> for ConditionSnippet {
     }
 }
 
-impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
+impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
     fn rip_to_func_idx(&self, rip: u64) -> FuncIdx {
         FuncIdx((rip.wrapping_sub(self.base_rip) / 1) as u32)
     }
@@ -330,26 +330,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                         self.handle_memory_rmw(&inst, size_bits, |this| this.emit_i64_add())
                     } else {
                         self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                            this.reactor.feed(&Instruction::LocalGet(dst))?;
+                            this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                             match src {
                                 Operand::Imm(i) => {
                                     this.emit_i64_const(i)?;
                                 }
                                 Operand::Reg(r) => {
-                                    this.reactor.feed(&Instruction::LocalGet(r))?;
+                                    this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 }
                                 Operand::RegWithSize(r, sz, bit) => {
-                                    this.reactor.feed(&Instruction::LocalGet(r))?;
+                                    this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                     this.emit_mask_shift_for_read(sz, bit)?;
                                 }
                             }
                             this.emit_i64_add()?;
                             if dst_size == 64 && dst_bit_offset == 0 {
-                                this.reactor.feed(&Instruction::LocalSet(dst))
+                                this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                             } else if dst_size == 32 {
-                                this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                                this.reactor.feed(&Instruction::I64And)?;
-                                this.reactor.feed(&Instruction::LocalSet(dst))
+                                this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                this.reactor .feed(ctx, &Instruction::I64And)?;
+                                this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                             } else {
                                 this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                             }
@@ -358,26 +358,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::Imul => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
                         this.emit_i64_mul()?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -385,26 +385,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::And => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
                         this.emit_i64_and()?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -412,26 +412,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::Or => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
                         this.emit_i64_or()?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -439,26 +439,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::Xor => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
                         this.emit_i64_xor()?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -466,26 +466,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::Shl => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
                         this.emit_i64_shl()?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -493,16 +493,16 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                 }
                 Mnemonic::Shr | Mnemonic::Sar => {
                     self.handle_binary(&inst, |this, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.feed(&Instruction::LocalGet(dst))?;
+                        this.reactor .feed(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
                                 this.emit_i64_const(i)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.feed(&Instruction::LocalGet(r))?;
+                                this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                 this.emit_mask_shift_for_read(sz, bit)?;
                             }
                         }
@@ -514,11 +514,11 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             this.emit_i64_shr_u()?;
                         }
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -537,11 +537,11 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                                     this.emit_i64_const(i)?;
                                 }
                                 if dst_size == 64 && dst_bit_offset == 0 {
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else if dst_size == 32 {
-                                    this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                                    this.reactor.feed(&Instruction::I64And)?;
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    this.reactor .feed(ctx, &Instruction::I64And)?;
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else {
                                     this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                                 }
@@ -549,20 +549,20 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             OpKind::Register => {
                                 match src {
                                     Operand::Reg(r) => {
-                                        this.reactor.feed(&Instruction::LocalGet(r))?;
+                                        this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                     }
                                     Operand::RegWithSize(r, sz, bit) => {
-                                        this.reactor.feed(&Instruction::LocalGet(r))?;
+                                        this.reactor .feed(ctx, &Instruction::LocalGet(r))?;
                                         this.emit_mask_shift_for_read(sz, bit)?;
                                     }
-                                    _ => return this.reactor.feed(&Instruction::Unreachable),
+                                    _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                                 }
                                 if dst_size == 64 && dst_bit_offset == 0 {
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else if dst_size == 32 {
-                                    this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                                    this.reactor.feed(&Instruction::I64And)?;
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    this.reactor .feed(ctx, &Instruction::I64And)?;
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else {
                                     this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                                 }
@@ -573,16 +573,16 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                                 // load according to destination size (zero-extend)
                                 this.emit_memory_load(dst_size, false)?;
                                 if dst_size == 64 && dst_bit_offset == 0 {
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else if dst_size == 32 {
-                                    this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                                    this.reactor.feed(&Instruction::I64And)?;
-                                    this.reactor.feed(&Instruction::LocalSet(dst))
+                                    this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    this.reactor .feed(ctx, &Instruction::I64And)?;
+                                    this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                                 } else {
                                     this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                                 }
                             }
-                            _ => return this.reactor.feed(&Instruction::Unreachable),
+                            _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                         }
                     })
                 }
@@ -608,33 +608,33 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             OpKind::Register => {
                                 match src {
                                     Operand::RegWithSize(r_local, r_size, r_bit) => {
-                                        this.reactor.feed(&Instruction::LocalGet(r_local))?;
+                                        this.reactor .feed(ctx, &Instruction::LocalGet(r_local))?;
                                         if r_bit > 0 {
                                             this.emit_mask_shift_for_read(r_size, r_bit)?;
                                         }
                                         match r_size {
                                             8 => {
                                                 // sign-extend 8-bit: (v << 56) >> 56 (arith)
-                                                this.reactor.feed(&Instruction::I64Const(56))?;
-                                                this.reactor.feed(&Instruction::I64Shl)?;
-                                                this.reactor.feed(&Instruction::I64Const(56))?;
-                                                this.reactor.feed(&Instruction::I64ShrS)?;
+                                                this.reactor .feed(ctx, &Instruction::I64Const(56))?;
+                                                this.reactor .feed(ctx, &Instruction::I64Shl)?;
+                                                this.reactor .feed(ctx, &Instruction::I64Const(56))?;
+                                                this.reactor .feed(ctx, &Instruction::I64ShrS)?;
                                             }
                                             16 => {
-                                                this.reactor.feed(&Instruction::I64Const(48))?;
-                                                this.reactor.feed(&Instruction::I64Shl)?;
-                                                this.reactor.feed(&Instruction::I64Const(48))?;
-                                                this.reactor.feed(&Instruction::I64ShrS)?;
+                                                this.reactor .feed(ctx, &Instruction::I64Const(48))?;
+                                                this.reactor .feed(ctx, &Instruction::I64Shl)?;
+                                                this.reactor .feed(ctx, &Instruction::I64Const(48))?;
+                                                this.reactor .feed(ctx, &Instruction::I64ShrS)?;
                                             }
                                             32 => {
                                                 // use i64.extend_i32_s if available via instruction
-                                                this.reactor.feed(&Instruction::I64ExtendI32S)?;
+                                                this.reactor .feed(ctx, &Instruction::I64ExtendI32S)?;
                                             }
                                             64 => { /* already 64-bit */ }
                                             _ => {}
                                         }
                                     }
-                                    _ => return this.reactor.feed(&Instruction::Unreachable),
+                                    _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                                 }
                             }
                             OpKind::Memory => {
@@ -652,14 +652,14 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                                 };
                                 this.emit_memory_load(mem_size_bits, true)?;
                             }
-                            _ => return this.reactor.feed(&Instruction::Unreachable),
+                            _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                         }
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -672,26 +672,26 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             OpKind::Register => {
                                 match src {
                                     Operand::RegWithSize(r_local, r_size, r_bit) => {
-                                        this.reactor.feed(&Instruction::LocalGet(r_local))?;
+                                        this.reactor .feed(ctx, &Instruction::LocalGet(r_local))?;
                                         if r_bit > 0 {
                                             this.emit_mask_shift_for_read(r_size, r_bit)?;
                                         }
                                         match r_size {
                                             8 => {
-                                                this.reactor.feed(&Instruction::I64Const(0xFF))?;
-                                                this.reactor.feed(&Instruction::I64And)?;
+                                                this.reactor .feed(ctx, &Instruction::I64Const(0xFF))?;
+                                                this.reactor .feed(ctx, &Instruction::I64And)?;
                                             }
                                             16 => {
                                                 this.reactor
-                                                    .feed(&Instruction::I64Const(0xFFFF))?;
-                                                this.reactor.feed(&Instruction::I64And)?;
+                                                     .feed(ctx, &Instruction::I64Const(0xFFFF))?;
+                                                this.reactor .feed(ctx, &Instruction::I64And)?;
                                             }
                                             32 => { /* already zero-extended */ }
                                             64 => { /* already 64 */ }
                                             _ => {}
                                         }
                                     }
-                                    _ => return this.reactor.feed(&Instruction::Unreachable),
+                                    _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                                 }
                             }
                             OpKind::Memory => {
@@ -705,14 +705,14 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                                 };
                                 this.emit_memory_load(mem_size_bits, false)?;
                             }
-                            _ => return this.reactor.feed(&Instruction::Unreachable),
+                            _ => return this.reactor .feed(ctx, &Instruction::Unreachable),
                         }
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.feed(&Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.feed(&Instruction::I64And)?;
-                            this.reactor.feed(&Instruction::LocalSet(dst))
+                            this.reactor .feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            this.reactor .feed(ctx, &Instruction::I64And)?;
+                            this.reactor .feed(ctx, &Instruction::LocalSet(dst))
                         } else {
                             this.emit_subreg_write_rmw(dst, dst_size, dst_bit_offset)
                         }
@@ -750,13 +750,13 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             // compute addr
                             self.emit_memory_address(&inst)?;
                             // load old value with register size
-                            self.emit_memory_load(_dst_size, false)?;
+                            self.emit_memory_load(ctx, _dst_size, false)?;
                             // store old value to temp
                             self.reactor.feed(ctx, &Instruction::LocalSet(17))?;
                             // store register value to memory
                             self.reactor.feed(ctx, &Instruction::LocalGet(dst_local))?;
                             self.reactor
-                                .feed(&Instruction::I64Store(wasm_encoder::MemArg {
+                                 .feed(ctx, &Instruction::I64Store(wasm_encoder::MemArg {
                                     offset: 0,
                                     align: 3,
                                     memory_index: 0,
@@ -856,7 +856,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                     }
 
                     // store flags at [RSP]
-                    self.emit_memory_store(size_bits)?;
+                    self.emit_memory_store(ctx, ctx, size_bits)?;
                     Ok(Some(()))
                 }
 
@@ -872,7 +872,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
 
                     // load value from [RSP] with appropriate size
                     self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
-                    self.emit_memory_load(size_bits, false)?; // pushes i64 value (zero-extended)
+                    self.emit_memory_load(ctx, size_bits, false)?; // pushes i64 value (zero-extended)
                                                               // store popped value into temp local 22
                     self.reactor.feed(ctx, &Instruction::LocalSet(22))?;
 
@@ -956,7 +956,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
 
         // Load current value from memory
         self.emit_memory_address(&inst)?;
-        self.emit_memory_load(size_bits, false)?;
+        self.emit_memory_load(ctx, size_bits, false)?;
 
         // Get source value based on operand kind
         match inst.op1_kind() {
@@ -966,13 +966,13 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
             | OpKind::Immediate64
             | OpKind::Immediate8to32 => {
                 let imm = inst.immediate64() as i64;
-                self.emit_i64_const(imm)?;
+                self.emit_i64_const(ctx, imm)?;
             }
             OpKind::Register => {
                 if let Some((r_local, r_size, _rz, bit)) = Self::resolve_reg(inst.op1_register()) {
                     self.reactor.feed(ctx, &Instruction::LocalGet(r_local))?;
                     if bit > 0 {
-                        self.emit_mask_shift_for_read(r_size, bit)?;
+                        self.(ctx, tx, ctx, r_size, bit)?;
                     }
                     // Apply mask for sub-registers
                     match r_size {
@@ -1000,7 +1000,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
 
         // Store result back to memory
         self.emit_memory_address(&inst)?;
-        self.emit_memory_store(size_bits)?;
+        self.emit_memory_store(ctx, ctx, size_bits)?;
 
         Ok(Some(()))
     }
@@ -1093,7 +1093,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                     // emit address then immediate then store sized by immediate kind
                     self.emit_memory_address(&inst)?;
                     let imm = inst.immediate64() as i64;
-                    self.emit_i64_const(imm)?;
+                    self.emit_i64_const(ctx, imm)?;
                     let size_bits = match op1 {
                         OpKind::Immediate8 => 8,
                         OpKind::Immediate16 => 16,
@@ -1102,7 +1102,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                         OpKind::Immediate64 => 64,
                         _ => 64,
                     };
-                    self.emit_memory_store(size_bits)?;
+                    self.emit_memory_store(ctx, ctx, size_bits)?;
                     return Ok(Some(()));
                 }
                 OpKind::Register => {
@@ -1114,7 +1114,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                         // get source value and narrow if sub-register
                         self.reactor.feed(ctx, &Instruction::LocalGet(r_local))?;
                         if bit > 0 {
-                            self.emit_mask_shift_for_read(r_size, bit)?;
+                            self.(ctx, tx, ctx, r_size, bit)?;
                         }
                         // narrow by mask if needed
                         match r_size {
@@ -1132,7 +1132,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
                             _ => {}
                         }
                         // store to memory using source size
-                        self.emit_memory_store(r_size)?;
+                        self.emit_memory_store(ctx, ctx, r_size)?;
                         return Ok(Some(()));
                     } else {
                         return Ok(None);
@@ -1234,13 +1234,13 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
         // Get dst value
         self.reactor.feed(ctx, &Instruction::LocalGet(dst_local))?;
         if dst_bit_offset > 0 {
-            self.emit_mask_shift_for_read(dst_size, dst_bit_offset)?;
+            self.(ctx, tx, ctx, dst_size, dst_bit_offset)?;
         }
 
         // Get src value
         match src {
             Operand::Imm(i) => {
-                self.emit_i64_const(i)?;
+                self.emit_i64_const(ctx, i)?;
             }
             Operand::Reg(r) => {
                 self.reactor.feed(ctx, &Instruction::LocalGet(r))?;
@@ -1248,13 +1248,13 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
             Operand::RegWithSize(r, sz, bit) => {
                 self.reactor.feed(ctx, &Instruction::LocalGet(r))?;
                 if bit > 0 {
-                    self.emit_mask_shift_for_read(sz, bit)?;
+                    self.(ctx, tx, ctx, sz, bit)?;
                 }
             }
         }
 
         // Perform AND
-        self.emit_i64_and()?;
+        self.emit_i64_and(ctx, )?;
 
         // Store result temporarily and set flags
         self.reactor.feed(ctx, &Instruction::LocalTee(22))?; // temp = result, result still on stack
@@ -1275,8 +1275,8 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
 
         // CF and OF are always cleared for TEST
-        self.set_cf(false)?;
-        self.set_of(false)?;
+        self.set_cf(ctx, false)?;
+        self.set_of(ctx, false)?;
 
         // PF: parity of lowest byte
         self.reactor.feed(ctx, &Instruction::LocalGet(22))?;
@@ -1329,13 +1329,13 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
         // Get dst value
         self.reactor.feed(ctx, &Instruction::LocalGet(dst_local))?;
         if dst_bit_offset > 0 {
-            self.emit_mask_shift_for_read(dst_size, dst_bit_offset)?;
+            self.(ctx, tx, ctx, dst_size, dst_bit_offset)?;
         }
 
         // Get src value
         match src {
             Operand::Imm(i) => {
-                self.emit_i64_const(i)?;
+                self.emit_i64_const(ctx, i)?;
             }
             Operand::Reg(r) => {
                 self.reactor.feed(ctx, &Instruction::LocalGet(r))?;
@@ -1343,7 +1343,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
             Operand::RegWithSize(r, sz, bit) => {
                 self.reactor.feed(ctx, &Instruction::LocalGet(r))?;
                 if bit > 0 {
-                    self.emit_mask_shift_for_read(sz, bit)?;
+                    self.(ctx, tx, ctx, sz, bit)?;
                 }
             }
         }
@@ -1355,7 +1355,7 @@ impl<E, F: InstructionSink<E>> X86Recompiler<E, F> {
         // Compute result = dst - src
         self.reactor.feed(ctx, &Instruction::LocalGet(22))?;
         self.reactor.feed(ctx, &Instruction::LocalGet(23))?;
-        self.emit_i64_sub()?;
+        self.emit_i64_sub(ctx, )?;
 
         // Store result and set flags
         self.reactor.feed(ctx, &Instruction::LocalTee(24))?; // result

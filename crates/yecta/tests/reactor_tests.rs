@@ -25,9 +25,9 @@ fn test_simple_function_creation() {
     reactor.next([(2, ValType::I32)].into_iter(), 0);
     
     // Emit some instructions
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&Instruction::I32Const(42)).is_ok());
-    assert!(reactor.feed(&Instruction::I32Add).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::I32Const(42)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::I32Add).is_ok());
 }
 
 #[test]
@@ -36,11 +36,11 @@ fn test_multiple_functions() {
     
     // Create first function
     reactor.next([(1, ValType::I32)].into_iter(), 0);
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
     
     // Create second function
     reactor.next([(1, ValType::I64)].into_iter(), 0);
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
 }
 
 #[test]
@@ -49,8 +49,8 @@ fn test_unconditional_jump() {
     
     // Create first function
     reactor.next([(2, ValType::I32)].into_iter(), 0);
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&Instruction::LocalGet(1)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(1)).is_ok());
     
     // Jump to function 1 with 2 parameters
     assert!(reactor.jmp(FuncIdx(1), 2).is_ok());
@@ -87,11 +87,11 @@ fn test_conditional_operations() {
     reactor.next([(2, ValType::I32)].into_iter(), 0);
     
     // Emit a simple conditional structure
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&Instruction::If(wasm_encoder::BlockType::Empty)).is_ok());
-    assert!(reactor.feed(&Instruction::LocalGet(1)).is_ok());
-    assert!(reactor.feed(&Instruction::Drop).is_ok());
-    assert!(reactor.feed(&Instruction::End).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::Drop).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::End).is_ok());
     
     assert!(reactor.seal(&Instruction::Unreachable).is_ok());
 }
@@ -140,7 +140,7 @@ fn test_seal_function() {
     let mut reactor = Reactor::<std::convert::Infallible, Function>::default();
     
     reactor.next([(1, ValType::I32)].into_iter(), 0);
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
     
     // Seal with return
     assert!(reactor.seal(&Instruction::Return).is_ok());
@@ -178,13 +178,13 @@ fn test_instruction_feeding() {
     reactor.next([(3, ValType::I32), (1, ValType::I64)].into_iter(), 0);
     
     // Feed various instructions
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&Instruction::LocalGet(1)).is_ok());
-    assert!(reactor.feed(&Instruction::I32Add).is_ok());
-    assert!(reactor.feed(&Instruction::LocalSet(2)).is_ok());
-    assert!(reactor.feed(&Instruction::LocalGet(3)).is_ok());
-    assert!(reactor.feed(&Instruction::I64Const(42)).is_ok());
-    assert!(reactor.feed(&Instruction::I64Eq).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::I32Add).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalSet(2)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(3)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::I64Const(42)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::I64Eq).is_ok());
     
     assert!(reactor.seal(&Instruction::Return).is_ok());
 }
@@ -226,7 +226,7 @@ fn test_control_flow_distance() {
     reactor.next([(1, ValType::I32)].into_iter(), 2);
     
     // All should be created successfully
-    assert!(reactor.feed(&Instruction::Nop).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::Nop).is_ok());
 }
 
 #[test]
@@ -244,8 +244,8 @@ fn test_call_and_return() {
     
     // Function 0: Calls function 1
     reactor.next([(2, ValType::I32)].into_iter(), 0);
-    assert!(reactor.feed(&Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&Instruction::LocalGet(1)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor .feed(ctx, &Instruction::LocalGet(1)).is_ok());
     
     assert!(reactor
         .call(

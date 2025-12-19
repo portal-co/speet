@@ -108,7 +108,7 @@ pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context,E>> {
 impl<'a, Context, E, F: InstructionSink<Context,E>> CallbackContext<'a, Context, E, F> {
     /// Emit a WebAssembly instruction
     pub fn emit(&mut self, instruction: &Instruction) -> Result<(), E> {
-        self.reactor.feed(ctx, self.ctx, instruction)
+        self.reactor.feed(self.ctx, instruction)
     }
 }
 
@@ -991,12 +991,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context,E>> RiscVRecompiler<'cb, 
     }
 
     /// Get the reactor (consumes self)
-    pub fn into_reactor(self) -> Reactor<E, F> {
+    pub fn into_reactor(self) -> Reactor<Context, , > {
         self.reactor
     }
 }
 
-impl<'cb, 'ctx, E, F: InstructionSink<E>> Default for RiscVRecompiler<'cb, 'ctx, E, F> {
+impl<'cb, 'ctx, E, F: InstructionSink<Context,E>> Default for RiscVRecompiler<'cb, 'ctx, E, F> {
     fn default() -> Self {
         Self::new()
     }
@@ -1074,7 +1074,7 @@ impl From<u64> for PageTableBase {
 
 impl PageTableBase {
     /// Emit instructions to get the page table base value onto the stack
-    fn emit_load<E, F: InstructionSink<E>>(&self, ctx: &mut CallbackContext<E, F>, use_i64: bool) -> Result<(), E> {
+    fn emit_load<Context, E, F: InstructionSink<Context,E>>(&self, ctx: &mut CallbackContext<Context, E, F>, use_i64: bool) -> Result<(), E> {
         match self {
             PageTableBase::Constant(addr) => {
                 if use_i64 {
@@ -1114,8 +1114,8 @@ impl PageTableBase {
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn standard_page_table_mapper<Context, E, F: InstructionSink<Context,E>>(
+    ctx: &mut CallbackContext<Context, E, F>,
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1236,8 +1236,8 @@ pub fn standard_page_table_mapper<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn multilevel_page_table_mapper<Context, E, F: InstructionSink<Context,E>>(
+    ctx: &mut CallbackContext<Context, E, F>,
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1327,8 +1327,8 @@ pub fn multilevel_page_table_mapper<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn standard_page_table_mapper_32<Context, E, F: InstructionSink<Context,E>>(
+    ctx: &mut CallbackContext<Context, E, F>,
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
@@ -1462,8 +1462,8 @@ pub fn standard_page_table_mapper_32<E, F: InstructionSink<E>>(
 /// # Stack State
 /// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
 /// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper_32<E, F: InstructionSink<E>>(
-    ctx: &mut CallbackContext<E, F>,
+pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context,E>>(
+    ctx: &mut CallbackContext<Context, E, F>,
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,

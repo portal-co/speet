@@ -84,36 +84,36 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
 
     fn set_zf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
-            .feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
     fn set_sf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
-            .feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
     fn set_cf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
-            .feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
     fn set_of(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
-            .feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
     fn set_pf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
-            .feed(&Instruction::I32Const(if value { 1 } else { 0 }))?;
+             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
-    fn compute_parity(&mut self) -> Result<(), E> {
+    fn compute_parity(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Assume value is on stack (i64)
         // Extract lowest byte: value & 0xFF
         self.reactor.feed(ctx, &Instruction::I64Const(0xFF))?;
@@ -130,9 +130,7 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
     }
 
     // Helper to set flags after arithmetic operation
-    fn set_flags_after_operation(
-        &mut self,
-        result: i64,
+    fn set_flags_after_operation(&mut self, ctx: &mut Context, result: i64,
         operand1: i64,
         operand2: i64,
         is_subtraction: bool,
@@ -171,7 +169,7 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
         }
 
         // PF: parity (simplified)
-        self.compute_parity(ctx, ctx)?;
+        self.compute_parity(ctx)?;
 
         Ok(())
     }
@@ -250,7 +248,7 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
         // shift right by bit_offset then mask size_bits
         if bit_offset > 0 {
             self.reactor
-                .feed(&Instruction::I64Const(bit_offset as i64))?;
+                 .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
             self.reactor.feed(ctx, &Instruction::I64ShrU)?;
         }
         match size_bits {
@@ -299,7 +297,7 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
         // shift mask left by bit_offset
         if bit_offset > 0 {
             self.reactor
-                .feed(&Instruction::I64Const(bit_offset as i64))?;
+                 .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
             self.reactor.feed(ctx, &Instruction::I64Shl)?;
         }
         // invert mask -> ~mask
@@ -320,7 +318,7 @@ impl<Context, E, F: InstructionSink<Context,E>> X86Recompiler<Context, E, F> {
         self.reactor.feed(ctx, &Instruction::I64And)?; // new_value & small_mask
         if bit_offset > 0 {
             self.reactor
-                .feed(&Instruction::I64Const(bit_offset as i64))?;
+                 .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
             self.reactor.feed(ctx, &Instruction::I64Shl)?; // << bit_offset
         }
         // combined = cleared | new_shifted
