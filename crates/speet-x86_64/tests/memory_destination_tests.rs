@@ -7,8 +7,10 @@ fn test_add_memory_destination_immediate() {
     // Test: ADD [rax], 0x42 - add immediate to memory location
     let bytes = vec![0x48, 0x83, 0x00, 0x42]; // ADD [rax], 0x42
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
+    let mut ctx = ();
     
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -26,8 +28,10 @@ fn test_add_memory_destination_register() {
     // Test: ADD [rax], rbx - add register to memory location
     let bytes = vec![0x48, 0x01, 0x18]; // ADD [rax], rbx
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
+    let mut ctx = ();
     
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -44,8 +48,10 @@ fn test_sub_memory_destination_immediate() {
     // Test: SUB [rax], 0x10 - subtract immediate from memory location
     let bytes = vec![0x48, 0x83, 0x28, 0x10]; // SUB [rax], 0x10
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
+    let mut ctx = ();
     
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -62,8 +68,10 @@ fn test_mov_memory_destination_immediate() {
     // Test: MOV [rax], 0x12345678 - move immediate to memory location
     let bytes = vec![0x48, 0xC7, 0x00, 0x78, 0x56, 0x34, 0x12]; // MOV [rax], 0x12345678
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
+    let mut ctx = ();
     
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -80,8 +88,10 @@ fn test_mov_memory_destination_register() {
     // Test: MOV [rax], rbx - move register to memory location
     let bytes = vec![0x48, 0x89, 0x18]; // MOV [rax], rbx
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
+    let mut ctx = ();
     
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {

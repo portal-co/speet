@@ -25,8 +25,9 @@ fn test_riscv_integration() -> bool {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Test a simple ADDI instruction
     let inst = Inst::Addi {
         imm: rv_asm::Imm::new_i32(42),
@@ -35,7 +36,7 @@ fn test_riscv_integration() -> bool {
     };
     
     recompiler
-        .translate_instruction(&inst, 0x1000, IsCompressed::No, &mut |a| {
+        .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
             Function::new(a.collect::<Vec<_>>())
         })
         .is_ok()
@@ -47,8 +48,9 @@ fn test_yecta_and_riscv_together() {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Translate multiple instructions
     let instructions = vec![
         Inst::Addi {
@@ -72,7 +74,7 @@ fn test_yecta_and_riscv_together() {
         let pc = 0x1000 + (i as u32 * 4);
         assert!(
             recompiler
-                .translate_instruction(inst, pc, IsCompressed::No, &mut |a| Function::new(
+                .translate_instruction(&mut ctx, inst, pc, IsCompressed::No, &mut |a| Function::new(
                     a.collect::<Vec<_>>()
                 ))
                 .is_ok(),
@@ -113,8 +115,9 @@ fn test_riscv_branch_translation() {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Test BEQ (branch if equal)
     let beq = Inst::Beq {
         offset: rv_asm::Imm::new_i32(8),
@@ -124,7 +127,7 @@ fn test_riscv_branch_translation() {
     
     assert!(
         recompiler
-            .translate_instruction(&beq, 0x1000, IsCompressed::No, &mut |a| Function::new(
+            .translate_instruction(&mut ctx, &beq, 0x1000, IsCompressed::No, &mut |a| Function::new(
                 a.collect::<Vec<_>>()
             ))
             .is_ok()
@@ -136,8 +139,9 @@ fn test_riscv_load_store_translation() {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Test LW (load word)
     let lw = Inst::Lw {
         offset: rv_asm::Imm::new_i32(0),
@@ -147,7 +151,7 @@ fn test_riscv_load_store_translation() {
     
     assert!(
         recompiler
-            .translate_instruction(&lw, 0x1000, IsCompressed::No, &mut |a| Function::new(
+            .translate_instruction(&mut ctx, &lw, 0x1000, IsCompressed::No, &mut |a| Function::new(
                 a.collect::<Vec<_>>()
             ))
             .is_ok()
@@ -162,7 +166,7 @@ fn test_riscv_load_store_translation() {
     
     assert!(
         recompiler
-            .translate_instruction(&sw, 0x1004, IsCompressed::No, &mut |a| Function::new(
+            .translate_instruction(&mut ctx, &sw, 0x1004, IsCompressed::No, &mut |a| Function::new(
                 a.collect::<Vec<_>>()
             ))
             .is_ok()
@@ -174,8 +178,9 @@ fn test_riscv_mul_extension() {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Test MUL (multiply) from M extension
     let mul = Inst::Mul {
         dest: rv_asm::Reg(3),
@@ -185,7 +190,7 @@ fn test_riscv_mul_extension() {
     
     assert!(
         recompiler
-            .translate_instruction(&mul, 0x1000, IsCompressed::No, &mut |a| Function::new(
+            .translate_instruction(&mut ctx, &mul, 0x1000, IsCompressed::No, &mut |a| Function::new(
                 a.collect::<Vec<_>>()
             ))
             .is_ok()
@@ -197,8 +202,9 @@ fn test_riscv_float_extension() {
     use speet_riscv::RiscVRecompiler;
     use rv_asm::{Inst, IsCompressed, RoundingMode};
     
-    let mut recompiler = RiscVRecompiler::<std::convert::Infallible, Function>::new_with_base_pc(0x1000);
-    
+    let mut recompiler = RiscVRecompiler::<(), std::convert::Infallible, Function>::new_with_base_pc(0x1000);
+    let mut ctx = ();
+
     // Test FADD.S (float add single) from F extension
     let fadd = Inst::FaddS {
         rm: RoundingMode::RoundToNearestTiesToEven,
@@ -209,7 +215,7 @@ fn test_riscv_float_extension() {
     
     assert!(
         recompiler
-            .translate_instruction(&fadd, 0x1000, IsCompressed::No, &mut |a| Function::new(
+            .translate_instruction(&mut ctx, &fadd, 0x1000, IsCompressed::No, &mut |a| Function::new(
                 a.collect::<Vec<_>>()
             ))
             .is_ok()

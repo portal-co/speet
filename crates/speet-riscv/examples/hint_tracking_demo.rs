@@ -15,7 +15,7 @@ fn main() {
     println!("======================================\n");
 
     // Create a recompiler with HINT tracking enabled
-    let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         Pool {
             table: TableIdx(0),
             ty: TypeIdx(0),
@@ -26,6 +26,7 @@ fn main() {
         false,  // disable RV64
         false,  // disable memory64
     );
+    let mut ctx = ();
 
     println!("HINT tracking is enabled\n");
 
@@ -138,7 +139,7 @@ fn main() {
     for (inst, description) in &test_program {
         println!("  0x{:08x}: {}", pc, description);
 
-        if let Err(e) = recompiler.translate_instruction(inst, pc, IsCompressed::No, &mut |a| {
+        if let Err(e) = recompiler.translate_instruction(&mut ctx, inst, pc, IsCompressed::No, &mut |a| {
             Function::new(a.collect::<Vec<_>>())
         }) {
             eprintln!("Error translating instruction: {:?}", e);
@@ -180,7 +181,7 @@ fn main() {
         dest: Reg(0),
         src1: Reg(0),
     };
-    let _ = recompiler.translate_instruction(&hint, pc, IsCompressed::No, &mut |a| {
+    let _ = recompiler.translate_instruction(&mut ctx, &hint, pc, IsCompressed::No, &mut |a| {
         Function::new(a.collect::<Vec<_>>())
     });
 
@@ -189,18 +190,19 @@ fn main() {
 
     // Demonstrate callback functionality
     println!("\n--- Callback Demo ---");
-    let mut callback_recompiler = RiscVRecompiler::new();
+    let mut callback_recompiler = RiscVRecompiler::<(), Infallible, Function>::new();
+    let mut ctx_cb = ();
 
     println!("Setting a callback for real-time HINT processing with code generation...");
     let mut my_callback =
-        |hint: &speet_riscv::HintInfo, ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
+        |hint: &speet_riscv::HintInfo, _ctx: &mut (), callback_ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
             println!(
                 "  [CALLBACK] Test case {} at PC 0x{:08x}",
                 hint.value, hint.pc
             );
             // Optionally emit a NOP instruction for each HINT
             use wasm_encoder::Instruction;
-            ctx.emit(&Instruction::Nop).ok();
+            callback_ctx.emit(&Instruction::Nop).ok();
         };
 
     callback_recompiler.set_hint_callback(&mut my_callback);
@@ -213,7 +215,7 @@ fn main() {
             src1: Reg(0),
         };
         let pc = 0x3000 + (i as u32 * 4);
-        let _ = callback_recompiler.translate_instruction(&hint, pc, IsCompressed::No, &mut |a| {
+        let _ = callback_recompiler.translate_instruction(&mut ctx_cb, &hint, pc, IsCompressed::No, &mut |a| {
             Function::new(a.collect::<Vec<_>>())
         });
     }

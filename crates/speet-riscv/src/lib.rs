@@ -32,7 +32,8 @@
 //! use rv_asm::{Inst, Xlen};
 //!
 //! // Create a recompiler instance
-//! let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+//! 
+//!     let mut ctx = ();
 //!
 //! // Decode and translate instructions
 //! let instruction_bytes: u32 = 0x00a50533; // add a0, a0, a0
@@ -440,8 +441,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
     /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
     /// # use wasm_encoder::Instruction;
-    /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext<_, _>| {
+    /// 
+    let mut ctx = ();
+    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
     ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
     ///     // Optionally emit WebAssembly instructions
     ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -472,8 +474,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
     /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
     /// # use wasm_encoder::Instruction;
-    /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext<_, _>| {
+    /// 
+    let mut ctx = ();
+    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
     ///     println!("ECALL at PC 0x{:x}", ecall.pc);
     ///     // Optionally emit WebAssembly instructions for the ecall
     ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -504,8 +507,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
     /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
     /// # use wasm_encoder::Instruction;
-    /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext<_, _>| {
+    /// 
+    let mut ctx = ();
+    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
     ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
     ///     // Optionally emit WebAssembly instructions for the ebreak
     ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -539,7 +543,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
     /// ```ignore
     /// # use speet_riscv::{RiscVRecompiler, MapperContext};
     /// # use wasm_encoder::Instruction;
-    /// let mut recompiler = RiscVRecompiler::new();
+    /// 
+    let mut ctx = ();
     /// let mut my_mapper = |ctx: &mut MapperContext<_, _>| {
     ///     // Example: Simple page table lookup
     ///     // Input: virtual address on stack
@@ -1556,7 +1561,7 @@ mod tests {
 
     #[test]
     fn test_recompiler_creation() {
-        let _recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        let _recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
         // Just ensure it can be created without panicking
     }
 
@@ -1564,7 +1569,8 @@ mod tests {
     fn test_addi_instruction() {
         // Test ADDI instruction: addi x1, x0, 42
         // Use base_pc to offset high addresses
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Addi {
             imm: rv_asm::Imm::new_i32(42),
@@ -1584,7 +1590,8 @@ mod tests {
     #[test]
     fn test_add_instruction() {
         // Test ADD instruction: add x3, x1, x2
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Add {
             dest: rv_asm::Reg(3),
@@ -1604,7 +1611,8 @@ mod tests {
     #[test]
     fn test_load_instruction() {
         // Test LW instruction: lw x1, 0(x2)
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Lw {
             offset: rv_asm::Imm::new_i32(0),
@@ -1624,7 +1632,8 @@ mod tests {
     #[test]
     fn test_store_instruction() {
         // Test SW instruction: sw x1, 4(x2)
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Sw {
             offset: rv_asm::Imm::new_i32(4),
@@ -1649,7 +1658,8 @@ mod tests {
     #[test]
     fn test_branch_instruction() {
         // Test BEQ instruction: beq x1, x2, offset
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Beq {
             offset: rv_asm::Imm::new_i32(8),
@@ -1669,7 +1679,8 @@ mod tests {
     #[test]
     fn test_mul_instruction() {
         // Test MUL instruction from M extension
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::Mul {
             dest: rv_asm::Reg(3),
@@ -1689,7 +1700,8 @@ mod tests {
     #[test]
     fn test_fadd_instruction() {
         // Test FADD.S instruction from F extension
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let inst = Inst::FaddS {
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
@@ -1714,7 +1726,8 @@ mod tests {
         let instruction_bytes: u32 = 0x00050513;
         let (inst, is_compressed) = Inst::decode(instruction_bytes, Xlen::Rv32).unwrap();
 
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         assert!(
             recompiler
@@ -1728,7 +1741,8 @@ mod tests {
     #[test]
     fn test_multiple_instructions() {
         // Test translating multiple instructions in sequence
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         // addi x1, x0, 5
         let inst1 = Inst::Addi {
@@ -1776,7 +1790,8 @@ mod tests {
     #[test]
     fn test_translate_from_bytes() {
         // Test translating from raw bytecode
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         // Simple program: addi x1, x0, 5 (0x00500093)
         let bytes = [0x93, 0x00, 0x50, 0x00]; // Little-endian
@@ -1791,7 +1806,8 @@ mod tests {
     #[test]
     fn test_translate_compressed_from_bytes() {
         // Test translating compressed instructions from bytes
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         // c.addi x1, 5 (0x0095) - compressed instruction
         let bytes = [0x95, 0x00];
@@ -1807,28 +1823,29 @@ mod tests {
     fn test_register_mapping() {
         // Test that register indices map correctly
         assert_eq!(
-            RiscVRecompiler::<Infallible, Function>::reg_to_local(rv_asm::Reg(0)),
+            reg_to_local(rv_asm::Reg(0)),
             0
         );
         assert_eq!(
-            RiscVRecompiler::<Infallible, Function>::reg_to_local(rv_asm::Reg(31)),
+            reg_to_local(rv_asm::Reg(31)),
             31
         );
         assert_eq!(
-            RiscVRecompiler::<Infallible, Function>::freg_to_local(rv_asm::FReg(0)),
+            freg_to_local(rv_asm::FReg(0)),
             32
         );
         assert_eq!(
-            RiscVRecompiler::<Infallible, Function>::freg_to_local(rv_asm::FReg(31)),
+            freg_to_local(rv_asm::FReg(31)),
             63
         );
-        assert_eq!(RiscVRecompiler::<Infallible, Function>::pc_local(), 64);
+        assert_eq!(pc_local(), 64);
     }
 
     #[test]
     fn test_hint_tracking_disabled_by_default() {
         // HINT tracking should be disabled by default
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         // Translate a HINT instruction: addi x0, x0, 1
         let hint_inst = Inst::Addi {
@@ -1855,17 +1872,8 @@ mod tests {
     #[test]
     fn test_hint_tracking_enabled() {
         // Test HINT tracking when explicitly enabled
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            true, // Enable HINT tracking
-            false, // Disable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Translate a HINT instruction: addi x0, x0, 1
         let hint1 = Inst::Addi {
@@ -1907,17 +1915,8 @@ mod tests {
     #[test]
     fn test_hint_vs_regular_addi() {
         // Test that regular ADDI instructions are not tracked as HINTs
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            true, // Enable HINT tracking
-            false, // Disable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Regular addi x1, x0, 5 (not a HINT)
         let regular_addi = Inst::Addi {
@@ -1960,17 +1959,8 @@ mod tests {
     #[test]
     fn test_hint_clear() {
         // Test clearing collected HINTs
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            true,
-            false, // Disable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Collect some hints
         let hint = Inst::Addi {
@@ -1995,7 +1985,8 @@ mod tests {
     #[test]
     fn test_hint_tracking_toggle() {
         // Test toggling HINT tracking on and off
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
+        
+    let mut ctx = ();
 
         let hint = Inst::Addi {
             imm: rv_asm::Imm::new_i32(1),
@@ -2040,17 +2031,8 @@ mod tests {
     #[test]
     fn test_hint_from_rv_corpus_pattern() {
         // Test the actual pattern used in rv-corpus test files
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            true,
-            false, // Disable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Simulate test case markers from rv-corpus
         for test_case in 1..=5 {
@@ -2085,9 +2067,10 @@ mod tests {
         let mut collected = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
-            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 collected.push(*hint);
             };
 
@@ -2146,19 +2129,10 @@ mod tests {
         let tracked_hints_result;
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_full_config(
-                Pool {
-                    table: TableIdx(0),
-                    ty: TypeIdx(0),
-                },
-                None,
-                0x1000,
-                true, // Enable tracking
-                false, // Disable RV64
-                false, // Disable memory64
-            );
+            
+    let mut ctx = ();
 
-            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 callback_hints.push(*hint);
             };
 
@@ -2202,8 +2176,9 @@ mod tests {
         let mut collected = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
-            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            
+    let mut ctx = ();
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 collected.push(hint.value);
             };
 
@@ -2260,10 +2235,11 @@ mod tests {
         let mut callback_values = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
             // Tracking is disabled by default
 
-            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |hint: &HintInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 assert_eq!(hint.value, 99);
                 callback_values.push(hint.value);
             };
@@ -2300,9 +2276,10 @@ mod tests {
         let mut invoked = false;
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
-            let mut callback = |_hint: &HintInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |_hint: &HintInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 invoked = true;
             };
 
@@ -2337,9 +2314,10 @@ mod tests {
         let mut hint_values = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
-            let mut callback = |hint: &HintInfo, ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |hint: &HintInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 hint_values.push(hint.value);
                 // Generate a NOP instruction for each HINT
                 callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -2384,9 +2362,10 @@ mod tests {
         let mut ecall_pcs = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
-            let mut callback = |ecall: &EcallInfo, _ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |ecall: &EcallInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 ecall_pcs.push(ecall.pc);
             };
 
@@ -2421,10 +2400,11 @@ mod tests {
         let mut ebreak_pcs = Vec::new();
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
             let mut callback =
-                |ebreak: &EbreakInfo, _ctx: &mut HintContext<Infallible, Function>| {
+                |ebreak: &EbreakInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                     ebreak_pcs.push(ebreak.pc);
                 };
 
@@ -2456,9 +2436,10 @@ mod tests {
         let mut ecall_count = 0;
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
-            let mut callback = |_ecall: &EcallInfo, ctx: &mut HintContext<Infallible, Function>| {
+            let mut callback = |_ecall: &EcallInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
                 ecall_count += 1;
                 // Generate a NOP instruction for each ECALL
                 callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -2495,10 +2476,11 @@ mod tests {
         let mut ebreak_count = 0;
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
             let mut callback =
-                |_ebreak: &EbreakInfo, ctx: &mut HintContext<Infallible, Function>| {
+                |_ebreak: &EbreakInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
                     ebreak_count += 1;
                     // Generate a NOP instruction for each EBREAK
                     callback_ctx.emit(ctx, &Instruction::Nop).ok();
@@ -2533,15 +2515,16 @@ mod tests {
         let mut ebreak_count = 0;
 
         {
-            let mut recompiler = RiscVRecompiler::new_with_base_pc(0x1000);
+            
+    let mut ctx = ();
 
             let mut ecall_cb =
-                |_ecall: &EcallInfo, _ctx: &mut HintContext<Infallible, Function>| {
+                |_ecall: &EcallInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                     ecall_count += 1;
                 };
 
             let mut ebreak_cb =
-                |_ebreak: &EbreakInfo, _ctx: &mut HintContext<Infallible, Function>| {
+                |_ebreak: &EbreakInfo, _ctx: &mut HintContext<'_, (), Infallible, Function>| {
                     ebreak_count += 1;
                 };
 
@@ -2595,17 +2578,8 @@ mod tests {
     #[test]
     fn test_rv64_instructions() {
         // Test RV64 instructions when RV64 is enabled
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            false, // Disable HINT tracking
-            true,  // Enable RV64
-            false, // Disable memory64 (use i32 addresses)
-        );
+        
+    let mut ctx = ();
 
         // Test ADDIW (Add Word Immediate)
         let addiw = Inst::AddiW {
@@ -2695,7 +2669,8 @@ mod tests {
     #[test]
     fn test_rv64_disabled_by_default() {
         // Test that RV64 instructions are not supported when RV64 is disabled
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new();
+        
+    let mut ctx = ();
 
         // ADDIW should fail when RV64 is disabled
         let addiw = Inst::AddiW {
@@ -2718,17 +2693,8 @@ mod tests {
     #[test]
     fn test_rv64_with_memory64() {
         // Test RV64 with memory64 enabled
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            false, // Disable HINT tracking
-            true,  // Enable RV64
-            true,  // Enable memory64 (use i64 addresses)
-        );
+        
+    let mut ctx = ();
 
         // Test LD with memory64
         let ld = Inst::Ld {
@@ -2762,17 +2728,8 @@ mod tests {
     #[test]
     fn test_rv64_mulh_instructions() {
         // Test RV64 multiply-high instructions (Mulh, Mulhu, Mulhsu)
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            false, // Disable HINT tracking
-            true,  // Enable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Test MULH (signed x signed)
         let mulh = Inst::Mulh {
@@ -2834,17 +2791,8 @@ mod tests {
     #[test]
     fn test_rv64_float_conversions() {
         // Test RV64 floating-point conversion instructions
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
-            Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            None,
-            0x1000,
-            false, // Disable HINT tracking
-            true,  // Enable RV64
-            false, // Disable memory64
-        );
+        
+    let mut ctx = ();
 
         // Test FCVT.L.S (float to signed i64)
         let fcvt_ls = Inst::FcvtLS {
@@ -3002,7 +2950,8 @@ mod tests {
     #[test]
     fn test_base_func_offset() {
         // Test that base_func_offset can be set and retrieved
-        let mut recompiler = RiscVRecompiler::<Infallible, Function>::new();
+        
+    let mut ctx = ();
         
         // Default should be 0
         assert_eq!(recompiler.base_func_offset(), 0);
@@ -3012,7 +2961,7 @@ mod tests {
         assert_eq!(recompiler.base_func_offset(), 15);
         
         // Create with offset using new_with_all_config
-        let recompiler2 = RiscVRecompiler::<Infallible, Function>::new_with_all_config(
+        let recompiler2 = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_all_config(
             Pool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),

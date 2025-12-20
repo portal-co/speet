@@ -132,6 +132,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     // Helper to set flags after arithmetic operation
     fn set_flags_after_operation(
         &mut self,
+        ctx: &mut Context,
         result: i64,
         operand1: i64,
         operand2: i64,
@@ -270,12 +271,12 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         Ok(())
     }
 
-    fn emit_subreg_write_rmw(
-        &mut self,
+    fn emit_subreg_write_rmw(&mut self, ctx: &mut Context,
         local: u32,
         size_bits: u32,
         bit_offset: u32,
     ) -> Result<(), E> {
+
         // Assume new value is on stack (i64) and we need to write it into `local` at bit_offset preserving other bits.
         // Steps:
         // local_val = local.get(local)

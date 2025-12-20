@@ -31,11 +31,12 @@ fn test_elf_recompilation(elf_path: &Path) -> Result<usize, Box<dyn std::error::
 
     // Create recompiler with the start address as base_pc
     let mut recompiler =
-        RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr);
+        RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
+    let mut ctx = ();
 
     // Translate the entire .text section
     let bytes_translated = recompiler
-        .translate_bytes(&text_data, start_addr as u32, Xlen::Rv32, &mut |a| {
+        .translate_bytes(&mut ctx, &text_data, start_addr as u32, Xlen::Rv32, &mut |a| {
             Function::new(a.collect::<Vec<_>>())
         })
         .map_err(|_| "Translation failed")?;
@@ -239,7 +240,8 @@ fn test_detailed_instruction_translation() {
     match extract_text_section(&corpus_path) {
         Ok((text_data, start_addr)) => {
             let mut recompiler =
-                RiscVRecompiler::<Infallible, Function>::new_with_base_pc(start_addr);
+                RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
+            let mut ctx = ();
 
             // Try to decode and translate instruction by instruction
             let mut offset = 0;
@@ -265,7 +267,7 @@ fn test_detailed_instruction_translation() {
                 match Inst::decode(inst_word, Xlen::Rv32) {
                     Ok((inst, is_compressed)) => {
                         let pc = start_addr as u32 + offset as u32;
-                        match recompiler.translate_instruction(&inst, pc, is_compressed, &mut |a| {
+                        match recompiler.translate_instruction(&mut ctx, &inst, pc, is_compressed, &mut |a| {
                             Function::new(a.collect::<Vec<_>>())
                         }) {
                             Ok(()) => {

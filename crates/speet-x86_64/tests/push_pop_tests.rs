@@ -8,7 +8,9 @@ fn test_pushfq_translation() {
     let bytes = vec![0x9C]; // PUSHF/Q
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
 
+    let mut ctx = ();
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -26,7 +28,9 @@ fn test_pushfd_translation() {
     let bytes = vec![0x66, 0x9C]; // 0x66 prefix + PUSHF
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
 
+    let mut ctx = ();
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -44,7 +48,9 @@ fn test_popfq_translation() {
     let bytes = vec![0x9D]; // POPF/Q
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
 
+    let mut ctx = ();
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {
@@ -62,7 +68,9 @@ fn test_popfd_translation() {
     let bytes = vec![0x66, 0x9D]; // 0x66 prefix + POPF
     let mut recompiler: X86Recompiler<(), _> = X86Recompiler::new();
 
+    let mut ctx = ();
     let result = recompiler.translate_bytes(
+        &mut ctx,
         &bytes,
         0x1000,
         &mut |locals| {

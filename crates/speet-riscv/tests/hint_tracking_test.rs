@@ -57,6 +57,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
     );
 
     // Translate the code and collect HINTs
+    let mut ctx = ();
     let mut offset = 0;
     while offset < text_data.len() {
         if offset + 2 > text_data.len() {
@@ -78,7 +79,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
             Ok((inst, is_compressed)) => {
                 let pc = start_addr as u32 + offset as u32;
                 if let Err(_) =
-                    recompiler.translate_instruction(&inst, pc, is_compressed, &mut |a| {
+                    recompiler.translate_instruction(&mut ctx, &inst, pc, is_compressed, &mut |a| {
                         Function::new(a.collect::<Vec<_>>())
                     })
                 {
@@ -141,8 +142,8 @@ fn test_hint_info_structure() {
 #[test]
 fn test_hint_tracking_performance() {
     // Ensure that HINT tracking doesn't significantly impact translation
-    let mut recompiler_no_hints = RiscVRecompiler::<Infallible, Function>::new_with_base_pc(0x1000);
-    let mut recompiler_with_hints = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+    let mut recompiler_no_hints = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
+    let mut recompiler_with_hints = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         Pool {
             table: TableIdx(0),
             ty: TypeIdx(0),
@@ -179,18 +180,20 @@ fn test_hint_tracking_performance() {
     ];
 
     // Both should translate successfully
+    let mut ctx_no = ();
+    let mut ctx_with = ();
     for (i, inst) in instructions.iter().enumerate() {
         let pc = 0x1000 + (i as u32 * 4);
         assert!(
             recompiler_no_hints
-                .translate_instruction(inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
+                .translate_instruction(&mut ctx_no, inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
                     a.collect::<Vec<_>>()
                 ))
                 .is_ok()
         );
         assert!(
             recompiler_with_hints
-                .translate_instruction(inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
+                .translate_instruction(&mut ctx_with, inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
                     a.collect::<Vec<_>>()
                 ))
                 .is_ok()
