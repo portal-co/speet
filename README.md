@@ -100,3 +100,12 @@ speet/
 ├── COPYING.md           # License information
 └── README.md            # This file
 ```
+
+## Goals
+- [ ] Add project goals
+
+## Progress
+- [ ] Initial setup
+
+---
+*AI assisted*
