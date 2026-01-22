@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "git+https://github.com/portal-co/rv-utils.git#72bfa6dd38292df48d52804ac10a8806d8deae7c"
+source = "git+https://github.com/portal-co/rv-utils.git#077f6fa1aa46f7f1f1e1c207b16da5faadef0a57"
 
 [[package]]
 name = "shlex"
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "wax-core"
 version = "0.1.0"
-source = "git+https://github.com/portal-co/wax.git?branch=main#52eada68014fb1a95eb28a7614d021d91672106f"
+source = "git+https://github.com/portal-co/wax.git?branch=main#6a0cd5105d6ba7e444e0988bb267533c3a4edb16"
 dependencies = [
  "impl-trait-for-tuples",
  "wasm-encoder",
