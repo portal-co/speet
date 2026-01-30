@@ -41,6 +41,28 @@
 //! // Add instructions, jumps, calls, etc.
 //! ```
 
+//! ## Static Speculative Call Lowering
+//!
+//! In contexts where guest binaries use standard ABI call instructions (for
+//! example x86_64 `call` or RISC-V `jal`/`jalr`), the recompiler may lower
+//! those ABI-compliant calls to native WebAssembly `call` instructions. The
+//! implementation in this crate emits calls wrapped in a small validation
+//! scaffold: the call is placed inside a `Block`/`TryTable` region tied to an
+//! `EscapeTag`. When the callee returns, the generated code validates the
+//! guest program counter (or other return metadata). If the return location
+//! differs from the statically-expected value the code throws the configured
+//! `EscapeTag` carrying the unexpected return payload. The outer `Reactor`
+//! catch handler receives the exception and performs a safe, validated
+//! transfer (for example via `return_call` or a dispatcher jump) to resume
+//! execution at the correct guest location.
+//!
+//! This crate's `Reactor::call` and `ret` implementations reflect that
+//! strategy: `call` emits a `Block(FunctionType(ty_idx))` and a `TryTable`
+//! region; `ret` pushes the configured parameters onto the exception payload
+//! and emits a `Throw(tag_idx)`. The exception-based escape ensures any
+//! deviation from the expected control flow is intercepted and re-validated
+//! by the vkernel-backed dispatcher.
+
 #![no_std]
 
 use core::{convert::Infallible, marker::PhantomData, mem::take};
