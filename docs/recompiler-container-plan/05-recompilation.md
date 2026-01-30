@@ -1,53 +1,39 @@
 Recompilation Strategy & Toolchain
 
 Goals
-- Translate existing ELF/binary artifacts into WASM (WASI+vkernel extensions) or build host-specific AOT native blobs at build time.
-- Keep the translation deterministic, auditable, and reproducible.
-- Cover common platforms (x86_64, aarch64) and common linking models (static and dynamic).
+- Translate entire container filesystems into a single, standalone WASM megabinary.
+- Ensure the translation is deterministic and optimized for both microservices and agentic AI.
+- Map every execution-capable file (ELF, script) to a hash-addressed entry point in the megabinary.
 
-Analysis phase
-- Identify executable files and scripts in the image.
-- For each binary:
-  - Extract architecture, dynamic dependencies, symbol table, and relocation info.
-  - Static syscall usage analysis: heuristically determine the set of syscalls used.
-  - Flag binaries that use JIT, self-modifying code, or rely on runtime code generation.
+Megabinary Construction
+Instead of separate WASM modules, the toolchain performs "global container linking":
+1. **Per-Binary Lifting**: Each ELF binary is lifted to WASM IR.
+2. **Library Deduplication**: Shared libraries (libc, libssl) are identified across all binaries in the container. They are lifted once and shared within the megabinary's internal module structure.
+3. **Internal Routing**: A global dispatcher is generated. It maps binary hashes to the lifted entry points of the original applications.
+4. **Megabinary Bundling**: All lifted code, shared components, and the dispatcher are compiled into a single `.wasm` file.
 
-Translation targets
-- Preferred: WASM (WASI) module
-  - Benefits: portability, sandboxing, and well-defined execution model that avoids runtime code generation.
-  - Use cases: C/C++ microservices, many command-line tools, statically linked binaries.
+Content-Addressable Mapping
+- For every executable in the original image, a cryptographic hash (e.g., BLAKE3 or SHA-256) is calculated.
+- The toolchain generates a `mapping.json` (part of the container manifest) that links `hash -> megabinary_export`.
+- If a script (e.g., a shell script) is executed, the interpreter (e.g., `/bin/sh`) is resolved via its hash, and the script is passed as an argument within the WASM environment.
 
-- Alternative: AOT native blob
-  - Benefits: better performance for CPU-bound workloads.
-  - Drawbacks: host specific, larger attack surface if toolchain has bugs. Must be signed and built reproducibly in pipeline.
+AI Agent Optimizations
+- **Pre-warmed Tooling**: Common AI tools (Python, grep, sed) are pre-compiled into the megabinary.
+- **Shared Polyfills**: A single WASM-based Python interpreter can be shared by multiple concurrent agent tasks, with isolated memory spaces managed by the vkernel.
+- **Rapid Instantiation**: The vkernel can AOT-compile the megabinary once at container start. Launching a "process" (a new WASM instance) becomes a near-zero-latency operation.
 
-Toolchain options
-- Use existing tools where possible:
-  - Binaryen / LLVM-based approaches for C/C++ → WASM
-  - Cranelift or wasmtime toolchain for IR translation where suitable
-  - Custom binary lifter that converts x86_64/ARM instructions to WASM IR for userland syscalls
-- Build deterministic toolchains and pin versions tightly.
+Handling Non-Recompilable Binaries
+- **Polyfill Injection**: Replace problematic binaries (like Node.js with JIT) with pre-built WASM polyfills (like QuickJS or a JIT-less Node build) directly in the megabinary.
+- **Hash-Failure Policy**: Any binary that cannot be recompiled or polyfilled is omitted from the mapping. Attempting to run it results in an immediate hash-lookup failure at the vkernel level, ensuring no "raw" ELF execution.
 
-Handling dynamic linking and shared libraries
-- Strategy A: Recompile shared libraries as separate WASM modules and provide a loader runtime that links them at module instantiation time.
-- Strategy B: Statically link libraries at build time into WASM if possible.
-- For glibc-specific features, provide compatibility shims in the vkernel/WASI layer.
+Toolchain Workflow
+1. `scan`: Identify all ELFs and scripts in the source image.
+2. `lift`: Convert each ELF to WASM IR.
+3. `merge`: Combine lifted IR, resolving shared dependencies and adding the dispatcher.
+4. `compile`: AOT-compile the megabinary for the target host architecture.
+5. `sign`: Sign the megabinary and the hash-mapping manifest.
 
-Fallbacks and qemu-like mode
-- For binaries that cannot be recompiled immediately, provide a controlled fallback that runs them via an emulation layer (qemu user mode) inside vkernel while still enforcing no-JIT and syscall policies.
-- Mark fallback containers as lower-trust and prioritize them for recompile later.
-
-Performance tuning
-- Use AOT for hotspots; profile-run workloads to determine candidates for AOT.
-- Inline essential syscalls into optimized host bridges to reduce cross-boundary overhead.
-
-Reproducibility and signing
-- Produce deterministic builds and include build metadata in the manifest.
-- Sign recompiled artifacts with pipeline keys and ensure hosts verify signatures at runtime.
-
-Developer ergonomics
-- Provide a CLI to emulate the translation locally, run tests, and iterate on polyfills.
-- Provide mapping reports that show what syscalls and library functions were translated or polyfilled.
-
-Next steps
-- Prototype a binary lifter from a simple x86_64 static binary to WASM and verify I/O and signal behavior.
+Next Steps
+- Research WASM "multi-module" or "component model" approaches for efficient megabinary construction.
+- Implement the hash-lookup and dispatcher generator.
+- Integrate with AI agent runtimes to test tool-invocation latency.

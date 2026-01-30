@@ -1,49 +1,34 @@
 Shared Virtual Kernel (vkernel)
 
 Goals
-- Provide a controlled, Linux-compatible syscall surface that all recompiled containers use.
-- Enforce security policies (no-exec, syscall whitelists, cgroup-like resource limits).
-- Support enough Linux semantics to run common userland workloads (threads, futex, epoll, file I/O, sockets, signals).
-- Be auditable, debuggable, and incrementally extensible.
+- Provide a controlled, Linux-compatible syscall surface for recompiled containers.
+- Enforce the "Megabinary Hash Rule": only allow execution of binaries with verified hashes.
+- Optimize for high-density AI agent execution and low-latency tool invocation.
 
 High-level design
-- Implementation model: user-mode vkernel process running on the host (recommended).
-  - Containers connect to vkernel via a per-container UNIX socket or ephemeral IPC channel.
-  - vkernel translates guest syscalls to host syscalls while enforcing policies and mapping namespaces.
-- Policy model: per-container policy manifest describing allowed syscalls, file system mounts, network egress rules, and resource quotas.
+- Implementation model: host-side vkernel process or runtime shim.
+- **Megabinary Integration**: The vkernel is aware of the container's WASM megabinary and its `manifest.json`.
+- **Hash-to-Entry Point Router**: When a process calls `execve`, the vkernel intercepts it, calculates the target file's hash, and routes the call to the corresponding WASM entry point in the megabinary.
 
 Responsibilities
-- Syscall emulation: open, read, write, close, socket, bind, listen, accept, connect, send, recv, poll/epoll, select, getrandom, clock_gettime, futex, nanosleep, signalfd, kill, fork/clone semantics to support threads (user-level threads mapping), and process exit semantics.
-- File system mediation: virtual rootfs overlays, readonly layers, controlled host path mounts, symlink policy, and inode namespace mapping.
-- Threading & synchronization: futex implementation to support pthreads and glibc synchronization.
-- Signal delivery: emulate POSIX signals semantics to processes running in the vkernel.
-- Enforcement: block or audit operations that attempt to create executable memory, create memfd with PROT_EXEC, or change protections to allow execution.
+- **Hash Verification**: Strictly enforce that any file being executed matches a hash in the signed `manifest.json`. Fail with `EACCES` for any mismatch or unknown file.
+- **Megabinary Instance Management**: Efficiently spawn and manage multiple WASM instances from the same megabinary, sharing AOT-compiled code.
+- **Syscall Emulation**: Standard Linux syscall support (I/O, sockets, threading, signals) mapped to WASI+vkernel extensions.
+- **Agent Resource Pooling**: Allow multiple "tools" or "agents" within the same container to share cached resources (e.g., a pre-loaded Python interpreter state) while maintaining memory isolation.
+- **No-JIT Enforcement**: Strictly block any attempt to allocate or modify executable memory. All code execution is confined to the AOT-compiled WASM megabinary.
 
-Performance considerations
-- Hot paths: read/write, epoll_wait, send/recv, futex wake/wait.
-- Use shared memory regions for high-throughput I/O and event notification where safe.
-- Batch syscalls where possible and safe to reduce IPC overhead.
+Performance for Agentic AI
+- **Instantaneous `execve`**: Since the megabinary is already loaded and AOT-compiled by the vkernel, an `execve` call to a recompiled tool (like `ls` or a custom script) is transformed into a simple WASM instantiation and jump, taking milliseconds.
+- **Snapshot/Restore**: The vkernel can support rapid snapshotting of agent WASM memory to allow pausing and resuming complex AI tasks.
 
-Security controls
-- Deny mmap/mprotect with PROT_EXEC and deny memfd_create with PROT_EXEC.
-- Enforce per-container seccomp-like rules derived from policy manifest.
-- Validate loader attestations and signed artifacts before mapping code pages.
-- Audit and log attempts to use disallowed syscalls; provide alerting hooks.
+Security Controls
+- **Content-Addressable Execution**: Even if an attacker manages to write a file to the container filesystem, they cannot execute it because its hash won't be in the signed manifest.
+- **Signed Policy Enforcement**: The vkernel reads syscall whitelists directly from the signed manifest, ensuring that even if the WASM code is compromised, its syscall surface is strictly limited.
 
-Extension points
-- Allow pluggable backends for networking (native sockets vs. host-proxied) and storage (host FS vs. FUSE-like mediator).
-- Provide optional compatibility modes for advanced features under stricter admin approval.
+Testing and Validation
+- Conformance tests for the hash-verification logic: ensure no edge case allows executing unhashed code.
+- Latency benchmarks for tool invocation: target <10ms for a full `execve` cycle into a recompiled binary.
 
-Testing and validation
-- Implement a syscall conformance suite (subset of LTP) and fuzz syscall interfaces.
-- Test futex and pthread-heavy workloads for correctness.
-- Benchmark I/O and event loop workloads and tune shared memory vs. IPC tradeoffs.
-
-Open questions
-- How to best represent process/threads mapping (one-to-one OS threads vs. user-mode threading multiplexing)?
-- How to support file descriptor passing between processes inside the vkernel while using host resources?
-- Policy distribution and secrets: how to securely provision vkernel per-container policies and keys.
-
-Next actions
-- Draft initial syscall mapping table to WASI+extensions (see 15-implementation-notes.md).
-- Build a minimal vkernel prototype that supports read/write, open, sockets, and exec-like semantics.
+Next Actions
+- Implement the hash-lookup and `execve` interception in the vkernel prototype.
+- Extend the vkernel to support "Megabinary Dispatching" based on the entry point IDs in the manifest.

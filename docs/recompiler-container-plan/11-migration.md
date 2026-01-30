@@ -1,41 +1,37 @@
 Incremental Rollout and Migration Plan
 
 Goals
-- Deploy the recompiler system gradually to minimize disruption and allow iterative improvements.
-- Provide clear rollback and support pathways for app owners whose apps need changes.
+- Transition from traditional container execution to the "Megabinary Hash-Based" model.
+- Prioritize high-value use cases like AI agent tool-execution and high-security microservices.
 
 Phased rollout
-- Phase 0: Prototype
-  - Recompile and run a single static C binary under local vkernel; validate basic I/O behaviors.
+- Phase 0: "Hello Megabinary"
+  - Recompile a small set of CLI utilities into a single megabinary.
+  - Execute them via a standalone hash-router to prove the core concept.
 
-- Phase 1: Single-process containers
-  - Support containers with a single recompiled process. Validate network and disk I/O.
+- Phase 1: AI Tool-Sandbox (Agentic AI)
+  - Target AI agent frameworks that need fast, secure tool execution (e.g., Python, Bash, Git).
+  - Deploy recompiled "Agent Containers" where tool use is instant and secure.
 
-- Phase 2: Multi-process and shared libs
-  - Add futex, pthreads, signals support. Recompile containers with multiple processes.
+- Phase 2: Hash-Based Container Shim
+  - Integrate the hash-interception logic into a containerd shim.
+  - Support running standard OCI images that have been "megabinary-fied" by the pipeline.
 
-- Phase 3: Polyfills for complex stacks
-  - Introduce polyfill images for Node and Python; work with app teams to adapt.
+- Phase 3: Global Library Deduplication
+  - Optimize the recompiler to deduplicate common libraries (libc, openssl) across all binaries in a container.
+  - Measure memory savings and startup performance improvements.
 
-- Phase 4: Full images and orchestration
-  - Integrate with containerd and Kubernetes; deploy recompiled apps at low-volume canary routes.
-
-- Phase 5: Fleet-wide rollout
-  - After sufficient testing, expand scheduling of recompiled images to more nodes. Continually expand syscall coverage.
+- Phase 4: Production Canary
+  - Deploy recompiled microservices (NGINX, Redis) on dedicated "Agent/WASM" nodes in a Kubernetes cluster.
 
 Developer migration steps
-- Provide a compatibility report for each image recompiled, listing any replaced runtimes, missing syscalls, or required changes.
-- Offer a dev CLI for local testing and debugging with a local vkernel.
-- Provide polyfill images and guides for porting native modules to WASM.
+- Provide a "Megabinary-fication" tool that developers can run against their existing OCI images.
+- Generate a "Hash & Syscall Report" for each container to highlight potential polyfill needs.
 
 Operational practices
-- Only schedule recompiled images on nodes running compatible vkernel versions.
-- Maintain image tagging policies (e.g., repo/image:recompiled-v1) to differentiate images.
-- Monitor failures and maintain a rapid rollback mechanism by switching to the original image in case of major issues.
-
-Support and escalation
-- Create a support channel for app owners to report compatibility issues.
-- Maintain runbooks for operator responses to policy violations and vkernel faults.
+- **Atomic Deployment**: Any change to a single binary in the container results in a full rebuild of the megabinary and manifest, ensuring perfect consistency.
+- **Node Specialization**: Label nodes as "WASM-Ready" to handle high-density agent workloads.
 
 Next steps
-- Start with a small set of internal services and iterate through phases, collecting feedback and compatibility data.
+- Identify a set of "AI Agent Tools" to serve as the first production-grade megabinary targets.
+- Develop the "Megabinary-fication" CLI for OCI images.

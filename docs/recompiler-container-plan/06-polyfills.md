@@ -1,50 +1,33 @@
 Polyfills for Unrecompilable Binaries
 
 Goals
-- Provide functional replacements or compatible runtimes for binaries that cannot be recompiled straightforwardly (e.g., V8-based Node.js, native Python extensions, JIT-based VMs).
-- Avoid runtime code generation in polyfills; prefer interpreter-based or precompiled snapshot approaches.
-- Minimize changes required from application maintainers while keeping the runtime secure and auditable.
+- Provide functional replacements for JIT-based or complex runtimes (Node.js, Python) within the single WASM megabinary.
+- Ensure polyfills are AOT-compiled and integrated into the hash-based execution model.
+- Optimize polyfills for agentic AI tasks (e.g., Python scripts run by agents).
 
-Classes of difficult workloads
-- JIT-based VMs (V8, JVM)
-- Interpreters that assume native extension loading (Python with C extensions)
-- Complex build systems or apps that rely on runtime code generation
+Megabinary Integration
+- Polyfills are no longer separate files; they are compiled as core components of the WASM megabinary.
+- Multiple binaries in the original container can point to the same internal polyfill entry point (e.g., several Python scripts all routed to the single WASM-based Python interpreter).
 
-Approaches
-1. Replace the engine with a non-JIT interpreter
-   - Example: Replace Node/V8 with QuickJS-based Node polyfill that provides a large subset of Node APIs.
-   - Pros: prevents runtime JIT; keeps API surface similar.
-   - Cons: incomplete compatibility; may require reworking native modules.
+Supported Polyfill Types
+1. **JIT-less Interpreters**
+   - **Node.js**: Replace V8 with QuickJS or a JIT-less build of Node, compiled to WASM.
+   - **Python**: Use a WASM-compiled CPython or MicroPython.
+2. **Hash-Routed Interpreters**
+   - When the vkernel intercepts an execution request for `/usr/bin/python3`, it routes it to the WASM-based Python entry point in the megabinary, passing the script path as an argument.
 
-2. Precompile snapshots at build time
-   - Capture application-specific code as a precompiled snapshot and run it in a runtime that can execute snapshots without JIT.
-   - Practical when app code is controlled by the builder (e.g., monorepos).
+Agentic AI Optimizations
+- **Pre-warmed Interpreters**: The megabinary can include a "warmed-up" interpreter state to further reduce startup time for agent scripts.
+- **Shared Libraries**: Polyfills share common WASM-compiled libraries (like `zlib` or `openssl`) within the megabinary to save space.
 
-3. Build interpreters/runtimes to WASM
-   - Compile CPython, Ruby, or other interpreters to WASM and run them via the vkernel/WASI runtime.
-   - Pros: avoids native JIT and keeps runtime in the verified artifact.
-   - Cons: complexity and potential incompatibility with CPython C extensions.
+Security Properties
+- **No-JIT Persistence**: Polyfills are AOT-compiled into WASM, ensuring they never need to generate executable memory at runtime.
+- **Controlled API Surface**: Polyfills interact with the vkernel through a strict, whitelisted set of WASI/vkernel syscalls.
 
-4. Recompile native modules to WASM
-   - For Node native modules (node-gyp), require building modules to WASM/AOT in the pipeline.
-   - Provide tooling and guides for module authors to produce WASM builds.
+Handling Native Extensions
+- For Python or Node native extensions, the pipeline attempts to recompile them to WASM and link them into the megabinary.
+- If a native extension cannot be recompiled, the associated polyfill will report an error at runtime, maintaining the "no-unauthorized-code" guarantee.
 
-5. Provide a compatibility image
-   - Offer curated base images with polyfills for Node, Python, and common stacks.
-   - Encourage developers to base their images on these to minimize surprises.
-
-Developer and migration strategy
-- Provide migration guides and diagnostics to help developers port native modules or rely on supported APIs.
-- Offer a compatibility testing harness so developers can detect polyfill incompatibilities early.
-
-Operational considerations
-- Maintain a curated set of polyfills with versioning and CVE tracking.
-- Track feature gaps and prioritize polyfill improvements based on user demand and security impact.
-
-Tradeoffs and limitations
-- Polyfills are costly to maintain and may lag behind upstream features.
-- Some applications may be infeasible to run without changes (heavy native extensions, custom JIT-based optimizations).
-
-Next steps
-- Prototype a QuickJS-based Node polyfill covering common APIs (fs, http, net, timers, streams, promise microtasks).
-- Build WASM CPython baseline and evaluate C-extension strategies (e.g., provide a limited C-API shim or require recompilation to WASM).
+Next Steps
+- Integrate a WASM-compiled CPython into the megabinary prototype.
+- Develop a strategy for bundling common Python packages (pip) into the megabinary's internal filesystem/data sections.

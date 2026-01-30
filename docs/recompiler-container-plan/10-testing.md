@@ -1,40 +1,35 @@
 Testing, Validation, Compatibility and Security Tests
 
 Goals
-- Provide comprehensive testing strategies covering syscall correctness, compatibility, security, and performance.
-- Find translation and vkernel bugs early through fuzzing and real-world application testing.
+- Ensure the integrity and performance of the "Megabinary Hash-Based Execution" model.
+- Validate that the "fail-on-hash-mismatch" policy is infallible.
+- Benchmark startup times specifically for agentic AI tool-use scenarios.
 
 Test categories
-1. Syscall conformance
-   - Implement a subset of the Linux Test Project (LTP) focused on syscalls used by typical userland workloads.
-   - Include tests for open/read/write, sockets, epoll, futex, signals, and clock/timers.
+1. **Hash-Based Execution Integrity**
+   - **Mismatch Test**: Attempt to execute a modified binary or an unauthorized script. Verify that the vkernel denies execution.
+   - **Path vs. Hash Test**: Move a recompiled binary to a different path and attempt execution. Verify that the hash-lookup still works (or fails correctly based on policy).
+   - **Collision Test**: Fuzz the hash-lookup logic to ensure no edge cases allow unauthorized code to map to a valid megabinary entry point.
 
-2. Functional compatibility
-   - Run common applications (NGINX, Redis, Postgres client, Node/Express, Python/Flask) against behavior expectations.
-   - Execute unit and integration test suites for these apps where available.
+2. **Megabinary Functional Correctness**
+   - **Dispatcher Test**: Verify that the global dispatcher correctly routes multiple different execution requests to their respective code segments within the megabinary.
+   - **Library Sharing Test**: Ensure that shared libraries (libc, etc.) deduplicated within the megabinary behave correctly for all linked applications.
 
-3. Polyfill validation
-   - Test Node polyfill against popular NPM packages and a curated compatibility suite.
-   - Test WASM CPython against common Python packages that do not require C extensions.
+3. **Agentic AI Benchmarking**
+   - **Tool Invocation Latency**: Measure the time from `execve` call to the first instruction of the recompiled tool (e.g., Python or a custom search tool). Target <10ms.
+   - **Concurrency Test**: Run hundreds of concurrent agent tasks sharing the same AOT-compiled megabinary and measure memory pressure and vkernel overhead.
 
-4. Security testing
-   - Fuzz inputs to syscalls and the vkernel interface to discover edge cases.
-   - Attempt to bypass no-JIT protections by invoking alternate syscall sequences.
-   - Perform penetration testing and exploit analysis on the vkernel and loader components.
+4. **Security & No-JIT Enforcement**
+   - **JIT Bypass Attempt**: Run code within the megabinary that attempts to use `mmap` or `mprotect` to create executable memory. Verify that the vkernel blocks these calls.
+   - **Boundary Fuzzing**: Fuzz the arguments passed between the vkernel and the WASM instances.
 
-5. Performance benchmarking
-   - Measure overhead for CPU-bound, I/O-bound, and network-bound workloads.
-   - Measure latency and throughput for event-loop style apps (Node/QuickJS polyfill) vs. native.
+5. **Polyfill & Recompilation Coverage**
+   - Run the recompiled versions of NGINX, Redis, and Python through their standard test suites to identify any lifted-code regressions.
 
 Automation and CI
-- Integrate tests into the pipeline to run after image recompile and before publishing.
-- Provide a staging environment with vkernel enabled nodes for full-stack tests.
-
-Observability and diagnostics
-- Instrument vkernel and loader to produce structured logs for syscall usage and policy violations.
-- Collect metrics on syscall counts, blocked syscalls, and performance hotspots.
-- Produce detailed compatibility reports for images that fail tests, including suggested fixes.
+- Every megabinary build must pass a "Hash-Routing Verification" step before being signed.
+- Use specialized runners with vkernel-enabled environments for automated integration tests.
 
 Next steps
-- Implement basic test harness and run a canonical "hello world" binary through the full pipeline and vkernel.
-- Build fuzzing harness for vkernel syscall translator and loader.
+- Build the "Hash Mismatch" test suite.
+- Develop the latency benchmarking tool for "instant" tool invocation.

@@ -1,54 +1,69 @@
-Binary Trailer Format and Manifest Schema
+Megabinary Format and Hash-Mapping Manifest Schema
 
 Goals
-- Define a stable on-disk format for appending WASM/AOT blobs and manifest metadata to binaries.
-- Ensure format supports versioning, signature verification, and tool inspection.
+- Define the structure of the single WASM megabinary and the manifest that maps binary hashes to its entry points.
+- Ensure the format is optimized for content-addressable execution and rapid startup.
 
-Trailer layout (appended trailer option)
-- Footer structure placed after EOF:
-  - 8 bytes: MAGIC "RCOMPv1\0" (null-terminated)
-  - 4 bytes: trailer_version (uint32)
-  - 8 bytes: manifest_len (uint64)
-  - 8 bytes: blob_len (uint64)
-  - manifest_len bytes: UTF-8 JSON manifest
-  - blob_len bytes: WASM or AOT blob
-  - 4 bytes: sig_key_id_len (uint32)
-  - sig_key_id_len bytes: signer key id (UTF-8)
-  - 4 bytes: sig_len (uint32)
-  - sig_len bytes: signature (raw bytes, e.g., Ed25519)
+Megabinary Structure
+The megabinary is a standard WASM module with specific internal layout conventions:
+1. **Dispatcher Export**: A main export function (e.g., `_dispatch`) that takes a `target_id` (the binary hash) and arguments.
+2. **Internal Module Map**: A set of internal entry points, one for each recompiled application.
+3. **Shared Memory/Tables**: A base layer of shared code (libc, shared libraries) that all recompiled apps can link against internally.
+4. **Metadata Section**: A custom WASM section containing the container ID and version.
 
-Notes
-- All multi-byte integers are little-endian.
-- The loader scans the end of file for MAGIC and then reads trailer fields by offset. If MAGIC not found, treat binary as unmodified.
-- Signatures cover the manifest and blob. The manifest must include the checksum of the original binary to bind the artifact.
-
-Manifest JSON schema (example)
+Manifest Schema (manifest.json)
+The central manifest is signed and describes the container's entire execution surface:
+```json
 {
-  "name": "example-service",
-  "version": "0.1.0",
-  "arch": "x86_64",
-  "wasi_version": "wasi_snapshot_preview1",
-  "vkernel_version": ">=0.1.0",
-  "allowed_syscalls": ["read","write","open","close","socket","connect","accept","epoll_wait","futex_wait","futex_wake"],
-  "entrypoint": "_start",
-  "original_checksum": "sha256:...",
-  "build_info": {
-    "toolchain_hash": "...",
-    "build_date": "2026-01-30T...Z"
+  "container_id": "sha256:...",
+  "version": "1.0",
+  "megabinary": "container.wasm",
+  "vkernel_version": ">=0.2.0",
+  "global_policies": {
+    "default_syscalls": ["read", "write", "open", "close"],
+    "networking": "restricted"
+  },
+  "binaries": {
+    "sha256:abcd...": {
+      "path": "/usr/bin/ls",
+      "entry_point": "ls_start",
+      "overrides": { "syscalls": ["getdents"] }
+    },
+    "sha256:efgh...": {
+      "path": "/usr/bin/python3",
+      "entry_point": "python_start",
+      "args": ["-u"]
+    }
+  },
+  "agent_tools": {
+    "sha256:tool_xyz...": {
+      "name": "search_tool",
+      "entry_point": "search_start"
+    }
+  },
+  "signatures": {
+    "key_id": "build-server-2026",
+    "signature": "..."
   }
 }
+```
 
-Versioning
-- Increase trailer_version on incompatible trailer format changes.
-- Include both wasi_version and vkernel_version for compatibility checks.
+Hash-Based Execution Logic
+- When a process inside the container calls `execve("/usr/bin/ls", args)`:
+  1. The vkernel/shim calculates `hash("/usr/bin/ls")`.
+  2. It looks up this hash in the `binaries` map of the `manifest.json`.
+  3. If the hash matches `sha256:abcd...`, it maps to `ls_start`.
+  4. The runtime then instantiates the megabinary and calls `_dispatch("sha256:abcd...", args)`.
+  5. **Critical Security Rule**: If the file at `/usr/bin/ls` has been modified, its hash will change, causing a lookup failure. If the file is not in the manifest, execution is denied.
 
-Signature
-- Use Ed25519 or similar modern signature scheme for simplicity and small size.
-- Signer keys should be managed in CI/KMS and only public keys kept on host nodes.
+Advantages for Agentic AI
+- **Multi-Tool Fast-Path**: A single AI agent container can contain hundreds of "tools", each mapped by hash. The overhead to switch between running `grep` and a custom Python tool is just a WASM function call.
+- **Deterministic Toolchains**: An agent environment is defined entirely by the megabinary and the hash-map.
 
-Tooling
-- Provide CLI tools to append, extract, and verify trailers.
-- Allow option to embed trailer as ELF section instead of appended trailer for advanced use.
+Versioning and Signatures
+- The `manifest.json` and `container.wasm` are signed as a single unit.
+- Any change to the container (updating a binary, adding a tool) results in a new megabinary and a new signed manifest.
 
 Next steps
-- Finalize trailer binary layout and implement loader parsing for appended trailers in prototype.
+- Implement the "Dispatcher" generation in the recompiler toolchain.
+- Standardize the custom WASM section for container metadata.

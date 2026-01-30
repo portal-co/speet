@@ -1,55 +1,49 @@
 Strict No-JIT Policy and Enforcement
 
 Goals
-- Ensure that no executable code may be generated at runtime inside a recompiled container unless it is produced and signed by the trusted build pipeline.
-- Provide defense-in-depth across build-time, loader-time, vkernel-time, and host kernel controls.
+- Ensure that no executable code may be generated at runtime inside a recompiled container.
+- Provide defense-in-depth across build-time, vkernel-time, and host kernel controls.
+- Enable high-security execution for AI-generated code by stripping all JIT capabilities.
 
 Policy principles
-- Default deny: disallow syscalls and operations that enable runtime code generation by default; explicitly allow when justified.
-- Signed artifacts only: only execute code pages that correspond to signed artifacts appended to binaries or provided as signed AOT blobs.
-- No executable allocations: deny mmap/mprotect/ memfd_create requests that would create or modify pages with PROT_EXEC.
+- **AOT-Only Execution**: Only code recompiled into the signed WASM megabinary can execute.
+- **No Runtime Code Generation**: Deny all syscalls that allow creating or modifying executable memory (PROT_EXEC).
+- **Content-Addressable Verification**: Execution is mapped to cryptographic file hashes to ensure no un-vetted code is run.
 
 Enforcement layers
 1. Build-time
-   - Artifacts built by the pipeline are the only allowed executable blobs. Sign everything.
-   - Prohibit shipping JIT engines unless they are strictly configured to disable runtime codegen (rare exception, heavily audited).
+   - The recompiler pipeline produces a single AOT-compiled megabinary.
+   - All code is statically verified and signed.
 
-2. Loader-time
-   - Loader validates signatures and refuses to run unsigned code or dynamically compile code.
-   - Verify that initial code pages map to signed regions.
+2. vkernel enforcement
+   - **Hash-Gate**: The vkernel intercepts `execve` and only proceeds if the file hash matches the signed `manifest.json`.
+   - **Memory Policy**: Deny `mmap`, `mprotect`, and `memfd_create` requests that involve `PROT_EXEC`.
+   - **WASM Constraints**: The WASM engine is configured in AOT or interpreter mode, with no JIT compiler enabled.
 
-3. vkernel enforcement
-   - Enforce seccomp-like syscall restrictions, deny PROT_EXEC changes, and refuse memfd_create with exec.
-   - Monitor for suspicious syscall sequences and terminate on policy violations.
+3. Host-level policies
+   - Apply seccomp-bpf to the vkernel and shim processes to ensure they cannot create executable memory on the host.
+   - Use LSM (e.g., Landlock or AppArmor) to strictly isolate the container's environment.
 
-4. Host-level policies
-   - Apply seccomp-bpf or LSM policies at the container boundary; use cgroups to restrict resource usage.
-   - Employ kernel mechanisms (e.g., SELinux, AppArmor, Landlock) to reduce attack surface.
+4. Attestation and runtime checks
+   - The vkernel provides a signed attestation of the megabinary hash and the manifest used for execution.
+   - Any attempt to load code from outside the megabinary triggers an immediate audit event and process termination.
 
-5. Attestation and runtime checks
-   - vkernel issues a signed attestation of the verified initial code hash and running modules.
-   - Monitor runtime integrity: ensure no new executable pages are created during execution.
-
-Handling allowed exceptions
-- Some workloads may legitimately require runtime codegen (rare). For such cases:
-  - Require explicit admin approval and strict per-container policy manifest documenting the need.
-  - Review and audit the provided JIT engine and limit its capabilities (e.g., networkless, no host fd access).
-  - Restrict its allowable syscalls and runtime memory regions.
+AI Agent Security
+- AI agents often need to execute small scripts. In this model, even if an agent generates a script, it **cannot** execute it unless it matches a hash already in the manifest.
+- This forces the agent to use only the pre-approved tools and interpreters (e.g., a recompiled Python interpreter) already inside the megabinary.
 
 Response to violations
-- Immediate termination of offending container process.
-- Emit detailed audit logs (attempted syscalls, PID, container id, binary hash) to security logs and optionally to SIEM.
-- Optionally quarantine the container and trigger automated incident response workflows.
+- Immediate termination of the offending process or the entire container.
+- Structured audit logs containing the attempted syscall, the binary hash (if applicable), and the container context.
 
 Testing the policy
-- Write tests that attempt to create executable memory via mmap/mprotect/memfd_create and ensure vkernel blocks them.
-- Fuzz attempts to bypass protections using alternate syscall sequences.
-- Test legitimate workflows that need non-JIT behaviour to avoid regressions.
+- **Exploit Simulation**: Run a "malicious" agent task that tries to download and run an ELF or write and run a shell script. Verify that the vkernel blocks both.
+- **Syscall Fuzzing**: Ensure the `PROT_EXEC` blocking logic cannot be bypassed by obscure syscall combinations.
 
 Developer guidance
-- Encourage AOT compilation and precompilation of scripts where possible.
-- Provide tooling to produce snapshots for languages that support it (Node snapshots, Python freeze tools).
+- All application code and dependencies must be processed by the recompiler pipeline.
+- Scripts must be executed via recompiled/polyfilled interpreters already present in the megabinary.
 
 Next steps
-- Implement syscall monitoring hooks in the vkernel prototype.
-- Implement attestation signatures and integrate with orchestration for reporting.
+- Implement the "No-JIT" memory policy in the vkernel prototype.
+- Develop the audit logging format for policy violations.

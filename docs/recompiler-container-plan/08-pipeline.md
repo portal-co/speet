@@ -1,60 +1,57 @@
 Image Transformation Pipeline and Build Flow
 
 Goals
-- Provide an automated build pipeline that transforms container images into recompiled images with signed artifacts and manifests.
-- Make the pipeline reproducible, auditable, and safe by default.
+- Provide an automated pipeline that transforms container images into a single WASM megabinary and a hash-mapping manifest.
+- Ensure all execution is content-addressed and failure-on-mismatch is enforced.
+- Optimize the flow for both standard microservices and high-density agentic AI workloads.
 
 Pipeline stages
-1. Image extraction
+1. Image extraction & Inventory
    - Pull image and extract filesystem layers.
-   - Enumerate executables, scripts, interpreters, and config files (entrypoints, CMD).
+   - Enumerate all executables and scripts.
+   - Calculate cryptographic hashes (e.g., BLAKE3) for every potential entry point.
 
 2. Static analysis
-   - For each executable, determine architecture, dynamic linking, and likely syscalls.
-   - Identify scripts and shebangs to replace interpreter paths with polyfills if required.
+   - Determine syscall requirements and dependencies for each binary.
+   - Map script shebangs to their recompiled/polyfilled interpreters.
 
-3. Recompilation
-   - Attempt to recompile binaries to WASM. If successful, produce WASM modules and AOT blobs if applicable.
-   - For dynamic libraries, either recompile or statically link where feasible.
+3. Global Recompilation & Merging
+   - Recompile all binaries into WASM IR.
+   - Merge common libraries and utilities into a shared space.
+   - Generate a single "megabinary" containing all logic with a hash-based dispatcher.
 
-4. Polyfill substitution
-   - For binaries flagged as unrecompilable, substitute runtimes with polyfills (e.g., /usr/bin/node -> /opt/recompiler/polyfills/node).
-   - For apps requiring native modules, attempt to rebuild modules to WASM/AOT or warn the user.
+4. Polyfill Integration
+   - Embed WASM-based interpreters (Python, QuickJS, etc.) into the megabinary.
+   - Map original interpreter paths (e.g., `/usr/bin/python3`) to these embedded instances via their file hashes.
 
-5. Appending artifacts and loader insertion
-   - For each binary, append the WASM/AOT blob and manifest; insert loader stub as the executable entrypoint where necessary.
+5. Manifest & Mapping Generation
+   - Create a central `manifest.json` that maps `file_hash -> megabinary_entry_point`.
+   - Define global security policies (syscall allow-lists) in the manifest.
 
-6. Manifest & policy generation
-   - Generate per-image manifest describing required vkernel version, allowed syscalls, signer keys, and resource expectations.
+6. AOT Pre-compilation (Optional but Recommended)
+   - Perform host-specific AOT compilation of the megabinary for target architectures (x86_64, aarch64) to ensure zero JIT at runtime.
 
 7. Signing and packaging
-   - Sign all appended artifacts and the image manifest with pipeline private keys.
-   - Rebuild the image layers and push to the registry.
+   - Sign the megabinary and the manifest.
+   - Rebuild the image, replacing original binaries with their (now inert) files (to maintain path structure) and adding the megabinary and manifest as the primary artifacts.
 
-8. Verification & testing
-   - Run automated smoke tests against the recompiled image in a test node with vkernel.
-   - Report compatibility issues and generate actionable diagnostics for developers.
-
-Tooling
-- CLI tools:
-  - recompiler inspect <image> — lists candidates and flags for recompilation
-  - recompiler build <image> — runs the pipeline and outputs a recompiled image
-  - recompiler sign/verify — for artifact signing and verification
-  - recompiler polyfill — manage polyfill bundles
+8. Verification & agent-readiness
+   - Validate that the megabinary starts in <10ms.
+   - Verify that all hashes in the manifest correctly route to the expected code.
 
 Integrations
-- CI: integrate pipeline into image build CI to automatically produce recompiled images and manage keys.
-- Registry: tag recompiled images and include manifest digest in image metadata.
-- Developer workflows: provide a local dev mode to run recompiled images with a local vkernel for testing.
+- CI/CD: Automated transformation of Dockerfiles into "megabinary-containers".
+- AI Agent Frameworks: Direct integration to provide "Agent Containers" where tool use is instant and secure.
+- Registry: Store megabinaries as OCI artifacts.
 
-Security practices
-- Keep private signing keys in secure KMS; use ephemeral signing tokens in CI.
-- Ensure pipeline is reproducible and record build metadata for audit.
-- Scan input images for malicious binaries and treat unknown toolchains with higher scrutiny.
+Security and Integrity
+- **Hash Failure**: If a container tries to run a binary whose hash isn't in the manifest (e.g., a file injected at runtime), the vkernel/runtime MUST refuse execution.
+- **Single Artifact Audit**: Auditors only need to verify one signature and one WASM blob per container, greatly simplifying the trust model.
 
 Operational notes
-- For large fleets, provide incremental builds and caching for layers and recompiled artifacts.
-- Provide a rollback plan to revert images if incompatibility is discovered.
+- Megabinaries allow for massive density: hundreds of containers can share the same underlying WASM engine and host-side AOT-compiled code.
+- "Warm" starts for AI agents become the default, as the megabinary is already loaded and ready in the vkernel.
 
 Next steps
-- Implement a minimal pipeline that can recompile a static C binary to WASM, append it, sign it, and run it under a local vkernel.
+- Implement the "Global Recompilation & Merging" tool.
+- Develop the hash-interception logic for the container runtime shim.
