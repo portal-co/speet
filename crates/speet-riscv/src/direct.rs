@@ -1,4 +1,41 @@
 use crate::*;
+
+/// Snippet for setting expected_ra to a constant return address in speculative calls
+struct ExpectedRaSnippet {
+    return_addr: u64,
+    enable_rv64: bool,
+}
+
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for ExpectedRaSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        if self.enable_rv64 {
+            sink.instruction(ctx, &wasm_encoder::Instruction::I64Const(self.return_addr as i64))?;
+        } else {
+            sink.instruction(ctx, &wasm_encoder::Instruction::I32Const(self.return_addr as i32))?;
+        }
+        Ok(())
+    }
+}
+
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ExpectedRaSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        if self.enable_rv64 {
+            sink.instruction(ctx, &wasm_encoder::Instruction::I64Const(self.return_addr as i64))?;
+        } else {
+            sink.instruction(ctx, &wasm_encoder::Instruction::I32Const(self.return_addr as i32))?;
+        }
+        Ok(())
+    }
+}
+
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
     /// Helper to translate load instructions
     pub(crate) fn translate_load(
@@ -682,27 +719,19 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
-                    // Set the hidden expected_ra local - this tracks what ra should be
-                    // when the callee performs an ABI-compliant return
-                    if self.enable_rv64 {
-                        self.reactor
-                            .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                    } else {
-                        self.reactor
-                            .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
-                    }
-                    self.reactor
-                        .feed(ctx, &Instruction::LocalSet(Self::expected_ra_local()))?;
+                    // Create a snippet that sets expected_ra to the return address
+                    let expected_ra_snippet = ExpectedRaSnippet {
+                        return_addr,
+                        enable_rv64: self.enable_rv64,
+                    };
 
-                    // Emit the speculative call using yecta's call API
-                    // This wraps the call in a try-catch block; when the callee throws
-                    // via ret(), control returns here with register state restored
-                    self.reactor.call(
-                        ctx,
-                        yecta::Target::Static { func: target_func },
-                        escape_tag,
-                        self.pool,
-                    )?;
+                    // Use fixups to set expected_ra (local 65) only for this call
+                    let params = yecta::JumpCallParams::call(target_func, 66, escape_tag, self.pool)
+                        .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
+
+                    // Emit the speculative call using yecta's ji_with_params API
+                    // This wraps the call in a try-catch block and uses fixups mechanism
+                    self.reactor.ji_with_params(ctx, params)?;
 
                     // After the call returns (via exception catch), execution continues here
                     // No manual validation needed - the ret() in the callee threw the state
@@ -742,13 +771,37 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     && self.escape_tag.is_some();
 
                 if is_abi_return {
-                    // ABI-compliant return: throw the escape tag to return to caller
-                    // The caller's try-catch block will catch this and restore state
+                    // ABI-compliant return: check if ra matches expected_ra
+                    // If they match, use regular WASM Return; if not, throw escape tag
                     let escape_tag = self.escape_tag.unwrap();
                     
-                    // Use ret() to throw the escape tag with all register state
-                    // This carries locals 0..65 (registers + PC) as the exception payload
+                    // Load ra (current return address)
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    
+                    // Load expected_ra
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
+                    
+                    // Compare them
+                    if self.enable_rv64 {
+                        self.reactor.feed(ctx, &Instruction::I64Eq)?;
+                    } else {
+                        self.reactor.feed(ctx, &Instruction::I32Eq)?;
+                    }
+                    
+                    // If equal (ABI-compliant), use regular return; else throw exception
+                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    
+                    // ABI-compliant return - use WASM Return
+                    self.reactor.feed(ctx, &Instruction::Return)?;
+                    
+                    self.reactor.feed(ctx, &Instruction::Else)?;
+                    
+                    // Non-ABI-compliant return - throw escape tag with all register state
                     self.reactor.ret(ctx, 66, escape_tag)?;
+                    
+                    self.reactor.feed(ctx, &Instruction::End)?;
                     return Ok(());
                 }
 
@@ -773,16 +826,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
-                    // Set the hidden expected_ra local
-                    if self.enable_rv64 {
-                        self.reactor
-                            .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                    } else {
-                        self.reactor
-                            .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
-                    }
-                    self.reactor
-                        .feed(ctx, &Instruction::LocalSet(Self::expected_ra_local()))?;
+                    // Create a snippet that sets expected_ra to the return address
+                    let expected_ra_snippet = ExpectedRaSnippet {
+                        return_addr,
+                        enable_rv64: self.enable_rv64,
+                    };
 
                     // Compute target address: (base + offset) & ~1
                     // We need to create a snippet that computes the function index
@@ -866,13 +914,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         base_pc: self.base_pc,
                     };
 
-                    // Emit the speculative call using yecta's call API with dynamic target
-                    self.reactor.call(
-                        ctx,
-                        yecta::Target::Dynamic { idx: &target_snippet },
-                        escape_tag,
-                        self.pool,
-                    )?;
+                    // Use fixups to set expected_ra (local 65) only for this call
+                    let mut fixups = alloc::collections::BTreeMap::new();
+                    fixups.insert(Self::expected_ra_local(), &expected_ra_snippet as &(dyn yecta::Snippet<Context, E> + '_));
+                    
+                    let params = yecta::JumpCallParams {
+                        params: 66,
+                        fixups,
+                        target: yecta::Target::Dynamic { idx: &target_snippet },
+                        call: Some(escape_tag),
+                        pool: self.pool,
+                        condition: None,
+                    };
+
+                    // Emit the speculative call using yecta's ji_with_params API
+                    self.reactor.ji_with_params(ctx, params)?;
 
                     // After the call returns (via exception catch), execution continues here
                     return Ok(());
