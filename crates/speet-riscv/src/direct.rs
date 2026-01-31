@@ -653,34 +653,82 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             // a signed offset in multiples of 2 bytes. The offset is sign-extended and added to the
             // address of the jump instruction to form the jump target address."
             Inst::Jal { offset, dest } => {
-                // Save return address (PC + inst_len * 2) to dest
-                if dest.0 != 0 {
-                    // x0 is hardwired to zero
-                    let return_addr = pc as u64 + (inst_len * 2) as u64;
+                let return_addr = pc as u64 + (inst_len * 2) as u64;
+                let target_pc = if self.enable_rv64 {
+                    (pc as i64).wrapping_add(offset.as_i32() as i64) as u64
+                } else {
+                    (pc as i32).wrapping_add(offset.as_i32()) as u32 as u64
+                };
+
+                // Check if this is an ABI-compliant call (dest == x1/ra) and speculative calls are enabled
+                let use_speculative = self.enable_speculative_calls
+                    && dest.0 == 1  // x1 is the return address register (ra)
+                    && self.escape_tag.is_some();
+
+                if use_speculative {
+                    // Speculative call lowering: emit a native WASM call with return validation
+                    // See SPECULATIVE_CALLS.md for the full pattern
+                    let escape_tag = self.escape_tag.unwrap();
+                    let target_func = self.pc_to_func_idx(target_pc);
+
+                    // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        // RV64: Store full 64-bit return address
                         self.reactor
                             .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                        self.reactor
-                            .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
-                        // RV32: Store 32-bit return address
                         self.reactor
                             .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                    }
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+
+                    // Emit the speculative call using yecta's call API
+                    // This wraps the call in a try-catch block for exception-based escapes
+                    self.reactor.call(
+                        ctx,
+                        yecta::Target::Static { func: target_func },
+                        escape_tag,
+                        self.pool,
+                    )?;
+
+                    // After the call returns, we need to validate the return PC
+                    // The yecta Reactor's call method handles the Block/TryTable wrapper;
+                    // we emit the validation logic here
+                    
+                    // Load the current PC (which should be the expected return address)
+                    self.reactor.feed(ctx, &Instruction::LocalGet(Self::pc_local()))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        self.reactor.feed(ctx, &Instruction::I64Ne)?;
+                    } else {
+                        self.reactor.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        self.reactor.feed(ctx, &Instruction::I32Ne)?;
+                    }
+                    
+                    // If PC doesn't match expected return address, throw escape tag
+                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    // Load all parameters for the escape
+                    self.reactor.ret(ctx, 65, escape_tag)?;
+                    self.reactor.feed(ctx, &Instruction::End)?;
+
+                    // Normal return path: continue execution
+                    return Ok(());
+                } else {
+                    // Non-speculative path: original jump-based implementation
+                    if dest.0 != 0 {
+                        if self.enable_rv64 {
+                            self.reactor
+                                .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        } else {
+                            self.reactor
+                                .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        }
                         self.reactor
                             .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
+                    self.jump_to_pc(ctx, target_pc, 65)?;
+                    return Ok(());
                 }
-                // Jump to PC + offset using yecta's jump API with PC-based indexing
-                let target_pc = if self.enable_rv64 {
-                    // RV64: Use 64-bit PC arithmetic
-                    (pc as i64).wrapping_add(offset.as_i32() as i64) as u64
-                } else {
-                    // RV32: Use 32-bit PC arithmetic
-                    (pc as i32).wrapping_add(offset.as_i32()) as u32 as u64
-                };
-                self.jump_to_pc(ctx, target_pc, 65)?; // Pass all registers as parameters
-                return Ok(()); // JAL handles control flow, no fallthrough
             }
 
             // Jalr: Jump And Link Register
@@ -689,46 +737,168 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             // The target address is obtained by adding the sign-extended 12-bit I-immediate to the
             // register rs1, then setting the least-significant bit of the result to zero."
             Inst::Jalr { offset, base, dest } => {
-                // Save return address
-                if dest.0 != 0 {
-                    let return_addr = pc as u64 + (inst_len * 2) as u64;
+                let return_addr = pc as u64 + (inst_len * 2) as u64;
+
+                // Check if this is an ABI-compliant call (dest == x1/ra) and speculative calls are enabled
+                let use_speculative = self.enable_speculative_calls
+                    && dest.0 == 1  // x1 is the return address register (ra)
+                    && self.escape_tag.is_some();
+
+                if use_speculative {
+                    // Speculative call lowering for indirect calls
+                    // Since JALR is indirect, we use dynamic dispatch through the pool table
+                    let escape_tag = self.escape_tag.unwrap();
+
+                    // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        // RV64: Store full 64-bit return address
                         self.reactor
                             .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                        self.reactor
-                            .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
-                        // RV32: Store 32-bit return address
                         self.reactor
                             .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                    }
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+
+                    // Compute target address: (base + offset) & ~1
+                    // We need to create a snippet that computes the function index
+                    struct JalrTargetSnippet {
+                        base_local: u32,
+                        offset: i32,
+                        enable_rv64: bool,
+                        base_pc: u64,
+                    }
+
+                    impl<Context, E> wax_core::build::InstructionSource<Context, E> for JalrTargetSnippet {
+                        fn emit_instruction(
+                            &self,
+                            ctx: &mut Context,
+                            sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+                        ) -> Result<(), E> {
+                            // Compute: ((base + offset) & ~1 - base_pc) / 2
+                            // This gives us the function index from the PC
+                            sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
+                            if self.enable_rv64 {
+                                sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Add)?;
+                                sink.instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                                sink.instruction(ctx, &Instruction::I64And)?;
+                                sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Sub)?;
+                                sink.instruction(ctx, &Instruction::I64Const(1))?;
+                                sink.instruction(ctx, &Instruction::I64ShrU)?;
+                                sink.instruction(ctx, &Instruction::I32WrapI64)?;
+                            } else {
+                                sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
+                                sink.instruction(ctx, &Instruction::I32Add)?;
+                                sink.instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                                sink.instruction(ctx, &Instruction::I32And)?;
+                                sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
+                                sink.instruction(ctx, &Instruction::I32Sub)?;
+                                sink.instruction(ctx, &Instruction::I32Const(1))?;
+                                sink.instruction(ctx, &Instruction::I32ShrU)?;
+                            }
+                            Ok(())
+                        }
+                    }
+
+                    impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for JalrTargetSnippet {
+                        fn emit(
+                            &self,
+                            ctx: &mut Context,
+                            sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+                        ) -> Result<(), E> {
+                            // Compute: ((base + offset) & ~1 - base_pc) / 2
+                            // This gives us the function index from the PC
+                            sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
+                            if self.enable_rv64 {
+                                sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Add)?;
+                                sink.instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                                sink.instruction(ctx, &Instruction::I64And)?;
+                                sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Sub)?;
+                                sink.instruction(ctx, &Instruction::I64Const(1))?;
+                                sink.instruction(ctx, &Instruction::I64ShrU)?;
+                                sink.instruction(ctx, &Instruction::I32WrapI64)?;
+                            } else {
+                                sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
+                                sink.instruction(ctx, &Instruction::I32Add)?;
+                                sink.instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                                sink.instruction(ctx, &Instruction::I32And)?;
+                                sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
+                                sink.instruction(ctx, &Instruction::I32Sub)?;
+                                sink.instruction(ctx, &Instruction::I32Const(1))?;
+                                sink.instruction(ctx, &Instruction::I32ShrU)?;
+                            }
+                            Ok(())
+                        }
+                    }
+
+                    let target_snippet = JalrTargetSnippet {
+                        base_local: Self::reg_to_local(*base),
+                        offset: offset.as_i32(),
+                        enable_rv64: self.enable_rv64,
+                        base_pc: self.base_pc,
+                    };
+
+                    // Emit the speculative call using yecta's call API with dynamic target
+                    self.reactor.call(
+                        ctx,
+                        yecta::Target::Dynamic { idx: &target_snippet },
+                        escape_tag,
+                        self.pool,
+                    )?;
+
+                    // After the call returns, validate the return PC
+                    self.reactor.feed(ctx, &Instruction::LocalGet(Self::pc_local()))?;
+                    if self.enable_rv64 {
+                        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        self.reactor.feed(ctx, &Instruction::I64Ne)?;
+                    } else {
+                        self.reactor.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        self.reactor.feed(ctx, &Instruction::I32Ne)?;
+                    }
+                    
+                    // If PC doesn't match expected return address, throw escape tag
+                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    self.reactor.ret(ctx, 65, escape_tag)?;
+                    self.reactor.feed(ctx, &Instruction::End)?;
+
+                    return Ok(());
+                } else {
+                    // Non-speculative path: original implementation
+                    if dest.0 != 0 {
+                        if self.enable_rv64 {
+                            self.reactor
+                                .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        } else {
+                            self.reactor
+                                .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        }
                         self.reactor
                             .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
-                }
-                // JALR is indirect, so we need to compute the target dynamically
-                // For now, we'll use the computed target and update PC
-                // A full implementation would need dynamic dispatch through a table
-                self.reactor
-                    .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
-                self.emit_imm(ctx, *offset)?;
-                self.emit_add(ctx)?;
-                if self.enable_rv64 {
-                    // RV64: Clear LSB with 64-bit mask
+                    // JALR is indirect, compute target and update PC
                     self.reactor
-                        .feed(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?; // ~1 mask
-                    self.reactor.feed(ctx, &Instruction::I64And)?;
-                } else {
-                    // RV32: Clear LSB with 32-bit mask
+                        .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
+                    self.emit_imm(ctx, *offset)?;
+                    self.emit_add(ctx)?;
+                    if self.enable_rv64 {
+                        self.reactor
+                            .feed(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                        self.reactor.feed(ctx, &Instruction::I64And)?;
+                    } else {
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                        self.reactor.feed(ctx, &Instruction::I32And)?;
+                    }
                     self.reactor
-                        .feed(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?; // ~1 mask
-                    self.reactor.feed(ctx, &Instruction::I32And)?;
+                        .feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+                    // For indirect jumps, seal with unreachable as we can't statically determine target
+                    self.reactor.seal(ctx, &Instruction::Unreachable)?;
+                    return Ok(());
                 }
-                self.reactor
-                    .feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
-                // For indirect jumps, we seal with unreachable as we can't statically determine target
-                self.reactor.seal(ctx, &Instruction::Unreachable)?;
-                return Ok(()); // JALR handles control flow, no fallthrough
             }
 
             // Branch Instructions

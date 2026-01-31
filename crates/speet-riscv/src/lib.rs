@@ -300,6 +300,11 @@ pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
     /// Only relevant when enable_rv64 is true
     use_memory64: bool,
+    /// Whether to enable speculative call lowering for ABI-compliant calls
+    /// (JAL x1 and JALR x1). See SPECULATIVE_CALLS.md for details.
+    /// When enabled, these instructions are lowered to native WASM calls with
+    /// exception-based return validation instead of jumps.
+    enable_speculative_calls: bool,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
@@ -335,6 +340,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             mapper_callback: None,
             enable_rv64,
             use_memory64,
+            enable_speculative_calls: false,
         }
     }
 
@@ -370,6 +376,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             mapper_callback: None,
             enable_rv64,
             use_memory64,
+            enable_speculative_calls: false,
         }
     }
 
@@ -647,6 +654,38 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Check if memory64 mode is enabled
     pub fn is_memory64_enabled(&self) -> bool {
         self.use_memory64
+    }
+
+    /// Enable or disable speculative call lowering for ABI-compliant calls
+    ///
+    /// When enabled, RISC-V `jal x1, <offset>` and `jalr x1, rs2, <offset>` instructions
+    /// (standard ABI-compliant function calls that save the return address to the `ra`
+    /// register) are lowered to native WebAssembly `call` instructions instead of jumps.
+    ///
+    /// The call is wrapped in a try-catch block that validates the return location.
+    /// If the callee returns to an unexpected location (e.g., due to stack manipulation),
+    /// an exception is thrown and caught by the Reactor's escape handler, which then
+    /// resumes execution at the correct guest location.
+    ///
+    /// This optimization allows the WebAssembly engine to use its native call stack,
+    /// improving performance and debuggability. However, it requires an escape tag
+    /// to be configured via the constructor.
+    ///
+    /// See `SPECULATIVE_CALLS.md` in the yecta crate for detailed documentation.
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable speculative call lowering
+    ///
+    /// # Panics
+    /// Does not panic, but speculative calls will have no effect if no escape tag
+    /// is configured (the recompiler will fall back to jump-based control flow).
+    pub fn set_speculative_calls(&mut self, enable: bool) {
+        self.enable_speculative_calls = enable;
+    }
+
+    /// Check if speculative call lowering is enabled
+    pub fn is_speculative_calls_enabled(&self) -> bool {
+        self.enable_speculative_calls
     }
 
     /// Convert a PC value to a function index
@@ -1727,6 +1766,7 @@ pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context, E
 mod tests {
     use super::*;
     use rv_asm::{Inst, Xlen};
+    use yecta::TagIdx;
 
     #[test]
     fn test_recompiler_creation() {
@@ -3199,5 +3239,175 @@ mod tests {
                 false,
             );
         assert_eq!(recompiler2.base_func_offset(), 25);
+    }
+
+    #[test]
+    fn test_speculative_calls_disabled_by_default() {
+        let recompiler =
+            RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
+        assert!(!recompiler.is_speculative_calls_enabled());
+    }
+
+    #[test]
+    fn test_speculative_calls_toggle() {
+        let mut recompiler =
+            RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
+        
+        // Initially disabled
+        assert!(!recompiler.is_speculative_calls_enabled());
+        
+        // Enable
+        recompiler.set_speculative_calls(true);
+        assert!(recompiler.is_speculative_calls_enabled());
+        
+        // Disable again
+        recompiler.set_speculative_calls(false);
+        assert!(!recompiler.is_speculative_calls_enabled());
+    }
+
+    #[test]
+    fn test_jal_with_speculative_calls_disabled() {
+        // Test JAL instruction without speculative calls (original behavior)
+        let mut recompiler =
+            RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
+        let mut ctx = ();
+        
+        // jal x1, 0x100 (call subroutine at PC+0x100)
+        let inst = Inst::Jal {
+            offset: rv_asm::Imm::new_i32(0x100),
+            dest: rv_asm::Reg(1), // ra = x1
+        };
+
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_jal_with_speculative_calls_enabled() {
+        // Test JAL instruction with speculative calls enabled
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            Some(EscapeTag {
+                tag: TagIdx(0),
+                ty: TypeIdx(0),
+            }),
+            0x1000,
+        );
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jal x1, 0x100 (call subroutine at PC+0x100)
+        // This should use speculative call lowering since dest=x1 (ra)
+        let inst = Inst::Jal {
+            offset: rv_asm::Imm::new_i32(0x100),
+            dest: rv_asm::Reg(1), // ra = x1
+        };
+
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_jal_non_abi_call_with_speculative_calls() {
+        // Test JAL with dest != x1 (not an ABI-compliant call)
+        // Should NOT use speculative calls even when enabled
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            Some(EscapeTag {
+                tag: TagIdx(0),
+                ty: TypeIdx(0),
+            }),
+            0x1000,
+        );
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jal x5, 0x100 (jump with link to x5, not a standard call)
+        let inst = Inst::Jal {
+            offset: rv_asm::Imm::new_i32(0x100),
+            dest: rv_asm::Reg(5), // t0, not ra
+        };
+
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_jalr_with_speculative_calls_enabled() {
+        // Test JALR instruction with speculative calls enabled
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            Some(EscapeTag {
+                tag: TagIdx(0),
+                ty: TypeIdx(0),
+            }),
+            0x1000,
+        );
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jalr x1, x2, 0 (indirect call through register x2)
+        let inst = Inst::Jalr {
+            offset: rv_asm::Imm::new_i32(0),
+            base: rv_asm::Reg(2),
+            dest: rv_asm::Reg(1), // ra = x1
+        };
+
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_speculative_calls_requires_escape_tag() {
+        // Test that speculative calls are not used when no escape tag is configured
+        let mut recompiler =
+            RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
+        // Enable speculative calls but don't set escape tag
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jal x1, 0x100 - should fall back to non-speculative since no escape tag
+        let inst = Inst::Jal {
+            offset: rv_asm::Imm::new_i32(0x100),
+            dest: rv_asm::Reg(1),
+        };
+
+        // Should still work, just uses non-speculative path
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 }
