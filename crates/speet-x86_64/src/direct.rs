@@ -841,6 +841,12 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
                 // Return instruction  
                 Mnemonic::Ret => self.handle_ret(ctx, &inst),
                 
+                // Push instruction
+                Mnemonic::Push => self.handle_push(ctx, &inst),
+                
+                // Pop instruction
+                Mnemonic::Pop => self.handle_pop(ctx, &inst),
+                
                 Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
                     // PUSHF variants: push flags with operand-size 16/32/64
                     let (size_bits, rsp_sub) = if inst.mnemonic() == Mnemonic::Pushf {
@@ -1602,6 +1608,147 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         // Use yecta's indirect jump capability
         let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, 0, self.pool);
         self.reactor.ji_with_params(ctx, params)?;
+
+        Ok(Some(()))
+    }
+
+    /// Handle PUSH instruction - push operand onto stack
+    fn handle_push(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        // Determine operand size and value based on operand type
+        let (operand_size, stack_decrement) = match inst.op0_kind() {
+            OpKind::Register => {
+                // Determine size based on register
+                let reg = inst.op0_register();
+                if let Some((_, reg_size, _, _)) = Self::resolve_reg(reg) {
+                    match reg_size {
+                        64 => (64, 8), // 64-bit register -> push 8 bytes
+                        32 => (32, 4), // 32-bit register -> push 4 bytes (but promoted to 64-bit in x64)
+                        16 => (16, 2), // 16-bit register -> push 2 bytes
+                        _ => (64, 8),  // Default to 64-bit
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            OpKind::Immediate8 | OpKind::Immediate8to32 => (64, 8), // Immediate pushes are 64-bit in x64
+            OpKind::Immediate16 => (16, 2),
+            OpKind::Immediate32 => (64, 8), // 32-bit immediate is sign-extended to 64-bit
+            OpKind::Memory => (64, 8), // Memory operand - assume 64-bit for now
+            _ => return Ok(None),
+        };
+
+        // Step 1: Decrement RSP
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+        self.reactor.feed(ctx, &Instruction::I64Const(stack_decrement))?;
+        self.reactor.feed(ctx, &Instruction::I64Sub)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+        // Step 2: Store operand value at [RSP]
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+
+        // Get the value to push based on operand type
+        match inst.op0_kind() {
+            OpKind::Register => {
+                let reg = inst.op0_register();
+                if let Some((reg_local, reg_size, _, bit_offset)) = Self::resolve_reg(reg) {
+                    self.reactor.feed(ctx, &Instruction::LocalGet(reg_local))?;
+                    
+                    // Handle bit offset for subregisters
+                    if bit_offset > 0 {
+                        self.emit_mask_shift_for_read(ctx, reg_size, bit_offset)?;
+                    }
+                    
+                    // Apply size mask if needed
+                    match reg_size {
+                        8 => {
+                            self.reactor.feed(ctx, &Instruction::I64Const(0xFF))?;
+                            self.reactor.feed(ctx, &Instruction::I64And)?;
+                        }
+                        16 => {
+                            self.reactor.feed(ctx, &Instruction::I64Const(0xFFFF))?;
+                            self.reactor.feed(ctx, &Instruction::I64And)?;
+                        }
+                        32 => {
+                            self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            self.reactor.feed(ctx, &Instruction::I64And)?;
+                        }
+                        64 => { /* No masking needed */ }
+                        _ => {}
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
+            OpKind::Immediate8 | OpKind::Immediate8to32 
+            | OpKind::Immediate16 | OpKind::Immediate32 => {
+                let imm = inst.immediate64() as i64;
+                self.reactor.feed(ctx, &Instruction::I64Const(imm))?;
+            }
+            OpKind::Memory => {
+                // Load from memory address
+                self.emit_memory_address(ctx, inst)?;
+                self.emit_memory_load(ctx, operand_size, false)?;
+            }
+            _ => return Ok(None),
+        }
+
+        // Step 3: Store the value
+        self.emit_memory_store(ctx, operand_size)?;
+
+        Ok(Some(()))
+    }
+
+    /// Handle POP instruction - pop from stack into operand
+    fn handle_pop(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        // Only support register destination for now
+        let (reg_local, reg_size, zero_extend, bit_offset) = match inst.op0_kind() {
+            OpKind::Register => {
+                let reg = inst.op0_register();
+                if let Some((reg_local, reg_size, zero_extend, bit_offset)) = Self::resolve_reg(reg) {
+                    (reg_local, reg_size, zero_extend, bit_offset)
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None), // Only support register destinations for now
+        };
+
+        let (operand_size, stack_increment) = match reg_size {
+            64 => (64, 8),
+            32 => (32, 4), // But this will be promoted to 64-bit
+            16 => (16, 2),
+            _ => (64, 8),
+        };
+
+        // Step 1: Load value from [RSP]
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP
+        self.emit_memory_load(ctx, operand_size, false)?; // Load with zero extension
+
+        // Store the loaded value in a temporary local (use local 24 for pop value)
+        self.reactor.feed(ctx, &Instruction::LocalSet(24))?;
+
+        // Step 2: Increment RSP
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(stack_increment))?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+        // Step 3: Store the value in the destination register
+        self.reactor.feed(ctx, &Instruction::LocalGet(24))?;
+
+        if zero_extend && reg_size == 32 {
+            // 32-bit writes zero-extend to 64-bit
+            self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+            self.reactor.feed(ctx, &Instruction::I64And)?;
+        }
+
+        if bit_offset > 0 || reg_size < 64 {
+            // Handle subregister writes using RMW
+            self.emit_subreg_write_rmw(ctx, reg_local, reg_size, bit_offset)?;
+        } else {
+            // Full register write
+            self.reactor.feed(ctx, &Instruction::LocalSet(reg_local))?;
+        }
 
         Ok(Some(()))
     }
