@@ -33,6 +33,46 @@ struct ConditionSnippet {
     condition_type: ConditionType,
 }
 
+/// Snippet that computes function index from return address stored in local 23
+struct ReturnAddressSnippet {
+    base_rip: u64,
+}
+
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for ReturnAddressSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        // Load return address from local 23
+        sink.instruction(ctx, &Instruction::LocalGet(23))?;
+        
+        // Subtract base_rip to get relative address: (return_addr - base_rip) 
+        sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
+        sink.instruction(ctx, &Instruction::I64Sub)?;
+        
+        // Convert to function index (divide by 1 for x86_64, similar to rip_to_func_idx)
+        // For x86_64, each function is 1 byte aligned (unlike RISC-V which is 2-byte aligned)
+        sink.instruction(ctx, &Instruction::I32WrapI64)?;
+        Ok(())
+    }
+}
+
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ReturnAddressSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        // Same logic as emit_instruction
+        sink.instruction(ctx, &Instruction::LocalGet(23))?;
+        sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
+        sink.instruction(ctx, &Instruction::I64Sub)?;
+        sink.instruction(ctx, &Instruction::I32WrapI64)?;
+        Ok(())
+    }
+}
+
 impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ConditionSnippet {
     fn emit(
         &self,
@@ -794,6 +834,13 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
                 Mnemonic::Jno => self.handle_conditional_jump(ctx, &inst, ConditionType::NOF),
                 Mnemonic::Jp => self.handle_conditional_jump(ctx, &inst, ConditionType::PF),
                 Mnemonic::Jnp => self.handle_conditional_jump(ctx, &inst, ConditionType::NPF),
+                
+                // Call instruction
+                Mnemonic::Call => self.handle_call(ctx, &inst),
+                
+                // Return instruction  
+                Mnemonic::Ret => self.handle_ret(ctx, &inst),
+                
                 Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
                     // PUSHF variants: push flags with operand-size 16/32/64
                     let (size_bits, rsp_sub) = if inst.mnemonic() == Mnemonic::Pushf {
@@ -1459,6 +1506,101 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         // Use the proper yecta conditional jump API
         let condition = ConditionSnippet { condition_type };
         let params = JumpCallParams::conditional_jump(target_func_idx, 0, &condition, pool);
+        self.reactor.ji_with_params(ctx, params)?;
+
+        Ok(Some(()))
+    }
+
+    /// Handle CALL instruction - push return address and jump to target
+    fn handle_call(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        // Calculate return address (instruction pointer after this call)
+        let return_addr = inst.next_ip();
+        
+        // Determine target based on operand kind
+        let target = match inst.op0_kind() {
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
+                // Direct call: call <offset>
+                let offset = inst.near_branch64() as i64;
+                let current_rip = inst.ip() as i64;
+                (current_rip + offset) as u64
+            }
+            OpKind::Register => {
+                // Indirect call: call <reg>
+                // For now, we'll return None (unsupported) since we need dynamic dispatch
+                return Ok(None);
+            }
+            OpKind::Memory => {
+                // Indirect call: call [memory]  
+                // For now, we'll return None (unsupported) since we need dynamic dispatch
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        };
+
+        // Step 1: Push return address onto stack
+        // Decrement RSP by 8 (64-bit address)
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+        self.reactor.feed(ctx, &Instruction::I64Const(8))?;
+        self.reactor.feed(ctx, &Instruction::I64Sub)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+        // Store return address at [RSP]
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
+        self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+
+        // Step 2: Jump to target function (non-speculative)
+        let target_func_idx = self.rip_to_func_idx(target);
+        self.reactor.jmp(ctx, target_func_idx, 0)?; // Pass 0 parameters for now
+
+        Ok(Some(()))
+    }
+
+    /// Handle RET instruction - pop return address and jump to it
+    fn handle_ret(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        // Handle optional immediate operand (for stack cleanup)
+        let stack_cleanup = if inst.op_count() > 0 {
+            match inst.op0_kind() {
+                OpKind::Immediate16 | OpKind::Immediate32 => inst.immediate16() as u64,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        // Step 1: Load return address from stack
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP 
+        self.emit_memory_load(ctx, 64, false)?; // Load 64-bit return address (zero-extended)
+        
+        // Store return address in a temporary local (use local 23 for return address)
+        self.reactor.feed(ctx, &Instruction::LocalSet(23))?;
+
+        // Step 2: Adjust stack pointer
+        // Increment RSP by 8 (for the return address)
+        self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(8))?;
+        self.reactor.feed(ctx, &Instruction::I64Add)?;
+
+        // Add any immediate stack cleanup (for ret <imm> instruction)
+        if stack_cleanup > 0 {
+            self.reactor.feed(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+            self.reactor.feed(ctx, &Instruction::I64Add)?;
+        }
+        
+        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+        // Step 3: Jump to return address (non-speculative)
+        // For now, we need to convert the return address to a function index
+        // This is the challenging part - we need dynamic dispatch since we don't know the target statically
+        
+        // For a basic implementation, we'll use an indirect jump through the function table
+        // First, convert the return address to a function index
+        let return_addr_snippet = ReturnAddressSnippet {
+            base_rip: self.base_rip,
+        };
+        
+        // Use yecta's indirect jump capability
+        let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, 0, self.pool);
         self.reactor.ji_with_params(ctx, params)?;
 
         Ok(Some(()))
