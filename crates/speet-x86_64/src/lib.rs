@@ -16,6 +16,7 @@ pub struct X86Recompiler<Context, E, F: InstructionSink<Context, E>> {
     escape_tag: Option<EscapeTag>,
     base_rip: u64,
     hints: Vec<u8>,
+    enable_speculative_calls: bool,
 }
 
 impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
@@ -40,7 +41,39 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             escape_tag: None,
             base_rip,
             hints: Vec::new(),
+            enable_speculative_calls: false,
         }
+    }
+
+    /// Enable or disable speculative call optimization
+    /// 
+    /// When enabled, ABI-compliant x86_64 `call` instructions are lowered to native WASM `call`
+    /// instructions wrapped in try-catch blocks. Returns (`ret`) compare stack top with expected
+    /// return address and use direct WASM return for ABI-compliant cases.
+    /// 
+    /// Requires an escape tag to be configured via `set_escape_tag()`.
+    pub fn set_speculative_calls(&mut self, enable: bool) {
+        self.enable_speculative_calls = enable;
+    }
+
+    /// Check if speculative call optimization is enabled
+    pub fn is_speculative_calls_enabled(&self) -> bool {
+        self.enable_speculative_calls
+    }
+
+    /// Set the escape tag used for exception-based control flow in speculative calls
+    pub fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
+        self.escape_tag = tag;
+    }
+
+    /// Get the current escape tag
+    pub fn get_escape_tag(&self) -> Option<EscapeTag> {
+        self.escape_tag
+    }
+
+    /// Get the local index for the expected return address used in speculative calls
+    pub fn expected_ra_local() -> u32 {
+        Self::EXPECTED_RA_LOCAL
     }
 
     fn emit_i64_const(&mut self, ctx: &mut Context, value: i64) -> Result<(), E> {
@@ -81,6 +114,9 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     const CF_LOCAL: u32 = 19;
     const OF_LOCAL: u32 = 20;
     const PF_LOCAL: u32 = 21;
+    // Temporary locals: 22, 23, 24 are used in direct.rs
+    // Expected return address for speculative calls
+    const EXPECTED_RA_LOCAL: u32 = 25;
 
     fn set_zf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor

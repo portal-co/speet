@@ -38,6 +38,35 @@ struct ReturnAddressSnippet {
     base_rip: u64,
 }
 
+/// Snippet for setting expected_ra to a constant return address in speculative calls
+struct ExpectedRaSnippet {
+    return_addr: u64,
+}
+
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for ExpectedRaSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        // x86_64 always uses 64-bit addresses
+        sink.instruction(ctx, &Instruction::I64Const(self.return_addr as i64))?;
+        Ok(())
+    }
+}
+
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ExpectedRaSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        // x86_64 always uses 64-bit addresses
+        sink.instruction(ctx, &Instruction::I64Const(self.return_addr as i64))?;
+        Ok(())
+    }
+}
+
 impl<Context, E> wax_core::build::InstructionSource<Context, E> for ReturnAddressSnippet {
     fn emit_instruction(
         &self,
@@ -1543,23 +1572,63 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             _ => return Ok(None),
         };
 
-        // Step 1: Push return address onto stack
-        // Decrement RSP by 8 (64-bit address)
-        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
-        self.reactor.feed(ctx, &Instruction::I64Const(8))?;
-        self.reactor.feed(ctx, &Instruction::I64Sub)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+        // Check if speculative calls are enabled and we have an escape tag
+        let use_speculative = self.enable_speculative_calls && self.escape_tag.is_some();
 
-        // Store return address at [RSP]
-        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // Address = RSP
-        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
-        self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+        if use_speculative {
+            // Speculative call lowering: emit a native WASM call with try-catch
+            let escape_tag = self.escape_tag.unwrap();
+            let target_func = self.rip_to_func_idx(target);
 
-        // Step 2: Jump to target function (non-speculative)
-        let target_func_idx = self.rip_to_func_idx(target);
-        self.reactor.jmp(ctx, target_func_idx, 0)?; // Pass 0 parameters for now
+            // Step 1: Push return address onto stack (normal x86_64 behavior)
+            // Decrement RSP by 8 (64-bit address)
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+            self.reactor.feed(ctx, &Instruction::I64Const(8))?;
+            self.reactor.feed(ctx, &Instruction::I64Sub)?;
+            self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
-        Ok(Some(()))
+            // Store return address at [RSP]
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+            self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
+            self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+
+            // Step 2: Create expected_ra snippet for fixups
+            let expected_ra_snippet = ExpectedRaSnippet {
+                return_addr,
+            };
+
+            // Step 3: Use fixups to set expected_ra (local 25) only for this call
+            let params = yecta::JumpCallParams::call(target_func, 26, escape_tag, self.pool)
+                .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
+
+            // Step 4: Emit the speculative call using yecta's ji_with_params API
+            // This wraps the call in a try-catch block and uses fixups mechanism
+            self.reactor.ji_with_params(ctx, params)?;
+
+            // After the call returns (via exception catch), execution continues here
+            // No manual validation needed - the ret() in the callee threw the state
+            return Ok(Some(()));
+        } else {
+            // Non-speculative path: original implementation
+            
+            // Step 1: Push return address onto stack
+            // Decrement RSP by 8 (64-bit address)
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+            self.reactor.feed(ctx, &Instruction::I64Const(8))?;
+            self.reactor.feed(ctx, &Instruction::I64Sub)?;
+            self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+            // Store return address at [RSP]
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+            self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
+            self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+
+            // Step 2: Jump to target function (non-speculative)
+            let target_func_idx = self.rip_to_func_idx(target);
+            self.reactor.jmp(ctx, target_func_idx, 0)?; // Pass 0 parameters for now
+
+            Ok(Some(()))
+        }
     }
 
     /// Handle RET instruction - pop return address and jump to it
@@ -1574,42 +1643,87 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             0
         };
 
-        // Step 1: Load return address from stack
-        self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP 
-        self.emit_memory_load(ctx, 64, false)?; // Load 64-bit return address (zero-extended)
-        
-        // Store return address in a temporary local (use local 23 for return address)
-        self.reactor.feed(ctx, &Instruction::LocalSet(23))?;
+        // Check if speculative calls are enabled and we have an escape tag
+        let use_speculative = self.enable_speculative_calls && self.escape_tag.is_some();
 
-        // Step 2: Adjust stack pointer
-        // Increment RSP by 8 (for the return address)
-        self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(8))?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
+        if use_speculative {
+            // Speculative return: compare stack top with expected return address
+            let escape_tag = self.escape_tag.unwrap();
 
-        // Add any immediate stack cleanup (for ret <imm> instruction)
-        if stack_cleanup > 0 {
-            self.reactor.feed(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+            // Step 1: Load return address from [RSP] (don't modify RSP yet)
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP
+            self.emit_memory_load(ctx, 64, false)?; // Stack top value (should be return address)
+            
+            // Step 2: Load expected_ra from the local set by the caller's fixup
+            self.reactor.feed(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
+            
+            // Step 3: Compare them
+            self.reactor.feed(ctx, &Instruction::I64Eq)?; // Compare stack top with expected
+            
+            // Step 4: If equal (ABI-compliant), use regular return; else throw exception
+            self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            
+            // ABI-compliant return path: pop stack and use WASM Return
+            // Increment RSP by 8 (for the return address)
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
+            self.reactor.feed(ctx, &Instruction::I64Const(8))?;
             self.reactor.feed(ctx, &Instruction::I64Add)?;
+
+            // Add any immediate stack cleanup (for ret <imm> instruction)
+            if stack_cleanup > 0 {
+                self.reactor.feed(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+                self.reactor.feed(ctx, &Instruction::I64Add)?;
+            }
+            
+            self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+            
+            // Direct WASM return (ABI-compliant case)
+            self.reactor.feed(ctx, &Instruction::Return)?;
+            
+            self.reactor.feed(ctx, &Instruction::Else)?;
+            
+            // Non-ABI-compliant return: throw escape tag with all register/stack state
+            // We need to pass all locals (registers + RSP + expected_ra)
+            // For now, use ret() with 26 locals (16 regs + 5 flags + 5 temps)
+            self.reactor.ret(ctx, 26, escape_tag)?;
+            
+            self.reactor.feed(ctx, &Instruction::End)?;
+            return Ok(Some(()));
+        } else {
+            // Non-speculative path: original implementation
+            
+            // Step 1: Load return address from stack
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?; // RSP 
+            self.emit_memory_load(ctx, 64, false)?; // Load 64-bit return address (zero-extended)
+            
+            // Store return address in a temporary local (use local 23 for return address)
+            self.reactor.feed(ctx, &Instruction::LocalSet(23))?;
+
+            // Step 2: Adjust stack pointer
+            // Increment RSP by 8 (for the return address)
+            self.reactor.feed(ctx, &Instruction::LocalGet(4))?;
+            self.reactor.feed(ctx, &Instruction::I64Const(8))?;
+            self.reactor.feed(ctx, &Instruction::I64Add)?;
+
+            // Add any immediate stack cleanup (for ret <imm> instruction)
+            if stack_cleanup > 0 {
+                self.reactor.feed(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+                self.reactor.feed(ctx, &Instruction::I64Add)?;
+            }
+            
+            self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
+
+            // Step 3: Jump to return address using indirect dispatch
+            let return_addr_snippet = ReturnAddressSnippet {
+                base_rip: self.base_rip,
+            };
+            
+            // Use yecta's indirect jump capability
+            let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, 0, self.pool);
+            self.reactor.ji_with_params(ctx, params)?;
+
+            Ok(Some(()))
         }
-        
-        self.reactor.feed(ctx, &Instruction::LocalSet(4))?; // Update RSP
-
-        // Step 3: Jump to return address (non-speculative)
-        // For now, we need to convert the return address to a function index
-        // This is the challenging part - we need dynamic dispatch since we don't know the target statically
-        
-        // For a basic implementation, we'll use an indirect jump through the function table
-        // First, convert the return address to a function index
-        let return_addr_snippet = ReturnAddressSnippet {
-            base_rip: self.base_rip,
-        };
-        
-        // Use yecta's indirect jump capability
-        let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, 0, self.pool);
-        self.reactor.ji_with_params(ctx, params)?;
-
-        Ok(Some(()))
     }
 
     /// Handle PUSH instruction - push operand onto stack
