@@ -662,23 +662,37 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// (standard ABI-compliant function calls that save the return address to the `ra`
     /// register) are lowered to native WebAssembly `call` instructions instead of jumps.
     ///
-    /// The call is wrapped in a try-catch block that validates the return location.
-    /// If the callee returns to an unexpected location (e.g., due to stack manipulation),
-    /// an exception is thrown and caught by the Reactor's escape handler, which then
-    /// resumes execution at the correct guest location.
+    /// ## Mechanism
     ///
-    /// This optimization allows the WebAssembly engine to use its native call stack,
-    /// improving performance and debuggability. However, it requires an escape tag
-    /// to be configured via the constructor.
+    /// The speculative call system works as follows:
+    ///
+    /// 1. **On call (`jal x1` / `jalr x1`):**
+    ///    - Set the hidden `expected_ra` local to the return address
+    ///    - Set `ra` (x1) to the return address (as normal)
+    ///    - Emit a native WASM `call` wrapped in a try-catch block
+    ///
+    /// 2. **On ABI-compliant return (`jalr x0, ra, 0`):**
+    ///    - Detect the return pattern (jump to `ra` with no link)
+    ///    - Throw the escape tag via `ret`, carrying all register state
+    ///
+    /// 3. **Exception handling (in the caller's frame):**
+    ///    - The try-catch block catches the exception
+    ///    - Register state is restored from the exception payload
+    ///    - Execution continues after the call site
+    ///
+    /// This allows the WebAssembly engine to use its native call stack for ABI-compliant
+    /// call/return sequences, improving performance and debuggability. Non-standard
+    /// returns (e.g., longjmp, corrupted `ra`) fall through to the dispatcher for
+    /// proper handling.
     ///
     /// See `SPECULATIVE_CALLS.md` in the yecta crate for detailed documentation.
     ///
     /// # Arguments
     /// * `enable` - Whether to enable speculative call lowering
     ///
-    /// # Panics
-    /// Does not panic, but speculative calls will have no effect if no escape tag
-    /// is configured (the recompiler will fall back to jump-based control flow).
+    /// # Requirements
+    /// Speculative calls require an escape tag to be configured via the constructor.
+    /// If no escape tag is set, the recompiler falls back to jump-based control flow.
     pub fn set_speculative_calls(&mut self, enable: bool) {
         self.enable_speculative_calls = enable;
     }
@@ -718,7 +732,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // Integer registers: locals 0-31 (i32 for RV32, i64 for RV64)
         // Float registers: locals 32-63 (f64)
         // PC: local 64 (i32)
-        // Temps: locals 65+ (mixed types)
+        // Expected RA: local 65 (i32/i64) - hidden register for speculative call returns
+        // Temps: locals 66+ (mixed types)
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
@@ -728,6 +743,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             (32, int_type),        // x0-x31
             (32, ValType::F64),    // f0-f31 (using F64 for both F and D with NaN-boxing)
             (1, ValType::I32),     // PC
+            (1, int_type),         // Expected RA (for speculative call returns)
             (num_temps, int_type), // Temporary registers (match integer register type)
         ];
         // The second argument is the length in 2-byte increments
@@ -748,6 +764,20 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Get the local index for the program counter
     const fn pc_local() -> u32 {
         64
+    }
+
+    /// Get the local index for the expected return address (used for speculative calls)
+    /// This hidden register tracks what `ra` should be after a speculative call returns.
+    /// When a callee performs an ABI-compliant return (jalr x0, ra, 0), it throws an
+    /// exception that the caller's try-catch block catches, restoring execution to
+    /// continue after the call site.
+    const fn expected_ra_local() -> u32 {
+        65
+    }
+
+    /// Get the starting index for temporary registers
+    const fn temps_start() -> u32 {
+        66
     }
 
     /// Emit instructions to load an immediate value
@@ -905,9 +935,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// to the high 64 bits, only through carries.
     fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
         // Load src1 and src2 to locals for reuse
-        let temp_a = 65;
-        let temp_b = 66;
-        let temp_mid = 67; // for accumulating middle terms
+        let temp_a = Self::temps_start();
+        let temp_b = Self::temps_start() + 1;
+        let temp_mid = Self::temps_start() + 2; // for accumulating middle terms
 
         self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
@@ -964,9 +994,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
     /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
     fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
-        let temp_a = 65;
-        let temp_b = 66;
-        let temp_mid = 67;
+        let temp_a = Self::temps_start();
+        let temp_b = Self::temps_start() + 1;
+        let temp_mid = Self::temps_start() + 2;
 
         self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
@@ -1028,9 +1058,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         src1: u32,
         src2: u32,
     ) -> Result<(), E> {
-        let temp_a = 65;
-        let temp_b = 66;
-        let temp_mid = 67;
+        let temp_a = Self::temps_start();
+        let temp_b = Self::temps_start() + 1;
+        let temp_mid = Self::temps_start() + 2;
 
         self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
         self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
@@ -3402,6 +3432,74 @@ mod tests {
         };
 
         // Should still work, just uses non-speculative path
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_abi_compliant_return_with_speculative_calls() {
+        // Test ABI-compliant return: jalr x0, ra, 0
+        // This should be detected as a return and use ret() to throw the escape tag
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            Some(EscapeTag {
+                tag: TagIdx(0),
+                ty: TypeIdx(0),
+            }),
+            0x1000,
+        );
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jalr x0, x1, 0 (return: jump to ra with no link)
+        // This is the canonical RISC-V return instruction
+        let inst = Inst::Jalr {
+            offset: rv_asm::Imm::new_i32(0),
+            base: rv_asm::Reg(1),  // ra
+            dest: rv_asm::Reg(0),  // x0 (no link)
+        };
+
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_non_abi_return_with_speculative_calls() {
+        // Test non-ABI return patterns that should NOT use ret()
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            Some(EscapeTag {
+                tag: TagIdx(0),
+                ty: TypeIdx(0),
+            }),
+            0x1000,
+        );
+        recompiler.set_speculative_calls(true);
+        let mut ctx = ();
+        
+        // jalr x0, x2, 0 (jump to x2, not ra - computed goto, not return)
+        let inst = Inst::Jalr {
+            offset: rv_asm::Imm::new_i32(0),
+            base: rv_asm::Reg(2),  // not ra
+            dest: rv_asm::Reg(0),
+        };
+
         assert!(
             recompiler
                 .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {

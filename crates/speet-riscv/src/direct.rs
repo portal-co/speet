@@ -666,8 +666,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     && self.escape_tag.is_some();
 
                 if use_speculative {
-                    // Speculative call lowering: emit a native WASM call with return validation
-                    // See SPECULATIVE_CALLS.md for the full pattern
+                    // Speculative call lowering: emit a native WASM call
+                    // See SPECULATIVE_CALLS.md and set_speculative_calls() docs for the full pattern
                     let escape_tag = self.escape_tag.unwrap();
                     let target_func = self.pc_to_func_idx(target_pc);
 
@@ -682,8 +682,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
+                    // Set the hidden expected_ra local - this tracks what ra should be
+                    // when the callee performs an ABI-compliant return
+                    if self.enable_rv64 {
+                        self.reactor
+                            .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                    } else {
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                    }
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalSet(Self::expected_ra_local()))?;
+
                     // Emit the speculative call using yecta's call API
-                    // This wraps the call in a try-catch block for exception-based escapes
+                    // This wraps the call in a try-catch block; when the callee throws
+                    // via ret(), control returns here with register state restored
                     self.reactor.call(
                         ctx,
                         yecta::Target::Static { func: target_func },
@@ -691,27 +704,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.pool,
                     )?;
 
-                    // After the call returns, we need to validate the return PC
-                    // The yecta Reactor's call method handles the Block/TryTable wrapper;
-                    // we emit the validation logic here
-                    
-                    // Load the current PC (which should be the expected return address)
-                    self.reactor.feed(ctx, &Instruction::LocalGet(Self::pc_local()))?;
-                    if self.enable_rv64 {
-                        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                        self.reactor.feed(ctx, &Instruction::I64Ne)?;
-                    } else {
-                        self.reactor.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
-                        self.reactor.feed(ctx, &Instruction::I32Ne)?;
-                    }
-                    
-                    // If PC doesn't match expected return address, throw escape tag
-                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
-                    // Load all parameters for the escape
-                    self.reactor.ret(ctx, 65, escape_tag)?;
-                    self.reactor.feed(ctx, &Instruction::End)?;
-
-                    // Normal return path: continue execution
+                    // After the call returns (via exception catch), execution continues here
+                    // No manual validation needed - the ret() in the callee threw the state
                     return Ok(());
                 } else {
                     // Non-speculative path: original jump-based implementation
@@ -726,7 +720,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.reactor
                             .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
-                    self.jump_to_pc(ctx, target_pc, 65)?;
+                    self.jump_to_pc(ctx, target_pc, 66)?;
                     return Ok(());
                 }
             }
@@ -738,6 +732,25 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             // register rs1, then setting the least-significant bit of the result to zero."
             Inst::Jalr { offset, base, dest } => {
                 let return_addr = pc as u64 + (inst_len * 2) as u64;
+
+                // Check if this is an ABI-compliant return: jalr x0, ra, 0
+                // (jump to ra with no link register saved)
+                let is_abi_return = self.enable_speculative_calls
+                    && dest.0 == 0       // x0 = no link (return, not call)
+                    && base.0 == 1       // ra = return address register
+                    && offset.as_i32() == 0
+                    && self.escape_tag.is_some();
+
+                if is_abi_return {
+                    // ABI-compliant return: throw the escape tag to return to caller
+                    // The caller's try-catch block will catch this and restore state
+                    let escape_tag = self.escape_tag.unwrap();
+                    
+                    // Use ret() to throw the escape tag with all register state
+                    // This carries locals 0..65 (registers + PC) as the exception payload
+                    self.reactor.ret(ctx, 66, escape_tag)?;
+                    return Ok(());
+                }
 
                 // Check if this is an ABI-compliant call (dest == x1/ra) and speculative calls are enabled
                 let use_speculative = self.enable_speculative_calls
@@ -759,6 +772,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     }
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+
+                    // Set the hidden expected_ra local
+                    if self.enable_rv64 {
+                        self.reactor
+                            .feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                    } else {
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                    }
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalSet(Self::expected_ra_local()))?;
 
                     // Compute target address: (base + offset) & ~1
                     // We need to create a snippet that computes the function index
@@ -850,21 +874,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.pool,
                     )?;
 
-                    // After the call returns, validate the return PC
-                    self.reactor.feed(ctx, &Instruction::LocalGet(Self::pc_local()))?;
-                    if self.enable_rv64 {
-                        self.reactor.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
-                        self.reactor.feed(ctx, &Instruction::I64Ne)?;
-                    } else {
-                        self.reactor.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
-                        self.reactor.feed(ctx, &Instruction::I32Ne)?;
-                    }
-                    
-                    // If PC doesn't match expected return address, throw escape tag
-                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
-                    self.reactor.ret(ctx, 65, escape_tag)?;
-                    self.reactor.feed(ctx, &Instruction::End)?;
-
+                    // After the call returns (via exception catch), execution continues here
                     return Ok(());
                 } else {
                     // Non-speculative path: original implementation
@@ -2680,7 +2690,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
 
         self.reactor.ji(
             ctx,
-            65,               // params: pass all registers
+            66,               // params: pass all registers (including expected_ra)
             &BTreeMap::new(), // fixups: none needed
             target,           // target: branch target
             None,             // call: not an escape call
