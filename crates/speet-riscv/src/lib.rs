@@ -59,6 +59,7 @@ use core::convert::Infallible;
 use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
 use wasm_encoder::{Function, Instruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
+use speet_wasm_helpers::{mulh_signed, mulh_unsigned, mulh_signed_unsigned, MulhTemps};
 
 /// Information about a detected HINT instruction
 ///
@@ -934,120 +935,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
     /// to the high 64 bits, only through carries.
     fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
-        // Load src1 and src2 to locals for reuse
-        let temp_a = Self::temps_start();
-        let temp_b = Self::temps_start() + 1;
-        let temp_mid = Self::temps_start() + 2; // for accumulating middle terms
-
-        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
-
-        // Start with a_hi * b_hi
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (sign-extended)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // b_hi (sign-extended)
-        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_hi * b_hi
-
-        // Compute middle term: a_hi * b_lo (full 64-bit result)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
-        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_hi * b_lo (64-bit result)
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?; // save for carry computation
-
-        // Add high 32 bits of (a_hi * b_lo) to result
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // arithmetic shift for signed
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
-        // Compute other middle term: a_lo * b_hi (full 64-bit result)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // b_hi
-        self.reactor.feed(ctx, &Instruction::I64Mul)?; // a_lo * b_hi (64-bit result)
-
-        // Add it to the middle term accumulator for carry calculation
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?; // sum of middle terms (low parts)
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
-
-        // Add high 32 bits of the summed middle terms
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // arithmetic shift
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
+        let temps = MulhTemps::new(Self::temps_start());
+        let instrs = mulh_signed(src1, src2, temps);
+        for instr in instrs {
+            self.reactor.feed(ctx, &instr)?;
+        }
         Ok(())
     }
 
     /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
     fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
-        let temp_a = Self::temps_start();
-        let temp_b = Self::temps_start() + 1;
-        let temp_mid = Self::temps_start() + 2;
-
-        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
-
-        // Start with a_hi * b_hi (all unsigned)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // a_hi (unsigned)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-
-        // Compute middle term: a_hi * b_lo
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // a_hi
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
-
-        // Add high 32 bits of (a_hi * b_lo)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
-        // Compute other middle term: a_lo * b_hi
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-
-        // Add to middle term for carry calculation
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
-
-        // Add high 32 bits of summed middle terms
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
+        let temps = MulhTemps::new(Self::temps_start());
+        let instrs = mulh_unsigned(src1, src2, temps);
+        for instr in instrs {
+            self.reactor.feed(ctx, &instr)?;
+        }
         Ok(())
     }
 
@@ -1058,62 +960,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         src1: u32,
         src2: u32,
     ) -> Result<(), E> {
-        let temp_a = Self::temps_start();
-        let temp_b = Self::temps_start() + 1;
-        let temp_mid = Self::temps_start() + 2;
-
-        self.reactor.feed(ctx, &Instruction::LocalGet(src1))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::LocalGet(src2))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_b))?;
-
-        // src1 is signed, src2 is unsigned
-
-        // Start with a_hi * b_hi (a_hi signed, b_hi unsigned)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (signed)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-
-        // Compute middle term: a_hi * b_lo (a_hi signed, b_lo unsigned)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?; // a_hi (signed)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // b_lo
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
-
-        // Add high 32 bits of (a_hi * b_lo) - use signed shift
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
-        // Compute other middle term: a_lo * b_hi (a_lo unsigned, b_hi unsigned)
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_a))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // a_lo
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_b))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?; // b_hi (unsigned)
-        self.reactor.feed(ctx, &Instruction::I64Mul)?;
-
-        // Add to middle term for carry calculation
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(temp_mid))?;
-
-        // Add high 32 bits of summed middle terms - use signed shift
-        self.reactor.feed(ctx, &Instruction::LocalGet(temp_mid))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrS)?;
-        self.reactor.feed(ctx, &Instruction::I64Add)?;
-
+        let temps = MulhTemps::new(Self::temps_start());
+        let instrs = mulh_signed_unsigned(src1, src2, temps);
+        for instr in instrs {
+            self.reactor.feed(ctx, &instr)?;
+        }
         Ok(())
     }
 

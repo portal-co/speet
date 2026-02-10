@@ -266,9 +266,17 @@ version = "0.1.0"
 dependencies = [
  "object",
  "rv-asm",
+ "speet-wasm-helpers",
  "wasm-encoder",
  "wax-core",
  "yecta",
+]
+
+[[package]]
+name = "speet-wasm-helpers"
+version = "0.1.0"
+dependencies = [
+ "wasm-encoder",
 ]
 
 [[package]]

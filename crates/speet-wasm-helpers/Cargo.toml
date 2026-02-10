@@ -1,0 +1,10 @@
+[package]
+name = "speet-wasm-helpers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasm-encoder.workspace = true
+
+[features]
+default = []

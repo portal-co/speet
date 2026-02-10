@@ -11,6 +11,7 @@ wasm-encoder.workspace = true
 yecta = {path = "../yecta"}
 rv-asm.workspace = true
 wax-core.workspace = true
+speet-wasm-helpers = {path = "../speet-wasm-helpers"}
 
 [dev-dependencies]
 object = "0.36"
