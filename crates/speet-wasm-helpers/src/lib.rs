@@ -10,7 +10,9 @@
 //!   - Signed × Signed
 //!   - Unsigned × Unsigned  
 //!   - Signed × Unsigned
-
+#![no_std]
+extern crate alloc;
+use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 
 /// Temporary variable indices used by mulh operations
