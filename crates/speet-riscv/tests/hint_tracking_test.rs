@@ -44,7 +44,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
     };
 
     // Create recompiler with HINT tracking enabled
-    let mut recompiler = RiscVRecompiler::<Infallible, Function>::new_with_full_config(
+    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         Pool {
             table: TableIdx(0),
             ty: TypeIdx(0),
