@@ -70,11 +70,11 @@ fn main() {
     println!("\n7. Translating: syscall (with callback)");
     
     let mut syscall_count = 0;
-    let mut syscall_callback = |syscall: &speet_mips::SyscallInfo, _ctx: &mut (), callback_ctx: &mut speet_mips::CallbackContext<_, _>| {
+    let mut syscall_callback = |syscall: &speet_mips::SyscallInfo, ctx: &mut (), callback_ctx: &mut speet_mips::CallbackContext<_, _, _>| {
         syscall_count += 1;
         println!("   SYSCALL detected at PC: 0x{:x}, count: {}", syscall.pc, syscall_count);
         // Could emit custom WebAssembly code here if needed
-        callback_ctx.emit(&wasm_encoder::Instruction::Nop).ok();
+        callback_ctx.emit(ctx, &wasm_encoder::Instruction::Nop).ok();
     };
     
     recompiler.set_syscall_callback(&mut syscall_callback);
