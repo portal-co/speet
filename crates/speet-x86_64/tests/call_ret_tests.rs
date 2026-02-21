@@ -10,33 +10,23 @@ fn test_call_direct_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
 
-#[test] 
+#[test]
 fn test_ret_translation() {
     // RET instruction: C3
     let bytes = vec![0xC3];
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -48,14 +38,9 @@ fn test_ret_with_immediate_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -70,14 +55,9 @@ fn test_call_ret_sequence() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }

@@ -9,15 +9,10 @@ fn test_test_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -29,15 +24,10 @@ fn test_cmp_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -49,15 +39,10 @@ fn test_jmp_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -69,15 +54,10 @@ fn test_je_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -89,15 +69,10 @@ fn test_jne_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -109,15 +84,10 @@ fn test_jl_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -129,15 +99,10 @@ fn test_jg_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -149,15 +114,10 @@ fn test_jb_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }
@@ -169,15 +129,10 @@ fn test_ja_instruction() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
     let mut ctx = ();
 
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
-            func
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        let mut func = wasm_encoder::Function::new(locals.collect::<Vec<_>>());
+        func
+    });
 
     assert!(result.is_ok());
 }

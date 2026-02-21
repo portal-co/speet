@@ -51,7 +51,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
         },
         None,
         start_addr as u64,
-        true, // Enable HINT tracking
+        true,  // Enable HINT tracking
         false, // Disable RV64
         false, // Disable memory64
     );
@@ -142,18 +142,20 @@ fn test_hint_info_structure() {
 #[test]
 fn test_hint_tracking_performance() {
     // Ensure that HINT tracking doesn't significantly impact translation
-    let mut recompiler_no_hints = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
-    let mut recompiler_with_hints = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        Pool {
-            table: TableIdx(0),
-            ty: TypeIdx(0),
-        },
-        None,
-        0x1000,
-        true,
-        false, // Disable RV64
-        false, // Disable memory64
-    );
+    let mut recompiler_no_hints =
+        RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
+    let mut recompiler_with_hints =
+        RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+            Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            None,
+            0x1000,
+            true,
+            false, // Disable RV64
+            false, // Disable memory64
+        );
 
     // Create a sequence of instructions including some HINTs
     let instructions: Vec<Inst> = vec![
@@ -186,16 +188,20 @@ fn test_hint_tracking_performance() {
         let pc = 0x1000 + (i as u32 * 4);
         assert!(
             recompiler_no_hints
-                .translate_instruction(&mut ctx_no, inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
+                .translate_instruction(&mut ctx_no, inst, pc, rv_asm::IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
                 .is_ok()
         );
         assert!(
             recompiler_with_hints
-                .translate_instruction(&mut ctx_with, inst, pc, rv_asm::IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
+                .translate_instruction(
+                    &mut ctx_with,
+                    inst,
+                    pc,
+                    rv_asm::IsCompressed::No,
+                    &mut |a| Function::new(a.collect::<Vec<_>>())
+                )
                 .is_ok()
         );
     }

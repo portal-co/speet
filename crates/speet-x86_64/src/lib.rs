@@ -46,11 +46,11 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     }
 
     /// Enable or disable speculative call optimization
-    /// 
+    ///
     /// When enabled, ABI-compliant x86_64 `call` instructions are lowered to native WASM `call`
     /// instructions wrapped in try-catch blocks. Returns (`ret`) compare stack top with expected
     /// return address and use direct WASM return for ABI-compliant cases.
-    /// 
+    ///
     /// Requires an escape tag to be configured via `set_escape_tag()`.
     pub fn set_speculative_calls(&mut self, enable: bool) {
         self.enable_speculative_calls = enable;
@@ -121,31 +121,36 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     fn set_zf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
     fn set_sf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
     fn set_cf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
     fn set_of(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
     fn set_pf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor
             .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
@@ -162,7 +167,8 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         // For now, just set to 0 (even parity) - this is a simplification
         self.reactor.feed(ctx, &Instruction::Drop)?;
         self.reactor.feed(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
-        self.reactor.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to set flags after arithmetic operation
@@ -213,44 +219,70 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         Ok(())
     }
 
-    fn emit_memory_load(&mut self, ctx: &mut Context, size_bits: u32, signed: bool) -> Result<(), E> {
+    fn emit_memory_load(
+        &mut self,
+        ctx: &mut Context,
+        size_bits: u32,
+        signed: bool,
+    ) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match (size_bits, signed) {
-            (8, true) => self.reactor.feed(ctx, &Instruction::I64Load8S(MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            })),
-            (8, false) => self.reactor.feed(ctx, &Instruction::I64Load8U(MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            })),
-            (16, true) => self.reactor.feed(ctx, &Instruction::I64Load16S(MemArg {
-                offset: 0,
-                align: 1,
-                memory_index: 0,
-            })),
-            (16, false) => self.reactor.feed(ctx, &Instruction::I64Load16U(MemArg {
-                offset: 0,
-                align: 1,
-                memory_index: 0,
-            })),
-            (32, true) => self.reactor.feed(ctx, &Instruction::I64Load32S(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            })),
-            (32, false) => self.reactor.feed(ctx, &Instruction::I64Load32U(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            })),
-            (64, _) => self.reactor.feed(ctx, &Instruction::I64Load(MemArg {
-                offset: 0,
-                align: 3,
-                memory_index: 0,
-            })),
+            (8, true) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load8S(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }),
+            ),
+            (8, false) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load8U(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }),
+            ),
+            (16, true) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load16S(MemArg {
+                    offset: 0,
+                    align: 1,
+                    memory_index: 0,
+                }),
+            ),
+            (16, false) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load16U(MemArg {
+                    offset: 0,
+                    align: 1,
+                    memory_index: 0,
+                }),
+            ),
+            (32, true) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load32S(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }),
+            ),
+            (32, false) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load32U(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }),
+            ),
+            (64, _) => self.reactor.feed(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }),
+            ),
             _ => self.reactor.feed(ctx, &Instruction::Unreachable),
         }
     }
@@ -258,32 +290,49 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     fn emit_memory_store(&mut self, ctx: &mut Context, size_bits: u32) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match size_bits {
-            8 => self.reactor.feed(ctx, &Instruction::I64Store8(MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            })),
-            16 => self.reactor.feed(ctx, &Instruction::I64Store16(MemArg {
-                offset: 0,
-                align: 1,
-                memory_index: 0,
-            })),
-            32 => self.reactor.feed(ctx, &Instruction::I64Store32(MemArg {
-                offset: 0,
-                align: 2,
-                memory_index: 0,
-            })),
-            64 => self.reactor.feed(ctx, &Instruction::I64Store(MemArg {
-                offset: 0,
-                align: 3,
-                memory_index: 0,
-            })),
+            8 => self.reactor.feed(
+                ctx,
+                &Instruction::I64Store8(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                }),
+            ),
+            16 => self.reactor.feed(
+                ctx,
+                &Instruction::I64Store16(MemArg {
+                    offset: 0,
+                    align: 1,
+                    memory_index: 0,
+                }),
+            ),
+            32 => self.reactor.feed(
+                ctx,
+                &Instruction::I64Store32(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }),
+            ),
+            64 => self.reactor.feed(
+                ctx,
+                &Instruction::I64Store(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }),
+            ),
             _ => self.reactor.feed(ctx, &Instruction::Unreachable),
         }
     }
 
     // Helpers for sub-register read/write
-    fn emit_mask_shift_for_read(&mut self, ctx: &mut Context, size_bits: u32, bit_offset: u32) -> Result<(), E> {
+    fn emit_mask_shift_for_read(
+        &mut self,
+        ctx: &mut Context,
+        size_bits: u32,
+        bit_offset: u32,
+    ) -> Result<(), E> {
         // shift right by bit_offset then mask size_bits
         if bit_offset > 0 {
             self.reactor
@@ -307,12 +356,13 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         Ok(())
     }
 
-    fn emit_subreg_write_rmw(&mut self, ctx: &mut Context,
+    fn emit_subreg_write_rmw(
+        &mut self,
+        ctx: &mut Context,
         local: u32,
         size_bits: u32,
         bit_offset: u32,
     ) -> Result<(), E> {
-
         // Assume new value is on stack (i64) and we need to write it into `local` at bit_offset preserving other bits.
         // Steps:
         // local_val = local.get(local)
@@ -342,7 +392,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         // invert mask -> ~mask
         self.reactor.feed(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
         self.reactor.feed(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
-                                                  // get original
+                                                       // get original
         self.reactor.feed(ctx, &Instruction::LocalGet(17))?;
         // cleared = original & ~mask
         self.reactor.feed(ctx, &Instruction::I64And)?;

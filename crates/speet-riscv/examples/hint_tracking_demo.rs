@@ -139,9 +139,11 @@ fn main() {
     for (inst, description) in &test_program {
         println!("  0x{:08x}: {}", pc, description);
 
-        if let Err(e) = recompiler.translate_instruction(&mut ctx, inst, pc, IsCompressed::No, &mut |a| {
-            Function::new(a.collect::<Vec<_>>())
-        }) {
+        if let Err(e) =
+            recompiler.translate_instruction(&mut ctx, inst, pc, IsCompressed::No, &mut |a| {
+                Function::new(a.collect::<Vec<_>>())
+            })
+        {
             eprintln!("Error translating instruction: {:?}", e);
             break;
         }
@@ -195,7 +197,9 @@ fn main() {
 
     println!("Setting a callback for real-time HINT processing with code generation...");
     let mut my_callback =
-        |hint: &speet_riscv::HintInfo, _ctx: &mut (), callback_ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
+        |hint: &speet_riscv::HintInfo,
+         _ctx: &mut (),
+         callback_ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
             println!(
                 "  [CALLBACK] Test case {} at PC 0x{:08x}",
                 hint.value, hint.pc
@@ -215,9 +219,13 @@ fn main() {
             src1: Reg(0),
         };
         let pc = 0x3000 + (i as u32 * 4);
-        let _ = callback_recompiler.translate_instruction(&mut ctx_cb, &hint, pc, IsCompressed::No, &mut |a| {
-            Function::new(a.collect::<Vec<_>>())
-        });
+        let _ = callback_recompiler.translate_instruction(
+            &mut ctx_cb,
+            &hint,
+            pc,
+            IsCompressed::No,
+            &mut |a| Function::new(a.collect::<Vec<_>>()),
+        );
     }
 
     println!("\nNote: Callbacks are invoked immediately and work independently of tracking.");

@@ -213,7 +213,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// # Arguments
     /// * `param_idx` - Index of the parameter to modify
     /// * `fixup` - Snippet that computes the new value
-    pub fn with_fixup(mut self, param_idx: u32, fixup: &'a (dyn Snippet<Context,E> + 'a)) -> Self {
+    pub fn with_fixup(mut self, param_idx: u32, fixup: &'a (dyn Snippet<Context, E> + 'a)) -> Self {
         self.fixups.insert(param_idx, fixup);
         self
     }
@@ -249,7 +249,9 @@ pub enum Target<'a, Context, E> {
     /// Static call to a known function index.
     Static { func: FuncIdx },
     /// Dynamic call through a table, with the index computed by a snippet.
-    Dynamic { idx: &'a (dyn Snippet<Context, E> + 'a) },
+    Dynamic {
+        idx: &'a (dyn Snippet<Context, E> + 'a),
+    },
 }
 /// Trait for code snippets that can emit WebAssembly instructions.
 /// Used for dynamic code generation within the reactor system.
@@ -277,7 +279,7 @@ impl<Context, E, T: wax_core::build::InstructionSource<Context, E> + ?Sized> Sni
 }
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
-pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context,E> = Function> {
+pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Function> {
     fns: Vec<Entry<F>>,
     lens: VecDeque<BTreeSet<FuncIdx>>,
     phantom: PhantomData<(Context, E)>,
@@ -285,7 +287,7 @@ pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context,E> = Func
     /// Used when imports or helper functions precede the generated functions in the module.
     base_func_offset: u32,
 }
-impl<Context, E, F: InstructionSink<Context,E>> Default for Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E, F> {
     fn default() -> Self {
         Self {
             fns: Default::default(),
@@ -296,7 +298,7 @@ impl<Context, E, F: InstructionSink<Context,E>> Default for Reactor<Context, E, 
     }
 }
 
-impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// Create a new reactor with a base function offset.
     ///
     /// The offset is added to all emitted function indices. This is useful when
@@ -353,12 +355,14 @@ impl<Context, E> Reactor<Context, E> {
         self.next_with(Function::new(locals), len);
     }
 }
-impl<Context, E, F: InstructionSink<Context,E>> InstructionSink<Context,E> for Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E>
+    for Reactor<Context, E, F>
+{
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.feed(ctx, instruction)
     }
 }
-impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// Create a new function with the given locals and control flow distance.
     ///
     /// # Arguments
@@ -405,7 +409,13 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     }
     /// Add a predecessor edge with cycle detection.
     /// If a cycle is detected, converts to return calls instead.
-    fn add_pred_checked(&mut self, ctx: &mut Context, succ: FuncIdx, pred: FuncIdx, params: u32) -> Result<(), E> {
+    fn add_pred_checked(
+        &mut self,
+        ctx: &mut Context,
+        succ: FuncIdx,
+        pred: FuncIdx,
+        params: u32,
+    ) -> Result<(), E> {
         let ifs = self.total_ifs(pred);
         let mut queue = VecDeque::new();
         queue.push_back(pred);
@@ -450,23 +460,33 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     /// * `target` - The function to call (static or dynamic)
     /// * `tag` - Exception tag configuration for escape handling
     /// * `pool` - Pool configuration for indirect calls
-    pub fn call(&mut self,ctx: &mut Context, target: Target<Context, E>, tag: EscapeTag, pool: Pool) -> Result<(), E> {
+    pub fn call(
+        &mut self,
+        ctx: &mut Context,
+        target: Target<Context, E>,
+        tag: EscapeTag,
+        pool: Pool,
+    ) -> Result<(), E> {
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: TypeIdx(ty_idx),
         } = tag;
-        self.feed(ctx, &Instruction::Block(wasm_encoder::BlockType::FunctionType(
-            ty_idx,
-        )))?;
-        self.feed(ctx, &Instruction::TryTable(
-            wasm_encoder::BlockType::FunctionType(ty_idx),
-            [Catch::One {
-                tag: tag_idx,
-                label: 0,
-            }]
-            .into_iter()
-            .collect(),
-        ))?;
+        self.feed(
+            ctx,
+            &Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)),
+        )?;
+        self.feed(
+            ctx,
+            &Instruction::TryTable(
+                wasm_encoder::BlockType::FunctionType(ty_idx),
+                [Catch::One {
+                    tag: tag_idx,
+                    label: 0,
+                }]
+                .into_iter()
+                .collect(),
+            ),
+        )?;
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -475,15 +495,18 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
                 self.feed(ctx, &Instruction::Call(wasm_func_idx))?;
             }
             Target::Dynamic { idx } => {
-                idx.emit_snippet(ctx, &mut |ctx,a| self.feed(ctx, a))?;
+                idx.emit_snippet(ctx, &mut |ctx, a| self.feed(ctx, a))?;
                 let Pool {
                     ty: TypeIdx(pool_ty),
                     table: TableIdx(pool_table),
                 } = pool;
-                self.feed(ctx, &Instruction::CallIndirect {
-                    type_index: pool_ty,
-                    table_index: pool_table,
-                })?;
+                self.feed(
+                    ctx,
+                    &Instruction::CallIndirect {
+                        type_index: pool_ty,
+                        table_index: pool_table,
+                    },
+                )?;
             }
         }
         self.feed(ctx, &Instruction::Return)?;
@@ -526,7 +549,11 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     /// let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
     /// reactor.ji_with_params(params);
     /// ```
-    pub fn ji_with_params(&mut self,ctx: &mut Context, params: JumpCallParams<Context, E>) -> Result<(), E> {
+    pub fn ji_with_params(
+        &mut self,
+        ctx: &mut Context,
+        params: JumpCallParams<Context, E>,
+    ) -> Result<(), E> {
         let JumpCallParams {
             params: param_count,
             fixups,
@@ -574,7 +601,9 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
 
         match call {
             Some(escape_tag) => {
-                self.emit_conditional_call(ctx, params, fixups, target, escape_tag, pool, condition)?;
+                self.emit_conditional_call(
+                    ctx, params, fixups, target, escape_tag, pool, condition,
+                )?;
             }
             None => {
                 self.emit_conditional_jump(ctx, params, fixups, target, pool, condition)?;
@@ -639,7 +668,7 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     ) -> Result<(), E> {
         for param_idx in (0..params).rev() {
             if fixups.contains_key(&param_idx) {
-                self.feed( ctx, &Instruction::Drop)?;
+                self.feed(ctx, &Instruction::Drop)?;
             } else {
                 self.feed(ctx, &Instruction::LocalSet(param_idx))?;
             }
@@ -685,7 +714,9 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     ) -> Result<(), E> {
         match target {
             Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, condition),
-            Target::Dynamic { idx } => self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition),
+            Target::Dynamic { idx } => {
+                self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition)
+            }
         }
     }
 
@@ -720,7 +751,8 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
 
     /// Emit a dynamic (indirect) jump through a table.
     fn emit_dynamic_jump(
-        &mut self,ctx: &mut Context,
+        &mut self,
+        ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         idx: &(dyn Snippet<Context, E> + '_),
@@ -740,16 +772,22 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
             table: TableIdx(pool_table),
         } = pool;
         if condition.is_some() {
-            self.feed(ctx, &Instruction::ReturnCallIndirect {
-                type_index: pool_ty,
-                table_index: pool_table,
-            })?;
+            self.feed(
+                ctx,
+                &Instruction::ReturnCallIndirect {
+                    type_index: pool_ty,
+                    table_index: pool_table,
+                },
+            )?;
             self.feed(ctx, &Instruction::Else)?;
         } else {
-            self.seal(ctx, &Instruction::ReturnCallIndirect {
-                type_index: pool_ty,
-                table_index: pool_table,
-            })?;
+            self.seal(
+                ctx,
+                &Instruction::ReturnCallIndirect {
+                    type_index: pool_ty,
+                    table_index: pool_table,
+                },
+            )?;
         }
         Ok(())
     }
@@ -759,7 +797,7 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     /// # Arguments
     /// * `target` - The function index to jump to
     /// * `params` - Number of parameters to pass
-    pub fn jmp(&mut self,ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+    pub fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
         let mut queue = VecDeque::new();
         queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
         let mut cache = BTreeSet::new();
@@ -781,7 +819,7 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     }
     /// Feed an instruction to all active functions.
     /// The instruction is added to the current function and all its predecessors.
-    pub fn feed(&mut self,ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+    pub fn feed(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         let mut queue = VecDeque::new();
         queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
         let mut cache = BTreeSet::new();
@@ -791,7 +829,9 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
             };
             cache.insert(q);
             let FuncIdx(q_idx) = q;
-            self.fns[q_idx as usize].function.instruction(ctx, instruction)?;
+            self.fns[q_idx as usize]
+                .function
+                .instruction(ctx, instruction)?;
             for p in self.fns[q_idx as usize].preds.iter().cloned() {
                 queue.push_back(p);
             }
@@ -800,7 +840,7 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
     }
     /// Seal the current function by emitting a final instruction and closing all if statements.
     /// This terminates the function and removes all predecessor edges.
-    pub fn seal(&mut self,ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+    pub fn seal(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         let ifs = self.total_ifs(FuncIdx((self.fns.len() - 1) as u32));
         let mut queue = VecDeque::new();
         queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
@@ -811,7 +851,9 @@ impl<Context, E, F: InstructionSink<Context,E>> Reactor<Context, E, F> {
             };
             cache.insert(q);
             let FuncIdx(q_idx) = q;
-            self.fns[q_idx as usize].function.instruction(ctx, instruction)?;
+            self.fns[q_idx as usize]
+                .function
+                .instruction(ctx, instruction)?;
             for _ in 0..ifs {
                 self.fns[q_idx as usize]
                     .function

@@ -13,9 +13,15 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ExpectedRaSn
         sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
     ) -> Result<(), E> {
         if self.enable_rv64 {
-            sink.instruction(ctx, &wasm_encoder::Instruction::I64Const(self.return_addr as i64))?;
+            sink.instruction(
+                ctx,
+                &wasm_encoder::Instruction::I64Const(self.return_addr as i64),
+            )?;
         } else {
-            sink.instruction(ctx, &wasm_encoder::Instruction::I32Const(self.return_addr as i32))?;
+            sink.instruction(
+                ctx,
+                &wasm_encoder::Instruction::I32Const(self.return_addr as i32),
+            )?;
         }
         Ok(())
     }
@@ -28,15 +34,23 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Expe
         sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
         if self.enable_rv64 {
-            sink.instruction(ctx, &wasm_encoder::Instruction::I64Const(self.return_addr as i64))?;
+            sink.instruction(
+                ctx,
+                &wasm_encoder::Instruction::I64Const(self.return_addr as i64),
+            )?;
         } else {
-            sink.instruction(ctx, &wasm_encoder::Instruction::I32Const(self.return_addr as i32))?;
+            sink.instruction(
+                ctx,
+                &wasm_encoder::Instruction::I32Const(self.return_addr as i32),
+            )?;
         }
         Ok(())
     }
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb, 'ctx, Context, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
+    RiscVRecompiler<'cb, 'ctx, Context, E, F>
+{
     /// Helper to translate load instructions
     pub(crate) fn translate_load(
         &mut self,
@@ -78,19 +92,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         match op {
             LoadOp::I8 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load8S(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load8S(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     // If RV64 but not memory64, extend to i64
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
@@ -99,19 +117,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             }
             LoadOp::U8 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load8U(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load8U(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                     }
@@ -119,19 +141,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             }
             LoadOp::I16 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load16S(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load16S(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                     }
@@ -139,19 +165,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             }
             LoadOp::U16 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load16U(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load16U(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                     }
@@ -159,19 +189,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             }
             LoadOp::I32 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load32S(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load32S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                     }
@@ -180,30 +214,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
             LoadOp::U32 => {
                 // RV64 LWU instruction - load word unsigned (zero-extended)
                 if self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Load32U(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Load32U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Load(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                 }
             }
             LoadOp::I64 => {
                 // RV64 LD instruction - load double-word
-                self.reactor
-                    .feed(ctx, &Instruction::I64Load(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::I64Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
             }
         }
 
@@ -259,63 +299,77 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         match op {
             StoreOp::I8 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Store8(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Store8(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 }
             }
             StoreOp::I16 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Store16(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Store16(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 }
             }
             StoreOp::I32 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    self.reactor
-                        .feed(ctx, &Instruction::I64Store32(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I64Store32(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 } else {
-                    self.reactor
-                        .feed(ctx, &Instruction::I32Store(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                 }
             }
             StoreOp::I64 => {
                 // RV64 SD instruction - store double-word
-                self.reactor
-                    .feed(ctx, &Instruction::I64Store(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::I64Store(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
             }
         }
 
@@ -348,21 +402,25 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         // Load from memory
         match op {
             FLoadOp::F32 => {
-                self.reactor
-                    .feed(ctx, &Instruction::F32Load(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::F32Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 2,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
                 self.reactor.feed(ctx, &Instruction::F64PromoteF32)?;
             }
             FLoadOp::F64 => {
-                self.reactor
-                    .feed(ctx, &Instruction::F64Load(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::F64Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
             }
         }
 
@@ -402,20 +460,24 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         match op {
             FStoreOp::F32 => {
                 self.reactor.feed(ctx, &Instruction::F32DemoteF64)?;
-                self.reactor
-                    .feed(ctx, &Instruction::F32Store(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::F32Store(wasm_encoder::MemArg {
                         offset: 0,
                         align: 2,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
             }
             FStoreOp::F64 => {
-                self.reactor
-                    .feed(ctx, &Instruction::F64Store(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::F64Store(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
             }
         }
 
@@ -726,8 +788,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     };
 
                     // Use fixups to set expected_ra (local 65) only for this call
-                    let params = yecta::JumpCallParams::call(target_func, 66, escape_tag, self.pool)
-                        .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
+                    let params =
+                        yecta::JumpCallParams::call(target_func, 66, escape_tag, self.pool)
+                            .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
                     // Emit the speculative call using yecta's ji_with_params API
                     // This wraps the call in a try-catch block and uses fixups mechanism
@@ -774,33 +837,34 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     // ABI-compliant return: check if ra matches expected_ra
                     // If they match, use regular WASM Return; if not, throw escape tag
                     let escape_tag = self.escape_tag.unwrap();
-                    
+
                     // Load ra (current return address)
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
-                    
+
                     // Load expected_ra
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
-                    
+
                     // Compare them
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64Eq)?;
                     } else {
                         self.reactor.feed(ctx, &Instruction::I32Eq)?;
                     }
-                    
+
                     // If equal (ABI-compliant), use regular return; else throw exception
-                    self.reactor.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
-                    
+                    self.reactor
+                        .feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+
                     // ABI-compliant return - use WASM Return
                     self.reactor.feed(ctx, &Instruction::Return)?;
-                    
+
                     self.reactor.feed(ctx, &Instruction::Else)?;
-                    
+
                     // Non-ABI-compliant return - throw escape tag with all register state
                     self.reactor.ret(ctx, 66, escape_tag)?;
-                    
+
                     self.reactor.feed(ctx, &Instruction::End)?;
                     return Ok(());
                 }
@@ -853,7 +917,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                             if self.enable_rv64 {
                                 sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
                                 sink.instruction(ctx, &Instruction::I64Add)?;
-                                sink.instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                                sink.instruction(
+                                    ctx,
+                                    &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64),
+                                )?;
                                 sink.instruction(ctx, &Instruction::I64And)?;
                                 sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
                                 sink.instruction(ctx, &Instruction::I64Sub)?;
@@ -863,7 +930,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                             } else {
                                 sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
                                 sink.instruction(ctx, &Instruction::I32Add)?;
-                                sink.instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                                sink.instruction(
+                                    ctx,
+                                    &Instruction::I32Const(0xFFFFFFFE_u32 as i32),
+                                )?;
                                 sink.instruction(ctx, &Instruction::I32And)?;
                                 sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
                                 sink.instruction(ctx, &Instruction::I32Sub)?;
@@ -878,7 +948,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         fn emit(
                             &self,
                             ctx: &mut Context,
-                            sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+                            sink: &mut (
+                                     dyn wax_core::build::InstructionOperatorSink<Context, E> + '_
+                                 ),
                         ) -> Result<(), E> {
                             // Compute: ((base + offset) & ~1 - base_pc) / 2
                             // This gives us the function index from the PC
@@ -886,7 +958,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                             if self.enable_rv64 {
                                 sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
                                 sink.instruction(ctx, &Instruction::I64Add)?;
-                                sink.instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                                sink.instruction(
+                                    ctx,
+                                    &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64),
+                                )?;
                                 sink.instruction(ctx, &Instruction::I64And)?;
                                 sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
                                 sink.instruction(ctx, &Instruction::I64Sub)?;
@@ -896,7 +971,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                             } else {
                                 sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
                                 sink.instruction(ctx, &Instruction::I32Add)?;
-                                sink.instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                                sink.instruction(
+                                    ctx,
+                                    &Instruction::I32Const(0xFFFFFFFE_u32 as i32),
+                                )?;
                                 sink.instruction(ctx, &Instruction::I32And)?;
                                 sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
                                 sink.instruction(ctx, &Instruction::I32Sub)?;
@@ -916,12 +994,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
 
                     // Use fixups to set expected_ra (local 65) only for this call
                     let mut fixups = alloc::collections::BTreeMap::new();
-                    fixups.insert(Self::expected_ra_local(), &expected_ra_snippet as &(dyn yecta::Snippet<Context, E> + '_));
-                    
+                    fixups.insert(
+                        Self::expected_ra_local(),
+                        &expected_ra_snippet as &(dyn yecta::Snippet<Context, E> + '_),
+                    );
+
                     let params = yecta::JumpCallParams {
                         params: 66,
                         fixups,
-                        target: yecta::Target::Dynamic { idx: &target_snippet },
+                        target: yecta::Target::Dynamic {
+                            idx: &target_snippet,
+                        },
                         call: Some(escape_tag),
                         pool: self.pool,
                         condition: None,
@@ -1358,7 +1441,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed multiplication
-                        self.emit_mulh_signed(ctx, 
+                        self.emit_mulh_signed(
+                            ctx,
                             Self::reg_to_local(*src1),
                             Self::reg_to_local(*src2),
                         )?;
@@ -1389,7 +1473,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed-unsigned multiplication
-                        self.emit_mulh_signed_unsigned(ctx, 
+                        self.emit_mulh_signed_unsigned(
+                            ctx,
                             Self::reg_to_local(*src1),
                             Self::reg_to_local(*src2),
                         )?;
@@ -1420,7 +1505,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit unsigned multiplication
-                        self.emit_mulh_unsigned(ctx, 
+                        self.emit_mulh_unsigned(
+                            ctx,
                             Self::reg_to_local(*src1),
                             Self::reg_to_local(*src2),
                         )?;
@@ -2120,12 +2206,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                 if dest.0 != 0 {
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
-                    self.reactor
-                        .feed(ctx, &Instruction::I32AtomicLoad(wasm_encoder::MemArg {
+                    self.reactor.feed(
+                        ctx,
+                        &Instruction::I32AtomicLoad(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }))?;
+                        }),
+                    )?;
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -2141,12 +2229,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                     .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                 self.reactor
                     .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor
-                    .feed(ctx, &Instruction::I32AtomicStore(wasm_encoder::MemArg {
+                self.reactor.feed(
+                    ctx,
+                    &Instruction::I32AtomicStore(wasm_encoder::MemArg {
                         offset: 0,
                         align: 2,
                         memory_index: 0,
-                    }))?;
+                    }),
+                )?;
                 if dest.0 != 0 {
                     self.reactor.feed(ctx, &Instruction::I32Const(0))?; // Success
                     self.reactor
@@ -2233,7 +2323,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.reactor
                             .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
                         self.reactor.feed(ctx, &Instruction::I32Shl)?;
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
@@ -2250,7 +2341,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.reactor
                             .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
                         self.reactor.feed(ctx, &Instruction::I32ShrU)?;
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
@@ -2267,7 +2359,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
                         self.reactor
                             .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
                         self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        self.reactor
+                            .feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
                         self.reactor.feed(ctx, &Instruction::I32ShrS)?;
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
                         self.reactor
@@ -2674,29 +2767,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for BranchCondition {
             fn emit(
                 &self,
-                ctx: &mut Context, sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+                ctx: &mut Context,
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
             ) -> Result<(), E> {
                 // Emit the same instructions as emit_instruction
                 sink.instruction(ctx, &Instruction::LocalGet(self.src1))?;
                 sink.instruction(ctx, &Instruction::LocalGet(self.src2))?;
                 if self.enable_rv64 {
-                    sink.instruction(ctx, &match self.op {
-                        BranchOp::Eq => Instruction::I64Eq,
-                        BranchOp::Ne => Instruction::I64Ne,
-                        BranchOp::LtS => Instruction::I64LtS,
-                        BranchOp::GeS => Instruction::I64GeS,
-                        BranchOp::LtU => Instruction::I64LtU,
-                        BranchOp::GeU => Instruction::I64GeU,
-                    })?;
+                    sink.instruction(
+                        ctx,
+                        &match self.op {
+                            BranchOp::Eq => Instruction::I64Eq,
+                            BranchOp::Ne => Instruction::I64Ne,
+                            BranchOp::LtS => Instruction::I64LtS,
+                            BranchOp::GeS => Instruction::I64GeS,
+                            BranchOp::LtU => Instruction::I64LtU,
+                            BranchOp::GeU => Instruction::I64GeU,
+                        },
+                    )?;
                 } else {
-                    sink.instruction(ctx, &match self.op {
-                        BranchOp::Eq => Instruction::I32Eq,
-                        BranchOp::Ne => Instruction::I32Ne,
-                        BranchOp::LtS => Instruction::I32LtS,
-                        BranchOp::GeS => Instruction::I32GeS,
-                        BranchOp::LtU => Instruction::I32LtU,
-                        BranchOp::GeU => Instruction::I32GeU,
-                    })?;
+                    sink.instruction(
+                        ctx,
+                        &match self.op {
+                            BranchOp::Eq => Instruction::I32Eq,
+                            BranchOp::Ne => Instruction::I32Ne,
+                            BranchOp::LtS => Instruction::I32LtS,
+                            BranchOp::GeS => Instruction::I32GeS,
+                            BranchOp::LtU => Instruction::I32LtU,
+                            BranchOp::GeU => Instruction::I32GeU,
+                        },
+                    )?;
                 }
                 Ok(())
             }
@@ -2705,28 +2805,35 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> RiscVRecompiler<'cb,
         impl<Context, E> wax_core::build::InstructionSource<Context, E> for BranchCondition {
             fn emit_instruction(
                 &self,
-                ctx: &mut Context, sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+                ctx: &mut Context,
+                sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
             ) -> Result<(), E> {
                 sink.instruction(ctx, &Instruction::LocalGet(self.src1))?;
                 sink.instruction(ctx, &Instruction::LocalGet(self.src2))?;
                 if self.enable_rv64 {
-                    sink.instruction(ctx, &match self.op {
-                        BranchOp::Eq => Instruction::I64Eq,
-                        BranchOp::Ne => Instruction::I64Ne,
-                        BranchOp::LtS => Instruction::I64LtS,
-                        BranchOp::GeS => Instruction::I64GeS,
-                        BranchOp::LtU => Instruction::I64LtU,
-                        BranchOp::GeU => Instruction::I64GeU,
-                    })?;
+                    sink.instruction(
+                        ctx,
+                        &match self.op {
+                            BranchOp::Eq => Instruction::I64Eq,
+                            BranchOp::Ne => Instruction::I64Ne,
+                            BranchOp::LtS => Instruction::I64LtS,
+                            BranchOp::GeS => Instruction::I64GeS,
+                            BranchOp::LtU => Instruction::I64LtU,
+                            BranchOp::GeU => Instruction::I64GeU,
+                        },
+                    )?;
                 } else {
-                    sink.instruction(ctx, &match self.op {
-                        BranchOp::Eq => Instruction::I32Eq,
-                        BranchOp::Ne => Instruction::I32Ne,
-                        BranchOp::LtS => Instruction::I32LtS,
-                        BranchOp::GeS => Instruction::I32GeS,
-                        BranchOp::LtU => Instruction::I32LtU,
-                        BranchOp::GeU => Instruction::I32GeU,
-                    })?;
+                    sink.instruction(
+                        ctx,
+                        &match self.op {
+                            BranchOp::Eq => Instruction::I32Eq,
+                            BranchOp::Ne => Instruction::I32Ne,
+                            BranchOp::LtS => Instruction::I32LtS,
+                            BranchOp::GeS => Instruction::I32GeS,
+                            BranchOp::LtU => Instruction::I32LtU,
+                            BranchOp::GeU => Instruction::I32GeU,
+                        },
+                    )?;
                 }
                 Ok(())
             }

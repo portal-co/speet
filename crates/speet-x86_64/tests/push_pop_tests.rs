@@ -9,14 +9,9 @@ fn test_push_register_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -28,14 +23,9 @@ fn test_push_immediate_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -47,33 +37,23 @@ fn test_pop_register_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_push_pop_sequence() {
-    // PUSH RAX, POP RBX: 50 5B  
+    // PUSH RAX, POP RBX: 50 5B
     let bytes = vec![0x50, 0x5B];
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -85,14 +65,9 @@ fn test_push_32bit_immediate() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }

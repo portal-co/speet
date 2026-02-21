@@ -9,14 +9,9 @@ fn test_pushfq_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -28,14 +23,9 @@ fn test_pushfd_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -47,14 +37,9 @@ fn test_popfq_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
@@ -66,14 +51,9 @@ fn test_popfd_translation() {
     let mut recompiler: X86Recompiler<(), core::convert::Infallible, _> = X86Recompiler::new();
 
     let mut ctx = ();
-    let result = recompiler.translate_bytes(
-        &mut ctx,
-        &bytes,
-        0x1000,
-        &mut |locals| {
-            wasm_encoder::Function::new(locals.collect::<Vec<_>>())
-        },
-    );
+    let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, &mut |locals| {
+        wasm_encoder::Function::new(locals.collect::<Vec<_>>())
+    });
 
     assert!(result.is_ok());
 }
