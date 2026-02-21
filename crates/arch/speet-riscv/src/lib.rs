@@ -1644,8 +1644,11 @@ pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context, E
 
 #[cfg(test)]
 mod tests {
+    use core::convert::Infallible;
+
     use super::*;
     use rv_asm::{Inst, Xlen};
+    use wasm_encoder::Function;
     use yecta::TagIdx;
 
     #[test]

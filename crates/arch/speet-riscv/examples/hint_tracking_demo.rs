@@ -199,14 +199,14 @@ fn main() {
     let mut my_callback =
         |hint: &speet_riscv::HintInfo,
          _ctx: &mut (),
-         callback_ctx: &mut speet_riscv::HintContext<Infallible, Function>| {
+         callback_ctx: &mut speet_riscv::HintContext<(), Infallible, Function>| {
             println!(
                 "  [CALLBACK] Test case {} at PC 0x{:08x}",
                 hint.value, hint.pc
             );
             // Optionally emit a NOP instruction for each HINT
             use wasm_encoder::Instruction;
-            callback_ctx.emit(&Instruction::Nop).ok();
+            callback_ctx.emit(_ctx, &Instruction::Nop).ok();
         };
 
     callback_recompiler.set_hint_callback(&mut my_callback);

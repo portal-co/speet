@@ -1,6 +1,12 @@
 [workspace]
-members=["crates/speet-powerpc", "crates/speet-riscv","crates/yecta","crates/speet-x86_64","crates/speet-mips"]
-resolver="3"
+members = [
+    "crates/arch/speet-powerpc",
+    "crates/arch/speet-riscv",
+    "crates/arch/yecta",
+    "crates/arch/speet-x86_64",
+    "crates/arch/speet-mips",
+]
+resolver = "3"
 
 [workspace.package]
 description = "Fast static recompiler"
@@ -8,15 +14,17 @@ license-file = "COPYING.md"
 
 [workspace.dependencies]
 wasmparser = { version = "0.240.0", default-features = false }
-wasm-encoder = { version = "0.240.0", default-features = false,features = ["wasmparser"] }
+wasm-encoder = { version = "0.240.0", default-features = false, features = [
+    "wasmparser",
+] }
 
-wax-core = {version = "0.1.0",git = "https://github.com/portal-co/wax.git",branch = "main"}
+wax-core = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", branch = "main" }
 
-portal-solutions-asm-semantics = {version = "0.1.0",git = "https://github.com/portal-co/asm-arch.git"}
+portal-solutions-asm-semantics = { version = "0.1.0", git = "https://github.com/portal-co/asm-arch.git" }
 asim-core = { version = "0.1.0", git = "https://github.com/portal-co/asim.git", branch = "main" }
 
-portal-pc-asm-common = {version = "0.1.1",git = "https://github.com/portal-co/asm-common.git"}
-portal-solutions-asm-x86-64 = {version = "0.1.0",git = "https://github.com/portal-co/asm-arch.git"}
-rv-asm = {version = "*",git = "https://github.com/portal-co/rv-utils.git"}
+portal-pc-asm-common = { version = "0.1.1", git = "https://github.com/portal-co/asm-common.git" }
+portal-solutions-asm-x86-64 = { version = "0.1.0", git = "https://github.com/portal-co/asm-arch.git" }
+rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 rabbitizer = "1.14.3"
 powerpc = "0.4.1"
