@@ -63,7 +63,7 @@ use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
 pub use speet_memory::{
-    CallbackContext, MapperCallback, PageTableBase,
+    CallbackContext, MapperCallback, PageMapLocals, PageTableBase,
     multilevel_page_table_mapper, multilevel_page_table_mapper_32,
     standard_page_table_mapper, standard_page_table_mapper_32,
 };

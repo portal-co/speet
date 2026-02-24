@@ -1,25 +1,45 @@
 //! Page-table code-generation helpers.
 //!
-//! These free functions emit the wasm instruction sequences required to walk
-//! an in-memory page table and produce a physical address from a virtual
-//! address.  They were previously housed in `speet-riscv`; the move here
-//! makes them usable by every architecture recompiler.
+//! Each function in this module is a *builder*: it takes the static
+//! configuration up-front and returns a [`MapperCallback`]-compatible closure.
+//! The returned closure can be handed directly to
+//! `recompiler.set_mapper_callback(…)`.
+//!
+//! ```ignore
+//! // Pick which wasm locals to use for the mapper's scratch space.
+//! let locals = PageMapLocals::new(66, [67, 68, 69]);
+//!
+//! let mut mapper = standard_page_table_mapper(
+//!     0x1000_0000u64,     // page_table_base
+//!     0x2000_0000u64,     // security_directory_base
+//!     0,                   // wasm memory index
+//!     true,                // use i64 (RV64 / memory64)
+//!     locals,
+//! );
+//! recompiler.set_mapper_callback(&mut mapper);
+//! ```
 //!
 //! # Scratch-local convention
 //!
-//! All helpers assume the caller has already saved the virtual address into
-//! **local 66** (`LocalTee(66)`) immediately before calling the mapper, so
-//! that the helpers can load it back when computing the page number and the
-//! page offset.  Locals 67, 68 and 69 are used as additional scratch space
-//! by the multi-level and 64-bit variants.
+//! Callers choose which wasm locals the mapper may use by supplying a
+//! [`PageMapLocals`] value.  The mapper closure saves the incoming virtual
+//! address into `locals.vaddr` with `LocalTee` at the start so it can reload
+//! it later.  Up to three additional scratch locals (`locals.scratch`) are
+//! used by the multi-level and 32-bit-physical-address variants.
+//!
+//! # Stack contract (all variants)
+//! * **Before**: virtual address (`i32` when `use_i64 = false`, `i64` when
+//!   `use_i64 = true`) is on the wasm value stack.
+//! * **After**: physical address of the same type is on the stack.
 
-use crate::mapper::CallbackContext;
+use crate::mapper::{CallbackContext, MapperCallback};
 use wax_core::build::InstructionSink;
 use wasm_encoder::{Instruction, MemArg};
 
 // ── PageTableBase ──────────────────────────────────────────────────────────────
 
 /// Specifies where the page-table base address comes from at runtime.
+#[derive(Clone, Copy, Debug)]
 pub enum PageTableBase {
     /// Compile-time constant physical address.
     Constant(u64),
@@ -62,365 +82,477 @@ impl PageTableBase {
     }
 }
 
+// ── PageMapLocals ──────────────────────────────────────────────────────────────
+
+/// The wasm local variable indices that a page-table mapper closure may use as
+/// scratch space.
+///
+/// The `vaddr` local is used to save the incoming virtual address so it can be
+/// reloaded after intermediate computations.  The `scratch` locals are used for
+/// intermediate page-table entry values; individual mapper variants document
+/// how many of the three scratch slots they actually consume.
+///
+/// # Example
+///
+/// If a recompiler allocates locals 0–63 for guest registers, local 64 for the
+/// PC, and wants to reserve locals 65–68 for the mapper:
+///
+/// ```ignore
+/// let locals = PageMapLocals::new(65, [66, 67, 68]);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct PageMapLocals {
+    /// Local used to save (and later reload) the virtual address.
+    pub vaddr: u32,
+    /// Up to three scratch locals for intermediate values.
+    pub scratch: [u32; 3],
+}
+
+impl PageMapLocals {
+    /// Construct a `PageMapLocals` with the given `vaddr` local and three
+    /// scratch locals.
+    #[inline]
+    pub const fn new(vaddr: u32, scratch: [u32; 3]) -> Self {
+        Self { vaddr, scratch }
+    }
+
+    /// Convenience: allocate four consecutive locals starting at `first_local`.
+    ///
+    /// * `first_local + 0` → `vaddr`
+    /// * `first_local + 1..=3` → `scratch[0..=2]`
+    #[inline]
+    pub const fn consecutive(first_local: u32) -> Self {
+        Self {
+            vaddr: first_local,
+            scratch: [first_local + 1, first_local + 2, first_local + 3],
+        }
+    }
+}
+
 // ── standard_page_table_mapper ─────────────────────────────────────────────────
 
-/// Single-level 64-bit page-table mapper for 64 KiB pages.
+/// Build a single-level 64 KiB page-table mapper closure.
 ///
-/// Each page-table entry is 8 bytes (i64).  Entry *n* is at
-/// `pt_base + n * 8`.  Bits \[63:16\] of the virtual address select the
-/// page; bits \[15:0\] are the page offset.
+/// Each page-table entry is 8 bytes (`i64`) for `use_i64 = true` or 4 bytes
+/// (`i32`) for `use_i64 = false`.  Bits \[63:16\] of the virtual address
+/// select the page; bits \[15:0\] are the page offset.
 ///
-/// The top 16 bits of the physical address are stored in a "security
-/// directory" and combined with the lower 48 bits from the page-table entry.
+/// The top 16 bits of the physical address come from a "security directory"
+/// entry and are combined with the lower 48 bits from the page-table entry.
 ///
-/// # Scratch locals used
-/// `66` — virtual address (must be pre-saved by caller), `67`, `68`.
+/// # Scratch locals consumed
+/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`.
 ///
-/// # Stack contract
-/// Before: virtual address (i64 or i32 per `use_i64`).
-/// After:  physical address (same type).
-pub fn standard_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    cb: &mut CallbackContext<Context, E, F>,
+/// # Returns
+/// A closure implementing [`MapperCallback`] that can be passed directly to
+/// `recompiler.set_mapper_callback`.
+pub fn standard_page_table_mapper<Context, E, F>(
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-) -> Result<(), E> {
+    locals: PageMapLocals,
+) -> impl MapperCallback<Context, E, F>
+where
+    F: InstructionSink<Context, E>,
+{
     let pt_base = page_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    if use_i64 {
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+        let lv = locals.vaddr;
+        let [ls0, ls1, _] = locals.scratch;
 
-        // page_pointer → scratch 67; page_base_low48 → scratch 68
-        cb.emit(ctx, &Instruction::LocalTee(67))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;          // security_index on stack
+        if use_i64 {
+            // Save vaddr, then compute page index
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            pt_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
 
-        cb.emit(ctx, &Instruction::LocalGet(67))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::LocalSet(68))?;    // page_base_low48
+            // page_pointer → scratch[0]; page_base_low48 → scratch[1]
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;       // security_index on stack
 
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_base_low48
 
-        // page_base_top16 = sec_entry >> 16
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        // phys_page_base = (top16 << 48) | low48
-        cb.emit(ctx, &Instruction::I64Const(48))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Or)?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            sec_dir_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
-        // page_offset = vaddr & 0xFFFF
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // 32-bit fallback — simple identity-style single-level
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I32Const(16))?;
-        cb.emit(ctx, &Instruction::I32ShrU)?;
-        cb.emit(ctx, &Instruction::I32Const(3))?;
-        cb.emit(ctx, &Instruction::I32Shl)?;
-        pt_base.emit_load(ctx, cb, false)?;
-        cb.emit(ctx, &Instruction::I32Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I32And)?;
-        cb.emit(ctx, &Instruction::I32Add)?;
+            // page_base_top16 = sec_entry >> 16
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            // phys_page_base = (top16 << 48) | low48
+            cb.emit(ctx, &Instruction::I64Const(48))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Or)?;
+
+            // page_offset = vaddr & 0xFFFF
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+        } else {
+            // 32-bit fallback — simple single-level
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            cb.emit(ctx, &Instruction::I32Const(16))?;
+            cb.emit(ctx, &Instruction::I32ShrU)?;
+            cb.emit(ctx, &Instruction::I32Const(3))?;
+            cb.emit(ctx, &Instruction::I32Shl)?;
+            pt_base.emit_load(ctx, cb, false)?;
+            cb.emit(ctx, &Instruction::I32Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I32And)?;
+            cb.emit(ctx, &Instruction::I32Add)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── standard_page_table_mapper_32 ─────────────────────────────────────────────
 
-/// Single-level page-table mapper with 32-bit physical addresses.
+/// Build a single-level page-table mapper with 32-bit physical addresses.
 ///
 /// Each page-table entry is 4 bytes (`i32`).  The physical page base occupies
 /// bits \[31:8\] of the entry; bits \[7:0\] are a security index.
 ///
-/// # Scratch locals used
-/// `66`, `67`, `68`, `69`.
-pub fn standard_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    cb: &mut CallbackContext<Context, E, F>,
+/// # Scratch locals consumed
+/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`, `locals.scratch[2]`.
+///
+/// # Returns
+/// A closure implementing [`MapperCallback`].
+pub fn standard_page_table_mapper_32<Context, E, F>(
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-) -> Result<(), E> {
+    locals: PageMapLocals,
+) -> impl MapperCallback<Context, E, F>
+where
+    F: InstructionSink<Context, E>,
+{
     let pt_base = page_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    if use_i64 {
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::LocalTee(67))?;      // page_pointer (i32)
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-        cb.emit(ctx, &Instruction::LocalSet(68))?;      // page_pointer as i64
+    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+        let lv = locals.vaddr;
+        let [ls0, ls1, ls2] = locals.scratch;
 
-        // security_index = page_pointer & 0xFF
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        // page_base_low24 = page_pointer >> 8
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Const(8))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::LocalSet(69))?;      // page_base_low24
+        if use_i64 {
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            pt_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;  // page_pointer (i32)
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;  // page_pointer as i64
 
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-        cb.emit(ctx, &Instruction::I64Const(24))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(24))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::LocalGet(69))?;
-        cb.emit(ctx, &Instruction::I64Or)?;
+            // security_index = page_pointer & 0xFF
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            // page_base_low24 = page_pointer >> 8
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Const(8))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?;  // page_base_low24
 
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I32Const(16))?;
-        cb.emit(ctx, &Instruction::I32ShrU)?;
-        cb.emit(ctx, &Instruction::I32Const(2))?;
-        cb.emit(ctx, &Instruction::I32Shl)?;
-        pt_base.emit_load(ctx, cb, false)?;
-        cb.emit(ctx, &Instruction::I32Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::LocalTee(67))?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            sec_dir_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            cb.emit(ctx, &Instruction::I64Const(24))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(24))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls2))?;
+            cb.emit(ctx, &Instruction::I64Or)?;
 
-        // security_index = page_pointer & 0xFF
-        cb.emit(ctx, &Instruction::I32Const(0xFF))?;
-        cb.emit(ctx, &Instruction::I32And)?;
-        // page_base_low24 = page_pointer >> 8
-        cb.emit(ctx, &Instruction::LocalGet(67))?;
-        cb.emit(ctx, &Instruction::I32Const(8))?;
-        cb.emit(ctx, &Instruction::I32ShrU)?;
-        cb.emit(ctx, &Instruction::LocalSet(68))?;
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+        } else {
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            cb.emit(ctx, &Instruction::I32Const(16))?;
+            cb.emit(ctx, &Instruction::I32ShrU)?;
+            cb.emit(ctx, &Instruction::I32Const(2))?;
+            cb.emit(ctx, &Instruction::I32Shl)?;
+            pt_base.emit_load(ctx, cb, false)?;
+            cb.emit(ctx, &Instruction::I32Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
 
-        cb.emit(ctx, &Instruction::I32Const(2))?;
-        cb.emit(ctx, &Instruction::I32Shl)?;
-        sec_dir_base.emit_load(ctx, cb, false)?;
-        cb.emit(ctx, &Instruction::I32Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::I32Const(24))?;
-        cb.emit(ctx, &Instruction::I32ShrU)?;
-        cb.emit(ctx, &Instruction::I32Const(24))?;
-        cb.emit(ctx, &Instruction::I32Shl)?;
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I32Or)?;
+            // security_index = page_pointer & 0xFF
+            cb.emit(ctx, &Instruction::I32Const(0xFF))?;
+            cb.emit(ctx, &Instruction::I32And)?;
+            // page_base_low24 = page_pointer >> 8
+            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
+            cb.emit(ctx, &Instruction::I32Const(8))?;
+            cb.emit(ctx, &Instruction::I32ShrU)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
 
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I32And)?;
-        cb.emit(ctx, &Instruction::I32Add)?;
+            cb.emit(ctx, &Instruction::I32Const(2))?;
+            cb.emit(ctx, &Instruction::I32Shl)?;
+            sec_dir_base.emit_load(ctx, cb, false)?;
+            cb.emit(ctx, &Instruction::I32Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::I32Const(24))?;
+            cb.emit(ctx, &Instruction::I32ShrU)?;
+            cb.emit(ctx, &Instruction::I32Const(24))?;
+            cb.emit(ctx, &Instruction::I32Shl)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I32Or)?;
+
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I32And)?;
+            cb.emit(ctx, &Instruction::I32Add)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── multilevel_page_table_mapper ───────────────────────────────────────────────
 
-/// Three-level page-table mapper for 64 KiB pages with 64-bit physical
-/// addresses.
+/// Build a three-level page-table mapper for 64 KiB pages with 64-bit
+/// physical addresses.
 ///
 /// Level indices: bits \[63:48\], \[47:32\], \[31:16\] of the virtual address.
-/// Each entry is 8 bytes.
+/// Each entry is 8 bytes (`i64`).
 ///
-/// # Scratch locals used
-/// `66`, `67`, `68`.
-pub fn multilevel_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    cb: &mut CallbackContext<Context, E, F>,
+/// When `use_i64 = false` this delegates to
+/// [`standard_page_table_mapper_32`] (the 32-bit multi-level fallback).
+///
+/// # Scratch locals consumed
+/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`.
+///
+/// # Returns
+/// A closure implementing [`MapperCallback`].
+pub fn multilevel_page_table_mapper<Context, E, F>(
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-) -> Result<(), E> {
+    locals: PageMapLocals,
+) -> impl MapperCallback<Context, E, F>
+where
+    F: InstructionSink<Context, E>,
+{
     let l3_base = l3_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    if use_i64 {
-        // Level 3 lookup
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(48))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+        let lv = locals.vaddr;
+        let [ls0, ls1, _] = locals.scratch;
 
-        // Level 2 lookup
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(32))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+        if use_i64 {
+            // Save vaddr
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
 
-        // Level 1 lookup
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            // Level 3 lookup
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(48))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            l3_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
 
-        // Security + final address (same as standard_page_table_mapper)
-        cb.emit(ctx, &Instruction::LocalTee(67))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;           // security_index
-        cb.emit(ctx, &Instruction::LocalGet(67))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::LocalSet(68))?;     // page_base_low48
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64Const(48))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(48))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Or)?;
+            // Level 2 lookup
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(32))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
 
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        multilevel_page_table_mapper_32(ctx, cb, l3_base, sec_dir_base, memory_index, false)?;
+            // Level 1 lookup
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+
+            // Security + final address (same as standard mapper)
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;       // security_index
+            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_base_low48
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            sec_dir_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64Const(48))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(48))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Or)?;
+
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+        } else {
+            // 32-bit vaddr/paddr: delegate to the 32-bit single-level mapper
+            let mut inner = standard_page_table_mapper_32(
+                l3_base,
+                sec_dir_base,
+                memory_index,
+                false,
+                locals,
+            );
+            inner.call(ctx, cb)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── multilevel_page_table_mapper_32 ───────────────────────────────────────────
 
-/// Three-level page-table mapper with 32-bit physical addresses.
+/// Build a three-level page-table mapper with 32-bit physical addresses.
 ///
-/// Each entry is 4 bytes.  The upper 8 bits come from the security directory;
-/// lower 24 bits from the page-table entry.
+/// Each entry is 4 bytes.  The upper 8 bits of the physical address come from
+/// the security directory; the lower 24 bits from the page-table entry.
 ///
-/// # Scratch locals used
-/// `66`, `67`, `68`, `69`.
-pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    cb: &mut CallbackContext<Context, E, F>,
+/// When `use_i64 = false` this delegates to
+/// [`standard_page_table_mapper_32`].
+///
+/// # Scratch locals consumed
+/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`, `locals.scratch[2]`.
+///
+/// # Returns
+/// A closure implementing [`MapperCallback`].
+pub fn multilevel_page_table_mapper_32<Context, E, F>(
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-) -> Result<(), E> {
+    locals: PageMapLocals,
+) -> impl MapperCallback<Context, E, F>
+where
+    F: InstructionSink<Context, E>,
+{
     let l3_base = l3_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    if use_i64 {
-        // Level 3
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(48))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+        let lv = locals.vaddr;
+        let [ls0, ls1, ls2] = locals.scratch;
 
-        // Level 2
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(32))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+        if use_i64 {
+            // Save vaddr
+            cb.emit(ctx, &Instruction::LocalTee(lv))?;
 
-        // Level 1
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(16))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Const(2))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-        cb.emit(ctx, &Instruction::LocalTee(67))?;    // page_pointer (i32)
-        cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-        cb.emit(ctx, &Instruction::LocalSet(68))?;    // page_pointer as i64
+            // Level 3
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(48))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            l3_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;           // security_index
-        cb.emit(ctx, &Instruction::LocalGet(68))?;
-        cb.emit(ctx, &Instruction::I64Const(8))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::LocalSet(69))?;     // page_base_low24
-        cb.emit(ctx, &Instruction::I64Const(3))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, cb, true)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-        cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
-        cb.emit(ctx, &Instruction::I64Const(56))?;
-        cb.emit(ctx, &Instruction::I64ShrU)?;
-        cb.emit(ctx, &Instruction::I64Const(24))?;
-        cb.emit(ctx, &Instruction::I64Shl)?;
-        cb.emit(ctx, &Instruction::LocalGet(69))?;
-        cb.emit(ctx, &Instruction::I64Or)?;
+            // Level 2
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(32))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
-        cb.emit(ctx, &Instruction::LocalGet(66))?;
-        cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        cb.emit(ctx, &Instruction::I64And)?;
-        cb.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // 32-bit vaddr/paddr fallback
-        standard_page_table_mapper_32(ctx, cb, l3_base, sec_dir_base, memory_index, false)?;
+            // Level 1
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(16))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Const(2))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;  // page_pointer (i32)
+            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;  // page_pointer as i64
+
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;          // security_index
+            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
+            cb.emit(ctx, &Instruction::I64Const(8))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?;  // page_base_low24
+            cb.emit(ctx, &Instruction::I64Const(3))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            sec_dir_base.emit_load(ctx, cb, true)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(ctx, &Instruction::I64Const(56))?;
+            cb.emit(ctx, &Instruction::I64ShrU)?;
+            cb.emit(ctx, &Instruction::I64Const(24))?;
+            cb.emit(ctx, &Instruction::I64Shl)?;
+            cb.emit(ctx, &Instruction::LocalGet(ls2))?;
+            cb.emit(ctx, &Instruction::I64Or)?;
+
+            cb.emit(ctx, &Instruction::LocalGet(lv))?;
+            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
+            cb.emit(ctx, &Instruction::I64And)?;
+            cb.emit(ctx, &Instruction::I64Add)?;
+        } else {
+            // 32-bit fallback
+            let mut inner = standard_page_table_mapper_32(
+                l3_base,
+                sec_dir_base,
+                memory_index,
+                false,
+                locals,
+            );
+            inner.call(ctx, cb)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
