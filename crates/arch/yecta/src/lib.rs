@@ -277,6 +277,14 @@ impl<Context, E, T: wax_core::build::InstructionSource<Context, E> + ?Sized> Sni
         )
     }
 }
+/// Default maximum number of WebAssembly instructions emitted into a single
+/// generated function before [`Reactor::next_with`] forces a split.
+pub const DEFAULT_MAX_INSTS_PER_FN: usize = 4096;
+
+/// Default maximum number of open `if` blocks that may accumulate in a single
+/// generated function before a conditional branch forces a split.
+pub const DEFAULT_MAX_IFS_PER_FN: usize = 32;
+
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
 pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Function> {
@@ -286,6 +294,10 @@ pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Fun
     /// Base offset added to all emitted function indices.
     /// Used when imports or helper functions precede the generated functions in the module.
     base_func_offset: u32,
+    /// Maximum instructions per generated function before a forced split.
+    max_insts_per_fn: usize,
+    /// Maximum open `if` blocks per generated function before a forced split.
+    max_ifs_per_fn: usize,
 }
 impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E, F> {
     fn default() -> Self {
@@ -294,6 +306,8 @@ impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E,
             lens: Default::default(),
             phantom: Default::default(),
             base_func_offset: 0,
+            max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
+            max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
         }
     }
 }
@@ -317,6 +331,8 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             lens: Default::default(),
             phantom: Default::default(),
             base_func_offset,
+            max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
+            max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
         }
     }
 
@@ -333,6 +349,34 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     pub fn set_base_func_offset(&mut self, offset: u32) {
         self.base_func_offset = offset;
     }
+
+    /// Return the maximum number of instructions per generated function.
+    pub fn max_insts_per_fn(&self) -> usize {
+        self.max_insts_per_fn
+    }
+
+    /// Set the maximum number of instructions per generated function.
+    ///
+    /// When the tail function's instruction count reaches this limit,
+    /// the next call to [`next_with`](Self::next_with) will seal the current
+    /// function group before starting a new one.
+    pub fn set_max_insts_per_fn(&mut self, limit: usize) {
+        self.max_insts_per_fn = limit;
+    }
+
+    /// Return the maximum number of open `if` blocks per generated function.
+    pub fn max_ifs_per_fn(&self) -> usize {
+        self.max_ifs_per_fn
+    }
+
+    /// Set the maximum number of open `if` blocks per generated function.
+    ///
+    /// When adding a conditional branch would push the tail function's open
+    /// `if` count to this limit, the current function group is sealed first
+    /// and the conditional branch is emitted into a fresh function.
+    pub fn set_max_ifs_per_fn(&mut self, limit: usize) {
+        self.max_ifs_per_fn = limit;
+    }
 }
 
 /// Internal entry representing a function being generated.
@@ -340,19 +384,31 @@ struct Entry<F> {
     function: F,
     preds: BTreeSet<FuncIdx>,
     if_stmts: usize,
+    /// Running count of instructions emitted into this function via `feed`.
+    inst_count: usize,
+    /// Lazily-computed cache of all functions reachable from this entry by
+    /// following predecessor edges transitively, including this entry itself.
+    ///
+    /// `None` means the cache is stale and must be recomputed by BFS before
+    /// use.  Invalidated (set to `None`) whenever any entry's `preds` set
+    /// changes.  Only recomputed when actually needed (in `feed`, `seal`,
+    /// saturation checks, etc.).
+    transitive_preds: Option<BTreeSet<FuncIdx>>,
 }
 impl<Context, E> Reactor<Context, E> {
     /// Create a new function with the given locals and control flow distance.
     ///
     /// # Arguments
+    /// * `ctx` - Mutable context passed through to the instruction sink on split
     /// * `locals` - Iterator of (count, type) pairs defining local variables
     /// * `len` - Control flow distance/depth for this function
     pub fn next(
         &mut self,
+        ctx: &mut Context,
         locals: impl IntoIterator<Item = (u32, ValType), IntoIter: ExactSizeIterator>,
         len: u32,
-    ) {
-        self.next_with(Function::new(locals), len);
+    ) -> Result<(), E> {
+        self.next_with(ctx, Function::new(locals), len)
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E>
@@ -365,11 +421,34 @@ impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E>
 impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// Create a new function with the given locals and control flow distance.
     ///
+    /// If any function in the current reachable predecessor set has reached the
+    /// instruction limit or the `if`-nesting limit, the current function group
+    /// is sealed first: every open `if` block is closed, and all predecessor
+    /// edges are severed so the new function starts with a clean slate.
+    ///
     /// # Arguments
-    /// * `locals` - Iterator of (count, type) pairs defining local variables
+    /// * `ctx` - Mutable context passed through to the instruction sink on split
+    /// * `f` - The function (instruction sink) to add
     /// * `len` - Control flow distance/depth for this function
-    pub fn next_with(&mut self, f: F, len: u32) {
-        while self.lens.len() != len as usize + 1 {
+    pub fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
+        // Check every function that would receive instructions from the new
+        // tail (i.e. the current tail's transitive predecessor set).  If any
+        // has hit a limit, seal the whole group before opening a new function.
+        if !self.fns.is_empty() {
+            let tail_idx = self.fns.len() - 1;
+            let reachable = self.transitive_preds_of(tail_idx).clone();
+            let max_insts = self.max_insts_per_fn;
+            let max_ifs = self.max_ifs_per_fn;
+            let saturated = reachable.iter().any(|&FuncIdx(i)| {
+                self.fns[i as usize].inst_count >= max_insts
+                    || self.fns[i as usize].if_stmts >= max_ifs
+            });
+            if saturated {
+                self.seal_for_split(ctx)?;
+            }
+        }
+
+        while self.lens.len() < len as usize + 1 {
             self.lens.push_back(Default::default());
         }
         self.lens
@@ -377,33 +456,138 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             .nth(len as usize)
             .unwrap()
             .insert(FuncIdx(self.fns.len() as u32));
+
+        // Build the direct predecessor set for the new entry from the lens queue.
+        // Filter out self-references (the new entry's own index in lens[0] for len=0).
+        let new_idx = FuncIdx(self.fns.len() as u32);
+        let direct_preds: BTreeSet<FuncIdx> = self
+            .lens
+            .pop_front()
+            .into_iter()
+            .flatten()
+            .filter(|&p| p != new_idx)
+            .collect();
+
         self.fns.push(Entry {
             function: f,
-            preds: self.lens.pop_front().into_iter().flatten().collect(),
+            preds: direct_preds,
             if_stmts: 0,
+            inst_count: 0,
+            transitive_preds: None, // computed lazily on first use
         });
+        Ok(())
+    }
+
+    /// Seal all functions in the current reachable group due to a saturation
+    /// split triggered from [`next_with`] or [`increment_if_stmts_for_predecessors`].
+    ///
+    /// Emits `Unreachable` followed by enough `End` instructions to close all
+    /// open `if` blocks on every reachable function, then drains all
+    /// predecessor edges and clears every entry's `transitive_preds` to just
+    /// itself so the next function starts with a clean slate.
+    /// Seal all functions in the current reachable group due to a saturation
+    /// split triggered from [`next_with`] or [`increment_if_stmts_for_predecessors`].
+    ///
+    /// Emits `Unreachable` followed by enough `End` instructions to close all
+    /// open `if` blocks on every reachable function, then drains all
+    /// predecessor edges and invalidates every affected entry's transitive
+    /// cache so the next function starts with a clean slate.
+    fn seal_for_split(&mut self, ctx: &mut Context) -> Result<(), E> {
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        let tail_idx = self.fns.len() - 1;
+        let ifs = self.fns[tail_idx].if_stmts;
+        let reachable: BTreeSet<FuncIdx> = self.transitive_preds_of(tail_idx).clone();
+        for &FuncIdx(idx) in &reachable {
+            self.fns[idx as usize]
+                .function
+                .instruction(ctx, &Instruction::Unreachable)?;
+            for _ in 0..ifs {
+                self.fns[idx as usize]
+                    .function
+                    .instruction(ctx, &Instruction::End)?;
+            }
+            _ = take(&mut self.fns[idx as usize].preds);
+            // Invalidate transitive cache after severing preds.
+            self.fns[idx as usize].transitive_preds = None;
+        }
+        // Clear any pending future-function predecessor assignments in the
+        // lens queue — they reference entries from before the split and are
+        // no longer valid.
+        self.lens.clear();
+        Ok(())
+    }
+
+    /// Return the transitive predecessor set for the entry at `idx`,
+    /// computing and caching it via BFS if the cache is stale.
+    ///
+    /// The returned reference borrows `self` immutably after the cache is
+    /// populated, so callers that need to mutate `self` afterward must clone
+    /// the result first.
+    fn transitive_preds_of(&mut self, idx: usize) -> &BTreeSet<FuncIdx> {
+        // If already cached, return immediately.
+        if self.fns[idx].transitive_preds.is_some() {
+            return self.fns[idx].transitive_preds.as_ref().unwrap();
+        }
+
+        // BFS over direct preds to build the transitive set.
+        let mut visited: BTreeSet<FuncIdx> = BTreeSet::new();
+        visited.insert(FuncIdx(idx as u32));
+
+        let mut stack: Vec<FuncIdx> = self.fns[idx].preds.iter().cloned().collect();
+        while let Some(p) = stack.pop() {
+            if visited.contains(&p) {
+                continue;
+            }
+            visited.insert(p);
+            let FuncIdx(pi) = p;
+            for &q in &self.fns[pi as usize].preds {
+                if !visited.contains(&q) {
+                    stack.push(q);
+                }
+            }
+        }
+
+        self.fns[idx].transitive_preds = Some(visited);
+        self.fns[idx].transitive_preds.as_ref().unwrap()
     }
     /// Add a predecessor edge from pred to succ in the control flow graph.
+    ///
+    /// Invalidates the transitive predecessor cache for `succ` and for every
+    /// live entry that has `succ` in its cached transitive set (since those
+    /// entries can now reach `pred` transitively too).
     fn add_pred(&mut self, succ: FuncIdx, pred: FuncIdx) {
         let FuncIdx(succ_idx) = succ;
         match self.fns.get_mut(succ_idx as usize) {
             Some(a) => {
                 a.preds.insert(pred);
+                // Invalidate this entry's cache — it has a new predecessor.
+                a.transitive_preds = None;
             }
             None => {
-                // succ_idx is beyond the current fns vector
-                // Calculate the offset into the lens queue
-                // lens[0] = preds for fns.len(), lens[1] = preds for fns.len()+1, etc.
+                // succ_idx is beyond the current fns vector — store in lens
+                // for when that entry is created by next_with.
                 let len = (succ_idx as usize)
                     .checked_sub(self.fns.len())
                     .expect("add_pred: succ_idx should be >= fns.len() in None branch")
                     as u32;
-
-                // Ensure lens is large enough to hold this offset
-                while self.lens.len() != len as usize + 1 {
+                while self.lens.len() < len as usize + 1 {
                     self.lens.push_back(Default::default());
                 }
                 self.lens.iter_mut().nth(len as usize).unwrap().insert(pred);
+                // No live entry to invalidate; done.
+                return;
+            }
+        }
+        // Invalidate the cache of every live entry whose cached transitive set
+        // included succ — those sets are now stale because they're missing the
+        // new predecessors reachable through succ.
+        for i in 0..self.fns.len() {
+            if let Some(ref tp) = self.fns[i].transitive_preds {
+                if tp.contains(&succ) {
+                    self.fns[i].transitive_preds = None;
+                }
             }
         }
     }
@@ -417,28 +601,20 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         params: u32,
     ) -> Result<(), E> {
         let ifs = self.total_ifs(pred);
-        let mut queue = VecDeque::new();
-        queue.push_back(pred);
-        let mut cache = BTreeSet::new();
-
-        while let Some(q) = queue.pop_front() {
-            if cache.contains(&q) {
-                continue;
-            };
-            cache.insert(q);
-            let FuncIdx(q_idx) = q;
-            // self.fns[q_idx as usize].function.instruction(instruction);
-            for p in self.fns[q_idx as usize].preds.iter().cloned() {
-                queue.push_back(p);
-            }
-        }
-        if cache.contains(&succ) {
+        let FuncIdx(pred_idx) = pred;
+        // Use the per-entry transitive predecessor cache for the cycle check.
+        let cycle = self.transitive_preds_of(pred_idx as usize).contains(&succ);
+        if cycle {
+            // Clone the set so we can mutate fns while iterating.
+            let pred_transitive: BTreeSet<FuncIdx> =
+                self.fns[pred_idx as usize].transitive_preds.clone().unwrap();
             let FuncIdx(succ_idx) = succ;
             let wasm_func_idx = succ_idx + self.base_func_offset;
-            for k in cache {
-                let FuncIdx(k_idx) = k;
+            for k in &pred_transitive {
+                let FuncIdx(k_idx) = *k;
                 let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
+                f.transitive_preds = None; // invalidate after severing preds
                 for p in 0..params {
                     f.function.instruction(ctx, &Instruction::LocalGet(p))?;
                 }
@@ -596,7 +772,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     ) -> Result<(), E> {
         // Track if statements for conditional branches
         if condition.is_some() {
-            self.increment_if_stmts_for_predecessors();
+            self.increment_if_stmts_for_predecessors(ctx)?;
         }
 
         match call {
@@ -613,33 +789,43 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     }
 
     /// Increment if statement counter for all predecessor functions.
-    fn increment_if_stmts_for_predecessors(&mut self) {
+    ///
+    /// If any function in the current reachable set has already reached
+    /// `max_ifs_per_fn`, the entire current function group is sealed
+    /// (`seal_for_split`) before the counter is incremented.  This prevents
+    /// unbounded `if`-nesting and the O(N²) `End`-instruction explosion that
+    /// follows from it.
+    fn increment_if_stmts_for_predecessors(&mut self, ctx: &mut Context) -> Result<(), E> {
+        if !self.fns.is_empty() {
+            let tail_idx = self.fns.len() - 1;
+            let reachable = self.transitive_preds_of(tail_idx).clone();
+            let max_ifs = self.max_ifs_per_fn;
+            let any_saturated = reachable
+                .iter()
+                .any(|&FuncIdx(i)| self.fns[i as usize].if_stmts >= max_ifs);
+            if any_saturated {
+                self.seal_for_split(ctx)?;
+            }
+        }
         let reachable_funcs = self.collect_reachable_predecessors();
-        for func_idx in reachable_funcs {
-            let FuncIdx(idx) = func_idx;
+        for FuncIdx(idx) in reachable_funcs {
             self.fns[idx as usize].if_stmts += 1;
         }
+        Ok(())
     }
 
-    /// Collect all functions reachable by following predecessor edges.
-    fn collect_reachable_predecessors(&self) -> BTreeSet<FuncIdx> {
-        let mut queue = VecDeque::new();
-        queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
-        let mut visited = BTreeSet::new();
-
-        while let Some(current_func) = queue.pop_front() {
-            if visited.contains(&current_func) {
-                continue;
-            }
-            visited.insert(current_func);
-
-            let FuncIdx(func_idx) = current_func;
-            for predecessor in self.fns[func_idx as usize].preds.iter().cloned() {
-                queue.push_back(predecessor);
-            }
+    /// Return the set of all functions reachable from the current tail by
+    /// following predecessor edges transitively, including the tail itself.
+    ///
+    /// The result is computed lazily and cached in the tail entry's
+    /// `transitive_preds` field.  Subsequent calls are O(1) until any
+    /// predecessor edge changes (which sets the cache to `None`).
+    fn collect_reachable_predecessors(&mut self) -> BTreeSet<FuncIdx> {
+        if self.fns.is_empty() {
+            return BTreeSet::new();
         }
-
-        visited
+        let tail = self.fns.len() - 1;
+        self.transitive_preds_of(tail).clone()
     }
 
     /// Emit parameters with fixups applied.
@@ -798,70 +984,48 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// * `target` - The function index to jump to
     /// * `params` - Number of parameters to pass
     pub fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        let mut queue = VecDeque::new();
-        queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
-        let mut cache = BTreeSet::new();
-        while let Some(q) = queue.pop_front() {
-            if cache.contains(&q) {
-                continue;
-            };
-            cache.insert(q);
-            let FuncIdx(q_idx) = q;
-            // self.fns[q_idx as usize].function.instruction(instruction);
-            for p in self.fns[q_idx as usize].preds.iter().cloned() {
-                queue.push_back(p);
-            }
-        }
-        for x in cache {
+        // Use the per-entry transitive predecessor cache instead of a BFS.
+        let reachable = self.collect_reachable_predecessors();
+        for x in reachable {
             self.add_pred_checked(ctx, target, x, params)?;
         }
         Ok(())
     }
     /// Feed an instruction to all active functions.
     /// The instruction is added to the current function and all its predecessors.
+    /// Each visited function's instruction count is incremented.
     pub fn feed(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        let mut queue = VecDeque::new();
-        queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
-        let mut cache = BTreeSet::new();
-        while let Some(q) = queue.pop_front() {
-            if cache.contains(&q) {
-                continue;
-            };
-            cache.insert(q);
-            let FuncIdx(q_idx) = q;
-            self.fns[q_idx as usize]
+        // collect_reachable_predecessors is O(1) — reads tail.transitive_preds.
+        let reachable = self.collect_reachable_predecessors();
+        for FuncIdx(idx) in reachable {
+            self.fns[idx as usize]
                 .function
                 .instruction(ctx, instruction)?;
-            for p in self.fns[q_idx as usize].preds.iter().cloned() {
-                queue.push_back(p);
-            }
+            self.fns[idx as usize].inst_count += 1;
         }
         Ok(())
     }
     /// Seal the current function by emitting a final instruction and closing all if statements.
     /// This terminates the function and removes all predecessor edges.
     pub fn seal(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        let ifs = self.total_ifs(FuncIdx((self.fns.len() - 1) as u32));
-        let mut queue = VecDeque::new();
-        queue.push_back(FuncIdx((self.fns.len() - 1) as u32));
-        let mut cache = BTreeSet::new();
-        while let Some(q) = queue.pop_front() {
-            if cache.contains(&q) {
-                continue;
-            };
-            cache.insert(q);
-            let FuncIdx(q_idx) = q;
-            self.fns[q_idx as usize]
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        let tail_idx = self.fns.len() - 1;
+        let ifs = self.fns[tail_idx].if_stmts;
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for &FuncIdx(idx) in &reachable {
+            self.fns[idx as usize]
                 .function
                 .instruction(ctx, instruction)?;
             for _ in 0..ifs {
-                self.fns[q_idx as usize]
+                self.fns[idx as usize]
                     .function
                     .instruction(ctx, &Instruction::End)?;
             }
-            for p in take(&mut self.fns[q_idx as usize].preds) {
-                queue.push_back(p);
-            }
+            _ = take(&mut self.fns[idx as usize].preds);
+            // Invalidate transitive cache after severing preds.
+            self.fns[idx as usize].transitive_preds = None;
         }
         Ok(())
     }

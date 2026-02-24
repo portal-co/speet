@@ -11,5 +11,8 @@ wasm-encoder = { workspace = true }
 yecta = { path = "../yecta" }
 wax-core = { workspace = true }
 
+[dev-dependencies]
+object = "0.36"
+
 [features]
 default = []

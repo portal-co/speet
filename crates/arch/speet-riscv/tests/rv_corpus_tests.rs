@@ -1,305 +1,269 @@
-//! Integration tests using rv-corpus ELF files
+//! Integration corpus tests for the RISC-V recompiler.
 //!
-//! These tests validate the RISC-V recompiler against real compiled programs
-//! from the rv-corpus test suite.
+//! Each test reads a pre-assembled ELF object from `test-data/rv-corpus/`,
+//! extracts the `.text` section, and feeds it through
+//! [`RiscVRecompiler::translate_bytes`].
+//!
+//! ## Running
+//!
+//! ```
+//! cargo test -p speet-riscv --test rv_corpus_tests
+//! ```
+//!
+//! ## Pre-built objects
+//!
+//! The ELF objects (extension-less files next to each `.s`) are committed to
+//! the rv-corpus submodule and were produced by `compile_corpus.sh` in that
+//! directory.  Tests are *skipped* (not failed) when the submodule has not
+//! been initialised.
 
 use object::{Object, ObjectSection};
-use rv_asm::{Inst, Xlen};
+use rv_asm::Xlen;
 use speet_riscv::RiscVRecompiler;
 use std::convert::Infallible;
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 use wasm_encoder::Function;
 
-/// Helper function to extract the .text section from an ELF file
-fn extract_text_section(elf_path: &Path) -> Result<(Vec<u8>, u64), Box<dyn std::error::Error>> {
-    let file_data = fs::read(elf_path)?;
-    let obj_file = object::File::parse(&*file_data)?;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-    if let Some(text_section) = obj_file.section_by_name(".text") {
-        let data = text_section.data()?.to_vec();
-        let address = text_section.address();
-        Ok((data, address))
-    } else {
-        Err("No .text section found".into())
+/// Read the `.text` section from a pre-built ELF object.
+///
+/// Returns `None` when the file does not exist (submodule not initialised).
+/// Panics on any other I/O or parse error so malformed committed objects are
+/// caught immediately.
+fn load_text_section(elf_path: &Path) -> Option<(Vec<u8>, u64)> {
+    if !elf_path.exists() {
+        eprintln!(
+            "Skipping: ELF object not found at {elf_path:?}\n\
+             Run 'git submodule update --init --recursive' to fetch rv-corpus."
+        );
+        return None;
     }
+    let bytes = fs::read(elf_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
+    let obj = object::File::parse(&*bytes)
+        .unwrap_or_else(|e| panic!("failed to parse ELF {}: {e}", elf_path.display()));
+    let section = obj
+        .section_by_name(".text")
+        .unwrap_or_else(|| panic!("no .text section in {}", elf_path.display()));
+    let data = section
+        .data()
+        .unwrap_or_else(|e| panic!("failed to read .text from {}: {e}", elf_path.display()))
+        .to_vec();
+    let addr = section.address();
+    Some((data, addr))
 }
 
-/// Helper function to test recompilation of an ELF file
-fn test_elf_recompilation(elf_path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
-    let (text_data, start_addr) = extract_text_section(elf_path)?;
-
-    // Create recompiler with the start address as base_pc
-    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
+fn recompile_riscv_text(text: &[u8], start_addr: u64, xlen: Xlen) -> usize {
+    let mut recompiler =
+        RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
     let mut ctx = ();
-
-    // Translate the entire .text section
-    let bytes_translated = recompiler
+    recompiler
         .translate_bytes(
             &mut ctx,
-            &text_data,
+            text,
             start_addr as u32,
-            Xlen::Rv32,
+            xlen,
             &mut |a| Function::new(a.collect::<Vec<_>>()),
         )
-        .map_err(|_| "Translation failed")?;
-
-    Ok(bytes_translated)
+        .expect("translate_bytes failed")
 }
 
-/// Test RV32I integer computational instructions
+fn test_rv32_corpus_file(elf_path: &Path) {
+    let (text, addr) = match load_text_section(elf_path) {
+        Some(v) => v,
+        None => return,
+    };
+    assert!(
+        !text.is_empty(),
+        "{}: .text section is empty",
+        elf_path.display()
+    );
+    let bytes = recompile_riscv_text(&text, addr, Xlen::Rv32);
+    assert!(bytes > 0, "should have translated some bytes");
+    println!(
+        "  ✓ {} — {bytes} bytes translated",
+        elf_path.file_name().unwrap().to_string_lossy()
+    );
+}
+
+fn test_rv64_corpus_file(elf_path: &Path) {
+    let (text, addr) = match load_text_section(elf_path) {
+        Some(v) => v,
+        None => return,
+    };
+    assert!(
+        !text.is_empty(),
+        "{}: .text section is empty",
+        elf_path.display()
+    );
+    let bytes = recompile_riscv_text(&text, addr, Xlen::Rv64);
+    assert!(bytes > 0, "should have translated some bytes");
+    println!(
+        "  ✓ {} — {bytes} bytes translated",
+        elf_path.file_name().unwrap().to_string_lossy()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Individual test cases
+// ---------------------------------------------------------------------------
+
+/// RV32I integer computational instructions.
 #[test]
 fn test_rv32i_integer_computational() {
-    let corpus_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test-data/rv-corpus/rv32i/01_integer_computational");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus not found at {:?}", corpus_path);
-        eprintln!("Run 'git submodule update --init --recursive' to fetch rv-corpus");
-        return;
-    }
-
-    match test_elf_recompilation(&corpus_path) {
-        Ok(bytes) => {
-            println!(
-                "Successfully translated {} bytes from {}",
-                bytes,
-                corpus_path.display()
-            );
-            assert!(bytes > 0, "Should have translated some bytes");
-        }
-        Err(e) => {
-            eprintln!("Failed to recompile {}: {}", corpus_path.display(), e);
-            panic!("Recompilation failed");
-        }
-    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/01_integer_computational");
+    test_rv32_corpus_file(&path);
 }
 
-/// Test RV32I control transfer instructions  
+/// RV32I control transfer instructions.
 #[test]
 fn test_rv32i_control_transfer() {
-    let corpus_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test-data/rv-corpus/rv32i/02_control_transfer");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus not found");
-        return;
-    }
-
-    match test_elf_recompilation(&corpus_path) {
-        Ok(bytes) => {
-            println!(
-                "Successfully translated {} bytes from {}",
-                bytes,
-                corpus_path.display()
-            );
-            assert!(bytes > 0, "Should have translated some bytes");
-        }
-        Err(e) => {
-            eprintln!("Failed to recompile {}: {}", corpus_path.display(), e);
-            panic!("Recompilation failed");
-        }
-    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/02_control_transfer");
+    test_rv32_corpus_file(&path);
 }
 
-/// Test RV32I load/store instructions
+/// RV32I load / store instructions.
 #[test]
 fn test_rv32i_load_store() {
-    let corpus_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/rv-corpus/rv32i/03_load_store");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus not found");
-        return;
-    }
-
-    match test_elf_recompilation(&corpus_path) {
-        Ok(bytes) => {
-            println!(
-                "Successfully translated {} bytes from {}",
-                bytes,
-                corpus_path.display()
-            );
-            assert!(bytes > 0, "Should have translated some bytes");
-        }
-        Err(e) => {
-            eprintln!("Failed to recompile {}: {}", corpus_path.display(), e);
-            panic!("Recompilation failed");
-        }
-    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/03_load_store");
+    test_rv32_corpus_file(&path);
 }
 
-/// Test RV32I edge cases
+/// RV32I edge cases.
 #[test]
 fn test_rv32i_edge_cases() {
-    let corpus_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/rv-corpus/rv32i/04_edge_cases");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/04_edge_cases");
+    test_rv32_corpus_file(&path);
+}
 
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus not found");
+/// RV32I simple program.
+#[test]
+fn test_rv32i_simple_program() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/05_simple_program");
+    test_rv32_corpus_file(&path);
+}
+
+/// RV32I NOP and hint encodings.
+#[test]
+fn test_rv32i_nop_and_hints() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/06_nop_and_hints");
+    test_rv32_corpus_file(&path);
+}
+
+/// RV32I pseudo-instructions.
+#[test]
+fn test_rv32i_pseudo_instructions() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32i/07_pseudo_instructions");
+    test_rv32_corpus_file(&path);
+}
+
+/// RV32IM multiply / divide instructions.
+#[test]
+fn test_rv32im_multiply_divide() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv32im/01_multiply_divide");
+    test_rv32_corpus_file(&path);
+}
+
+/// RV64I basic 64-bit instructions.
+#[test]
+fn test_rv64i_basic_64bit() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/rv-corpus/rv64i/01_basic_64bit");
+    test_rv64_corpus_file(&path);
+}
+
+/// Smoke test: run every pre-built ELF found in rv-corpus through the
+/// recompiler in a single pass.  Skips gracefully when the submodule has not
+/// been initialised.
+#[test]
+fn test_rv_full_corpus() {
+    let corpus_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/rv-corpus");
+
+    if !corpus_root.exists() {
+        eprintln!("Skipping test_rv_full_corpus: rv-corpus submodule not initialised");
         return;
     }
 
-    match test_elf_recompilation(&corpus_path) {
-        Ok(bytes) => {
-            println!(
-                "Successfully translated {} bytes from {}",
-                bytes,
-                corpus_path.display()
-            );
-            assert!(bytes > 0, "Should have translated some bytes");
+    let elfs = collect_elfs(&corpus_root);
+    if elfs.is_empty() {
+        eprintln!("Skipping test_rv_full_corpus: no pre-built ELF objects found in rv-corpus");
+        return;
+    }
+
+    println!("\n  rv corpus ({} files):", elfs.len());
+    for (path, xlen) in &elfs {
+        let (text, addr) = match load_text_section(path) {
+            Some(v) => v,
+            None => return,
+        };
+        if text.is_empty() {
+            continue;
         }
-        Err(e) => {
-            eprintln!("Failed to recompile {}: {}", corpus_path.display(), e);
-            panic!("Recompilation failed");
+        let bytes = recompile_riscv_text(&text, addr, *xlen);
+        println!(
+            "  ✓ {} — {bytes} bytes",
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ELF discovery
+// ---------------------------------------------------------------------------
+
+/// Recursively collect all pre-built ELF objects (extension-less files whose
+/// magic bytes confirm they are ELF) under `root`, paired with the [`Xlen`]
+/// inferred from their top-level subdirectory name.
+fn collect_elfs(root: &Path) -> Vec<(std::path::PathBuf, Xlen)> {
+    let mut result = Vec::new();
+    collect_elfs_rec(root, root, &mut result);
+    result.sort_by(|(a, _), (b, _)| a.cmp(b));
+    result
+}
+
+fn collect_elfs_rec(root: &Path, dir: &Path, out: &mut Vec<(std::path::PathBuf, Xlen)>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_elfs_rec(root, &path, out);
+        } else if path.extension().is_none() && is_elf(&path) {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let top_dir = rel
+                .components()
+                .next()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let xlen = if top_dir.starts_with("rv64") {
+                Xlen::Rv64
+            } else {
+                Xlen::Rv32
+            };
+            out.push((path, xlen));
         }
     }
 }
 
-/// Test RV32IM (with M extension) programs
-#[test]
-fn test_rv32im_mul_div() {
-    let corpus_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/rv-corpus/rv32im");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus rv32im not found");
-        return;
-    }
-
-    // Find the first ELF file in the directory
-    if let Ok(entries) = fs::read_dir(&corpus_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && !path.extension().map_or(false, |e| e == "s") {
-                match test_elf_recompilation(&path) {
-                    Ok(bytes) => {
-                        println!(
-                            "Successfully translated {} bytes from {}",
-                            bytes,
-                            path.display()
-                        );
-                        assert!(bytes > 0, "Should have translated some bytes");
-                        return; // Test first file only
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to recompile {}: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-    }
-
-    eprintln!("No RV32IM ELF files found to test");
-}
-
-/// Test RV32F (single-precision float) programs
-#[test]
-fn test_rv32f_float() {
-    let corpus_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/rv-corpus/rv32f");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus rv32f not found");
-        return;
-    }
-
-    // Find the first ELF file in the directory
-    if let Ok(entries) = fs::read_dir(&corpus_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && !path.extension().map_or(false, |e| e == "s") {
-                match test_elf_recompilation(&path) {
-                    Ok(bytes) => {
-                        println!(
-                            "Successfully translated {} bytes from {}",
-                            bytes,
-                            path.display()
-                        );
-                        assert!(bytes > 0, "Should have translated some bytes");
-                        return; // Test first file only
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to recompile {}: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-    }
-
-    eprintln!("No RV32F ELF files found to test");
-}
-
-/// Test detailed instruction-by-instruction translation
-#[test]
-fn test_detailed_instruction_translation() {
-    let corpus_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test-data/rv-corpus/rv32i/05_simple_program");
-
-    if !corpus_path.exists() {
-        eprintln!("Skipping test: rv-corpus not found");
-        return;
-    }
-
-    match extract_text_section(&corpus_path) {
-        Ok((text_data, start_addr)) => {
-            let mut recompiler =
-                RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
-            let mut ctx = ();
-
-            // Try to decode and translate instruction by instruction
-            let mut offset = 0;
-            let mut instruction_count = 0;
-
-            while offset < text_data.len() && offset < 100 {
-                // Limit to first 100 bytes
-                if offset + 1 >= text_data.len() {
-                    break;
-                }
-
-                let inst_word = if offset + 3 < text_data.len() {
-                    u32::from_le_bytes([
-                        text_data[offset],
-                        text_data[offset + 1],
-                        text_data[offset + 2],
-                        text_data[offset + 3],
-                    ])
-                } else {
-                    u32::from_le_bytes([text_data[offset], text_data[offset + 1], 0, 0])
-                };
-
-                match Inst::decode(inst_word, Xlen::Rv32) {
-                    Ok((inst, is_compressed)) => {
-                        let pc = start_addr as u32 + offset as u32;
-                        match recompiler.translate_instruction(
-                            &mut ctx,
-                            &inst,
-                            pc,
-                            is_compressed,
-                            &mut |a| Function::new(a.collect::<Vec<_>>()),
-                        ) {
-                            Ok(()) => {
-                                instruction_count += 1;
-                                offset += match is_compressed {
-                                    rv_asm::IsCompressed::Yes => 2,
-                                    rv_asm::IsCompressed::No => 4,
-                                };
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            println!("Successfully translated {} instructions", instruction_count);
-            assert!(
-                instruction_count > 0,
-                "Should have translated at least some instructions"
-            );
-        }
-        Err(e) => {
-            eprintln!("Failed to extract .text section: {}", e);
-            panic!("Test setup failed");
-        }
-    }
+/// Return `true` when the first four bytes of the file are the ELF magic.
+fn is_elf(path: &Path) -> bool {
+    let mut buf = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut buf)
+        })
+        .map(|_| buf == [0x7f, b'E', b'L', b'F'])
+        .unwrap_or(false)
 }

@@ -666,9 +666,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // Translate the instruction
             if let Err(_) = self.translate_instruction(ctx, &inst, pc, is_compressed, f) {
                 break;
-            }
-
-            // Advance by instruction size
+            }            // Advance by instruction size
             offset += match is_compressed {
                 IsCompressed::Yes => 2,
                 IsCompressed::No => 4,
@@ -702,7 +700,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         // Initialize function for this instruction
-        self.init_function(pc, inst_len, 8, f);
+        self.init_function(ctx, pc, inst_len, 8, f)?;
         // Update PC
         self.reactor.feed(ctx, &Instruction::I32Const(pc as i32))?;
         self.reactor

@@ -326,12 +326,13 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
 
     fn init_function(
         &mut self,
+        ctx: &mut Context,
         _rip: u64,
         inst_len: u32,
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, wasm_encoder::ValType)> + '_)) -> F
                   + '_),
-    ) {
+    ) -> Result<(), E> {
         // For simplicity, model 16 general purpose 64-bit regs as locals 0-15
         // PC in local 16 (i32)
         // Condition flags: ZF(17), SF(18), CF(19), OF(20), PF(21) as i32
@@ -343,7 +344,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             (num_temps, wasm_encoder::ValType::I64), // temps
         ];
         // Pass instruction length to yecta so fallthrough is controlled by instruction size
-        self.reactor.next_with(f(&mut locals.into_iter()), inst_len);
+        self.reactor.next_with(ctx, f(&mut locals.into_iter()), inst_len)
     }
 
     fn resolve_reg(reg: Register) -> Option<(u32, u32, bool, u32)> {
@@ -444,7 +445,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             let inst_len = inst.len() as u32;
             let inst_rip = dec.ip() - inst_len as u64; // decoder advanced
 
-            self.init_function(inst_rip, inst_len, 4, f);
+            self.init_function(ctx, inst_rip, inst_len, 4, f)?;
             // store rip into local 16
             self.reactor
                 .feed(ctx, &Instruction::I32Const(inst_rip as i32))?;

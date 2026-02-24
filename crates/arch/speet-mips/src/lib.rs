@@ -448,10 +448,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// * `num_temps` - Number of additional temporary registers needed
     fn init_function(
         &mut self,
+        ctx: &mut Context,
         _pc: u32,
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
-    ) {
+    ) -> Result<(), E> {
         // General-purpose registers: locals 0-31 (i32 for MIPS32, i64 for MIPS64)
         // HI/LO registers: locals 32-33 (same type as GPRs)
         // PC: local 34 (i32)
@@ -468,7 +469,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             (num_temps, gpr_type), // Temporary registers (match GPR type)
         ];
         // Set to 1 to prevent infinite looping (yecta handles automatic fallthrough)
-        self.reactor.next_with(f(&mut locals.into_iter()), 1);
+        self.reactor.next_with(ctx, f(&mut locals.into_iter()), 1)
     }
 
     /// Get the local index for a general-purpose register
@@ -735,7 +736,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         let pc = instruction.vram;
 
         // Initialize function for this instruction
-        self.init_function(pc, 8, f);
+        self.init_function(ctx, pc, 8, f)?;
 
         // Update PC
         self.reactor

@@ -284,6 +284,7 @@ name = "speet-x86_64"
 version = "0.1.0"
 dependencies = [
  "iced-x86",
+ "object",
  "wasm-encoder",
  "wax-core",
  "yecta",
