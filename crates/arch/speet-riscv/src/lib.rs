@@ -60,6 +60,19 @@ use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsi
 use wasm_encoder::{Instruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
 
+// Re-export the shared memory/mapper abstractions so existing users do not
+// need to change their import paths.
+pub use speet_memory::{
+    CallbackContext, MapperCallback, PageTableBase,
+    multilevel_page_table_mapper, multilevel_page_table_mapper_32,
+    standard_page_table_mapper, standard_page_table_mapper_32,
+};
+
+/// Legacy type alias — `MapperContext` is the same as [`CallbackContext`].
+pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
+/// Legacy type alias — `HintContext` is the same as [`CallbackContext`].
+pub type HintContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
+
 /// Information about a detected HINT instruction
 ///
 /// RISC-V HINT instructions are instructions that write to x0 (which is hardwired
@@ -93,61 +106,6 @@ pub struct EcallInfo {
 pub struct EbreakInfo {
     /// Program counter where the EBREAK was encountered
     pub pc: u32,
-}
-
-/// Unified context for all callbacks
-///
-/// This struct provides access to the WebAssembly instruction emitter and other
-/// compilation state. It is passed to all callbacks (HINT, ECALL, EBREAK, mapper).
-pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context, E>> {
-    /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<Context, E, F>,
-}
-
-impl<'a, Context, E, F: InstructionSink<Context, E>> CallbackContext<'a, Context, E, F> {
-    /// Emit a WebAssembly instruction
-    pub fn emit(&mut self, ctx: &mut Context, instruction: &Instruction) -> Result<(), E> {
-        self.reactor.feed(ctx, instruction)
-    }
-}
-
-/// Legacy type alias for backwards compatibility
-pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
-/// Legacy type alias for backwards compatibility
-pub type HintContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
-
-/// Trait for address mapping callbacks (paging support)
-///
-/// This trait defines the interface for callbacks that translate virtual addresses
-/// to physical addresses. The callback receives the virtual address on the Wasm stack
-/// and should leave the physical address on the stack.
-///
-/// See PAGING.md for detailed documentation on the paging system.
-pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
-    /// Translate a virtual address to a physical address
-    ///
-    /// # Stack State
-    /// - Input: Virtual address (i64 or i32 depending on use_memory64/enable_rv64)
-    /// - Output: Physical address (same type as input)
-    fn call(
-        &mut self,
-        ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
-    ) -> Result<(), E>;
-}
-
-/// Blanket implementation of MapperCallback for FnMut closures
-impl<Context, E, F: InstructionSink<Context, E>, T> MapperCallback<Context, E, F> for T
-where
-    T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>,
-{
-    fn call(
-        &mut self,
-        ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
-    ) -> Result<(), E> {
-        self(ctx, callback_ctx)
-    }
 }
 
 /// Trait for HINT instruction callbacks
@@ -288,13 +246,13 @@ pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>
     /// Collected HINT instructions (when tracking is enabled)
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
-    hint_callback: Option<&'cb mut (dyn HintCallback<Context, E, F> + 'ctx)>,
+    hint_callback: Option<&'cb mut (dyn HintCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Optional callback for ECALL instructions
-    ecall_callback: Option<&'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)>,
+    ecall_callback: Option<&'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Optional callback for EBREAK instructions
-    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)>,
+    ebreak_callback: Option<&'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Optional callback for address mapping (paging support - see PAGING.md)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -497,7 +455,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// ```
     pub fn set_hint_callback(
         &mut self,
-        callback: &'cb mut (dyn HintCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn HintCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.hint_callback = Some(callback);
     }
@@ -533,7 +491,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// ```
     pub fn set_ecall_callback(
         &mut self,
-        callback: &'cb mut (dyn EcallCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.ecall_callback = Some(callback);
     }
@@ -570,7 +528,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// ```
     pub fn set_ebreak_callback(
         &mut self,
-        callback: &'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.ebreak_callback = Some(callback);
     }
@@ -610,7 +568,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// ```
     pub fn set_mapper_callback(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.mapper_callback = Some(callback);
     }
@@ -1039,608 +997,6 @@ enum FsgnjOp {
     Sgnj,  // Copy sign from src2
     Sgnjn, // Copy negated sign from src2
     Sgnjx, // XOR signs of src1 and src2
-}
-
-/// Helper for specifying page table base address location
-pub enum PageTableBase {
-    /// Static constant address
-    Constant(u64),
-    /// Runtime value stored in a WebAssembly local variable
-    Local(u32),
-    /// Runtime value stored in a WebAssembly global variable  
-    Global(u32),
-}
-
-impl From<u64> for PageTableBase {
-    fn from(c: u64) -> Self {
-        PageTableBase::Constant(c)
-    }
-}
-
-impl PageTableBase {
-    /// Emit instructions to get the page table base value onto the stack
-    fn emit_load<Context, E, F: InstructionSink<Context, E>>(
-        &self,
-        ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
-        use_i64: bool,
-    ) -> Result<(), E> {
-        match self {
-            PageTableBase::Constant(addr) => {
-                if use_i64 {
-                    callback_ctx.emit(ctx, &Instruction::I64Const(*addr as i64))?;
-                } else {
-                    callback_ctx.emit(ctx, &Instruction::I32Const(*addr as i32))?;
-                }
-            }
-            PageTableBase::Local(idx) => {
-                callback_ctx.emit(ctx, &Instruction::LocalGet(*idx))?;
-            }
-            PageTableBase::Global(idx) => {
-                callback_ctx.emit(ctx, &Instruction::GlobalGet(*idx))?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Standard page table mapper for 64KB single-level paging
-///
-/// This helper generates WebAssembly instructions to translate virtual addresses
-/// using a flat page table stored in WebAssembly memory.
-///
-/// # Page Table Format
-/// - Each entry is 8 bytes (i64) containing the physical page base address
-/// - Entry address = page_table_base + (page_num * 8)
-/// - Page number = vaddr >> 16 (bits 63:16)
-/// - Page offset = vaddr & 0xFFFF (bits 15:0)
-///
-/// # Arguments
-/// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `page_table_base`: Page table base (constant u64, local, or global)
-/// - `memory_index`: Memory index to use for loads (usually 0)
-/// - `use_i64`: Whether to use i64 addressing (true for memory64/RV64)
-///
-/// # Stack State
-/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
-/// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    callback_ctx: &mut CallbackContext<Context, E, F>,
-    page_table_base: impl Into<PageTableBase>,
-    security_directory_base: impl Into<PageTableBase>,
-    memory_index: u32,
-    use_i64: bool,
-) -> Result<(), E> {
-    let pt_base = page_table_base.into();
-    let sec_dir_base = security_directory_base.into();
-
-    if use_i64 {
-        // 64-bit implementation
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?; // vaddr
-
-        // page_num = vaddr >> 16
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-
-        // pte_addr = pt_base + (page_num * 8)
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-
-        // page_pointer = [pte_addr]
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?;
-
-        // security_index = page_pointer & 0xFFFF
-        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // Store page_pointer in temp local 67
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-
-        // page_base_low48 = page_pointer >> 16
-        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // Store page_base_low48 in temp local 68
-
-        // sec_entry_addr = sec_dir_base + (security_index * 4)
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-
-        // sec_entry = [sec_entry_addr]
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-
-        // page_base_top16 = sec_entry >> 16
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        // phys_page_base = (page_base_top16 << 48) | page_base_low48
-        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Or)?;
-
-        // page_offset = vaddr & 0xFFFF
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-
-        // phys_addr = phys_page_base + page_offset
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // 32-bit implementation (falls back to old logic for now)
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
-
-        pt_base.emit_load(ctx, callback_ctx, false)?;
-        callback_ctx.emit(ctx, &Instruction::I32Add)?;
-
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I32And)?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Add)?;
-    }
-
-    Ok(())
-}
-
-/// Multi-level page table mapper for 64KB pages
-///
-/// This helper generates WebAssembly instructions for a 3-level page table structure.
-/// Each level uses 16-bit indices, supporting the full 64-bit address space.
-///
-/// # Page Table Structure
-/// - Level 3 (top): Indexed by bits [63:48]
-/// - Level 2: Indexed by bits [47:32]
-/// - Level 1 (leaf): Indexed by bits [31:16], contains physical page bases
-/// - Page offset: bits [15:0]
-///
-/// # Arguments
-/// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `l3_table_base`: Base address of level 3 page table (constant u64, local, or global)
-/// - `memory_index`: Memory index to use for loads (usually 0)
-/// - `use_i64`: Whether to use i64 addressing
-///
-/// # Stack State
-/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
-/// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    callback_ctx: &mut CallbackContext<Context, E, F>,
-    l3_table_base: impl Into<PageTableBase>,
-    security_directory_base: impl Into<PageTableBase>,
-    memory_index: u32,
-    use_i64: bool,
-) -> Result<(), E> {
-    let l3_base = l3_table_base.into();
-    let sec_dir_base = security_directory_base.into();
-
-    if use_i64 {
-        // Level 3
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?;
-
-        // Level 2
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(32))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?;
-
-        // Level 1
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?; // page_pointer
-
-        // Security and final address construction
-        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?; // security_index
-        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // page_base_low48
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Or)?;
-
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // simplified for 32-bit, only single level supported in this path
-        multilevel_page_table_mapper_32(
-            ctx,
-            callback_ctx,
-            l3_base,
-            sec_dir_base,
-            memory_index,
-            false,
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Single-level page table mapper with 32-bit physical addresses
-///
-/// This variant uses 4-byte page table entries for 32-bit physical addresses,
-/// supporting up to 4 GiB of physical memory while maintaining 64-bit virtual addresses.
-///
-/// # Arguments
-/// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `page_table_base`: Base address of page table (constant u64, local, or global)
-/// - `memory_index`: Memory index to use
-/// - `use_i64`: Whether to use i64 addressing (true for memory64/RV64)
-///
-/// # Stack State
-/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
-/// - Output: Physical address (same type as input)
-pub fn standard_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    callback_ctx: &mut CallbackContext<Context, E, F>,
-    page_table_base: impl Into<PageTableBase>,
-    security_directory_base: impl Into<PageTableBase>,
-    memory_index: u32,
-    use_i64: bool,
-) -> Result<(), E> {
-    let pt_base = page_table_base.into();
-    let sec_dir_base = security_directory_base.into();
-    if use_i64 {
-        // 64-bit vaddr, 32-bit paddr
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-
-        // page_num = vaddr >> 16
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-
-        // pte_addr = pt_base + (page_num * 4)
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        pt_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-
-        // page_pointer = [pte_addr] (u32)
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // temp local 67 for page_pointer
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // temp local 68 for page_pointer as u64
-
-        // security_index = page_pointer & 0xFF
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-
-        // page_base_low24 = page_pointer >> 8
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(8))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(69))?; // temp local 69 for page_base_low24
-
-        // sec_entry_addr = sec_dir_base + (security_index * 4)
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-
-        // sec_entry = [sec_entry_addr] (u32)
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-
-        // page_base_top8 = sec_entry >> 24
-        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        // phys_page_base = (page_base_top8 << 24) | page_base_low24
-        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(69))?;
-        callback_ctx.emit(ctx, &Instruction::I64Or)?;
-
-        // page_offset = vaddr & 0xFFFF
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // 32-bit vaddr, 32-bit paddr
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
-        pt_base.emit_load(ctx, callback_ctx, false)?;
-        callback_ctx.emit(ctx, &Instruction::I32Add)?;
-
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
-
-        // security_index = page_pointer & 0xFF
-        callback_ctx.emit(ctx, &Instruction::I32Const(0xFF))?;
-        callback_ctx.emit(ctx, &Instruction::I32And)?;
-
-        // page_base_low24 = page_pointer >> 8
-        callback_ctx.emit(ctx, &Instruction::LocalGet(67))?;
-        callback_ctx.emit(ctx, &Instruction::I32Const(8))?;
-        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?; // page_base_low24
-
-        // sec_entry_addr = sec_dir_base + (security_index * 4)
-        callback_ctx.emit(ctx, &Instruction::I32Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
-        sec_dir_base.emit_load(ctx, callback_ctx, false)?;
-        callback_ctx.emit(ctx, &Instruction::I32Add)?;
-
-        // sec_entry = [sec_entry_addr]
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-
-        // page_base_top8 = sec_entry >> 24
-        callback_ctx.emit(ctx, &Instruction::I32Const(24))?;
-        callback_ctx.emit(ctx, &Instruction::I32ShrU)?;
-
-        // phys_page_base = (page_base_top8 << 24) | page_base_low24
-        callback_ctx.emit(ctx, &Instruction::I32Const(24))?;
-        callback_ctx.emit(ctx, &Instruction::I32Shl)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I32Or)?;
-
-        // page_offset = vaddr & 0xFFFF
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I32And)?;
-
-        callback_ctx.emit(ctx, &Instruction::I32Add)?;
-    }
-
-    Ok(())
-}
-
-/// Multi-level page table mapper with 32-bit physical addresses
-///
-/// This variant uses 4-byte page table entries for 32-bit physical addresses,
-/// supporting up to 4 GiB of physical memory in a 3-level page table structure.
-///
-/// # Arguments
-/// - `ctx`: Callback context for emitting WebAssembly instructions
-/// - `l3_table_base`: Base address of level 3 page table
-/// - `memory_index`: Memory index to use
-/// - `use_i64`: Whether to use i64 addressing
-///
-/// # Stack State
-/// - Input: Virtual address (i64 or i32) - must be saved to local 66 before calling
-/// - Output: Physical address (same type as input)
-pub fn multilevel_page_table_mapper_32<Context, E, F: InstructionSink<Context, E>>(
-    ctx: &mut Context,
-    callback_ctx: &mut CallbackContext<Context, E, F>,
-    l3_table_base: impl Into<PageTableBase>,
-    security_directory_base: impl Into<PageTableBase>,
-    memory_index: u32,
-    use_i64: bool,
-) -> Result<(), E> {
-    let l3_base = l3_table_base.into();
-    let sec_dir_base = security_directory_base.into();
-
-    if use_i64 {
-        // Level 3
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(48))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        l3_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-
-        // Level 2
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(32))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-
-        // Level 1
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(16))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(2))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 2,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::LocalTee(67))?; // page_pointer
-        callback_ctx.emit(ctx, &Instruction::I64ExtendI32U)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(68))?;
-
-        // Security and final address construction
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(68))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(8))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::LocalSet(69))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(3))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        sec_dir_base.emit_load(ctx, callback_ctx, true)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-        callback_ctx.emit(
-            ctx,
-            &Instruction::I64Load(wasm_encoder::MemArg {
-                offset: 0,
-                align: 3,
-                memory_index,
-            }),
-        )?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(56))?;
-        callback_ctx.emit(ctx, &Instruction::I64ShrU)?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(24))?;
-        callback_ctx.emit(ctx, &Instruction::I64Shl)?;
-        callback_ctx.emit(ctx, &Instruction::LocalGet(69))?;
-        callback_ctx.emit(ctx, &Instruction::I64Or)?;
-
-        callback_ctx.emit(ctx, &Instruction::LocalGet(66))?;
-        callback_ctx.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-        callback_ctx.emit(ctx, &Instruction::I64And)?;
-        callback_ctx.emit(ctx, &Instruction::I64Add)?;
-    } else {
-        // 32-bit vaddr, 32-bit paddr
-        standard_page_table_mapper_32(
-            ctx,
-            callback_ctx,
-            l3_base,
-            sec_dir_base,
-            memory_index,
-            false,
-        )?;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

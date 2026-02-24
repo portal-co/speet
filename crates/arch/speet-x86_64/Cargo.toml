@@ -10,6 +10,7 @@ iced-x86 = "1.18.0"
 wasm-encoder = { workspace = true }
 yecta = { path = "../yecta" }
 wax-core = { workspace = true }
+speet-memory = { path = "../speet-memory" }
 
 [dev-dependencies]
 object = "0.36"

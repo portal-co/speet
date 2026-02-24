@@ -51,6 +51,9 @@ use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, Target, TypeIdx};
 
+// Re-export the shared memory/mapper abstractions.
+pub use speet_memory::{CallbackContext, MapperCallback};
+
 /// Branch operation types for conditional branches
 #[derive(Debug, Clone, Copy)]
 enum BranchOp {
@@ -123,54 +126,6 @@ pub struct BreakInfo {
     pub pc: u32,
     /// Break code (immediate value)
     pub code: u32,
-}
-
-/// Unified context for all callbacks
-///
-/// This struct provides access to the WebAssembly instruction emitter and other
-/// compilation state. It is passed to all callbacks (SYSCALL, BREAK, mapper).
-pub struct CallbackContext<'a, Context, E, F: InstructionSink<Context, E>> {
-    /// Reference to the reactor for emitting WebAssembly instructions
-    pub reactor: &'a mut Reactor<Context, E, F>,
-}
-
-impl<'a, Context, E, F: InstructionSink<Context, E>> CallbackContext<'a, Context, E, F> {
-    /// Emit a WebAssembly instruction
-    pub fn emit(&mut self, ctx: &mut Context, instruction: &WasmInstruction) -> Result<(), E> {
-        self.reactor.feed(ctx, instruction)
-    }
-}
-
-/// Trait for address mapping callbacks (paging support)
-///
-/// This trait defines interface for callbacks that translate virtual addresses
-/// to physical addresses. The callback receives the virtual address on the Wasm stack
-/// and should leave the physical address on the stack.
-pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
-    /// Translate a virtual address to a physical address
-    ///
-    /// # Stack State
-    /// - Input: Virtual address (i32)
-    /// - Output: Physical address (i32)
-    fn call(
-        &mut self,
-        ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
-    ) -> Result<(), E>;
-}
-
-/// Blanket implementation of MapperCallback for FnMut closures
-impl<Context, E, F: InstructionSink<Context, E>, T> MapperCallback<Context, E, F> for T
-where
-    T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>,
-{
-    fn call(
-        &mut self,
-        ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
-    ) -> Result<(), E> {
-        self(ctx, callback_ctx)
-    }
 }
 
 /// Trait for SYSCALL instruction callbacks
@@ -255,11 +210,11 @@ pub struct MipsRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
     /// Optional callback for SYSCALL instructions
-    syscall_callback: Option<&'cb mut (dyn SyscallCallback<Context, E, F> + 'ctx)>,
+    syscall_callback: Option<&'cb mut (dyn SyscallCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Optional callback for BREAK instructions
-    break_callback: Option<&'cb mut (dyn BreakCallback<Context, E, F> + 'ctx)>,
+    break_callback: Option<&'cb mut (dyn BreakCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Optional callback for address mapping (paging support)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
+    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Whether to enable MIPS64 instruction support (disabled by default)
     enable_mips64: bool,
 }
@@ -373,7 +328,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// is encountered during translation.
     pub fn set_syscall_callback(
         &mut self,
-        callback: &'cb mut (dyn SyscallCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn SyscallCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.syscall_callback = Some(callback);
     }
@@ -389,7 +344,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// is encountered during translation.
     pub fn set_break_callback(
         &mut self,
-        callback: &'cb mut (dyn BreakCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn BreakCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.break_callback = Some(callback);
     }
@@ -405,7 +360,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// to translate virtual addresses to physical addresses.
     pub fn set_mapper_callback(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
     ) {
         self.mapper_callback = Some(callback);
     }
@@ -1077,9 +1032,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.emit_add(ctx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1114,9 +1067,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.emit_add(ctx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1150,9 +1101,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.emit_add(ctx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1186,9 +1135,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.emit_add(ctx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1221,9 +1168,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 self.emit_add(ctx)?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     mapper.call(ctx, &mut callback_ctx)?;
                 }
 
@@ -1266,9 +1211,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 self.emit_add(ctx)?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     mapper.call(ctx, &mut callback_ctx)?;
                 }
 
@@ -1314,9 +1257,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1351,9 +1292,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // invoke mapper callback if present (virtual -> physical)
                 if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     mapper.call(ctx, &mut callback_ctx)?;
                 }
 
@@ -1402,9 +1341,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1440,9 +1377,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
@@ -1537,9 +1472,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.syscall_callback {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     callback.call(&syscall_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: system call - implementation specific
@@ -1553,9 +1486,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.break_callback {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     callback.call(&break_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific

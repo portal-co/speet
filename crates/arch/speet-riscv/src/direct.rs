@@ -82,9 +82,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut callback_ctx = CallbackContext::new(&mut self.reactor);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
@@ -279,9 +277,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut callback_ctx = CallbackContext::new(&mut self.reactor);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
@@ -393,9 +389,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut callback_ctx = CallbackContext::new(&mut self.reactor);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
@@ -446,9 +440,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext {
-                reactor: &mut self.reactor,
-            };
+            let mut callback_ctx = CallbackContext::new(&mut self.reactor);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
@@ -1142,9 +1134,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // Invoke callback if set
                     if let Some(ref mut callback) = self.hint_callback {
-                        let mut callback_ctx = CallbackContext {
-                            reactor: &mut self.reactor,
-                        };
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         callback.call(&hint_info, ctx, &mut callback_ctx);
                     }
 
@@ -1389,9 +1379,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ecall_callback {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     callback.call(&ecall_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: environment call - implementation specific
@@ -1405,9 +1393,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ebreak_callback {
-                    let mut callback_ctx = CallbackContext {
-                        reactor: &mut self.reactor,
-                    };
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                     callback.call(&ebreak_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
