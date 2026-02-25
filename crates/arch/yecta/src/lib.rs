@@ -65,7 +65,11 @@
 
 #![no_std]
 
-use core::{convert::Infallible, marker::PhantomData, mem::take};
+use core::{
+    convert::Infallible,
+    marker::PhantomData,
+    mem::{take, transmute},
+};
 
 use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet, vec_deque::VecDeque},
@@ -382,6 +386,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
 /// Internal entry representing a function being generated.
 struct Entry<F> {
     function: F,
+    bundles: Vec<Instruction<'static>>,
     preds: BTreeSet<FuncIdx>,
     if_stmts: usize,
     /// Running count of instructions emitted into this function via `feed`.
@@ -473,6 +478,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             preds: direct_preds,
             if_stmts: 0,
             inst_count: 0,
+            bundles: Vec::new(),
             transitive_preds: None, // computed lazily on first use
         });
         Ok(())
@@ -606,8 +612,10 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         let cycle = self.transitive_preds_of(pred_idx as usize).contains(&succ);
         if cycle {
             // Clone the set so we can mutate fns while iterating.
-            let pred_transitive: BTreeSet<FuncIdx> =
-                self.fns[pred_idx as usize].transitive_preds.clone().unwrap();
+            let pred_transitive: BTreeSet<FuncIdx> = self.fns[pred_idx as usize]
+                .transitive_preds
+                .clone()
+                .unwrap();
             let FuncIdx(succ_idx) = succ;
             let wasm_func_idx = succ_idx + self.base_func_offset;
             for k in &pred_transitive {
@@ -615,6 +623,9 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
+                for b in f.bundles.drain(..) {
+                    f.function.instruction(ctx, &b)?;
+                }
                 for p in 0..params {
                     f.function.instruction(ctx, &Instruction::LocalGet(p))?;
                 }
@@ -629,6 +640,18 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         }
         Ok(())
     }
+
+    fn flush_bundles(&mut self, ctx: &mut Context, idx: usize) -> Result<(), E> {
+        let mut funcs = self.transitive_preds_of(idx).clone();
+        for func in funcs {
+            let f = &mut self.fns[func.0 as usize];
+            for b in f.bundles.drain(..) {
+                f.function.instruction(ctx, &b)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Emit a call instruction with exception handling.
     /// The call is wrapped in a try-catch block to handle escapes via the specified tag.
     ///
@@ -643,6 +666,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         tag: EscapeTag,
         pool: Pool,
     ) -> Result<(), E> {
+        self.flush_bundles(ctx, self.fns.len() - 1)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: TypeIdx(ty_idx),
@@ -698,6 +722,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// * `params` - Number of parameters to pass through the exception
     /// * `tag` - Exception tag to throw
     pub fn ret(&mut self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.flush_bundles(ctx, self.fns.len() - 1)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: _,
@@ -770,6 +795,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         pool: Pool,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
     ) -> Result<(), E> {
+        self.flush_bundles(ctx, self.fns.len() - 1)?;
         // Track if statements for conditional branches
         if condition.is_some() {
             self.increment_if_stmts_for_predecessors(ctx)?;
@@ -1005,6 +1031,32 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         }
         Ok(())
     }
+
+    /// Feed an instruction lazily to all active functions.
+    /// The instruction is added lazily to the current function and all its predecessors.
+    /// Each visited function's instruction count is incremented.
+    pub fn feed_lazy(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+        // collect_reachable_predecessors is O(1) — reads tail.transitive_preds.
+        let reachable = self.collect_reachable_predecessors();
+        for FuncIdx(idx) in reachable {
+            //SAFETY: TODO
+            self.fns[idx as usize]
+                .bundles
+                .push(unsafe { transmute(instruction.clone()) });
+            self.fns[idx as usize].inst_count += 1;
+        }
+        Ok(())
+    }
+
+    /// Perform a barrier on all lazily fed instructions, ensuring they are emitted before any subsequent instructions.
+    pub fn barrier(&mut self, ctx: &mut Context) -> Result<(), E> {
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        let tail_idx = self.fns.len() - 1;
+        self.flush_bundles(ctx, tail_idx)
+    }
+
     /// Seal the current function by emitting a final instruction and closing all if statements.
     /// This terminates the function and removes all predecessor edges.
     pub fn seal(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
@@ -1012,6 +1064,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             return Ok(());
         }
         let tail_idx = self.fns.len() - 1;
+        self.flush_bundles(ctx, tail_idx)?;
         let ifs = self.fns[tail_idx].if_stmts;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
