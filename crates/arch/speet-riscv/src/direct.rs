@@ -1,5 +1,6 @@
 use crate::*;
-use speet_ordering::{emit_fence, emit_load, emit_store};
+use rv_asm::{AmoOp, AmoOrdering};
+use speet_ordering::{RmwOp, RmwWidth, emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 
 /// Snippet for setting expected_ra to a constant return address in speculative calls
 struct ExpectedRaSnippet {
@@ -2135,49 +2136,55 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
 
             // Atomic operations (A extension)
-            // RISC-V Specification Quote:
-            // "The atomic instruction set is divided into two subsets: the standard atomic
-            // instructions (AMO) and load-reserved/store-conditional (LR/SC) instructions."
-            // Note: WebAssembly atomics require special handling
-            Inst::LrW { dest, addr, .. } => {
-                // Load-reserved word
-                // In WebAssembly, we'll implement this as a regular atomic load
+            // RISC-V Specification: "The atomic instruction set is divided into two
+            // subsets: the standard atomic instructions (AMO) and load-reserved /
+            // store-conditional (LR/SC) instructions."
+            //
+            // All three families lower to wasm thread-local atomics.  In the
+            // single-threaded wasm model these are equivalent to plain loads/stores
+            // plus the cmpxchg loop for min/max AMOs; on shared-memory wasm they
+            // provide the full multi-threaded guarantees.
+            Inst::LrW { dest, addr, order } => {
+                // LR.W: load-reserved word.  No reservation register in wasm —
+                // treated as an atomic 32-bit load.  AmoOrdering is accepted for
+                // API symmetry; the wasm atomic load is always seq-cst within a
+                // thread.
                 if dest.0 != 0 {
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
-                    self.reactor.feed(
-                        ctx,
-                        &Instruction::I32AtomicLoad(wasm_encoder::MemArg {
-                            offset: 0,
-                            align: 2,
-                            memory_index: 0,
-                        }),
-                    )?;
+                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32, MemOrder::Strong)?;
+                    if self.enable_rv64 {
+                        // Sign-extend the 32-bit loaded value to i64.
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
+                    }
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
-            Inst::ScW {
-                dest, addr, src, ..
-            } => {
-                // Store-conditional word
-                // In a simplified model, always succeed (return 0)
-                // A full implementation would track reservations
+            Inst::ScW { dest, addr, src, order } => {
+                // SC.W: store-conditional word.  Always succeeds in single-threaded
+                // wasm — write 0 (success) into `dest`.
                 self.reactor
                     .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
-                self.reactor
-                    .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.feed(
-                    ctx,
-                    &Instruction::I32AtomicStore(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 2,
-                        memory_index: 0,
-                    }),
-                )?;
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    // Truncate i64 register to the 32-bit value to store.
+                    self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                } else {
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                }
+                emit_sc(ctx, &mut self.reactor, RmwWidth::W32, MemOrder::Strong)?;
                 if dest.0 != 0 {
-                    self.reactor.feed(ctx, &Instruction::I32Const(0))?; // Success
+                    // SC always succeeds: write 0 into dest.
+                    let zero = if self.enable_rv64 {
+                        Instruction::I64Const(0)
+                    } else {
+                        Instruction::I32Const(0)
+                    };
+                    self.reactor.feed(ctx, &zero)?;
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
@@ -2643,12 +2650,62 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 }
             }
 
-            // Advanced atomic memory operations
-            // These require more sophisticated atomic support than simple LR/SC
-            Inst::AmoW { .. } => {
-                // AMO operations (AMOSWAP, AMOADD, etc.) need WebAssembly atomic RMW operations
-                // Future implementation should map these to appropriate wasm atomic instructions
-                self.reactor.feed(ctx, &Instruction::Unreachable)?;
+            // AMO: atomic read-modify-write word.
+            //
+            // Each AMO reads the old value at [addr], applies `op(old, src)`, writes
+            // the result back, and returns `old` into `dest`.  The five ops with direct
+            // wasm RMW counterparts (Swap/Add/Xor/And/Or) compile to a single wasm
+            // atomic instruction.  Min/Max/Minu/Maxu are synthesised with a cmpxchg
+            // loop in emit_rmw — see speet-ordering for the detailed encoding.
+            Inst::AmoW { op, dest, addr, src, order } => {
+                let rmw_op = match op {
+                    AmoOp::Swap => RmwOp::Swap,
+                    AmoOp::Add  => RmwOp::Add,
+                    AmoOp::Xor  => RmwOp::Xor,
+                    AmoOp::And  => RmwOp::And,
+                    AmoOp::Or   => RmwOp::Or,
+                    AmoOp::Min  => RmwOp::Min,
+                    AmoOp::Max  => RmwOp::Max,
+                    AmoOp::Minu => RmwOp::Minu,
+                    AmoOp::Maxu => RmwOp::Maxu,
+                };
+
+                let addr_local = Self::reg_to_local(*addr);
+                let src_local  = Self::reg_to_local(*src);
+                let scratch    = Self::amo_scratch_local();
+
+                // Push addr and src onto the wasm stack for emit_rmw to consume.
+                self.reactor
+                    .feed(ctx, &Instruction::LocalGet(addr_local))?;
+                if self.enable_rv64 {
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(src_local))?;
+                    // Truncate i64 register to i32 for the 32-bit AMO.
+                    self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+                } else {
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(src_local))?;
+                }
+                // emit_rmw consumes [addr, src] from the stack and leaves [old].
+                // The `order` bits from the guest instruction are passed through;
+                // emit_rmw ignores them for the direct-RMW path and they have no
+                // semantic effect on the cmpxchg path either (wasm cmpxchg is
+                // seq-cst within a thread).
+                let _ = order; // accepted for completeness; wasm atomics are always seq-cst
+                emit_rmw(ctx, &mut self.reactor, RmwWidth::W32, rmw_op,
+                         addr_local, src_local, scratch)?;
+
+                if dest.0 != 0 {
+                    if self.enable_rv64 {
+                        // Sign-extend the 32-bit old value to the 64-bit register.
+                        self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
+                    }
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                } else {
+                    // Discard the returned old value.
+                    self.reactor.feed(ctx, &Instruction::Drop)?;
+                }
             }
 
             // Floating-point classify

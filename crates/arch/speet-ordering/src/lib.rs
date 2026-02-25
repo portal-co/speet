@@ -202,6 +202,316 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     reactor.feed(ctx, &instr)
 }
 
+// ── Atomic RMW helpers ────────────────────────────────────────────────────────
+
+/// Width of an atomic read-modify-write operation.
+///
+/// Both RISC-V (A extension) and MIPS (future) expose 32-bit AMO/LL-SC;
+/// RISC-V RV64 uses the same 32-bit variant of the encoding but the context
+/// in this crate models them explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RmwWidth {
+    /// 32-bit (wasm `i32.atomic.rmw.*`)
+    W32,
+    /// 64-bit (wasm `i64.atomic.rmw.*`)
+    W64,
+}
+
+/// ISA-neutral read-modify-write operation.
+///
+/// Maps directly onto the wasm `i32.atomic.rmw.*` / `i64.atomic.rmw.*` family
+/// where a direct counterpart exists.  `Min`, `Max`, `Minu`, and `Maxu` have
+/// no single wasm RMW opcode and are synthesised with a `cmpxchg` loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RmwOp {
+    /// Atomic exchange (AMOSWAP).
+    Swap,
+    /// Atomic fetch-and-add (AMOADD).
+    Add,
+    /// Atomic fetch-and-xor (AMOXOR).
+    Xor,
+    /// Atomic fetch-and-and (AMOAND).
+    And,
+    /// Atomic fetch-and-or (AMOOR).
+    Or,
+    /// Atomic fetch-and-signed-min (AMOMIN).  Synthesised via cmpxchg.
+    Min,
+    /// Atomic fetch-and-signed-max (AMOMAX).  Synthesised via cmpxchg.
+    Max,
+    /// Atomic fetch-and-unsigned-min (AMOMINU).  Synthesised via cmpxchg.
+    Minu,
+    /// Atomic fetch-and-unsigned-max (AMOMAXU).  Synthesised via cmpxchg.
+    Maxu,
+}
+
+/// The alignment (log₂ bytes) for an [`RmwWidth`] access.
+fn rmw_align(w: RmwWidth) -> u32 {
+    match w {
+        RmwWidth::W32 => 2, // 4-byte aligned
+        RmwWidth::W64 => 3, // 8-byte aligned
+    }
+}
+
+/// The canonical wasm [`MemArg`] (offset 0, natural alignment) for an RMW
+/// access of the given width into memory index 0.
+fn rmw_memarg(w: RmwWidth) -> MemArg {
+    MemArg { offset: 0, align: rmw_align(w), memory_index: 0 }
+}
+
+/// Emit an **atomic load-reserved** (`LR.W` / `LR.D`).
+///
+/// The effective address is already on the wasm stack when this is called.
+/// The loaded value is left on the stack; the caller is responsible for
+/// storing it into the destination local.
+///
+/// In the single-threaded wasm model there is no reservation register, so
+/// this lowers to a plain `I32AtomicLoad` / `I64AtomicLoad`.  The `_order`
+/// argument is accepted for API symmetry but currently has no effect; the
+/// wasm atomic load always implies sequential consistency within a thread.
+pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    reactor: &mut Reactor<Context, E, F>,
+    width: RmwWidth,
+    _order: MemOrder,
+) -> Result<(), E> {
+    let m = rmw_memarg(width);
+    let instr = match width {
+        RmwWidth::W32 => Instruction::I32AtomicLoad(m),
+        RmwWidth::W64 => Instruction::I64AtomicLoad(m),
+    };
+    reactor.feed(ctx, &instr)
+}
+
+/// Emit an **atomic store-conditional** (`SC.W` / `SC.D`).
+///
+/// Stack on entry: `[addr, value]`.  The store is performed atomically.
+/// In the single-threaded wasm model SC always succeeds; the caller pushes
+/// `0i32` (success) into the destination register after this call.
+///
+/// The `_order` argument is accepted for API symmetry only.
+pub fn emit_sc<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    reactor: &mut Reactor<Context, E, F>,
+    width: RmwWidth,
+    _order: MemOrder,
+) -> Result<(), E> {
+    let m = rmw_memarg(width);
+    let instr = match width {
+        RmwWidth::W32 => Instruction::I32AtomicStore(m),
+        RmwWidth::W64 => Instruction::I64AtomicStore(m),
+    };
+    reactor.feed(ctx, &instr)
+}
+
+pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
+    ctx: &mut Context,
+    reactor: &mut Reactor<Context, E, F>,
+    width: RmwWidth,
+    op: RmwOp,
+    addr_local: u32,
+    src_local: u32,
+    scratch_local: u32,
+) -> Result<(), E> {
+    let m = rmw_memarg(width);
+
+    // ── Direct RMW opcodes (consume stack [addr, src] → [old]) ────────────
+    let direct: Option<Instruction<'static>> = match (width, op) {
+        (RmwWidth::W32, RmwOp::Swap) => Some(Instruction::I32AtomicRmwXchg(m)),
+        (RmwWidth::W64, RmwOp::Swap) => Some(Instruction::I64AtomicRmwXchg(m)),
+        (RmwWidth::W32, RmwOp::Add)  => Some(Instruction::I32AtomicRmwAdd(m)),
+        (RmwWidth::W64, RmwOp::Add)  => Some(Instruction::I64AtomicRmwAdd(m)),
+        (RmwWidth::W32, RmwOp::Xor)  => Some(Instruction::I32AtomicRmwXor(m)),
+        (RmwWidth::W64, RmwOp::Xor)  => Some(Instruction::I64AtomicRmwXor(m)),
+        (RmwWidth::W32, RmwOp::And)  => Some(Instruction::I32AtomicRmwAnd(m)),
+        (RmwWidth::W64, RmwOp::And)  => Some(Instruction::I64AtomicRmwAnd(m)),
+        (RmwWidth::W32, RmwOp::Or)   => Some(Instruction::I32AtomicRmwOr(m)),
+        (RmwWidth::W64, RmwOp::Or)   => Some(Instruction::I64AtomicRmwOr(m)),
+        _ => None,
+    };
+
+    if let Some(instr) = direct {
+        return reactor.feed(ctx, &instr);
+    }
+
+    // ── Synthesised min/max via cmpxchg loop ──────────────────────────────
+    //
+    // Wasm structured encoding:
+    //
+    //   ;; entry stack: [addr, src]  (both consumed; reloaded from locals)
+    //   block $exit (result valtype)
+    //     loop $retry
+    //       local.get addr_local
+    //       i32/i64.atomic.load          ;; old
+    //       local.tee scratch_local      ;; old (stashed)
+    //       local.get src_local          ;; old, src
+    //       [relational op]              ;; pred
+    //       local.get scratch_local      ;; pred, old
+    //       local.get src_local          ;; pred, old, src
+    //       select                       ;; new = pred ? old : src
+    //                                    ;;   = keep old when pred is true
+    //       ;; cmpxchg needs [addr, expected, replacement]
+    //       local.get addr_local         ;; new, addr  ← wrong order
+    //       ;; swap trick: stash new, push addr, push expected, push new
+    //       local.set scratch_local      ;; addr (new stashed)  ← but scratch has old!
+    //
+    // The problem: we need both `old` (as cmpxchg expected) and `new`
+    // (as replacement) simultaneously, but we only have one scratch local.
+    //
+    // Solution: use `scratch_local` for `old` (tee it there), and compute
+    // `new` without losing `old`, by ordering the select to put the result
+    // (new) on the stack last, then immediately issue cmpxchg.
+    //
+    // cmpxchg operand order: addr expected replacement → old_at_addr
+    // We build:
+    //   addr_local.get                ;; addr
+    //   scratch_local.get             ;; addr, old   (= expected)
+    //   [new computed inline on stack];; addr, old, new   (= replacement)
+    //   cmpxchg                       ;; got
+    //   ;; check: got == old?
+    //   local.get scratch_local       ;; got, old
+    //   i32/i64.eq                    ;; same?
+    //   br_if 1 ($exit)              ;; exit if CAS succeeded (got==old)
+    //   br 0 ($retry)                ;; else retry
+    //   end ;; loop
+    //   ;; unreachable — loop only exits via br_if
+    //   unreachable
+    //   end ;; block → old is the block result (from br_if value)
+    //
+    // The `br_if $exit` with value requires the old value on the stack:
+    //   got, old → eq → pred; but we need to carry `old` as block result.
+    //   So: tee got into scratch2, compare, br_if carries the tee'd value.
+    //   Since we only have one scratch, we instead:
+    //     1. tee got (not stash), compare got==old_stash, br_if
+    //   But we need `old` as the result, not `got` — and we can't br_if
+    //   carrying `got` when we want `old`.
+    //
+    // Cleanest approach: after CAS, if got==old then `got` IS `old` so
+    // we can use `got` as the block result directly.
+    //
+    //   block $exit (result valtype)
+    //     loop $retry
+    //       ;; compute new, then cmpxchg
+    //       local.get addr_local
+    //       scratch = atomic_load(addr)   scratch_local ← old
+    //       new = op(scratch, src)         on stack
+    //       ;; cmpxchg [addr, expected=scratch, replacement=new]
+    //       local.get addr_local           ;; new, addr
+    //       local.get scratch_local        ;; new, addr, expected
+    //       ;; need [addr, expected, new] but have [new, addr, expected]
+    //       ;; Use a second approach: don't put new on stack yet.
+    //
+    // Final clean sequence (compute new last):
+    //
+    //   block $exit (result valtype)
+    //     loop $retry
+    //       ;; load old
+    //       local.get addr_local
+    //       atomic.load                    ;; old
+    //       local.tee scratch_local        ;; old
+    //       ;; push addr, expected, then compute new inline as replacement
+    //       local.get addr_local           ;; old, addr
+    //       local.get scratch_local        ;; old, addr, expected(=old)
+    //       ;; compute new = op(old, src) — need old and src
+    //       local.get scratch_local        ;; old, addr, expected, old
+    //       local.get src_local            ;; old, addr, expected, old, src
+    //       [relational]                   ;; old, addr, expected, pred
+    //       local.get scratch_local        ;; old, addr, expected, pred, old
+    //       local.get src_local            ;; old, addr, expected, pred, old, src
+    //       select                         ;; old, addr, expected, new(=replacement)
+    //       cmpxchg                        ;; old, got
+    //       local.get scratch_local        ;; old, got, old_expected
+    //       i32/i64.eq                     ;; old, same?
+    //       br_if 1                        ;; if same: br to $exit carrying `old`
+    //       drop                           ;; discard `old` from stack (loop again)
+    //       br 0                           ;; retry
+    //     end ;; loop
+    //     unreachable
+    //   end ;; block
+    //
+    // This uses only `scratch_local` (one extra local of the value type).
+    // The entry stack [addr, src] is consumed immediately by the loop setup
+    // (they are only accessed via locals after that).
+
+    use wasm_encoder::BlockType;
+
+    let val_ty = match width {
+        RmwWidth::W32 => wasm_encoder::ValType::I32,
+        RmwWidth::W64 => wasm_encoder::ValType::I64,
+    };
+    let block_ty = BlockType::Result(val_ty);
+
+    // Consume the entry [addr, src] stack — they're already in locals,
+    // so just drop them.
+    reactor.feed(ctx, &Instruction::Drop)?; // drop src from entry stack
+    reactor.feed(ctx, &Instruction::Drop)?; // drop addr from entry stack
+
+    reactor.feed(ctx, &Instruction::Block(block_ty))?;
+    reactor.feed(ctx, &Instruction::Loop(BlockType::Empty))?;
+
+    // Load old
+    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;
+    let load_instr = match width {
+        RmwWidth::W32 => Instruction::I32AtomicLoad(m),
+        RmwWidth::W64 => Instruction::I64AtomicLoad(m),
+    };
+    reactor.feed(ctx, &load_instr)?;
+    reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
+
+    // Push addr, expected for cmpxchg
+    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;     // old, addr
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?;  // old, addr, expected
+
+    // Compute new = op(old, src) as replacement
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?;  // old, addr, expected, old
+    reactor.feed(ctx, &Instruction::LocalGet(src_local))?;       // old, addr, expected, old, src
+
+    // Emit the comparison operator; consumes [old, src], leaves [pred]
+    match (width, op) {
+        (RmwWidth::W32, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I32LtS)?,
+        (RmwWidth::W64, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I64LtS)?,
+        (RmwWidth::W32, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I32GtS)?,
+        (RmwWidth::W64, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I64GtS)?,
+        (RmwWidth::W32, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I32LtU)?,
+        (RmwWidth::W64, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I64LtU)?,
+        (RmwWidth::W32, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I32GtU)?,
+        (RmwWidth::W64, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I64GtU)?,
+        _ => unreachable!(),
+    }
+    // stack: old, addr, expected, pred
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, pred, old
+    reactor.feed(ctx, &Instruction::LocalGet(src_local))?;      // old, addr, expected, pred, old, src
+    // select: pred ? old : src  (pred true → keep old = it IS min/max)
+    reactor.feed(ctx, &Instruction::Select)?;   // old, addr, expected, new
+
+    // cmpxchg: [addr, expected, replacement] → got
+    let cmpxchg_instr = match width {
+        RmwWidth::W32 => Instruction::I32AtomicRmwCmpxchg(m),
+        RmwWidth::W64 => Instruction::I64AtomicRmwCmpxchg(m),
+    };
+    reactor.feed(ctx, &cmpxchg_instr)?; // old, got
+
+    // Check CAS result: got == old?
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?;  // old, got, expected
+    let eq_instr = match width {
+        RmwWidth::W32 => Instruction::I32Eq,
+        RmwWidth::W64 => Instruction::I64Eq,
+    };
+    reactor.feed(ctx, &eq_instr)?;  // old, same?
+
+    // br_if 1 ($exit): if CAS succeeded, break out carrying `old` (depth 1 = block)
+    reactor.feed(ctx, &Instruction::BrIf(1))?;  // old (consumed by br, or remains for drop)
+
+    // CAS failed: drop `old`, retry
+    reactor.feed(ctx, &Instruction::Drop)?;
+    reactor.feed(ctx, &Instruction::Br(0))?;  // br $retry
+
+    reactor.feed(ctx, &Instruction::End)?; // end loop
+    reactor.feed(ctx, &Instruction::Unreachable)?; // unreachable after infinite loop
+    reactor.feed(ctx, &Instruction::End)?; // end block; result = old (from br_if)
+
+    Ok(())
+}
+
 /// Emit a **fence** (memory barrier).
 ///
 /// * Under [`MemOrder::Strong`]: calls [`Reactor::barrier`] to flush any

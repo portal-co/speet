@@ -59,7 +59,7 @@ use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
-use speet_ordering::{emit_fence, emit_load, emit_store};
+use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
@@ -68,7 +68,7 @@ pub use speet_memory::{
     multilevel_page_table_mapper, multilevel_page_table_mapper_32,
     standard_page_table_mapper, standard_page_table_mapper_32,
 };
-pub use speet_ordering::{AtomicOpts, MemOrder};
+pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 
 /// Legacy type alias — `MapperContext` is the same as [`CallbackContext`].
 pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
@@ -800,6 +800,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Get the starting index for temporary registers
     const fn temps_start() -> u32 {
         66
+    }
+
+    /// Scratch local used by AMO min/max synthesis (cmpxchg loop).
+    ///
+    /// Locals 66–68 are reserved for the page-table mapper callbacks
+    /// (see [`PageMapLocals::consecutive`]).  Local 69 is therefore the first
+    /// free slot available for non-mapper scratch use.  It holds an i32 (or
+    /// i64 in RV64 mode) value type and is only live for the duration of a
+    /// single AMO instruction translation.
+    const fn amo_scratch_local() -> u32 {
+        69
     }
 
     /// Emit instructions to load an immediate value

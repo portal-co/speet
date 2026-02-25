@@ -50,10 +50,10 @@ use wax_core::build::InstructionSink;
 use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, Target, TypeIdx};
-use speet_ordering::{emit_fence, emit_load, emit_store};
+use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
-pub use speet_ordering::{AtomicOpts, MemOrder};
+pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 
 /// Branch operation types for conditional branches
 #[derive(Debug, Clone, Copy)]
@@ -1528,6 +1528,146 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // empty, so this is a guaranteed no-op.
             InstrId::cpu_sync => {
                 emit_fence(ctx, &mut self.reactor, self.mem_order)?;
+            }
+
+            // ── Atomic load-linked / store-conditional ────────────────────────────
+            //
+            // MIPS LL/SC implement optimistic concurrency.  On wasm (single-threaded
+            // model) the SC always succeeds; on shared-memory wasm the wasm atomic
+            // load/store give the necessary ordering.  The reservation register is
+            // not tracked — SC always writes 1 (success) into rt.
+            //
+            // LL rt, offset(base) — load-linked word (32-bit)
+            InstrId::cpu_ll => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt:   GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if rt != GprO32::zero {
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx)?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
+                        mapper.call(ctx, &mut callback_ctx)?;
+                    }
+
+                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32,
+                            speet_ordering::MemOrder::Strong)?;
+
+                    if self.enable_mips64 {
+                        self.reactor
+                            .feed(ctx, &WasmInstruction::I64ExtendI32S)?;
+                    }
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                }
+            }
+
+            // SC rt, offset(base) — store-conditional word (32-bit); always succeeds
+            InstrId::cpu_sc => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt:   GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                // Compute effective address
+                self.reactor
+                    .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
+                self.emit_add(ctx)?;
+
+                if let Some(mapper) = self.mapper_callback.as_mut() {
+                    let mut callback_ctx = CallbackContext::new(&mut self.reactor);
+                    mapper.call(ctx, &mut callback_ctx)?;
+                }
+
+                // Value to store: rt (truncated to i32 if MIPS64)
+                if self.enable_mips64 {
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
+                } else {
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                }
+
+                emit_sc(ctx, &mut self.reactor, RmwWidth::W32,
+                        speet_ordering::MemOrder::Strong)?;
+
+                // SC always succeeds: write 1 into rt
+                if rt != GprO32::zero {
+                    let one: WasmInstruction<'static> = if self.enable_mips64 {
+                        WasmInstruction::I64Const(1)
+                    } else {
+                        WasmInstruction::I32Const(1)
+                    };
+                    self.reactor.feed(ctx, &one)?;
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                }
+            }
+
+            // LLD rt, offset(base) — load-linked doubleword (MIPS64 only)
+            InstrId::cpu_lld => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt:   GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if !self.enable_mips64 {
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
+                } else if rt != GprO32::zero {
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx)?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
+                        mapper.call(ctx, &mut callback_ctx)?;
+                    }
+
+                    emit_lr(ctx, &mut self.reactor, RmwWidth::W64,
+                            speet_ordering::MemOrder::Strong)?;
+
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                }
+            }
+
+            // SCD rt, offset(base) — store-conditional doubleword (MIPS64 only); always succeeds
+            InstrId::cpu_scd => {
+                let base: GprO32 = instruction.get_rs_o32();
+                let rt:   GprO32 = instruction.get_rt_o32();
+                let imm = instruction.get_immediate() as i32;
+
+                if !self.enable_mips64 {
+                    self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
+                } else {
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.reactor.feed(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx)?;
+
+                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                        let mut callback_ctx = CallbackContext::new(&mut self.reactor);
+                        mapper.call(ctx, &mut callback_ctx)?;
+                    }
+
+                    self.reactor
+                        .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+
+                    emit_sc(ctx, &mut self.reactor, RmwWidth::W64,
+                            speet_ordering::MemOrder::Strong)?;
+
+                    // SCD always succeeds: write 1 into rt
+                    if rt != GprO32::zero {
+                        self.reactor.feed(ctx, &WasmInstruction::I64Const(1))?;
+                        self.reactor
+                            .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                }
             }
 
             // Unsupported or unimplemented instructions
