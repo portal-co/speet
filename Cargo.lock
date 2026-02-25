@@ -294,6 +294,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "speet-traps"
+version = "0.1.0"
+dependencies = [
+ "wasm-encoder",
+ "wax-core",
+ "yecta",
+]
+
+[[package]]
 name = "speet-wasm-helpers"
 version = "0.1.0"
 dependencies = [

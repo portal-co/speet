@@ -7,6 +7,7 @@ members = [
     "crates/arch/yecta",
     "crates/arch/speet-x86_64",
     "crates/arch/speet-mips",
+    "crates/arch/speet-traps",
 ]
 resolver = "3"
 
