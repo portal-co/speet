@@ -88,18 +88,24 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
+        // Save the effective address into the load-addr scratch local so that
+        // emit_load can compare it against any pending lazy store addresses.
+        let load_addr = Self::load_addr_scratch_local();
+        self.reactor
+            .feed(ctx, &Instruction::LocalTee(load_addr))?;
+
         // Load from memory
         match op {
             LoadOp::I8 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -113,14 +119,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
             LoadOp::U8 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -133,14 +139,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
             LoadOp::I16 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -153,14 +159,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
             LoadOp::U16 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -173,14 +179,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
             LoadOp::I32 => {
                 if self.enable_rv64 && self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load32S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -194,14 +200,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             LoadOp::U32 => {
                 // RV64 LWU instruction - load word unsigned (zero-extended)
                 if self.use_memory64 {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load32U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
                         }))?;
                 } else {
-                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -212,7 +218,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
             LoadOp::I64 => {
                 // RV64 LD instruction - load double-word
-                emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::I64Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
@@ -355,10 +361,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
+        // Save the effective address for alias checks.
+        let load_addr = Self::load_addr_scratch_local();
+        self.reactor
+            .feed(ctx, &Instruction::LocalTee(load_addr))?;
+
         // Load from memory
         match op {
             FLoadOp::F32 => {
-                emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::F32Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 2,
@@ -367,7 +378,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 self.reactor.feed(ctx, &Instruction::F64PromoteF32)?;
             }
             FLoadOp::F64 => {
-                emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
                     Instruction::F64Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 3,
@@ -2152,7 +2163,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if dest.0 != 0 {
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
-                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32, self.atomic_opts, MemOrder::Strong)?;
+                    // Tee address for alias check in emit_lr.
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalTee(Self::load_addr_scratch_local()))?;
+                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32, self.atomic_opts,
+                            Self::load_addr_scratch_local(), MemOrder::Strong)?;
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit loaded value to i64.
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;

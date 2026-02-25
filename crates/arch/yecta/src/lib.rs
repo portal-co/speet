@@ -75,10 +75,150 @@ use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet, vec_deque::VecDeque},
     vec::Vec,
 };
-use wasm_encoder::{Catch, Function, Instruction, ValType};
+use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
 use wax_core::build::InstructionSink;
 
 extern crate alloc;
+
+// ── LocalPool ─────────────────────────────────────────────────────────────────
+
+/// A fixed-capacity pool of recyclable wasm local indices.
+///
+/// The pool is split into two typed buckets — one for `i32` locals and one for
+/// `i64` locals.  Both buckets are backed by stack-allocated fixed-size arrays
+/// so there are no heap allocations in the hot path.
+///
+/// The pool is generic over a const capacity `N` that covers *both* buckets
+/// combined: up to `N` i32 locals and up to `N` i64 locals may be held at the
+/// same time.  In practice the pool is small (a handful of locals per
+/// in-flight deferred store), so `N = 32` is more than sufficient.
+///
+/// # Allocation failure
+/// If `alloc` returns `None` the caller is expected to flush all pending lazy
+/// stores unconditionally and reset the pool, after which allocation will
+/// succeed again.
+pub struct LocalPool<const N: usize = 32> {
+    i32s: [u32; N],
+    i32_len: usize,
+    i64s: [u32; N],
+    i64_len: usize,
+}
+
+impl<const N: usize> LocalPool<N> {
+    /// Create an empty pool.
+    pub const fn new() -> Self {
+        Self { i32s: [0; N], i32_len: 0, i64s: [0; N], i64_len: 0 }
+    }
+
+    /// Seed the pool with a contiguous range of i32 local indices
+    /// `[first, first + count)`.
+    pub fn seed_i32(&mut self, first: u32, count: u32) {
+        for i in 0..count as usize {
+            if self.i32_len < N {
+                self.i32s[self.i32_len] = first + i as u32;
+                self.i32_len += 1;
+            }
+        }
+    }
+
+    /// Seed the pool with a contiguous range of i64 local indices
+    /// `[first, first + count)`.
+    pub fn seed_i64(&mut self, first: u32, count: u32) {
+        for i in 0..count as usize {
+            if self.i64_len < N {
+                self.i64s[self.i64_len] = first + i as u32;
+                self.i64_len += 1;
+            }
+        }
+    }
+
+    /// Allocate one local of the requested type.  Returns `None` when the
+    /// corresponding bucket is empty.
+    pub fn alloc(&mut self, ty: ValType) -> Option<u32> {
+        match ty {
+            ValType::I32 => {
+                if self.i32_len == 0 {
+                    return None;
+                }
+                self.i32_len -= 1;
+                Some(self.i32s[self.i32_len])
+            }
+            ValType::I64 => {
+                if self.i64_len == 0 {
+                    return None;
+                }
+                self.i64_len -= 1;
+                Some(self.i64s[self.i64_len])
+            }
+            // Only i32 and i64 are used for store operands and flags.
+            _ => None,
+        }
+    }
+
+    /// Return a local back to the pool.
+    pub fn free(&mut self, idx: u32, ty: ValType) {
+        match ty {
+            ValType::I32 => {
+                if self.i32_len < N {
+                    self.i32s[self.i32_len] = idx;
+                    self.i32_len += 1;
+                }
+            }
+            ValType::I64 => {
+                if self.i64_len < N {
+                    self.i64s[self.i64_len] = idx;
+                    self.i64_len += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Returns `true` if there are no free locals of *any* type in the pool.
+    pub fn is_empty(&self) -> bool {
+        self.i32_len == 0 && self.i64_len == 0
+    }
+}
+
+impl<const N: usize> Default for LocalPool<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── LazyStore ─────────────────────────────────────────────────────────────────
+
+/// A store instruction that has been deferred via [`Reactor::feed_lazy`].
+///
+/// At deferral time the operands (`[addr, value]`) are popped from the wasm
+/// value stack and saved into borrowed locals from the [`LocalPool`].  The
+/// instruction itself is stored here so that later emission (either
+/// conditionally before a load or unconditionally at a barrier) can
+/// reconstruct the full sequence:
+///
+/// ```text
+/// local.get addr_local
+/// local.get val_local
+/// [instr]
+/// ```
+///
+/// Additionally, `emitted_local` (always i32) records at **runtime** whether
+/// this store was already conditionally emitted before a load (1 = emitted,
+/// 0 = not yet).  The unconditional flush path checks this flag to avoid
+/// double-storing.
+pub struct LazyStore {
+    /// Local holding the effective address (always i32).
+    pub addr_local: u32,
+    /// Local holding the value to store.
+    pub val_local: u32,
+    /// Value type of the stored value (`I32` or `I64`).
+    pub val_type: ValType,
+    /// Boolean local (i32): set to 1 at runtime when this store was
+    /// conditionally emitted before a load; the barrier flush checks it.
+    pub emitted_local: u32,
+    /// The wasm store instruction (e.g. `I32Store`, `I64Store8`, …).
+    pub instr: Instruction<'static>,
+}
 
 /// Index of a WebAssembly function in the module.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -302,6 +442,9 @@ pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Fun
     max_insts_per_fn: usize,
     /// Maximum open `if` blocks per generated function before a forced split.
     max_ifs_per_fn: usize,
+    /// Pool of recyclable local indices used to save/restore deferred store
+    /// operands around alias-check `if` guards in lazy emission.
+    pub local_pool: LocalPool,
 }
 impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E, F> {
     fn default() -> Self {
@@ -312,6 +455,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E,
             base_func_offset: 0,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
+            local_pool: LocalPool::new(),
         }
     }
 }
@@ -337,6 +481,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             base_func_offset,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
+            local_pool: LocalPool::new(),
         }
     }
 
@@ -386,7 +531,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
 /// Internal entry representing a function being generated.
 struct Entry<F> {
     function: F,
-    bundles: Vec<Instruction<'static>>,
+    bundles: Vec<LazyStore>,
     preds: BTreeSet<FuncIdx>,
     if_stmts: usize,
     /// Running count of instructions emitted into this function via `feed`.
@@ -623,8 +768,23 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
-                for b in f.bundles.drain(..) {
-                    f.function.instruction(ctx, &b)?;
+                // Drain deferred stores: emit the flag-guarded unconditional flush.
+                // We can't borrow `self.local_pool` and `f` simultaneously so we
+                // drain into a local vec first.
+                let stores: Vec<LazyStore> = f.bundles.drain(..).collect();
+                for s in stores {
+                    // Emit only if not already emitted before a load.
+                    f.function.instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
+                    f.function.instruction(ctx, &Instruction::I32Eqz)?;
+                    f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                    f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                    f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                    f.function.instruction(ctx, &s.instr)?;
+                    f.function.instruction(ctx, &Instruction::End)?;
+                    // Return locals to the pool.
+                    self.local_pool.free(s.addr_local, ValType::I32);
+                    self.local_pool.free(s.val_local, s.val_type);
+                    self.local_pool.free(s.emitted_local, ValType::I32);
                 }
                 for p in 0..params {
                     f.function.instruction(ctx, &Instruction::LocalGet(p))?;
@@ -642,11 +802,77 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     }
 
     fn flush_bundles(&mut self, ctx: &mut Context, idx: usize) -> Result<(), E> {
-        let mut funcs = self.transitive_preds_of(idx).clone();
+        let funcs = self.transitive_preds_of(idx).clone();
+        for func in funcs {
+            // Drain into a temporary vec to satisfy the borrow checker.
+            let stores: Vec<LazyStore> = self.fns[func.0 as usize].bundles.drain(..).collect();
+            for s in stores {
+                let f = &mut self.fns[func.0 as usize];
+                // Emit only if not already conditionally emitted before a load.
+                f.function.instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
+                f.function.instruction(ctx, &Instruction::I32Eqz)?;
+                f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                f.function.instruction(ctx, &s.instr)?;
+                f.function.instruction(ctx, &Instruction::End)?;
+                // Return locals to the shared pool.
+                self.local_pool.free(s.addr_local, ValType::I32);
+                self.local_pool.free(s.val_local, s.val_type);
+                self.local_pool.free(s.emitted_local, ValType::I32);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit alias-guarded conditional stores for all pending lazy bundles
+    /// before a load from `load_addr_local`.
+    ///
+    /// For each deferred store, emits:
+    ///
+    /// ```text
+    /// ;; runtime alias check
+    /// local.get store.addr_local
+    /// local.get load_addr_local
+    /// i32.eq
+    /// local.tee store.emitted_local   ;; record for the later unconditional flush
+    /// if                              ;; if they alias, emit the store now
+    ///   local.get store.addr_local
+    ///   local.get store.val_local
+    ///   [store instr]
+    /// end
+    /// ```
+    ///
+    /// The `emitted_local` flag is set to 1 at runtime when the addresses
+    /// aliased.  The subsequent unconditional flush (at `barrier()` / control
+    /// flow) skips stores whose flag is already set, preventing double-stores.
+    ///
+    /// All pending bundles remain in the queue; the unconditional flush will
+    /// drain them and free their locals.
+    pub fn flush_bundles_for_load(
+        &mut self,
+        ctx: &mut Context,
+        load_addr_local: u32,
+    ) -> Result<(), E> {
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        let tail_idx = self.fns.len() - 1;
+        let funcs = self.transitive_preds_of(tail_idx).clone();
         for func in funcs {
             let f = &mut self.fns[func.0 as usize];
-            for b in f.bundles.drain(..) {
-                f.function.instruction(ctx, &b)?;
+            for s in &*f.bundles {
+                // Alias check: store.addr == load.addr?
+                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function.instruction(ctx, &Instruction::LocalGet(load_addr_local))?;
+                f.function.instruction(ctx, &Instruction::I32Eq)?;
+                // Tee the result into emitted_local so the later flush can skip it.
+                f.function.instruction(ctx, &Instruction::LocalTee(s.emitted_local))?;
+                f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                f.function.instruction(ctx, &s.instr)?;
+                f.function.instruction(ctx, &Instruction::End)?;
             }
         }
         Ok(())
@@ -1032,18 +1258,81 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         Ok(())
     }
 
-    /// Feed an instruction lazily to all active functions.
-    /// The instruction is added lazily to the current function and all its predecessors.
-    /// Each visited function's instruction count is incremented.
-    pub fn feed_lazy(&mut self, ctx: &mut Context, instruction: &Instruction<'static>) -> Result<(), E> { //TODO: support non-`'static` instructions
-        // collect_reachable_predecessors is O(1) — reads tail.transitive_preds.
-        let reachable = self.collect_reachable_predecessors();
-        for FuncIdx(idx) in reachable {
-            //SAFETY: TODO
-            self.fns[idx as usize]
-                .bundles
-                .push(instruction.clone());
-            self.fns[idx as usize].inst_count += 1;
+    /// Defer a store instruction lazily.
+    ///
+    /// At call time `[addr, value]` must be on the wasm stack.  This method:
+    ///
+    /// 1. Attempts to allocate three locals from [`Reactor::local_pool`]:
+    ///    - `addr_local` (i32) — saves the effective address
+    ///    - `val_local` (`val_type`) — saves the value
+    ///    - `emitted_local` (i32) — runtime flag indicating whether this store
+    ///      was already conditionally emitted before a load
+    ///
+    /// 2. **Pool has space**: emits `LocalSet(val_local)`, `LocalSet(addr_local)`
+    ///    (consuming the stack), initialises `emitted_local` to 0, and queues a
+    ///    [`LazyStore`].
+    ///
+    /// 3. **Pool is exhausted**: flushes all existing lazy bundles
+    ///    unconditionally first (freeing their locals), then emits the store
+    ///    instruction eagerly.  This is the safe fallback that preserves
+    ///    correctness at the cost of disabling further reordering for this
+    ///    store.
+    ///
+    /// `val_type` must be `ValType::I32` or `ValType::I64` matching the value
+    /// type consumed by `instruction`.
+    pub fn feed_lazy(
+        &mut self,
+        ctx: &mut Context,
+        val_type: ValType,
+        instruction: &Instruction<'static>,
+    ) -> Result<(), E> {
+        // Try to allocate all three locals up front.  If any allocation fails,
+        // fall back to eager emission.  We allocate emitted_local last so that
+        // partial allocation doesn't waste pool entries on a failed attempt.
+        let addr_opt = self.local_pool.alloc(ValType::I32);
+        let val_opt  = self.local_pool.alloc(val_type);
+        let flag_opt = self.local_pool.alloc(ValType::I32);
+
+        match (addr_opt, val_opt, flag_opt) {
+            (Some(addr_local), Some(val_local), Some(emitted_local)) => {
+                // Consume [addr, value] from the stack into locals.  The value
+                // is on top, so set it first.
+                let reachable = self.collect_reachable_predecessors();
+                for FuncIdx(idx) in reachable {
+                    self.fns[idx as usize]
+                        .function
+                        .instruction(ctx, &Instruction::LocalSet(val_local))?;
+                    self.fns[idx as usize]
+                        .function
+                        .instruction(ctx, &Instruction::LocalSet(addr_local))?;
+                    // Initialise the emitted flag to 0.
+                    self.fns[idx as usize]
+                        .function
+                        .instruction(ctx, &Instruction::I32Const(0))?;
+                    self.fns[idx as usize]
+                        .function
+                        .instruction(ctx, &Instruction::LocalSet(emitted_local))?;
+                    self.fns[idx as usize].inst_count += 4;
+                    self.fns[idx as usize].bundles.push(LazyStore {
+                        addr_local,
+                        val_local,
+                        val_type,
+                        emitted_local,
+                        instr: instruction.clone(),
+                    });
+                }
+            }
+            (addr_opt, val_opt, flag_opt) => {
+                // Return any successfully allocated locals before bailing.
+                if let Some(l) = flag_opt { self.local_pool.free(l, ValType::I32); }
+                if let Some(l) = val_opt  { self.local_pool.free(l, val_type); }
+                if let Some(l) = addr_opt { self.local_pool.free(l, ValType::I32); }
+                // Flush existing bundles so those locals are freed.
+                let tail = self.fns.len().saturating_sub(1);
+                self.flush_bundles(ctx, tail)?;
+                // Emit this store eagerly — the stack still has [addr, value].
+                self.feed(ctx, instruction)?;
+            }
         }
         Ok(())
     }

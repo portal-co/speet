@@ -755,23 +755,40 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // Float registers: locals 32-63 (f64)
         // PC: local 64 (i32)
         // Expected RA: local 65 (i32/i64) - hidden register for speculative call returns
-        // Temps: locals 66+ (mixed types)
+        // Temps: locals 66+ (int_type):
+        //   66-68  mapper scratch
+        //   69     AMO scratch
+        //   70-65+num_temps   caller-requested extras
+        // Load-addr scratch: local 66+num_temps (i32, always)
+        // Pool i32s: locals 67+num_temps .. 66+num_temps+N_POOL_I32 (i32)
+        // Pool i64s: locals 67+num_temps+N_POOL_I32 .. end (i64)
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
             ValType::I32
         };
         let locals = [
-            (32, int_type),        // x0-x31
-            (32, ValType::F64),    // f0-f31 (using F64 for both F and D with NaN-boxing)
-            (1, ValType::I32),     // PC
-            (1, int_type),         // Expected RA (for speculative call returns)
-            (num_temps, int_type), // Temporary registers (match integer register type)
+            (32, int_type),              // x0-x31
+            (32, ValType::F64),          // f0-f31
+            (1, ValType::I32),           // PC
+            (1, int_type),               // Expected RA
+            (num_temps, int_type),       // caller temps (mapper + AMO scratch)
+            (1, ValType::I32),           // load-addr scratch
+            (Self::N_POOL_I32, ValType::I32), // pool i32 slots
+            (Self::N_POOL_I64, ValType::I64), // pool i64 slots
         ];
-        // The second argument is the length in 2-byte increments
-        // Set to 2 to prevent infinite looping (yecta handles automatic fallthrough)
+        // Seed the reactor's local pool with the freshly-declared pool locals.
+        let pool_i32_start = 66 + num_temps + 1;
+        let pool_i64_start = pool_i32_start + Self::N_POOL_I32;
+        self.reactor.local_pool.seed_i32(pool_i32_start, Self::N_POOL_I32);
+        self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
         self.reactor.next_with(ctx, f(&mut locals.into_iter()), 2)
     }
+
+    /// Number of i32 locals reserved in the local pool for lazy-store operand saving.
+    const N_POOL_I32: u32 = 8;
+    /// Number of i64 locals reserved in the local pool for lazy-store operand saving.
+    const N_POOL_I64: u32 = 4;
 
     /// Get the local index for an integer register
     fn reg_to_local(reg: Reg) -> u32 {
@@ -811,6 +828,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// single AMO instruction translation.
     const fn amo_scratch_local() -> u32 {
         69
+    }
+
+    /// Scratch local used to save the effective load address for alias checks
+    /// against pending lazy stores.
+    ///
+    /// Follows immediately after the 8 `int_type` temp locals (66–73).
+    /// This local is always `i32` (linear memory addresses are 32-bit in the
+    /// default wasm memory model).
+    const fn load_addr_scratch_local() -> u32 {
+        // 66 (first temp) + 8 (num_temps passed by translate_instruction) = 74
+        74
     }
 
     /// Emit instructions to load an immediate value

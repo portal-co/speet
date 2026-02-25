@@ -58,7 +58,7 @@
 
 #![no_std]
 
-use wasm_encoder::{Instruction, MemArg};
+use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 use yecta::Reactor;
 
@@ -146,6 +146,27 @@ fn atomic_store_equiv(instr: &Instruction<'static>) -> Instruction<'static> {
     }
 }
 
+/// Return the wasm value type of the *value* operand consumed by a store
+/// instruction.
+///
+/// All narrow integer stores (`I32Store8`, `I32Store16`, `I32Store32`) take an
+/// i32 value; wide stores (`I64Store`, `I64Store8`, …) take an i64 value.
+/// This is used to pick the right local type when deferring a store via
+/// [`Reactor::feed_lazy`].
+fn store_val_type(instr: &Instruction<'static>) -> ValType {
+    match instr {
+        Instruction::I64Store(_)
+        | Instruction::I64Store8(_)
+        | Instruction::I64Store16(_)
+        | Instruction::I64Store32(_)
+        | Instruction::I64AtomicStore(_)
+        | Instruction::I64AtomicStore8(_)
+        | Instruction::I64AtomicStore16(_)
+        | Instruction::I64AtomicStore32(_) => ValType::I64,
+        _ => ValType::I32,
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Emit a memory **store** instruction.
@@ -176,21 +197,39 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     };
     match order {
         MemOrder::Strong => reactor.feed(ctx, &instr),
-        MemOrder::Relaxed => reactor.feed_lazy(ctx, &instr),
+        MemOrder::Relaxed => {
+            let vt = store_val_type(&instr);
+            reactor.feed_lazy(ctx, vt, &instr)
+        }
     }
 }
 
 /// Emit a memory **load** instruction.
 ///
-/// Loads are always emitted eagerly regardless of `MemOrder`, because
-/// reordering a load past a subsequent store would violate load-acquire
-/// semantics even on a weak ISA.
+/// Before emitting the load, any deferred stores that might alias
+/// `addr_local` are conditionally flushed via
+/// [`Reactor::flush_bundles_for_load`].  Each pending store is guarded by a
+/// runtime equality check between its saved address local and `addr_local`;
+/// if they match at runtime the store is emitted immediately so the load
+/// sees the up-to-date value.
+///
+/// The `addr_local` argument must hold the effective load address (i32) at
+/// the point of the call.  The address must already be on the wasm stack as
+/// well (it is consumed by the actual load instruction); callers should
+/// `local.tee` it into `addr_local` just before calling this function:
+///
+/// ```text
+/// ;; address computation ...
+/// local.tee addr_local          ;; save for alias check; keep on stack
+/// emit_load(…, addr_local, …)   ;; conditionally flushes, then loads
+/// ```
 ///
 /// If `atomic.use_atomic_insns` is `true` and the instruction has an atomic
 /// counterpart, the atomic form is used instead.
 pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     reactor: &mut Reactor<Context, E, F>,
+    addr_local: u32,
     atomic: AtomicOpts,
     instr: Instruction<'static>,
 ) -> Result<(), E> {
@@ -199,6 +238,8 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     } else {
         instr
     };
+    // Flush any pending stores that might alias this load's address.
+    reactor.flush_bundles_for_load(ctx, addr_local)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -277,11 +318,35 @@ fn rmw_memarg(w: RmwWidth) -> MemArg {
 /// The `_order` argument is accepted for API symmetry; wasm atomic loads are
 /// always sequentially consistent within a thread regardless of the guest
 /// ordering annotation.
+/// Emit an **atomic load-reserved** (`LR.W` / `LR.D`).
+///
+/// The effective address is already on the wasm stack when this is called.
+/// The loaded value is left on the stack; the caller is responsible for
+/// storing it into the destination local.
+///
+/// Before emitting the load, any pending lazy stores that alias `addr_local`
+/// are conditionally flushed (see [`emit_load`]).  `addr_local` must hold the
+/// same effective address that is on the stack.
+///
+/// When `atomic.use_atomic_insns` is `true` this emits an
+/// `I32AtomicLoad` / `I64AtomicLoad`.  On a shared-memory wasm target those
+/// instructions provide the sequentially-consistent ordering that an LR
+/// requires.
+///
+/// When `atomic.use_atomic_insns` is `false` — an environment that does not
+/// support the wasm threads proposal — this falls back to a plain
+/// `I32Load` / `I64Load`.  There is no hardware reservation mechanism in this
+/// path; correctness relies on single-threaded execution.
+///
+/// The `_order` argument is accepted for API symmetry; wasm atomic loads are
+/// always sequentially consistent within a thread regardless of the guest
+/// ordering annotation.
 pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     reactor: &mut Reactor<Context, E, F>,
     width: RmwWidth,
     atomic: AtomicOpts,
+    addr_local: u32,
     _order: MemOrder,
 ) -> Result<(), E> {
     let m = rmw_memarg(width);
@@ -296,6 +361,8 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W64 => Instruction::I64Load(m),
         }
     };
+    // Flush any pending stores that might alias this load.
+    reactor.flush_bundles_for_load(ctx, addr_local)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -442,6 +509,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
+        reactor.flush_bundles_for_load(ctx, addr_local)?;
         reactor.feed(ctx, &load_instr)?;                          // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
@@ -602,6 +670,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
+        reactor.flush_bundles_for_load(ctx, addr_local)?;
         reactor.feed(ctx, &load_instr)?;                            // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?;  // stash old; old on stack
 
@@ -652,6 +721,8 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
         RmwWidth::W32 => Instruction::I32AtomicLoad(m),
         RmwWidth::W64 => Instruction::I64AtomicLoad(m),
     };
+    // Flush any deferred stores that alias the RMW address before reading.
+    reactor.flush_bundles_for_load(ctx, addr_local)?;
     reactor.feed(ctx, &load_instr)?;
     reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
 
