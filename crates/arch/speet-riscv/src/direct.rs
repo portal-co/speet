@@ -2152,7 +2152,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if dest.0 != 0 {
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
-                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32, MemOrder::Strong)?;
+                    emit_lr(ctx, &mut self.reactor, RmwWidth::W32, self.atomic_opts, MemOrder::Strong)?;
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit loaded value to i64.
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
@@ -2176,7 +2176,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 }
-                emit_sc(ctx, &mut self.reactor, RmwWidth::W32, MemOrder::Strong)?;
+                emit_sc(ctx, &mut self.reactor, RmwWidth::W32, self.atomic_opts, self.mem_order)?;
                 if dest.0 != 0 {
                     // SC always succeeds: write 0 into dest.
                     let zero = if self.enable_rv64 {
@@ -2687,12 +2687,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         .feed(ctx, &Instruction::LocalGet(src_local))?;
                 }
                 // emit_rmw consumes [addr, src] from the stack and leaves [old].
-                // The `order` bits from the guest instruction are passed through;
-                // emit_rmw ignores them for the direct-RMW path and they have no
-                // semantic effect on the cmpxchg path either (wasm cmpxchg is
-                // seq-cst within a thread).
-                let _ = order; // accepted for completeness; wasm atomics are always seq-cst
+                // When atomic_opts.use_atomic_insns is true, direct ops use wasm
+                // RMW instructions and min/max use a cmpxchg loop.  When false,
+                // direct ops use a plain load/op/store and min/max use a plain
+                // load/select/store — correct for single-threaded wasm and still
+                // eligible for store sinking under MemOrder::Relaxed.
+                let _ = order; // guest ordering annotation; wasm atomics are seq-cst within a thread
                 emit_rmw(ctx, &mut self.reactor, RmwWidth::W32, rmw_op,
+                         self.atomic_opts, self.mem_order,
                          addr_local, src_local, scratch)?;
 
                 if dest.0 != 0 {

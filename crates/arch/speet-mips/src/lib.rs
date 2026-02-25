@@ -1555,7 +1555,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     emit_lr(ctx, &mut self.reactor, RmwWidth::W32,
-                            speet_ordering::MemOrder::Strong)?;
+                            self.atomic_opts, speet_ordering::MemOrder::Strong)?;
 
                     if self.enable_mips64 {
                         self.reactor
@@ -1594,7 +1594,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 }
 
                 emit_sc(ctx, &mut self.reactor, RmwWidth::W32,
-                        speet_ordering::MemOrder::Strong)?;
+                        self.atomic_opts, self.mem_order)?;
 
                 // SC always succeeds: write 1 into rt
                 if rt != GprO32::zero {
@@ -1629,7 +1629,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     emit_lr(ctx, &mut self.reactor, RmwWidth::W64,
-                            speet_ordering::MemOrder::Strong)?;
+                            self.atomic_opts, speet_ordering::MemOrder::Strong)?;
 
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
@@ -1659,7 +1659,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
 
                     emit_sc(ctx, &mut self.reactor, RmwWidth::W64,
-                            speet_ordering::MemOrder::Strong)?;
+                            self.atomic_opts, self.mem_order)?;
 
                     // SCD always succeeds: write 1 into rt
                     if rt != GprO32::zero {
