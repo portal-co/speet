@@ -30,3 +30,4 @@ portal-solutions-asm-x86-64 = { version = "0.1.0", git = "https://github.com/por
 rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 rabbitizer = "1.14.3"
 powerpc = "0.4.1"
+disarm64 = "0.1.25"
