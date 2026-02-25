@@ -11,6 +11,7 @@ yecta = {path = "../yecta"}
 rabbitizer.workspace = true
 wax-core.workspace = true
 speet-memory = {path = "../speet-memory"}
+speet-ordering = {path = "../speet-ordering"}
 
 [dev-dependencies]
 object = "0.36"

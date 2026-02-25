@@ -255,6 +255,16 @@ dependencies = [
  "object",
  "rabbitizer",
  "speet-memory",
+ "speet-ordering",
+ "wasm-encoder",
+ "wax-core",
+ "yecta",
+]
+
+[[package]]
+name = "speet-ordering"
+version = "0.1.0"
+dependencies = [
  "wasm-encoder",
  "wax-core",
  "yecta",
@@ -276,6 +286,7 @@ dependencies = [
  "object",
  "rv-asm",
  "speet-memory",
+ "speet-ordering",
  "speet-wasm-helpers",
  "wasm-encoder",
  "wax-core",

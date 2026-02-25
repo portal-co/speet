@@ -59,6 +59,7 @@ use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
+use speet_ordering::{emit_fence, emit_load, emit_store};
 
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
@@ -67,6 +68,7 @@ pub use speet_memory::{
     multilevel_page_table_mapper, multilevel_page_table_mapper_32,
     standard_page_table_mapper, standard_page_table_mapper_32,
 };
+pub use speet_ordering::{AtomicOpts, MemOrder};
 
 /// Legacy type alias — `MapperContext` is the same as [`CallbackContext`].
 pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
@@ -263,6 +265,19 @@ pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>
     /// When enabled, these instructions are lowered to native WASM calls with
     /// exception-based return validation instead of jumps.
     enable_speculative_calls: bool,
+    /// Memory ordering mode for load/store emission.
+    ///
+    /// `MemOrder::Strong` (default) emits all stores eagerly.
+    /// `MemOrder::Relaxed` emits stores via `feed_lazy`, letting the yecta
+    /// reactor sink them to the latest control-flow boundary.  Only enable
+    /// for binaries that conform to the RISC-V weak memory model.
+    mem_order: MemOrder,
+    /// Optional atomic instruction substitution.
+    ///
+    /// When `use_atomic_insns` is true, integer loads and stores are replaced
+    /// with their wasm atomic equivalents.  This is gated behind a separate
+    /// flag so it can be enabled independently of `mem_order`.
+    atomic_opts: AtomicOpts,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
@@ -299,6 +314,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_rv64,
             use_memory64,
             enable_speculative_calls: false,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
         }
     }
 
@@ -335,6 +352,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_rv64,
             use_memory64,
             enable_speculative_calls: false,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
         }
     }
 
@@ -592,7 +611,39 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.mapper_callback = None;
     }
 
-    /// Enable or disable RV64 instruction support
+    /// Set the memory ordering mode for load/store emission.
+    ///
+    /// * [`MemOrder::Strong`] (default) — all stores are emitted eagerly.
+    ///   `FENCE` instructions flush the lazy buffer (which is always empty
+    ///   in this mode) and are otherwise no-ops.
+    ///
+    /// * [`MemOrder::Relaxed`] — stores are emitted via `feed_lazy`, letting
+    ///   yecta sink them to the latest control-flow boundary.  Only use this
+    ///   for RISC-V binaries that conform to the weak memory model.
+    pub fn set_mem_order(&mut self, order: MemOrder) {
+        self.mem_order = order;
+    }
+
+    /// Return the current memory ordering mode.
+    pub fn mem_order(&self) -> MemOrder {
+        self.mem_order
+    }
+
+    /// Set the atomic instruction options.
+    ///
+    /// When `atomic.use_atomic_insns` is `true`, integer load/store
+    /// instructions will be replaced with their wasm atomic equivalents.
+    /// This is independent of [`MemOrder`].
+    pub fn set_atomic_opts(&mut self, atomic: AtomicOpts) {
+        self.atomic_opts = atomic;
+    }
+
+    /// Return the current atomic instruction options.
+    pub fn atomic_opts(&self) -> AtomicOpts {
+        self.atomic_opts
+    }
+
+
     ///
     /// When enabled, RV64-specific instructions will be translated instead of
     /// emitting unreachable. This includes 64-bit loads/stores and W-suffix

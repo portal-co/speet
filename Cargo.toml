@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/arch/speet-memory",
+    "crates/arch/speet-ordering",
     "crates/arch/speet-powerpc",
     "crates/arch/speet-riscv",
     "crates/arch/yecta",

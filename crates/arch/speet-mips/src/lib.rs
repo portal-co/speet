@@ -50,9 +50,10 @@ use wax_core::build::InstructionSink;
 use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, Target, TypeIdx};
-
-// Re-export the shared memory/mapper abstractions.
+use speet_ordering::{emit_fence, emit_load, emit_store};
+// Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
+pub use speet_ordering::{AtomicOpts, MemOrder};
 
 /// Branch operation types for conditional branches
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +218,18 @@ pub struct MipsRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx)>,
     /// Whether to enable MIPS64 instruction support (disabled by default)
     enable_mips64: bool,
+    /// Memory ordering mode for load/store emission.
+    ///
+    /// `MemOrder::Strong` (default) emits all stores eagerly.
+    /// `MemOrder::Relaxed` emits stores via `feed_lazy`, letting the yecta
+    /// reactor sink them to the latest control-flow boundary.  Only enable
+    /// for MIPS binaries that conform to the weak memory model.
+    mem_order: MemOrder,
+    /// Optional atomic instruction substitution.
+    ///
+    /// When `use_atomic_insns` is true, integer load/store instructions are
+    /// replaced with their wasm atomic equivalents.
+    atomic_opts: AtomicOpts,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
@@ -244,6 +257,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             break_callback: None,
             mapper_callback: None,
             enable_mips64,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
         }
     }
 
@@ -271,6 +286,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             break_callback: None,
             mapper_callback: None,
             enable_mips64,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
         }
     }
 
@@ -370,7 +387,38 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.mapper_callback = None;
     }
 
-    /// Enable or disable MIPS64 instruction support
+    /// Set the memory ordering mode for load/store emission.
+    ///
+    /// * [`MemOrder::Strong`] (default) — all stores are emitted eagerly.
+    ///   `SYNC` instructions flush the lazy buffer and are otherwise no-ops.
+    ///
+    /// * [`MemOrder::Relaxed`] — stores are emitted via `feed_lazy`, letting
+    ///   yecta sink them to the latest control-flow boundary.  Only use this
+    ///   for MIPS binaries that conform to the weak memory model.
+    pub fn set_mem_order(&mut self, order: MemOrder) {
+        self.mem_order = order;
+    }
+
+    /// Return the current memory ordering mode.
+    pub fn mem_order(&self) -> MemOrder {
+        self.mem_order
+    }
+
+    /// Set the atomic instruction options.
+    ///
+    /// When `atomic.use_atomic_insns` is `true`, integer load/store
+    /// instructions will be replaced with their wasm atomic equivalents.
+    /// This is independent of [`MemOrder`].
+    pub fn set_atomic_opts(&mut self, atomic: AtomicOpts) {
+        self.atomic_opts = atomic;
+    }
+
+    /// Return the current atomic instruction options.
+    pub fn atomic_opts(&self) -> AtomicOpts {
+        self.atomic_opts
+    }
+
+
     ///
     /// When enabled, MIPS64-specific instructions will be translated instead of
     /// emitting unreachable.
@@ -1037,14 +1085,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // load byte (signed) -> i32
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Load8S(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I32Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     // extend to i64 if needed
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
@@ -1072,14 +1118,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // load byte unsigned -> i32
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Load8U(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I32Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
@@ -1106,14 +1150,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // load halfword signed -> i32
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Load16S(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I32Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
@@ -1140,14 +1182,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // load halfword unsigned -> i32
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Load16U(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I32Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
@@ -1177,25 +1217,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store8(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store8(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 }
             }
 
@@ -1220,25 +1256,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store16(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store16(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 }
             }
 
@@ -1262,14 +1294,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Load(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
@@ -1301,25 +1331,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I32Store(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 }
             }
 
@@ -1346,14 +1372,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // perform 64-bit memory load
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I64Load(wasm_encoder::MemArg {
+                    emit_load(ctx, &mut self.reactor, self.atomic_opts,
+                        WasmInstruction::I64Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 3,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
@@ -1384,14 +1408,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // store 64-bit value directly
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.feed(
-                        ctx,
-                        &WasmInstruction::I64Store(wasm_encoder::MemArg {
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                        WasmInstruction::I64Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 3,
                             memory_index: 0,
-                        }),
-                    )?;
+                        }))?;
                 }
             }
 
@@ -1492,6 +1514,20 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // Default behavior: breakpoint - implementation specific
                     self.reactor.feed(ctx, &WasmInstruction::Unreachable)?;
                 }
+            }
+
+            // SYNC: MIPS memory barrier
+            //
+            // MIPS Specification: "The SYNC instruction affects the order in
+            // which memory access operations are seen by other processors or
+            // devices sharing the same memory."
+            //
+            // Under MemOrder::Relaxed, emit_fence flushes all stores that were
+            // deferred by feed_lazy, committing them in program order before the
+            // next instruction.  Under MemOrder::Strong the lazy buffer is always
+            // empty, so this is a guaranteed no-op.
+            InstrId::cpu_sync => {
+                emit_fence(ctx, &mut self.reactor, self.mem_order)?;
             }
 
             // Unsupported or unimplemented instructions
