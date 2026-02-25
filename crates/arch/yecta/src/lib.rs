@@ -207,8 +207,11 @@ impl<const N: usize> Default for LocalPool<N> {
 /// 0 = not yet).  The unconditional flush path checks this flag to avoid
 /// double-storing.
 pub struct LazyStore {
-    /// Local holding the effective address (always i32).
+    /// Local holding the effective address.
+    /// Type is `I32` for 32-bit memory (the default), `I64` for memory64.
     pub addr_local: u32,
+    /// Value type of the address (`I32` or `I64`).
+    pub addr_type: ValType,
     /// Local holding the value to store.
     pub val_local: u32,
     /// Value type of the stored value (`I32` or `I64`).
@@ -782,7 +785,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                     f.function.instruction(ctx, &s.instr)?;
                     f.function.instruction(ctx, &Instruction::End)?;
                     // Return locals to the pool.
-                    self.local_pool.free(s.addr_local, ValType::I32);
+                    self.local_pool.free(s.addr_local, s.addr_type);
                     self.local_pool.free(s.val_local, s.val_type);
                     self.local_pool.free(s.emitted_local, ValType::I32);
                 }
@@ -817,7 +820,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 f.function.instruction(ctx, &s.instr)?;
                 f.function.instruction(ctx, &Instruction::End)?;
                 // Return locals to the shared pool.
-                self.local_pool.free(s.addr_local, ValType::I32);
+                self.local_pool.free(s.addr_local, s.addr_type);
                 self.local_pool.free(s.val_local, s.val_type);
                 self.local_pool.free(s.emitted_local, ValType::I32);
             }
@@ -834,7 +837,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// ;; runtime alias check
     /// local.get store.addr_local
     /// local.get load_addr_local
-    /// i32.eq
+    /// i32.eq  (or i64.eq for memory64)
     /// local.tee store.emitted_local   ;; record for the later unconditional flush
     /// if                              ;; if they alias, emit the store now
     ///   local.get store.addr_local
@@ -847,12 +850,18 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// aliased.  The subsequent unconditional flush (at `barrier()` / control
     /// flow) skips stores whose flag is already set, preventing double-stores.
     ///
+    /// `load_addr_type` must match the type of `load_addr_local` — `ValType::I32`
+    /// for the default 32-bit memory model, `ValType::I64` for memory64.  Stores
+    /// with a different `addr_type` than the load are skipped (they live in a
+    /// different address space and cannot alias).
+    ///
     /// All pending bundles remain in the queue; the unconditional flush will
     /// drain them and free their locals.
     pub fn flush_bundles_for_load(
         &mut self,
         ctx: &mut Context,
         load_addr_local: u32,
+        load_addr_type: ValType,
     ) -> Result<(), E> {
         if self.fns.is_empty() {
             return Ok(());
@@ -862,10 +871,20 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         for func in funcs {
             let f = &mut self.fns[func.0 as usize];
             for s in &*f.bundles {
+                // Only alias-check stores in the same address space.
+                if s.addr_type != load_addr_type {
+                    continue;
+                }
                 // Alias check: store.addr == load.addr?
                 f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
                 f.function.instruction(ctx, &Instruction::LocalGet(load_addr_local))?;
-                f.function.instruction(ctx, &Instruction::I32Eq)?;
+                let eq_instr = match load_addr_type {
+                    ValType::I32 => Instruction::I32Eq,
+                    ValType::I64 => Instruction::I64Eq,
+                    // Other types cannot be linear-memory addresses; skip.
+                    _ => continue,
+                };
+                f.function.instruction(ctx, &eq_instr)?;
                 // Tee the result into emitted_local so the later flush can skip it.
                 f.function.instruction(ctx, &Instruction::LocalTee(s.emitted_local))?;
                 f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
@@ -1263,7 +1282,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// At call time `[addr, value]` must be on the wasm stack.  This method:
     ///
     /// 1. Attempts to allocate three locals from [`Reactor::local_pool`]:
-    ///    - `addr_local` (i32) — saves the effective address
+    ///    - `addr_local` (`addr_type`) — saves the effective address
     ///    - `val_local` (`val_type`) — saves the value
     ///    - `emitted_local` (i32) — runtime flag indicating whether this store
     ///      was already conditionally emitted before a load
@@ -1278,18 +1297,22 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     ///    correctness at the cost of disabling further reordering for this
     ///    store.
     ///
+    /// `addr_type` must match the address type on the stack: `ValType::I32`
+    /// for the default 32-bit memory model, `ValType::I64` for memory64.
+    ///
     /// `val_type` must be `ValType::I32` or `ValType::I64` matching the value
     /// type consumed by `instruction`.
     pub fn feed_lazy(
         &mut self,
         ctx: &mut Context,
+        addr_type: ValType,
         val_type: ValType,
         instruction: &Instruction<'static>,
     ) -> Result<(), E> {
         // Try to allocate all three locals up front.  If any allocation fails,
         // fall back to eager emission.  We allocate emitted_local last so that
         // partial allocation doesn't waste pool entries on a failed attempt.
-        let addr_opt = self.local_pool.alloc(ValType::I32);
+        let addr_opt = self.local_pool.alloc(addr_type);
         let val_opt  = self.local_pool.alloc(val_type);
         let flag_opt = self.local_pool.alloc(ValType::I32);
 
@@ -1315,6 +1338,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                     self.fns[idx as usize].inst_count += 4;
                     self.fns[idx as usize].bundles.push(LazyStore {
                         addr_local,
+                        addr_type,
                         val_local,
                         val_type,
                         emitted_local,
@@ -1326,7 +1350,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 // Return any successfully allocated locals before bailing.
                 if let Some(l) = flag_opt { self.local_pool.free(l, ValType::I32); }
                 if let Some(l) = val_opt  { self.local_pool.free(l, val_type); }
-                if let Some(l) = addr_opt { self.local_pool.free(l, ValType::I32); }
+                if let Some(l) = addr_opt { self.local_pool.free(l, addr_type); }
                 // Flush existing bundles so those locals are freed.
                 let tail = self.fns.len().saturating_sub(1);
                 self.flush_bundles(ctx, tail)?;

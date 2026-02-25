@@ -759,35 +759,47 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         //   66-68  mapper scratch
         //   69     AMO scratch
         //   70-65+num_temps   caller-requested extras
-        // Load-addr scratch: local 66+num_temps (i32, always)
-        // Pool i32s: locals 67+num_temps .. 66+num_temps+N_POOL_I32 (i32)
-        // Pool i64s: locals 67+num_temps+N_POOL_I32 .. end (i64)
+        // Load-addr scratch: local 66+num_temps (addr_type: i32 or i64)
+        // Pool addr-type locals: locals 67+num_temps .. (N_POOL_ADDR of addr_type)
+        // Pool i64s: locals after pool addr-type slots (i64, for val saving in memory64)
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
             ValType::I32
         };
+        // The effective address type matches the memory model in use.
+        // memory64 uses i64 addresses; the default path uses i32.
+        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
         let locals = [
             (32, int_type),              // x0-x31
             (32, ValType::F64),          // f0-f31
             (1, ValType::I32),           // PC
             (1, int_type),               // Expected RA
             (num_temps, int_type),       // caller temps (mapper + AMO scratch)
-            (1, ValType::I32),           // load-addr scratch
-            (Self::N_POOL_I32, ValType::I32), // pool i32 slots
-            (Self::N_POOL_I64, ValType::I64), // pool i64 slots
+            (1, addr_type),              // load-addr scratch (matches address width)
+            (Self::N_POOL_ADDR, addr_type), // pool addr-type slots (for addr_local saving)
+            (Self::N_POOL_I64, ValType::I64), // pool i64 slots (for val_local saving)
         ];
         // Seed the reactor's local pool with the freshly-declared pool locals.
-        let pool_i32_start = 66 + num_temps + 1;
-        let pool_i64_start = pool_i32_start + Self::N_POOL_I32;
-        self.reactor.local_pool.seed_i32(pool_i32_start, Self::N_POOL_I32);
+        let pool_addr_start = 66 + num_temps + 1;
+        let pool_i64_start  = pool_addr_start + Self::N_POOL_ADDR;
+        match addr_type {
+            ValType::I32 => self.reactor.local_pool.seed_i32(pool_addr_start, Self::N_POOL_ADDR),
+            ValType::I64 => self.reactor.local_pool.seed_i64(pool_addr_start, Self::N_POOL_ADDR),
+            _ => {}
+        }
         self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
         self.reactor.next_with(ctx, f(&mut locals.into_iter()), 2)
     }
 
+    /// Number of addr-type locals reserved in the local pool for address saving.
+    /// These slots hold `i32` values in the default memory model and `i64` in
+    /// memory64 mode.  Sized to hold addresses for 4 concurrent deferred stores
+    /// (each needing one addr slot + one val slot + one flag slot).
+    const N_POOL_ADDR: u32 = 4;
     /// Number of i32 locals reserved in the local pool for lazy-store operand saving.
+    #[allow(dead_code)]
     const N_POOL_I32: u32 = 8;
-    /// Number of i64 locals reserved in the local pool for lazy-store operand saving.
     const N_POOL_I64: u32 = 4;
 
     /// Get the local index for an integer register
@@ -830,12 +842,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         69
     }
 
+    /// The wasm [`ValType`] of an effective (post-mapper) memory address.
+    ///
+    /// In the default (non-memory64) path the mapper outputs an `i32`; in
+    /// memory64 mode (`use_memory64 = true`) it outputs an `i64`.
+    fn addr_val_type(&self) -> ValType {
+        if self.use_memory64 { ValType::I64 } else { ValType::I32 }
+    }
+
     /// Scratch local used to save the effective load address for alias checks
     /// against pending lazy stores.
     ///
     /// Follows immediately after the 8 `int_type` temp locals (66–73).
-    /// This local is always `i32` (linear memory addresses are 32-bit in the
-    /// default wasm memory model).
+    /// The type of this local matches the address type in use: `i32` for the
+    /// default memory model, `i64` for memory64.  The declaration in
+    /// `init_function` uses `addr_type` which is set accordingly.
     const fn load_addr_scratch_local() -> u32 {
         // 66 (first temp) + 8 (num_temps passed by translate_instruction) = 74
         74

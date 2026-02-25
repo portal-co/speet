@@ -501,6 +501,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         43
     }
 
+    /// The wasm [`ValType`] of an effective (post-mapper) memory address.
+    ///
+    /// MIPS linear memory addresses are always 32-bit (`i32`) — there is no
+    /// memory64 mode for MIPS yet.
+    fn addr_val_type(&self) -> ValType {
+        ValType::I32
+    }
+
     /// Get the local index for a general-purpose register
     fn gpr_to_local(reg: GprO32) -> u32 {
         reg as u32
@@ -1113,7 +1121,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // load byte (signed) -> i32
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I32Load8S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1148,7 +1156,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // load byte unsigned -> i32
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I32Load8U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1182,7 +1190,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // load halfword signed -> i32
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I32Load16S(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1216,7 +1224,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // load halfword unsigned -> i32
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I32Load16U(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1251,7 +1259,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1260,7 +1268,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1290,7 +1298,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1299,7 +1307,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1330,7 +1338,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -1367,7 +1375,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     self.reactor.feed(ctx, &WasmInstruction::I32WrapI64)?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -1376,7 +1384,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 } else {
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -1410,7 +1418,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // perform 64-bit memory load
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
-                    emit_load(ctx, &mut self.reactor, load_addr, self.atomic_opts,
+                    emit_load(ctx, &mut self.reactor, load_addr, ValType::I32, self.atomic_opts,
                         WasmInstruction::I64Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 3,
@@ -1446,7 +1454,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // store 64-bit value directly
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts,
+                    emit_store(ctx, &mut self.reactor, self.mem_order, self.atomic_opts, ValType::I32,
                         WasmInstruction::I64Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 3,
@@ -1595,7 +1603,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(ctx, &mut self.reactor, RmwWidth::W32,
-                            self.atomic_opts, load_addr, speet_ordering::MemOrder::Strong)?;
+                            self.atomic_opts, load_addr, ValType::I32, speet_ordering::MemOrder::Strong)?;
 
                     if self.enable_mips64 {
                         self.reactor
@@ -1671,7 +1679,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     let load_addr = Self::load_addr_scratch_local();
                     self.reactor.feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(ctx, &mut self.reactor, RmwWidth::W64,
-                            self.atomic_opts, load_addr, speet_ordering::MemOrder::Strong)?;
+                            self.atomic_opts, load_addr, ValType::I32, speet_ordering::MemOrder::Strong)?;
 
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;

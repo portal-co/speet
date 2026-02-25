@@ -147,13 +147,15 @@ fn atomic_store_equiv(instr: &Instruction<'static>) -> Instruction<'static> {
 }
 
 /// Return the wasm value type of the *value* operand consumed by a store
-/// instruction.
+/// instruction, or `None` if the store cannot be lazily deferred (e.g.
+/// float stores, whose value type has no counterpart in the i32/i64 local
+/// pool).
 ///
 /// All narrow integer stores (`I32Store8`, `I32Store16`, `I32Store32`) take an
 /// i32 value; wide stores (`I64Store`, `I64Store8`, …) take an i64 value.
-/// This is used to pick the right local type when deferring a store via
-/// [`Reactor::feed_lazy`].
-fn store_val_type(instr: &Instruction<'static>) -> ValType {
+/// Float stores (`F32Store`, `F64Store`) return `None` — they are always
+/// emitted eagerly.
+fn store_val_type(instr: &Instruction<'static>) -> Option<ValType> {
     match instr {
         Instruction::I64Store(_)
         | Instruction::I64Store8(_)
@@ -162,8 +164,11 @@ fn store_val_type(instr: &Instruction<'static>) -> ValType {
         | Instruction::I64AtomicStore(_)
         | Instruction::I64AtomicStore8(_)
         | Instruction::I64AtomicStore16(_)
-        | Instruction::I64AtomicStore32(_) => ValType::I64,
-        _ => ValType::I32,
+        | Instruction::I64AtomicStore32(_) => Some(ValType::I64),
+        // Float stores cannot be saved in the i32/i64 local pool.
+        Instruction::F32Store(_) | Instruction::F64Store(_) => None,
+        // Everything else (I32Store, I32Store8, I32Store16, atomic variants) → i32.
+        _ => Some(ValType::I32),
     }
 }
 
@@ -175,7 +180,9 @@ fn store_val_type(instr: &Instruction<'static>) -> ValType {
 ///   eagerly via [`Reactor::feed`].
 /// * When `order` is [`MemOrder::Relaxed`]: the instruction is queued with
 ///   [`Reactor::feed_lazy`] so the reactor can defer it until the next
-///   control-flow boundary.
+///   control-flow boundary.  Float stores (`F32Store`, `F64Store`) are always
+///   emitted eagerly regardless of `order` because their value type (`f32` /
+///   `f64`) cannot be saved in the integer local pool.
 ///
 /// If `atomic.use_atomic_insns` is `true` and the instruction has an atomic
 /// counterpart, the atomic form is used instead.
@@ -183,11 +190,17 @@ fn store_val_type(instr: &Instruction<'static>) -> ValType {
 /// The `instr` argument must be a `'static` instruction (i.e. one that does
 /// not borrow a name or byte string) because `feed_lazy` requires
 /// `'static`.  All integer store instructions satisfy this.
+///
+/// `addr_type` is the wasm value type of the address operand on the stack:
+/// `ValType::I32` for ordinary (32-bit) linear memory, `ValType::I64` for
+/// memory64.  This is recorded in the [`LazyStore`] so that alias checks
+/// against loads use the correct equality instruction.
 pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     reactor: &mut Reactor<Context, E, F>,
     order: MemOrder,
     atomic: AtomicOpts,
+    addr_type: ValType,
     instr: Instruction<'static>,
 ) -> Result<(), E> {
     let instr = if atomic.use_atomic_insns {
@@ -198,8 +211,11 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     match order {
         MemOrder::Strong => reactor.feed(ctx, &instr),
         MemOrder::Relaxed => {
-            let vt = store_val_type(&instr);
-            reactor.feed_lazy(ctx, vt, &instr)
+            match store_val_type(&instr) {
+                Some(vt) => reactor.feed_lazy(ctx, addr_type, vt, &instr),
+                // Float stores are always eager — no pool support for f32/f64.
+                None => reactor.feed(ctx, &instr),
+            }
         }
     }
 }
@@ -213,15 +229,16 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
 /// if they match at runtime the store is emitted immediately so the load
 /// sees the up-to-date value.
 ///
-/// The `addr_local` argument must hold the effective load address (i32) at
-/// the point of the call.  The address must already be on the wasm stack as
-/// well (it is consumed by the actual load instruction); callers should
-/// `local.tee` it into `addr_local` just before calling this function:
+/// The `addr_local` argument must hold the effective load address at the
+/// point of the call; `addr_type` must be `ValType::I32` for ordinary memory
+/// and `ValType::I64` for memory64.  The address must already be on the wasm
+/// stack as well (it is consumed by the actual load instruction); callers
+/// should `local.tee` it into `addr_local` just before calling this function:
 ///
 /// ```text
 /// ;; address computation ...
 /// local.tee addr_local          ;; save for alias check; keep on stack
-/// emit_load(…, addr_local, …)   ;; conditionally flushes, then loads
+/// emit_load(…, addr_local, addr_type, …)
 /// ```
 ///
 /// If `atomic.use_atomic_insns` is `true` and the instruction has an atomic
@@ -230,6 +247,7 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     reactor: &mut Reactor<Context, E, F>,
     addr_local: u32,
+    addr_type: ValType,
     atomic: AtomicOpts,
     instr: Instruction<'static>,
 ) -> Result<(), E> {
@@ -239,7 +257,7 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
         instr
     };
     // Flush any pending stores that might alias this load's address.
-    reactor.flush_bundles_for_load(ctx, addr_local)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, addr_type)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -347,6 +365,7 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
     width: RmwWidth,
     atomic: AtomicOpts,
     addr_local: u32,
+    addr_type: ValType,
     _order: MemOrder,
 ) -> Result<(), E> {
     let m = rmw_memarg(width);
@@ -362,7 +381,7 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
         }
     };
     // Flush any pending stores that might alias this load.
-    reactor.flush_bundles_for_load(ctx, addr_local)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, addr_type)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -403,7 +422,7 @@ pub fn emit_sc<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, instr)
+        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, instr)
     }
 }
 
@@ -509,7 +528,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
-        reactor.flush_bundles_for_load(ctx, addr_local)?;
+        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
         reactor.feed(ctx, &load_instr)?;                          // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
@@ -542,7 +561,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, store_instr)?;
+        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, store_instr)?;
         // Stack: old
         return Ok(());
     }
@@ -670,7 +689,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
-        reactor.flush_bundles_for_load(ctx, addr_local)?;
+        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
         reactor.feed(ctx, &load_instr)?;                            // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?;  // stash old; old on stack
 
@@ -699,7 +718,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, store_instr)?;
+        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, store_instr)?;
         // stack: old
         return Ok(());
     }
@@ -722,7 +741,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
         RmwWidth::W64 => Instruction::I64AtomicLoad(m),
     };
     // Flush any deferred stores that alias the RMW address before reading.
-    reactor.flush_bundles_for_load(ctx, addr_local)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
     reactor.feed(ctx, &load_instr)?;
     reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
 
