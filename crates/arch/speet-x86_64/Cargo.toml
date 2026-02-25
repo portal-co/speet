@@ -11,6 +11,7 @@ wasm-encoder = { workspace = true }
 yecta = { path = "../yecta" }
 wax-core = { workspace = true }
 speet-memory = { path = "../speet-memory" }
+speet-traps = { path = "../speet-traps" }
 
 [dev-dependencies]
 object = "0.36"

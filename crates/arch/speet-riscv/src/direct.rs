@@ -667,6 +667,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.reactor
             .feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
 
+        // Fire instruction trap (if installed).
+        let insn_info = InstructionInfo {
+            pc: pc as u64,
+            len: inst_len * 2,  // inst_len is in 2-byte units; convert to bytes
+            arch: ArchTag::RiscV,
+            class: Self::classify_insn(inst),
+        };
+        if self.traps.on_instruction(&insn_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            return Ok(());
+        }
+
         match inst {
             // RV32I Base Integer Instruction Set
 
@@ -748,7 +759,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // Use fixups to set expected_ra (local 65) only for this call
                     let params =
-                        yecta::JumpCallParams::call(target_func, 66, escape_tag, self.pool)
+                        yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
                             .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
                     // Emit the speculative call using yecta's ji_with_params API
@@ -771,7 +782,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         self.reactor
                             .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
-                    self.jump_to_pc(ctx, target_pc, 66)?;
+                    // Jump trap: Jal rd!=x0,ra → Call; others → DirectJump
+                    let jal_kind = if dest.0 == 1 { JumpKind::Call } else { JumpKind::DirectJump };
+                    let jal_info = JumpInfo::direct(pc as u64, target_pc, jal_kind);
+                    if self.traps.on_jump(&jal_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                        return Ok(());
+                    }
+                    self.jump_to_pc(ctx, target_pc, self.total_params)?;
                     return Ok(());
                 }
             }
@@ -793,6 +810,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     && self.escape_tag.is_some();
 
                 if is_abi_return {
+                    // Jump trap: jalr x0, ra, 0 → Return (indirect)
+                    // Tee ra into load_addr_scratch_local so the trap can inspect it.
+                    let scratch = Self::load_addr_scratch_local();
+                    self.reactor
+                        .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    self.reactor.feed(ctx, &Instruction::LocalTee(scratch))?;
+                    self.reactor.feed(ctx, &Instruction::Drop)?; // balance the stack
+                    let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
+                    if self.traps.on_jump(&jalr_ret_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                        return Ok(());
+                    }
+
                     // ABI-compliant return: check if ra matches expected_ra
                     // If they match, use regular WASM Return; if not, throw escape tag
                     let escape_tag = self.escape_tag.unwrap();
@@ -822,7 +851,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor.feed(ctx, &Instruction::Else)?;
 
                     // Non-ABI-compliant return - throw escape tag with all register state
-                    self.reactor.ret(ctx, 66, escape_tag)?;
+                    self.reactor.ret(ctx, self.total_params, escape_tag)?;
 
                     self.reactor.feed(ctx, &Instruction::End)?;
                     return Ok(());
@@ -959,7 +988,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     );
 
                     let params = yecta::JumpCallParams {
-                        params: 66,
+                        params: self.total_params,
                         fixups,
                         target: yecta::Target::Dynamic {
                             idx: &target_snippet,
@@ -987,7 +1016,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         self.reactor
                             .feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
-                    // JALR is indirect, compute target and update PC
+                    // JALR is indirect, compute target and update PC.
+                    // Tee the target into load_addr_scratch_local for the jump trap.
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
                     self.emit_imm(ctx, *offset)?;
@@ -1001,8 +1031,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             .feed(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
                         self.reactor.feed(ctx, &Instruction::I32And)?;
                     }
-                    self.reactor
-                        .feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+                    let scratch = Self::load_addr_scratch_local();
+                    self.reactor.feed(ctx, &Instruction::LocalTee(scratch))?;
+                    self.reactor.feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+                    // Jump trap: dest==1 → IndirectCall; dest==0 without base==ra → IndirectJump
+                    let jalr_kind = if dest.0 == 1 { JumpKind::IndirectCall } else { JumpKind::IndirectJump };
+                    let jalr_info = JumpInfo::indirect(pc as u64, scratch, jalr_kind);
+                    if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                        return Ok(());
+                    }
                     // For indirect jumps, seal with unreachable as we can't statically determine target
                     self.reactor.seal(ctx, &Instruction::Unreachable)?;
                     return Ok(());
@@ -2864,6 +2901,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_rv64: self.enable_rv64,
         };
 
+        // Jump trap: conditional branch.
+        let branch_info = JumpInfo::direct(pc as u64, target_pc, JumpKind::ConditionalBranch);
+        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            return Ok(());
+        }
+
         // Use ji with condition for branch taken path
         // When condition is true, jump to target; yecta handles else/end automatically
         let target_func = self.pc_to_func_idx(target_pc);
@@ -2871,7 +2914,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         self.reactor.ji(
             ctx,
-            66,               // params: pass all registers (including expected_ra)
+            self.total_params, // params: pass all registers (including expected_ra + trap params)
             &BTreeMap::new(), // fixups: none needed
             target,           // target: branch target
             None,             // call: not an escape call

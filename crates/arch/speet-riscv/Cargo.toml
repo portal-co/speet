@@ -14,6 +14,7 @@ wax-core.workspace = true
 speet-wasm-helpers = {path = "../speet-wasm-helpers"}
 speet-memory = {path = "../speet-memory"}
 speet-ordering = {path = "../speet-ordering"}
+speet-traps = {path = "../speet-traps"}
 
 [dev-dependencies]
 object = "0.36"

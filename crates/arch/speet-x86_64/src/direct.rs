@@ -319,7 +319,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, 'ctx, Context, E, F> {
     fn rip_to_func_idx(&self, rip: u64) -> FuncIdx {
         FuncIdx((rip.wrapping_sub(self.base_rip) / 1) as u32)
     }
@@ -333,18 +333,19 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, wasm_encoder::ValType)> + '_)) -> F
                   + '_),
     ) -> Result<(), E> {
-        // For simplicity, model 16 general purpose 64-bit regs as locals 0-15
-        // PC in local 16 (i32)
-        // Condition flags: ZF(17), SF(18), CF(19), OF(20), PF(21) as i32
-        // Temps after that
-        let locals = [
+        let arch_locals = [
             (16, wasm_encoder::ValType::I64),        // registers
             (1, wasm_encoder::ValType::I32),         // PC
             (5, wasm_encoder::ValType::I32),         // condition flags: ZF, SF, CF, OF, PF
             (num_temps, wasm_encoder::ValType::I64), // temps
         ];
-        // Pass instruction length to yecta so fallthrough is controlled by instruction size
-        self.reactor.next_with(ctx, f(&mut locals.into_iter()), inst_len)
+        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
+        let trap_locals: alloc::vec::Vec<(u32, wasm_encoder::ValType)> =
+            self.traps.extend_locals(core::iter::empty()).collect();
+        let mut all_locals = arch_locals.iter().copied().chain(trap_locals.iter().copied());
+        self.reactor.next_with(ctx, f(&mut all_locals), inst_len)?;
+        self.traps.set_local_base(self.total_params + arch_local_count);
+        Ok(())
     }
 
     fn resolve_reg(reg: Register) -> Option<(u32, u32, bool, u32)> {
@@ -451,7 +452,21 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
                 .feed(ctx, &Instruction::I32Const(inst_rip as i32))?;
             self.reactor.feed(ctx, &Instruction::LocalSet(16))?;
 
-            // Try to handle the mnemonic; each arm returns Result<Option<()>, E> where None means undecidable operands
+            // Fire instruction trap (if installed).
+            {
+                use crate::{InstructionInfo, TrapAction, ArchTag};
+                let insn_info = InstructionInfo {
+                    pc: inst_rip,
+                    len: inst_len,
+                    arch: ArchTag::X86_64,
+                    class: Self::classify_mnemonic(inst.mnemonic()),
+                };
+                if self.traps.on_instruction(&insn_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    continue;
+                }
+            }
+
+            // Try to handle the mnemonic
             let undecidable_option = (match inst.mnemonic() {
                 Mnemonic::Add => {
                     // Handle memory destination case first
@@ -1696,8 +1711,15 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         let target_func_idx = self.rip_to_func_idx(target);
         let _pool = self.pool;
 
-        // Unconditional jump
-        self.reactor.jmp(ctx, target_func_idx, 0)?; // No params for now
+        // Unconditional jump (direct)
+        {
+            use crate::{JumpInfo, JumpKind, TrapAction};
+            let jmp_info = JumpInfo::direct(inst.ip(), target, JumpKind::DirectJump);
+            if self.traps.on_jump(&jmp_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                return Ok(Some(()));
+            }
+        }
+        self.reactor.jmp(ctx, target_func_idx, self.total_params)?;
 
         Ok(Some(()))
     }
@@ -1720,9 +1742,16 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
         let target_func_idx = self.rip_to_func_idx(target);
         let pool = self.pool;
 
-        // Use the proper yecta conditional jump API
+        // Conditional branch.
+        {
+            use crate::{JumpInfo, JumpKind, TrapAction};
+            let jcc_info = JumpInfo::direct(inst.ip(), target, JumpKind::ConditionalBranch);
+            if self.traps.on_jump(&jcc_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                return Ok(Some(()));
+            }
+        }
         let condition = ConditionSnippet { condition_type };
-        let params = JumpCallParams::conditional_jump(target_func_idx, 0, &condition, pool);
+        let params = JumpCallParams::conditional_jump(target_func_idx, self.total_params, &condition, pool);
         self.reactor.ji_with_params(ctx, params)?;
 
         Ok(Some(()))
@@ -1779,7 +1808,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             let expected_ra_snippet = ExpectedRaSnippet { return_addr };
 
             // Step 3: Use fixups to set expected_ra (local 25) only for this call
-            let params = yecta::JumpCallParams::call(target_func, 26, escape_tag, self.pool)
+            let params = yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
                 .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
             // Step 4: Emit the speculative call using yecta's ji_with_params API
@@ -1807,7 +1836,14 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
 
             // Step 2: Jump to target function (non-speculative)
             let target_func_idx = self.rip_to_func_idx(target);
-            self.reactor.jmp(ctx, target_func_idx, 0)?; // Pass 0 parameters for now
+            {
+                use crate::{JumpInfo, JumpKind, TrapAction};
+                let call_info = JumpInfo::direct(inst.ip(), target, JumpKind::Call);
+                if self.traps.on_jump(&call_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(Some(()));
+                }
+            }
+            self.reactor.jmp(ctx, target_func_idx, self.total_params)?;
 
             Ok(Some(()))
         }
@@ -1868,9 +1904,7 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             self.reactor.feed(ctx, &Instruction::Else)?;
 
             // Non-ABI-compliant return: throw escape tag with all register/stack state
-            // We need to pass all locals (registers + RSP + expected_ra)
-            // For now, use ret() with 26 locals (16 regs + 5 flags + 5 temps)
-            self.reactor.ret(ctx, 26, escape_tag)?;
+            self.reactor.ret(ctx, self.total_params, escape_tag)?;
 
             self.reactor.feed(ctx, &Instruction::End)?;
             return Ok(Some(()));
@@ -1905,7 +1939,14 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             };
 
             // Use yecta's indirect jump capability
-            let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, 0, self.pool);
+            {
+                use crate::{JumpInfo, JumpKind, TrapAction};
+                let ret_info = JumpInfo::indirect(inst.ip(), 23, JumpKind::Return);
+                if self.traps.on_jump(&ret_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(Some(()));
+                }
+            }
+            let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, self.total_params, self.pool);
             self.reactor.ji_with_params(ctx, params)?;
 
             Ok(Some(()))

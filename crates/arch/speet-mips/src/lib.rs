@@ -54,6 +54,11 @@ use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_sto
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
+use speet_traps::{
+    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    TrapConfig,
+    insn::{ArchTag, InsnClass},
+};
 
 /// Branch operation types for conditional branches
 #[derive(Debug, Clone, Copy)]
@@ -230,6 +235,10 @@ pub struct MipsRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// When `use_atomic_insns` is true, integer load/store instructions are
     /// replaced with their wasm atomic equivalents.
     atomic_opts: AtomicOpts,
+    /// Pluggable instruction-level and jump-level trap hooks.
+    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F>>,
+    /// Total wasm function parameter count (recompiler params + trap params).
+    total_params: u32,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
@@ -259,6 +268,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_mips64,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: Self::BASE_PARAMS,
         }
     }
 
@@ -288,6 +299,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_mips64,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: Self::BASE_PARAMS,
         }
     }
 
@@ -418,8 +431,89 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.atomic_opts
     }
 
+    // ── Trap hooks ───────────────────────────────────────────────────────
 
+    /// MIPS base parameter count: 32 GPRs + HI + LO + PC = 35.
+    pub const BASE_PARAMS: u32 = 35;
+
+    /// Install an instruction trap.
     ///
+    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
+    /// before the first `translate_instruction` call.
+    pub fn set_instruction_trap(
+        &mut self,
+        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_instruction_trap(trap);
+    }
+
+    /// Remove the instruction trap.
+    pub fn clear_instruction_trap(&mut self) {
+        self.traps.clear_instruction_trap();
+    }
+
+    /// Install a jump trap.
+    ///
+    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
+    /// before the first `translate_instruction` call.
+    pub fn set_jump_trap(
+        &mut self,
+        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_jump_trap(trap);
+    }
+
+    /// Remove the jump trap.
+    pub fn clear_jump_trap(&mut self) {
+        self.traps.clear_jump_trap();
+    }
+
+    /// **Phase 1** — register trap parameters and compute `total_params`.
+    pub fn setup_traps(&mut self) -> u32 {
+        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
+        self.total_params = self.traps.setup(&mut layout);
+        self.total_params
+    }
+
+    /// The current total wasm function parameter count.
+    pub fn total_params(&self) -> u32 {
+        self.total_params
+    }
+
+    /// Classify a decoded MIPS instruction into [`InsnClass`] flags.
+    fn classify_insn(id: rabbitizer::InstrId) -> InsnClass {
+        use rabbitizer::InstrId;
+        match id {
+            // Loads
+            InstrId::cpu_lw | InstrId::cpu_lh | InstrId::cpu_lb
+            | InstrId::cpu_lwu | InstrId::cpu_lhu | InstrId::cpu_lbu
+            | InstrId::cpu_ld | InstrId::cpu_ldc1 | InstrId::cpu_lwc1
+            // Stores
+            | InstrId::cpu_sw | InstrId::cpu_sh | InstrId::cpu_sb
+            | InstrId::cpu_sd | InstrId::cpu_sdc1 | InstrId::cpu_swc1
+                => InsnClass::MEMORY,
+            // Conditional branches
+            InstrId::cpu_beq | InstrId::cpu_bne | InstrId::cpu_blez | InstrId::cpu_bgtz
+            | InstrId::cpu_bltz | InstrId::cpu_bgez | InstrId::cpu_beql | InstrId::cpu_bnel
+            | InstrId::cpu_bltzl | InstrId::cpu_bgezl | InstrId::cpu_blezl | InstrId::cpu_bgtzl
+                => InsnClass::BRANCH,
+            // Direct unconditional jump
+            InstrId::cpu_j => InsnClass::BRANCH,
+            // Direct call
+            InstrId::cpu_jal => InsnClass::CALL,
+            // Indirect jump
+            InstrId::cpu_jr => InsnClass::BRANCH | InsnClass::INDIRECT,
+            // Indirect call
+            InstrId::cpu_jalr => InsnClass::CALL | InsnClass::INDIRECT,
+            // System
+            InstrId::cpu_syscall => InsnClass::PRIVILEGED,
+            InstrId::cpu_break => InsnClass::PRIVILEGED,
+            // FP loads/stores
+            InstrId::cpu_lwc2 | InstrId::cpu_swc2
+                => InsnClass::MEMORY | InsnClass::FLOAT,
+            _ => InsnClass::OTHER,
+        }
+    }
     /// When enabled, MIPS64-specific instructions will be translated instead of
     /// emitting unreachable.
     pub fn set_mips64_support(&mut self, enable: bool) {
@@ -456,19 +550,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
-        // General-purpose registers: locals 0-31 (i32 for MIPS32, i64 for MIPS64)
-        // HI/LO registers: locals 32-33 (same type as GPRs)
-        // PC: local 34 (i32)
-        // Temps: locals 35..35+num_temps (gpr_type)
-        // Load-addr scratch: local 35+num_temps (i32, always)
-        // Pool i32s: locals 36+num_temps .. 35+num_temps+N_POOL_I32
-        // Pool i64s: locals after pool i32s (i64)
         let gpr_type = if self.enable_mips64 {
             ValType::I64
         } else {
             ValType::I32
         };
-        let locals = [
+        let arch_locals = [
             (32, gpr_type),               // $0-$31
             (2, gpr_type),                // HI/LO
             (1, ValType::I32),            // PC
@@ -477,13 +564,19 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             (Self::N_POOL_I32, ValType::I32), // pool i32 slots
             (Self::N_POOL_I64, ValType::I64), // pool i64 slots
         ];
+        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
         // Seed the reactor's local pool with the freshly-declared pool locals.
         let pool_i32_start = 35 + num_temps + 1;
         let pool_i64_start = pool_i32_start + Self::N_POOL_I32;
         self.reactor.local_pool.seed_i32(pool_i32_start, Self::N_POOL_I32);
         self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
-        // Set to 1 to prevent infinite looping (yecta handles automatic fallthrough)
-        self.reactor.next_with(ctx, f(&mut locals.into_iter()), 1)
+        // Phase 2a: collect trap non-param locals to avoid borrow conflicts, then chain.
+        let trap_locals: alloc::vec::Vec<(u32, ValType)> = self.traps.extend_locals(core::iter::empty()).collect();
+        let mut all_locals = arch_locals.iter().copied().chain(trap_locals.iter().copied());
+        self.reactor.next_with(ctx, f(&mut all_locals), 1)?;
+        // Phase 2b: assign absolute indices to trap non-param locals.
+        self.traps.set_local_base(self.total_params + arch_local_count);
+        Ok(())
     }
 
     /// Number of i32 locals reserved in the local pool for lazy-store operand saving.
@@ -739,13 +832,19 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             op,
         };
 
+        // Jump trap: conditional branch.
+        let branch_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::ConditionalBranch);
+        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            return Ok(());
+        }
+
         // Use ji with condition for branch taken path
         let target_func = self.pc_to_func_idx(target_pc);
         let target = Target::Static { func: target_func };
 
         self.reactor.ji(
             ctx,
-            35,               // params: pass all registers
+            self.total_params, // params: pass all registers (including trap params)
             &BTreeMap::new(), // fixups: none needed
             target,           // target: branch target
             None,             // call: not an escape call
@@ -780,6 +879,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             .feed(ctx, &WasmInstruction::I32Const(pc as i32))?;
         self.reactor
             .feed(ctx, &WasmInstruction::LocalSet(Self::pc_local()))?;
+
+        // Fire instruction trap (if installed).
+        let insn_info = InstructionInfo {
+            pc: pc as u64,
+            len: 4, // MIPS instructions are always 4 bytes
+            arch: ArchTag::Mips,
+            class: Self::classify_insn(instruction.unique_id),
+        };
+        if self.traps.on_instruction(&insn_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            return Ok(());
+        }
 
         let opcode = instruction.unique_id;
 
@@ -1469,12 +1579,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 let target = (instruction.get_instr_index() as u32) << 2;
                 let target_pc = (pc & 0xF0000000) | target;
 
-                self.jump_to_pc(ctx, target_pc, 35)?; // Pass all registers as parameters
-                return Ok(()); // J handles control flow, no fallthrough
+                let j_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::DirectJump);
+                if self.traps.on_jump(&j_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(());
+                }
+                self.jump_to_pc(ctx, target_pc, self.total_params)?;
+                return Ok(());
             }
 
             InstrId::cpu_jal => {
-                // JAL uses the same 26-bit instruction index field
                 let target = (instruction.get_instr_index() as u32) << 2;
                 let target_pc = (pc & 0xF0000000) | target;
 
@@ -1487,23 +1600,37 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     &WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)),
                 )?;
 
-                self.jump_to_pc(ctx, target_pc, 35)?; // Pass all registers as parameters
-                return Ok(()); // JAL handles control flow, no fallthrough
+                let jal_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::Call);
+                if self.traps.on_jump(&jal_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(());
+                }
+                self.jump_to_pc(ctx, target_pc, self.total_params)?;
+                return Ok(());
             }
 
             InstrId::cpu_jr => {
                 let rs: GprO32 = instruction.get_rs_o32();
 
-                // Use shared TableIndexSnippet to compute table index
+                // Tee rs into load_addr_scratch_local for the jump trap.
+                let scratch = Self::load_addr_scratch_local();
+                self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalTee(scratch))?;
+                self.reactor.feed(ctx, &WasmInstruction::Drop)?;
+
+                // JR $ra = return; other JR = indirect jump
+                let jr_kind = if rs == GprO32::ra { JumpKind::Return } else { JumpKind::IndirectJump };
+                let jr_info = JumpInfo::indirect(pc as u64, scratch, jr_kind);
+                if self.traps.on_jump(&jr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(());
+                }
+
                 let snippet = TableIndexSnippet {
                     rs_local: Self::gpr_to_local(rs),
                     base_pc: self.base_pc,
                 };
-
-                // Use yecta indirect jump params: pass all regs as parameters
-                let params = yecta::JumpCallParams::indirect_jump(&snippet, 35, self.pool);
+                let params = yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
                 self.reactor.ji_with_params(ctx, params)?;
-                return Ok(()); // JR handles control flow, no fallthrough
+                return Ok(());
             }
 
             InstrId::cpu_jalr => {
@@ -1519,16 +1646,24 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
 
-                // Use shared TableIndexSnippet to compute table index
+                // Tee rs into load_addr_scratch_local for the jump trap.
+                let scratch = Self::load_addr_scratch_local();
+                self.reactor.feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                self.reactor.feed(ctx, &WasmInstruction::LocalTee(scratch))?;
+                self.reactor.feed(ctx, &WasmInstruction::Drop)?;
+
+                let jalr_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::IndirectCall);
+                if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    return Ok(());
+                }
+
                 let snippet = TableIndexSnippet {
                     rs_local: Self::gpr_to_local(rs),
                     base_pc: self.base_pc,
                 };
-
-                // Use yecta indirect jump params: pass all regs as parameters
-                let params = yecta::JumpCallParams::indirect_jump(&snippet, 35, self.pool);
+                let params = yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
                 self.reactor.ji_with_params(ctx, params)?;
-                return Ok(()); // JALR handles control flow, no fallthrough
+                return Ok(());
             }
 
             // System instructions

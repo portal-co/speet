@@ -60,6 +60,11 @@ use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsi
 use wasm_encoder::{Instruction, ValType};
 use yecta::{EscapeTag, FuncIdx, Pool, Reactor, TableIdx, TypeIdx};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
+use speet_traps::{
+    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    TrapConfig,
+    insn::{ArchTag, InsnClass},
+};
 
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
@@ -278,6 +283,14 @@ pub struct RiscVRecompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>
     /// with their wasm atomic equivalents.  This is gated behind a separate
     /// flag so it can be enabled independently of `mem_order`.
     atomic_opts: AtomicOpts,
+    /// Pluggable instruction-level and jump-level trap hooks.
+    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F>>,
+    /// Total wasm function parameter count (recompiler params + trap params).
+    ///
+    /// Set by [`Self::setup_traps`] and used as the `params` argument to every
+    /// `jmp` / `ji` / `ji_with_params` call so that trap parameters (e.g. the
+    /// ROP depth counter) are forwarded along every control-flow edge.
+    total_params: u32,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
@@ -316,6 +329,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_speculative_calls: false,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: Self::BASE_PARAMS,
         }
     }
 
@@ -354,6 +369,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             enable_speculative_calls: false,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: Self::BASE_PARAMS,
         }
     }
 
@@ -643,6 +660,64 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.atomic_opts
     }
 
+    // ── Trap hooks ───────────────────────────────────────────────────────
+
+    /// The number of wasm parameters in a translated function type with no
+    /// traps installed (32 int regs + 32 float regs + PC + expected_RA = 66).
+    pub const BASE_PARAMS: u32 = 66;
+
+    /// Install an instruction trap.
+    ///
+    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
+    /// before the first `translate_instruction` call.
+    pub fn set_instruction_trap(
+        &mut self,
+        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_instruction_trap(trap);
+    }
+
+    /// Remove the instruction trap.
+    pub fn clear_instruction_trap(&mut self) {
+        self.traps.clear_instruction_trap();
+    }
+
+    /// Install a jump trap.
+    ///
+    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
+    /// before the first `translate_instruction` call.
+    pub fn set_jump_trap(
+        &mut self,
+        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_jump_trap(trap);
+    }
+
+    /// Remove the jump trap.
+    pub fn clear_jump_trap(&mut self) {
+        self.traps.clear_jump_trap();
+    }
+
+    /// **Phase 1** — register trap parameters and compute [`total_params`].
+    ///
+    /// Must be called once after installing traps and before calling
+    /// `translate_instruction`.  Safe to call when no traps are installed
+    /// (sets `total_params = BASE_PARAMS`).
+    ///
+    /// The returned `total_params` value is the wasm function parameter count
+    /// for all translated functions.  It must also be passed to `jmp` / `ji`
+    /// calls so that trap parameters are forwarded across `return_call` chains.
+    pub fn setup_traps(&mut self) -> u32 {
+        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
+        self.total_params = self.traps.setup(&mut layout);
+        self.total_params
+    }
+
+    /// The current total wasm function parameter count (recompiler + trap params).
+    pub fn total_params(&self) -> u32 {
+        self.total_params
+    }
+
 
     ///
     /// When enabled, RV64-specific instructions will be translated instead of
@@ -762,6 +837,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // Load-addr scratch: local 66+num_temps (addr_type: i32 or i64)
         // Pool addr-type locals: locals 67+num_temps .. (N_POOL_ADDR of addr_type)
         // Pool i64s: locals after pool addr-type slots (i64, for val saving in memory64)
+        // Trap non-param locals: immediately after pool i64s
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
@@ -770,7 +846,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // The effective address type matches the memory model in use.
         // memory64 uses i64 addresses; the default path uses i32.
         let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
-        let locals = [
+        let arch_locals = [
             (32, int_type),              // x0-x31
             (32, ValType::F64),          // f0-f31
             (1, ValType::I32),           // PC
@@ -780,6 +856,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             (Self::N_POOL_ADDR, addr_type), // pool addr-type slots (for addr_local saving)
             (Self::N_POOL_I64, ValType::I64), // pool i64 slots (for val_local saving)
         ];
+        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
         // Seed the reactor's local pool with the freshly-declared pool locals.
         let pool_addr_start = 66 + num_temps + 1;
         let pool_i64_start  = pool_addr_start + Self::N_POOL_ADDR;
@@ -789,7 +866,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             _ => {}
         }
         self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
-        self.reactor.next_with(ctx, f(&mut locals.into_iter()), 2)
+        // Phase 2a: collect trap non-param locals into a Vec to avoid borrow conflicts,
+        // then chain with the arch locals and pass to next_with.
+        let trap_locals: Vec<(u32, ValType)> = self.traps.extend_locals(core::iter::empty()).collect();
+        let mut all_locals = arch_locals.iter().copied().chain(trap_locals.iter().copied());
+        self.reactor.next_with(ctx, f(&mut all_locals), 2)?;
+        // Phase 2b: assign absolute indices to trap non-param locals.
+        self.traps.set_local_base(self.total_params + arch_local_count);
+        Ok(())
     }
 
     /// Number of addr-type locals reserved in the local pool for address saving.
@@ -969,7 +1053,60 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.reactor.jmp(ctx, target_func, params)
     }
 
-    /// NaN-box a single-precision float value for storage in a double-precision register
+    /// Classify a decoded RISC-V instruction into [`InsnClass`] flags.
+    fn classify_insn(inst: &Inst) -> InsnClass {
+        match inst {
+            Inst::Lb { .. } | Inst::Lh { .. } | Inst::Lw { .. } | Inst::Ld { .. }
+            | Inst::Lbu { .. } | Inst::Lhu { .. } | Inst::Lwu { .. }
+            | Inst::Sb { .. } | Inst::Sh { .. } | Inst::Sw { .. } | Inst::Sd { .. }
+                => InsnClass::MEMORY,
+            Inst::Flw { .. } | Inst::Fld { .. } | Inst::Fsw { .. } | Inst::Fsd { .. }
+                => InsnClass::MEMORY | InsnClass::FLOAT,
+            Inst::Beq { .. } | Inst::Bne { .. } | Inst::Blt { .. }
+            | Inst::Bge { .. } | Inst::Bltu { .. } | Inst::Bgeu { .. }
+                => InsnClass::BRANCH,
+            Inst::Jal { dest, .. } if dest.0 == 1 => InsnClass::CALL,
+            Inst::Jal { .. } => InsnClass::BRANCH,
+            Inst::Jalr { dest, base, offset } => {
+                let is_ret = dest.0 == 0 && base.0 == 1 && offset.as_i32() == 0;
+                if is_ret {
+                    InsnClass::RETURN | InsnClass::INDIRECT
+                } else if dest.0 == 1 {
+                    InsnClass::CALL | InsnClass::INDIRECT
+                } else {
+                    InsnClass::BRANCH | InsnClass::INDIRECT
+                }
+            }
+            Inst::Ecall => InsnClass::PRIVILEGED,
+            Inst::Ebreak => InsnClass::PRIVILEGED,
+            Inst::LrW { .. } | Inst::ScW { .. } | Inst::AmoW { .. }
+                => InsnClass::ATOMIC | InsnClass::MEMORY,
+            Inst::FaddS { .. } | Inst::FsubS { .. } | Inst::FmulS { .. } | Inst::FdivS { .. }
+            | Inst::FsqrtS { .. } | Inst::FsgnjS { .. } | Inst::FsgnjnS { .. }
+            | Inst::FsgnjxS { .. } | Inst::FminS { .. } | Inst::FmaxS { .. }
+            | Inst::FcvtWS { .. } | Inst::FcvtWuS { .. } | Inst::FmvXW { .. }
+            | Inst::FeqS { .. } | Inst::FltS { .. } | Inst::FleS { .. }
+            | Inst::FclassS { .. } | Inst::FcvtSW { .. } | Inst::FcvtSWu { .. }
+            | Inst::FmvWX { .. } | Inst::FcvtLS { .. } | Inst::FcvtLuS { .. }
+            | Inst::FcvtSL { .. } | Inst::FcvtSLu { .. }
+            | Inst::FmaddS { .. } | Inst::FmsubS { .. }
+            | Inst::FnmsubS { .. } | Inst::FnmaddS { .. }
+            | Inst::FaddD { .. } | Inst::FsubD { .. } | Inst::FmulD { .. } | Inst::FdivD { .. }
+            | Inst::FsqrtD { .. } | Inst::FsgnjD { .. } | Inst::FsgnjnD { .. }
+            | Inst::FsgnjxD { .. } | Inst::FminD { .. } | Inst::FmaxD { .. }
+            | Inst::FcvtSD { .. } | Inst::FcvtDS { .. }
+            | Inst::FcvtWD { .. } | Inst::FcvtWuD { .. } | Inst::FmvXD { .. }
+            | Inst::FeqD { .. } | Inst::FltD { .. } | Inst::FleD { .. }
+            | Inst::FclassD { .. } | Inst::FcvtDW { .. } | Inst::FcvtDWu { .. }
+            | Inst::FmvDX { .. } | Inst::FcvtLD { .. } | Inst::FcvtLuD { .. }
+            | Inst::FcvtDL { .. } | Inst::FcvtDLu { .. }
+            | Inst::FmaddD { .. } | Inst::FmsubD { .. }
+            | Inst::FnmsubD { .. } | Inst::FnmaddD { .. }
+                => InsnClass::FLOAT,
+            _ => InsnClass::OTHER,
+        }
+    }
+
     ///
     /// RISC-V Specification Quote:
     /// "When multiple floating-point precisions are supported, then valid values of

@@ -9,17 +9,26 @@ use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Pool, Reactor, TableIdx, TypeIdx};
 pub mod direct;
+use speet_traps::{
+    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    TrapConfig,
+    insn::{ArchTag, InsnClass},
+};
 /// Simple x86_64 recompiler for integer ops
-pub struct X86Recompiler<Context, E, F: InstructionSink<Context, E>> {
+pub struct X86Recompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
     reactor: Reactor<Context, E, F>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     base_rip: u64,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
+    /// Pluggable instruction-level and jump-level trap hooks.
+    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F>>,
+    /// Total wasm function parameter count (recompiler params + trap params).
+    total_params: u32,
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, 'ctx, Context, E, F> {
     pub fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
     }
@@ -42,6 +51,8 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
             base_rip,
             hints: Vec::new(),
             enable_speculative_calls: false,
+            traps: TrapConfig::new(),
+            total_params: Self::BASE_PARAMS,
         }
     }
 
@@ -117,6 +128,92 @@ impl<Context, E, F: InstructionSink<Context, E>> X86Recompiler<Context, E, F> {
     // Temporary locals: 22, 23, 24 are used in direct.rs
     // Expected return address for speculative calls
     const EXPECTED_RA_LOCAL: u32 = 25;
+
+    /// x86-64 base parameter count:
+    /// 16 GPRs (i64) + PC (i32) + ZF + SF + CF + OF + PF (5×i32) + 4 temp i64s
+    /// + expected_RA (i64) = 26.
+    pub const BASE_PARAMS: u32 = 26;
+
+    /// Install an instruction trap.
+    pub fn set_instruction_trap(
+        &mut self,
+        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_instruction_trap(trap);
+    }
+
+    /// Remove the instruction trap.
+    pub fn clear_instruction_trap(&mut self) {
+        self.traps.clear_instruction_trap();
+    }
+
+    /// Install a jump trap.
+    pub fn set_jump_trap(
+        &mut self,
+        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+    ) {
+        self.traps.set_jump_trap(trap);
+    }
+
+    /// Remove the jump trap.
+    pub fn clear_jump_trap(&mut self) {
+        self.traps.clear_jump_trap();
+    }
+
+    /// **Phase 1** — register trap parameters and compute `total_params`.
+    pub fn setup_traps(&mut self) -> u32 {
+        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
+        self.total_params = self.traps.setup(&mut layout);
+        self.total_params
+    }
+
+    /// The current total wasm function parameter count.
+    pub fn total_params(&self) -> u32 {
+        self.total_params
+    }
+
+    /// Classify an x86-64 mnemonic into [`InsnClass`] flags.
+    pub(crate) fn classify_mnemonic(mnemonic: iced_x86::Mnemonic) -> InsnClass {
+        use iced_x86::Mnemonic;
+        match mnemonic {
+            // Memory
+            Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd
+            | Mnemonic::Lea | Mnemonic::Xchg
+            | Mnemonic::Push | Mnemonic::Pop
+            | Mnemonic::Movsb | Mnemonic::Movsw | Mnemonic::Movsd | Mnemonic::Movsq
+            | Mnemonic::Stosb | Mnemonic::Stosw | Mnemonic::Stosd | Mnemonic::Stosq
+            | Mnemonic::Lodsb | Mnemonic::Lodsw | Mnemonic::Lodsd | Mnemonic::Lodsq
+            | Mnemonic::Scasb | Mnemonic::Scasw | Mnemonic::Scasd | Mnemonic::Scasq
+                => InsnClass::MEMORY,
+            // Conditional branches
+            Mnemonic::Jo | Mnemonic::Jno | Mnemonic::Jb | Mnemonic::Jae
+            | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jbe | Mnemonic::Ja
+            | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Jp | Mnemonic::Jnp
+            | Mnemonic::Jl | Mnemonic::Jge | Mnemonic::Jle | Mnemonic::Jg
+            | Mnemonic::Jcxz | Mnemonic::Jecxz | Mnemonic::Jrcxz
+            | Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne
+                => InsnClass::BRANCH,
+            // Direct/indirect unconditional jump
+            Mnemonic::Jmp => InsnClass::BRANCH,
+            // Call
+            Mnemonic::Call => InsnClass::CALL,
+            // Return
+            Mnemonic::Ret | Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd | Mnemonic::Iretq
+                => InsnClass::RETURN,
+            // Syscall / privileged
+            Mnemonic::Syscall | Mnemonic::Sysenter | Mnemonic::Int | Mnemonic::Int1
+            | Mnemonic::Int3 | Mnemonic::Into
+                => InsnClass::PRIVILEGED,
+            // Float
+            Mnemonic::Fld | Mnemonic::Fst | Mnemonic::Fstp | Mnemonic::Fadd | Mnemonic::Fsub
+            | Mnemonic::Fmul | Mnemonic::Fdiv | Mnemonic::Fsqrt
+            | Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Addss | Mnemonic::Addsd
+            | Mnemonic::Subss | Mnemonic::Subsd | Mnemonic::Mulss | Mnemonic::Mulsd
+            | Mnemonic::Divss | Mnemonic::Divsd | Mnemonic::Sqrtss | Mnemonic::Sqrtsd
+                => InsnClass::FLOAT,
+            _ => InsnClass::OTHER,
+        }
+    }
 
     fn set_zf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
         self.reactor

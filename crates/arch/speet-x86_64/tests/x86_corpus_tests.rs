@@ -57,7 +57,7 @@ fn test_corpus_file(elf_path: &Path) {
         elf_path.display()
     );
 
-    let mut recompiler: X86Recompiler<(), Infallible, Function> =
+    let mut recompiler: X86Recompiler<'_, '_, (), Infallible, Function> =
         X86Recompiler::new_with_base_rip(load_addr);
     let mut ctx = ();
 
