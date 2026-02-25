@@ -435,21 +435,26 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// is encountered during translation. This allows for real-time processing of
     /// test case markers without needing to collect them all first.
     ///
-    /// The callback receives both the HINT information and a context for code generation.
+    /// The callback receives the HINT information, the user context, and a
+    /// [`CallbackContext`] (aliased as [`HintContext`]) for emitting wasm instructions.
     ///
     /// # Arguments
-    /// * `callback` - A mutable reference to a closure or function that takes a `&HintInfo` and `&mut HintContext`
+    /// * `callback` - A mutable reference to a callback implementing [`HintCallback`].
+    ///   Any `FnMut(&HintInfo, &mut Context, &mut HintContext<…>)` closure qualifies.
     ///
     /// # Example
     /// ```ignore
-    /// # use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
-    /// # use wasm_encoder::Instruction;
+    /// use speet_riscv::{RiscVRecompiler, HintInfo, HintContext};
+    /// use wasm_encoder::{Function, Instruction};
+    /// use yecta::Reactor;
+    /// use std::convert::Infallible;
     ///
-    /// let mut ctx = ();
-    /// let mut my_callback = |hint: &HintInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
-    ///     println!("Test case {} at PC 0x{:x}", hint.value, hint.pc);
-    ///     // Optionally emit WebAssembly instructions
-    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
+    /// let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
+    /// let mut my_callback = |hint: &HintInfo,
+    ///                         user_ctx: &mut (),
+    ///                         cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
+    ///     println!("HINT {} at PC 0x{:x}", hint.value, hint.pc);
+    ///     cb.emit(user_ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_hint_callback(&mut my_callback);
     /// ```
@@ -474,18 +479,22 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// calls, including generating custom WebAssembly code.
     ///
     /// # Arguments
-    /// * `callback` - A mutable reference to a closure or function that takes an `&EcallInfo` and `&mut HintContext`
+    /// * `callback` - A mutable reference to a callback implementing [`EcallCallback`].
+    ///   Any `FnMut(&EcallInfo, &mut Context, &mut CallbackContext<…>)` closure qualifies.
     ///
     /// # Example
     /// ```ignore
-    /// # use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
-    /// # use wasm_encoder::Instruction;
+    /// use speet_riscv::{RiscVRecompiler, EcallInfo, HintContext};
+    /// use wasm_encoder::{Function, Instruction};
+    /// use yecta::Reactor;
+    /// use std::convert::Infallible;
     ///
-    /// let mut ctx = ();
-    /// let mut my_callback = |ecall: &EcallInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
+    /// let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
+    /// let mut my_callback = |ecall: &EcallInfo,
+    ///                         user_ctx: &mut (),
+    ///                         cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
     ///     println!("ECALL at PC 0x{:x}", ecall.pc);
-    ///     // Optionally emit WebAssembly instructions for the ecall
-    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
+    ///     cb.emit(user_ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_ecall_callback(&mut my_callback);
     /// ```
@@ -510,19 +519,22 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// including generating custom WebAssembly code.
     ///
     /// # Arguments
-    /// * `callback` - A mutable reference to a closure or function that takes an `&EbreakInfo` and `&mut HintContext`
+    /// * `callback` - A mutable reference to a callback implementing [`EbreakCallback`].
+    ///   Any `FnMut(&EbreakInfo, &mut Context, &mut CallbackContext<…>)` closure qualifies.
     ///
     /// # Example
     /// ```ignore
-    /// # use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
-    /// # use wasm_encoder::Instruction;
+    /// use speet_riscv::{RiscVRecompiler, EbreakInfo, HintContext};
+    /// use wasm_encoder::{Function, Instruction};
+    /// use yecta::Reactor;
+    /// use std::convert::Infallible;
     ///
-    /// let mut recompiler = RiscVRecompiler::new();
-    /// let mut ctx = ();
-    /// let mut my_callback = |ebreak: &EbreakInfo, ctx: &mut HintContext<'_, (), Infallible, Function>| {
+    /// let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
+    /// let mut my_callback = |ebreak: &EbreakInfo,
+    ///                         user_ctx: &mut (),
+    ///                         cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
     ///     println!("EBREAK at PC 0x{:x}", ebreak.pc);
-    ///     // Optionally emit WebAssembly instructions for the ebreak
-    ///     callback_ctx.emit(ctx, &Instruction::Nop).ok();
+    ///     cb.emit(user_ctx, &Instruction::Nop).ok();
     /// };
     /// recompiler.set_ebreak_callback(&mut my_callback);
     /// ```
@@ -1091,11 +1103,6 @@ mod tests {
             src: rv_asm::Reg(1),
             base: rv_asm::Reg(2),
         };
-        let inst = Inst::Sw {
-            offset: rv_asm::Imm::new_i32(4),
-            src: rv_asm::Reg(1),
-            base: rv_asm::Reg(2),
-        };
 
         assert!(
             recompiler
@@ -1575,7 +1582,7 @@ mod tests {
             let mut callback =
                 |hint: &HintInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     collected.push(*hint);
                 };
 
@@ -1642,7 +1649,7 @@ mod tests {
             let mut callback =
                 |hint: &HintInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     callback_hints.push(*hint);
                 };
 
@@ -1700,7 +1707,7 @@ mod tests {
             let mut callback =
                 |hint: &HintInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     collected.push(hint.value);
                 };
 
@@ -1761,7 +1768,7 @@ mod tests {
             let mut callback =
                 |hint: &HintInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     assert_eq!(hint.value, 99);
                     callback_values.push(hint.value);
                 };
@@ -1804,7 +1811,7 @@ mod tests {
             let mut callback =
                 |_hint: &HintInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     invoked = true;
                 };
 
@@ -1848,11 +1855,11 @@ mod tests {
             let mut ctx = ();
             let mut callback =
                 |hint: &HintInfo,
-                 _: &mut (),
-                 ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 user_ctx: &mut (),
+                 cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     hint_values.push(hint.value);
                     // Generate a NOP instruction for each HINT
-                    // callback_ctx.emit(ctx, &Instruction::Nop).ok();
+                    cb.emit(user_ctx, &Instruction::Nop).ok();
                 };
 
             recompiler.set_hint_callback(&mut callback);
@@ -1901,7 +1908,7 @@ mod tests {
             let mut callback =
                 |ecall: &EcallInfo,
                  _: &mut (),
-                 ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ecall_pcs.push(ecall.pc);
                 };
 
@@ -1939,7 +1946,7 @@ mod tests {
             let mut callback =
                 |ebreak: &EbreakInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ebreak_pcs.push(ebreak.pc);
                 };
 
@@ -1976,11 +1983,11 @@ mod tests {
             let mut ctx = ();
             let mut callback =
                 |_ecall: &EcallInfo,
-                 _: &mut (),
-                 ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 user_ctx: &mut (),
+                 cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ecall_count += 1;
                     // Generate a NOP instruction for each ECALL
-                    // callback_ctx.emit(ctx, &Instruction::Nop).ok();
+                    cb.emit(user_ctx, &Instruction::Nop).ok();
                 };
 
             recompiler.set_ecall_callback(&mut callback);
@@ -2016,11 +2023,11 @@ mod tests {
             let mut ctx = ();
             let mut callback =
                 |_ebreak: &EbreakInfo,
-                 _: &mut (),
-                 ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 user_ctx: &mut (),
+                 cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ebreak_count += 1;
                     // Generate a NOP instruction for each EBREAK
-                    // callback_ctx.emit(ctx, &Instruction::Nop).ok();
+                    cb.emit(user_ctx, &Instruction::Nop).ok();
                 };
 
             recompiler.set_ebreak_callback(&mut callback);
@@ -2058,14 +2065,14 @@ mod tests {
             let mut ecall_cb =
                 |_ecall: &EcallInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ecall_count += 1;
                 };
 
             let mut ebreak_cb =
                 |_ebreak: &EbreakInfo,
                  _: &mut (),
-                 _ctx: &mut HintContext<'_, (), Infallible, Function>| {
+                 _cb: &mut HintContext<'_, (), Infallible, Reactor<(), Infallible, Function>>| {
                     ebreak_count += 1;
                 };
 
@@ -2536,7 +2543,7 @@ mod tests {
 
         let mut recompiler =
             RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
-        let mut ctx = ();
+        let _ctx = ();
 
         // Default should be 0
         assert_eq!(recompiler.base_func_offset(), 0);
@@ -2546,7 +2553,7 @@ mod tests {
         assert_eq!(recompiler.base_func_offset(), 15);
 
         // Create with offset using new_with_all_config
-        let mut recompiler2 =
+        let recompiler2 =
             RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_all_config(
                 Pool {
                     table: TableIdx(0),

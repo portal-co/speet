@@ -1,6 +1,7 @@
 use rabbitizer::{InstrCategory, Instruction};
 use speet_mips::{BreakInfo, CallbackContext, MipsRecompiler, SyscallInfo};
 use wasm_encoder::Function;
+use yecta::Reactor;
 
 #[test]
 fn test_basic_arithmetic() {
@@ -158,7 +159,7 @@ fn test_syscall_callback() {
         '_,
         (),
         core::convert::Infallible,
-        wasm_encoder::Function,
+        Reactor<(), core::convert::Infallible, wasm_encoder::Function>,
     >| {
         syscall_called = true;
     };
@@ -190,7 +191,7 @@ fn test_break_callback() {
         '_,
         (),
         core::convert::Infallible,
-        wasm_encoder::Function,
+        Reactor<(), core::convert::Infallible, wasm_encoder::Function>,
     >| {
         break_called = true;
     };

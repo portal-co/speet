@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use rv_asm::{Imm, Inst, IsCompressed, Reg};
 use speet_riscv::RiscVRecompiler;
 use wasm_encoder::Function;
-use yecta::{Pool, TableIdx, TypeIdx};
+use yecta::{Pool, Reactor, TableIdx, TypeIdx};
 
 fn main() {
     println!("RISC-V HINT Instruction Tracking Demo");
@@ -199,7 +199,7 @@ fn main() {
     let mut my_callback =
         |hint: &speet_riscv::HintInfo,
          _ctx: &mut (),
-         callback_ctx: &mut speet_riscv::HintContext<(), Infallible, Function>| {
+         callback_ctx: &mut speet_riscv::HintContext<(), Infallible, Reactor<(), Infallible, Function>>| {
             println!(
                 "  [CALLBACK] Test case {} at PC 0x{:08x}",
                 hint.value, hint.pc

@@ -1,6 +1,7 @@
 use rabbitizer::{InstrCategory, Instruction};
 use speet_mips::MipsRecompiler;
 use wasm_encoder::Function;
+use yecta::Reactor;
 
 #[test]
 fn test_simple_add() {
@@ -79,7 +80,7 @@ fn test_simple_syscall() {
         '_,
         (),
         core::convert::Infallible,
-        wasm_encoder::Function,
+        Reactor<(), core::convert::Infallible, wasm_encoder::Function>,
     >| {
         syscall_called = true;
     };
