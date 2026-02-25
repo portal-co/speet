@@ -1035,14 +1035,14 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// Feed an instruction lazily to all active functions.
     /// The instruction is added lazily to the current function and all its predecessors.
     /// Each visited function's instruction count is incremented.
-    pub fn feed_lazy(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+    pub fn feed_lazy(&mut self, ctx: &mut Context, instruction: &Instruction<'static>) -> Result<(), E> { //TODO: support non-`'static` instructions
         // collect_reachable_predecessors is O(1) — reads tail.transitive_preds.
         let reachable = self.collect_reachable_predecessors();
         for FuncIdx(idx) in reachable {
             //SAFETY: TODO
             self.fns[idx as usize]
                 .bundles
-                .push(unsafe { transmute(instruction.clone()) });
+                .push(instruction.clone());
             self.fns[idx as usize].inst_count += 1;
         }
         Ok(())
