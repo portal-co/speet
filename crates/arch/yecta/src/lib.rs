@@ -80,7 +80,24 @@ use wax_core::build::InstructionSink;
 
 extern crate alloc;
 
-// ── LocalPool ─────────────────────────────────────────────────────────────────
+/// A trait for local pool backends that can be swapped dynamically.
+///
+/// This trait defines the interface required by [`Reactor`] for managing
+/// recyclable local variable indices. Implementations can provide different
+/// allocation strategies while maintaining compatibility with the reactor.
+pub trait LocalPoolBackend {
+    /// Allocate one local of the requested type.
+    ///
+    /// Returns `Some(index)` if successful, or `None` if the pool is exhausted
+    /// and no locals of the requested type are available.
+    fn alloc(&mut self, ty: ValType) -> Option<u32>;
+
+    /// Return a local index back to the pool for reuse.
+    ///
+    /// The index and its type are stored for future allocation. If the pool
+    /// is full, this operation has no effect.
+    fn free(&mut self, idx: u32, ty: ValType);
+}
 
 /// A fixed-capacity pool of recyclable wasm local indices.
 ///
@@ -107,7 +124,12 @@ pub struct LocalPool<const N: usize = 32> {
 impl<const N: usize> LocalPool<N> {
     /// Create an empty pool.
     pub const fn new() -> Self {
-        Self { i32s: [0; N], i32_len: 0, i64s: [0; N], i64_len: 0 }
+        Self {
+            i32s: [0; N],
+            i32_len: 0,
+            i64s: [0; N],
+            i64_len: 0,
+        }
     }
 
     /// Seed the pool with a contiguous range of i32 local indices
@@ -131,10 +153,10 @@ impl<const N: usize> LocalPool<N> {
             }
         }
     }
+}
 
-    /// Allocate one local of the requested type.  Returns `None` when the
-    /// corresponding bucket is empty.
-    pub fn alloc(&mut self, ty: ValType) -> Option<u32> {
+impl<const N: usize> LocalPoolBackend for LocalPool<N> {
+    fn alloc(&mut self, ty: ValType) -> Option<u32> {
         match ty {
             ValType::I32 => {
                 if self.i32_len == 0 {
@@ -155,8 +177,7 @@ impl<const N: usize> LocalPool<N> {
         }
     }
 
-    /// Return a local back to the pool.
-    pub fn free(&mut self, idx: u32, ty: ValType) {
+    fn free(&mut self, idx: u32, ty: ValType) {
         match ty {
             ValType::I32 => {
                 if self.i32_len < N {
@@ -173,7 +194,9 @@ impl<const N: usize> LocalPool<N> {
             _ => {}
         }
     }
+}
 
+impl<const N: usize> LocalPool<N> {
     /// Returns `true` if there are no free locals of *any* type in the pool.
     pub fn is_empty(&self) -> bool {
         self.i32_len == 0 && self.i64_len == 0
@@ -434,7 +457,11 @@ pub const DEFAULT_MAX_IFS_PER_FN: usize = 32;
 
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
-pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Function> {
+pub struct Reactor<Context, E = Infallible, F = Function, P = LocalPool>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
     fns: Vec<Entry<F>>,
     lens: VecDeque<BTreeSet<FuncIdx>>,
     phantom: PhantomData<(Context, E)>,
@@ -447,9 +474,13 @@ pub struct Reactor<Context, E = Infallible, F: InstructionSink<Context, E> = Fun
     max_ifs_per_fn: usize,
     /// Pool of recyclable local indices used to save/restore deferred store
     /// operands around alias-check `if` guards in lazy emission.
-    pub local_pool: LocalPool,
+    pub local_pool: P,
 }
-impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E, F> {
+impl<Context, E, F, P> Default for Reactor<Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend + Default,
+{
     fn default() -> Self {
         Self {
             fns: Default::default(),
@@ -458,12 +489,12 @@ impl<Context, E, F: InstructionSink<Context, E>> Default for Reactor<Context, E,
             base_func_offset: 0,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
-            local_pool: LocalPool::new(),
+            local_pool: P::default(),
         }
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
     /// Create a new reactor with a base function offset.
     ///
     /// The offset is added to all emitted function indices. This is useful when
@@ -476,7 +507,10 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
     /// # Example
     /// If the module has 10 imports and 5 helper functions, use `base_func_offset = 15`
     /// so that generated function 0 emits as WebAssembly function 15.
-    pub fn with_base_func_offset(base_func_offset: u32) -> Self {
+    pub fn with_base_func_offset(base_func_offset: u32) -> Self
+    where
+        P: Default,
+    {
         Self {
             fns: Default::default(),
             lens: Default::default(),
@@ -484,7 +518,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             base_func_offset,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
-            local_pool: LocalPool::new(),
+            local_pool: P::default(),
         }
     }
 
@@ -564,14 +598,14 @@ impl<Context, E> Reactor<Context, E> {
         self.next_with(ctx, Function::new(locals), len)
     }
 }
-impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E>
-    for Reactor<Context, E, F>
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> InstructionSink<Context, E>
+    for Reactor<Context, E, F, P>
 {
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.feed(ctx, instruction)
     }
 }
-impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
     /// Create a new function with the given locals and control flow distance.
     ///
     /// If any function in the current reachable predecessor set has reached the
@@ -771,17 +805,21 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
-                // Drain deferred stores: emit the flag-guarded unconditional flush.
-                // We can't borrow `self.local_pool` and `f` simultaneously so we
-                // drain into a local vec first.
+                                           // Drain deferred stores: emit the flag-guarded unconditional flush.
+                                           // We can't borrow `self.local_pool` and `f` simultaneously so we
+                                           // drain into a local vec first.
                 let stores: Vec<LazyStore> = f.bundles.drain(..).collect();
                 for s in stores {
                     // Emit only if not already emitted before a load.
-                    f.function.instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
+                    f.function
+                        .instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
                     f.function.instruction(ctx, &Instruction::I32Eqz)?;
-                    f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
-                    f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
-                    f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                    f.function
+                        .instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                    f.function
+                        .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                    f.function
+                        .instruction(ctx, &Instruction::LocalGet(s.val_local))?;
                     f.function.instruction(ctx, &s.instr)?;
                     f.function.instruction(ctx, &Instruction::End)?;
                     // Return locals to the pool.
@@ -812,11 +850,15 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             for s in stores {
                 let f = &mut self.fns[func.0 as usize];
                 // Emit only if not already conditionally emitted before a load.
-                f.function.instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
                 f.function.instruction(ctx, &Instruction::I32Eqz)?;
-                f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
-                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
-                f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.val_local))?;
                 f.function.instruction(ctx, &s.instr)?;
                 f.function.instruction(ctx, &Instruction::End)?;
                 // Return locals to the shared pool.
@@ -876,8 +918,10 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                     continue;
                 }
                 // Alias check: store.addr == load.addr?
-                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
-                f.function.instruction(ctx, &Instruction::LocalGet(load_addr_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(load_addr_local))?;
                 let eq_instr = match load_addr_type {
                     ValType::I32 => Instruction::I32Eq,
                     ValType::I64 => Instruction::I64Eq,
@@ -886,10 +930,14 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
                 };
                 f.function.instruction(ctx, &eq_instr)?;
                 // Tee the result into emitted_local so the later flush can skip it.
-                f.function.instruction(ctx, &Instruction::LocalTee(s.emitted_local))?;
-                f.function.instruction(ctx, &Instruction::If(BlockType::Empty))?;
-                f.function.instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
-                f.function.instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalTee(s.emitted_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.val_local))?;
                 f.function.instruction(ctx, &s.instr)?;
                 f.function.instruction(ctx, &Instruction::End)?;
             }
@@ -1313,7 +1361,7 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
         // fall back to eager emission.  We allocate emitted_local last so that
         // partial allocation doesn't waste pool entries on a failed attempt.
         let addr_opt = self.local_pool.alloc(addr_type);
-        let val_opt  = self.local_pool.alloc(val_type);
+        let val_opt = self.local_pool.alloc(val_type);
         let flag_opt = self.local_pool.alloc(ValType::I32);
 
         match (addr_opt, val_opt, flag_opt) {
@@ -1348,9 +1396,15 @@ impl<Context, E, F: InstructionSink<Context, E>> Reactor<Context, E, F> {
             }
             (addr_opt, val_opt, flag_opt) => {
                 // Return any successfully allocated locals before bailing.
-                if let Some(l) = flag_opt { self.local_pool.free(l, ValType::I32); }
-                if let Some(l) = val_opt  { self.local_pool.free(l, val_type); }
-                if let Some(l) = addr_opt { self.local_pool.free(l, addr_type); }
+                if let Some(l) = flag_opt {
+                    self.local_pool.free(l, ValType::I32);
+                }
+                if let Some(l) = val_opt {
+                    self.local_pool.free(l, val_type);
+                }
+                if let Some(l) = addr_opt {
+                    self.local_pool.free(l, addr_type);
+                }
                 // Flush existing bundles so those locals are freed.
                 let tail = self.fns.len().saturating_sub(1);
                 self.flush_bundles(ctx, tail)?;
