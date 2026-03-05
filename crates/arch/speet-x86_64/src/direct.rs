@@ -319,7 +319,9 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
     }
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, 'ctx, Context, E, F> {
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
+    X86Recompiler<'cb, 'ctx, Context, E, F>
+{
     fn rip_to_func_idx(&self, rip: u64) -> FuncIdx {
         FuncIdx((rip.wrapping_sub(self.base_rip) / 1) as u32)
     }
@@ -342,9 +344,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
         let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
         let trap_locals: alloc::vec::Vec<(u32, wasm_encoder::ValType)> =
             self.traps.extend_locals(core::iter::empty()).collect();
-        let mut all_locals = arch_locals.iter().copied().chain(trap_locals.iter().copied());
+        let mut all_locals = arch_locals
+            .iter()
+            .copied()
+            .chain(trap_locals.iter().copied());
         self.reactor.next_with(ctx, f(&mut all_locals), inst_len)?;
-        self.traps.set_local_base(self.total_params + arch_local_count);
+        self.traps
+            .set_local_base(self.total_params + arch_local_count);
         Ok(())
     }
 
@@ -454,14 +460,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
 
             // Fire instruction trap (if installed).
             {
-                use crate::{InstructionInfo, TrapAction, ArchTag};
+                use crate::{ArchTag, InstructionInfo, TrapAction};
                 let insn_info = InstructionInfo {
                     pc: inst_rip,
                     len: inst_len,
                     arch: ArchTag::X86_64,
                     class: Self::classify_mnemonic(inst.mnemonic()),
                 };
-                if self.traps.on_instruction(&insn_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_instruction(&insn_info, ctx, &mut self.reactor)?
+                    == TrapAction::Skip
+                {
                     continue;
                 }
             }
@@ -1751,7 +1761,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
             }
         }
         let condition = ConditionSnippet { condition_type };
-        let params = JumpCallParams::conditional_jump(target_func_idx, self.total_params, &condition, pool);
+        let params =
+            JumpCallParams::conditional_jump(target_func_idx, self.total_params, &condition, pool);
         self.reactor.ji_with_params(ctx, params)?;
 
         Ok(Some(()))
@@ -1808,8 +1819,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
             let expected_ra_snippet = ExpectedRaSnippet { return_addr };
 
             // Step 3: Use fixups to set expected_ra (local 25) only for this call
-            let params = yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
-                .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
+            let params =
+                yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
+                    .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
             // Step 4: Emit the speculative call using yecta's ji_with_params API
             // This wraps the call in a try-catch block and uses fixups mechanism
@@ -1946,7 +1958,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
                     return Ok(Some(()));
                 }
             }
-            let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, self.total_params, self.pool);
+            let params = yecta::JumpCallParams::indirect_jump(
+                &return_addr_snippet,
+                self.total_params,
+                self.pool,
+            );
             self.reactor.ji_with_params(ctx, params)?;
 
             Ok(Some(()))

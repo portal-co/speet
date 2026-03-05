@@ -7,28 +7,39 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, LocalPool, LocalPoolBackend, Pool, Reactor, TableIdx, TypeIdx};
 pub mod direct;
 use speet_traps::{
+    insn::{ArchTag, InsnClass},
     FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
-    insn::{ArchTag, InsnClass},
 };
 /// Simple x86_64 recompiler for integer ops
-pub struct X86Recompiler<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
-    reactor: Reactor<Context, E, F>,
+pub struct X86Recompiler<
+    'cb,
+    'ctx,
+    Context,
+    E,
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend = yecta::LocalPool,
+> {
+    reactor: Reactor<Context, E, F, P>,
     pool: Pool,
     escape_tag: Option<EscapeTag>,
     base_rip: u64,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
     /// Pluggable instruction-level and jump-level trap hooks.
-    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F>>,
+    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
     /// Total wasm function parameter count (recompiler params + trap params).
     total_params: u32,
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, 'ctx, Context, E, F> {
+impl<'cb, 'ctx, Context, E, F, P> X86Recompiler<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend,
+{
     pub fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
     }
@@ -177,40 +188,89 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> X86Recompiler<'cb, '
         use iced_x86::Mnemonic;
         match mnemonic {
             // Memory
-            Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd
-            | Mnemonic::Lea | Mnemonic::Xchg
-            | Mnemonic::Push | Mnemonic::Pop
-            | Mnemonic::Movsb | Mnemonic::Movsw | Mnemonic::Movsd | Mnemonic::Movsq
-            | Mnemonic::Stosb | Mnemonic::Stosw | Mnemonic::Stosd | Mnemonic::Stosq
-            | Mnemonic::Lodsb | Mnemonic::Lodsw | Mnemonic::Lodsd | Mnemonic::Lodsq
-            | Mnemonic::Scasb | Mnemonic::Scasw | Mnemonic::Scasd | Mnemonic::Scasq
-                => InsnClass::MEMORY,
+            Mnemonic::Mov
+            | Mnemonic::Movzx
+            | Mnemonic::Movsx
+            | Mnemonic::Movsxd
+            | Mnemonic::Lea
+            | Mnemonic::Xchg
+            | Mnemonic::Push
+            | Mnemonic::Pop
+            | Mnemonic::Movsb
+            | Mnemonic::Movsw
+            | Mnemonic::Movsd
+            | Mnemonic::Movsq
+            | Mnemonic::Stosb
+            | Mnemonic::Stosw
+            | Mnemonic::Stosd
+            | Mnemonic::Stosq
+            | Mnemonic::Lodsb
+            | Mnemonic::Lodsw
+            | Mnemonic::Lodsd
+            | Mnemonic::Lodsq
+            | Mnemonic::Scasb
+            | Mnemonic::Scasw
+            | Mnemonic::Scasd
+            | Mnemonic::Scasq => InsnClass::MEMORY,
             // Conditional branches
-            Mnemonic::Jo | Mnemonic::Jno | Mnemonic::Jb | Mnemonic::Jae
-            | Mnemonic::Je | Mnemonic::Jne | Mnemonic::Jbe | Mnemonic::Ja
-            | Mnemonic::Js | Mnemonic::Jns | Mnemonic::Jp | Mnemonic::Jnp
-            | Mnemonic::Jl | Mnemonic::Jge | Mnemonic::Jle | Mnemonic::Jg
-            | Mnemonic::Jcxz | Mnemonic::Jecxz | Mnemonic::Jrcxz
-            | Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne
-                => InsnClass::BRANCH,
+            Mnemonic::Jo
+            | Mnemonic::Jno
+            | Mnemonic::Jb
+            | Mnemonic::Jae
+            | Mnemonic::Je
+            | Mnemonic::Jne
+            | Mnemonic::Jbe
+            | Mnemonic::Ja
+            | Mnemonic::Js
+            | Mnemonic::Jns
+            | Mnemonic::Jp
+            | Mnemonic::Jnp
+            | Mnemonic::Jl
+            | Mnemonic::Jge
+            | Mnemonic::Jle
+            | Mnemonic::Jg
+            | Mnemonic::Jcxz
+            | Mnemonic::Jecxz
+            | Mnemonic::Jrcxz
+            | Mnemonic::Loop
+            | Mnemonic::Loope
+            | Mnemonic::Loopne => InsnClass::BRANCH,
             // Direct/indirect unconditional jump
             Mnemonic::Jmp => InsnClass::BRANCH,
             // Call
             Mnemonic::Call => InsnClass::CALL,
             // Return
-            Mnemonic::Ret | Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd | Mnemonic::Iretq
-                => InsnClass::RETURN,
+            Mnemonic::Ret | Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd | Mnemonic::Iretq => {
+                InsnClass::RETURN
+            }
             // Syscall / privileged
-            Mnemonic::Syscall | Mnemonic::Sysenter | Mnemonic::Int | Mnemonic::Int1
-            | Mnemonic::Int3 | Mnemonic::Into
-                => InsnClass::PRIVILEGED,
+            Mnemonic::Syscall
+            | Mnemonic::Sysenter
+            | Mnemonic::Int
+            | Mnemonic::Int1
+            | Mnemonic::Int3
+            | Mnemonic::Into => InsnClass::PRIVILEGED,
             // Float
-            Mnemonic::Fld | Mnemonic::Fst | Mnemonic::Fstp | Mnemonic::Fadd | Mnemonic::Fsub
-            | Mnemonic::Fmul | Mnemonic::Fdiv | Mnemonic::Fsqrt
-            | Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Addss | Mnemonic::Addsd
-            | Mnemonic::Subss | Mnemonic::Subsd | Mnemonic::Mulss | Mnemonic::Mulsd
-            | Mnemonic::Divss | Mnemonic::Divsd | Mnemonic::Sqrtss | Mnemonic::Sqrtsd
-                => InsnClass::FLOAT,
+            Mnemonic::Fld
+            | Mnemonic::Fst
+            | Mnemonic::Fstp
+            | Mnemonic::Fadd
+            | Mnemonic::Fsub
+            | Mnemonic::Fmul
+            | Mnemonic::Fdiv
+            | Mnemonic::Fsqrt
+            | Mnemonic::Movss
+            | Mnemonic::Movsd
+            | Mnemonic::Addss
+            | Mnemonic::Addsd
+            | Mnemonic::Subss
+            | Mnemonic::Subsd
+            | Mnemonic::Mulss
+            | Mnemonic::Mulsd
+            | Mnemonic::Divss
+            | Mnemonic::Divsd
+            | Mnemonic::Sqrtss
+            | Mnemonic::Sqrtsd => InsnClass::FLOAT,
             _ => InsnClass::OTHER,
         }
     }
