@@ -38,7 +38,7 @@
 
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::FuncIdx;
+use yecta::{FuncIdx, LocalPoolBackend};
 
 use crate::layout::ExtraParams;
 use crate::locals::ExtraLocals;
@@ -65,12 +65,13 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     ///
     /// Only [`TrapConfig`] should call this — traps receive one as a `&mut`
     /// argument.
-    pub(crate) fn new(
-        sink: &'a mut F,
-        locals: &'a ExtraLocals,
-        params: &'a ExtraParams,
-    ) -> Self {
-        Self { sink, locals, params, _pd: PhantomData }
+    pub(crate) fn new(sink: &'a mut F, locals: &'a ExtraLocals, params: &'a ExtraParams) -> Self {
+        Self {
+            sink,
+            locals,
+            params,
+            _pd: PhantomData,
+        }
     }
 
     /// Emit a single wasm instruction into the current function.
@@ -123,7 +124,8 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     /// end
     /// ```
     pub fn jump_if(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.sink.instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+        self.sink
+            .instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
         self.jump(ctx, target, params)?;
         self.sink.instruction(ctx, &Instruction::End)?;
         Ok(())
@@ -134,15 +136,15 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
 
 /// Emit an unconditional jump via `Reactor::jmp` on a `TrapContext` whose
 /// sink is known to be a `Reactor`.
-pub fn reactor_jump<Context, E, F>(
-    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F>>,
+pub fn reactor_jump<Context, E, F, P: LocalPoolBackend>(
+    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F, P>>,
     ctx: &mut Context,
     target: FuncIdx,
     params: u32,
 ) -> Result<(), E>
 where
     F: wax_core::build::InstructionSink<Context, E>,
-    yecta::Reactor<Context, E, F>: InstructionSink<Context, E>,
+    yecta::Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     trap_ctx.sink.jmp(ctx, target, params)
 }
@@ -150,17 +152,19 @@ where
 /// Emit a conditional jump via a wasm `if` block wrapping `Reactor::jmp`.
 ///
 /// Consumes the top `i32` on the stack as the branch condition.
-pub fn reactor_jump_if<Context, E, F>(
-    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F>>,
+pub fn reactor_jump_if<Context, E, F, P: LocalPoolBackend>(
+    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F, P>>,
     ctx: &mut Context,
     target: FuncIdx,
     params: u32,
 ) -> Result<(), E>
 where
     F: wax_core::build::InstructionSink<Context, E>,
-    yecta::Reactor<Context, E, F>: InstructionSink<Context, E>,
+    yecta::Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
-    trap_ctx.sink.instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+    trap_ctx
+        .sink
+        .instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
     trap_ctx.sink.jmp(ctx, target, params)?;
     trap_ctx.sink.instruction(ctx, &Instruction::End)
 }

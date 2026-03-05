@@ -38,7 +38,7 @@ pub struct X86Recompiler<
 impl<'cb, 'ctx, Context, E, F, P> X86Recompiler<'cb, 'ctx, Context, E, F, P>
 where
     F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend,
+    P: yecta::LocalPoolBackend + Default,
 {
     pub fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
@@ -148,7 +148,7 @@ where
     /// Install an instruction trap.
     pub fn set_instruction_trap(
         &mut self,
-        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.traps.set_instruction_trap(trap);
     }
@@ -161,7 +161,7 @@ where
     /// Install a jump trap.
     pub fn set_jump_trap(
         &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.traps.set_jump_trap(trap);
     }

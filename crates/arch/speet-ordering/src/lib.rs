@@ -60,7 +60,7 @@
 
 use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
-use yecta::Reactor;
+use yecta::{LocalPoolBackend, Reactor};
 
 // ── MemOrder ──────────────────────────────────────────────────────────────────
 
@@ -113,9 +113,13 @@ pub struct AtomicOpts {
 
 impl AtomicOpts {
     /// Atomic instructions disabled (the default).
-    pub const NONE: Self = Self { use_atomic_insns: false };
+    pub const NONE: Self = Self {
+        use_atomic_insns: false,
+    };
     /// Atomic instructions enabled.
-    pub const ATOMIC: Self = Self { use_atomic_insns: true };
+    pub const ATOMIC: Self = Self {
+        use_atomic_insns: true,
+    };
 }
 
 // ── Instruction substitution ──────────────────────────────────────────────────
@@ -195,9 +199,9 @@ fn store_val_type(instr: &Instruction<'static>) -> Option<ValType> {
 /// `ValType::I32` for ordinary (32-bit) linear memory, `ValType::I64` for
 /// memory64.  This is recorded in the [`LazyStore`] so that alias checks
 /// against loads use the correct equality instruction.
-pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_store<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     order: MemOrder,
     atomic: AtomicOpts,
     addr_type: ValType,
@@ -243,9 +247,9 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>>(
 ///
 /// If `atomic.use_atomic_insns` is `true` and the instruction has an atomic
 /// counterpart, the atomic form is used instead.
-pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_load<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     addr_local: u32,
     addr_type: ValType,
     atomic: AtomicOpts,
@@ -314,7 +318,11 @@ fn rmw_align(w: RmwWidth) -> u32 {
 /// The canonical wasm [`MemArg`] (offset 0, natural alignment) for an RMW
 /// access of the given width into memory index 0.
 fn rmw_memarg(w: RmwWidth) -> MemArg {
-    MemArg { offset: 0, align: rmw_align(w), memory_index: 0 }
+    MemArg {
+        offset: 0,
+        align: rmw_align(w),
+        memory_index: 0,
+    }
 }
 
 /// Emit an **atomic load-reserved** (`LR.W` / `LR.D`).
@@ -359,9 +367,9 @@ fn rmw_memarg(w: RmwWidth) -> MemArg {
 /// The `_order` argument is accepted for API symmetry; wasm atomic loads are
 /// always sequentially consistent within a thread regardless of the guest
 /// ordering annotation.
-pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_lr<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     width: RmwWidth,
     atomic: AtomicOpts,
     addr_local: u32,
@@ -402,9 +410,9 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>>(
 /// stores.  Guest atomic instructions that carry `.rl` (release) or `.aqrl`
 /// semantics should therefore pass the recompiler's `mem_order` field here so
 /// that a relaxed-mode binary still enjoys store sinking.
-pub fn emit_sc<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_sc<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     width: RmwWidth,
     atomic: AtomicOpts,
     order: MemOrder,
@@ -451,9 +459,9 @@ pub fn emit_sc<Context, E, F: InstructionSink<Context, E>>(
 /// In both paths `scratch_local` must be a wasm local of the same value type
 /// as `width`; it is used only by the min/max synthesis paths and is ignored
 /// for all direct-operation cases.
-pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     width: RmwWidth,
     op: RmwOp,
     atomic: AtomicOpts,
@@ -491,14 +499,14 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
         match (width, op) {
             (RmwWidth::W32, RmwOp::Swap) => Some(Instruction::I32AtomicRmwXchg(m)),
             (RmwWidth::W64, RmwOp::Swap) => Some(Instruction::I64AtomicRmwXchg(m)),
-            (RmwWidth::W32, RmwOp::Add)  => Some(Instruction::I32AtomicRmwAdd(m)),
-            (RmwWidth::W64, RmwOp::Add)  => Some(Instruction::I64AtomicRmwAdd(m)),
-            (RmwWidth::W32, RmwOp::Xor)  => Some(Instruction::I32AtomicRmwXor(m)),
-            (RmwWidth::W64, RmwOp::Xor)  => Some(Instruction::I64AtomicRmwXor(m)),
-            (RmwWidth::W32, RmwOp::And)  => Some(Instruction::I32AtomicRmwAnd(m)),
-            (RmwWidth::W64, RmwOp::And)  => Some(Instruction::I64AtomicRmwAnd(m)),
-            (RmwWidth::W32, RmwOp::Or)   => Some(Instruction::I32AtomicRmwOr(m)),
-            (RmwWidth::W64, RmwOp::Or)   => Some(Instruction::I64AtomicRmwOr(m)),
+            (RmwWidth::W32, RmwOp::Add) => Some(Instruction::I32AtomicRmwAdd(m)),
+            (RmwWidth::W64, RmwOp::Add) => Some(Instruction::I64AtomicRmwAdd(m)),
+            (RmwWidth::W32, RmwOp::Xor) => Some(Instruction::I32AtomicRmwXor(m)),
+            (RmwWidth::W64, RmwOp::Xor) => Some(Instruction::I64AtomicRmwXor(m)),
+            (RmwWidth::W32, RmwOp::And) => Some(Instruction::I32AtomicRmwAnd(m)),
+            (RmwWidth::W64, RmwOp::And) => Some(Instruction::I64AtomicRmwAnd(m)),
+            (RmwWidth::W32, RmwOp::Or) => Some(Instruction::I32AtomicRmwOr(m)),
+            (RmwWidth::W64, RmwOp::Or) => Some(Instruction::I64AtomicRmwOr(m)),
             _ => None,
         }
     } else {
@@ -515,7 +523,10 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
     // Reached when !use_atomic_insns AND op is Swap/Add/Xor/And/Or.
     // All min/max ops fall through to the section below regardless.
     let is_direct_nonatomic = !atomic.use_atomic_insns
-        && matches!(op, RmwOp::Swap | RmwOp::Add | RmwOp::Xor | RmwOp::And | RmwOp::Or);
+        && matches!(
+            op,
+            RmwOp::Swap | RmwOp::Add | RmwOp::Xor | RmwOp::And | RmwOp::Or
+        );
 
     if is_direct_nonatomic {
         // Entry stack: [addr, src] — consumed here; values also in locals.
@@ -529,19 +540,19 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W64 => Instruction::I64Load(m),
         };
         reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
-        reactor.feed(ctx, &load_instr)?;                          // old
+        reactor.feed(ctx, &load_instr)?; // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
         if op == RmwOp::Swap {
             // new = src; drop old from compute stack, keep it as result below.
             // Stack: old.  We need [addr, src] for the store.
             reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
-            reactor.feed(ctx, &Instruction::LocalGet(src_local))?;  // old, addr, src
+            reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, src
         } else {
             // Compute new = op(old, src).  Stack: old.
-            reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;  // old, addr
+            reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
             reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
-            reactor.feed(ctx, &Instruction::LocalGet(src_local))?;    // old, addr, old, src
+            reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
             match (width, op) {
                 (RmwWidth::W32, RmwOp::Add) => reactor.feed(ctx, &Instruction::I32Add)?,
                 (RmwWidth::W64, RmwOp::Add) => reactor.feed(ctx, &Instruction::I64Add)?,
@@ -549,8 +560,8 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
                 (RmwWidth::W64, RmwOp::Xor) => reactor.feed(ctx, &Instruction::I64Xor)?,
                 (RmwWidth::W32, RmwOp::And) => reactor.feed(ctx, &Instruction::I32And)?,
                 (RmwWidth::W64, RmwOp::And) => reactor.feed(ctx, &Instruction::I64And)?,
-                (RmwWidth::W32, RmwOp::Or)  => reactor.feed(ctx, &Instruction::I32Or)?,
-                (RmwWidth::W64, RmwOp::Or)  => reactor.feed(ctx, &Instruction::I64Or)?,
+                (RmwWidth::W32, RmwOp::Or) => reactor.feed(ctx, &Instruction::I32Or)?,
+                (RmwWidth::W64, RmwOp::Or) => reactor.feed(ctx, &Instruction::I64Or)?,
                 _ => unreachable!(),
             }
             // Stack: old, addr, new
@@ -561,7 +572,14 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, store_instr)?;
+        emit_store(
+            ctx,
+            reactor,
+            order,
+            AtomicOpts::NONE,
+            ValType::I32,
+            store_instr,
+        )?;
         // Stack: old
         return Ok(());
     }
@@ -690,18 +708,18 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
             RmwWidth::W64 => Instruction::I64Load(m),
         };
         reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
-        reactor.feed(ctx, &load_instr)?;                            // old
-        reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?;  // stash old; old on stack
+        reactor.feed(ctx, &load_instr)?; // old
+        reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
         // Compute new = op(old, src) via select.
-        reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;    // old, addr (for store)
+        reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr (for store)
         reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
-        reactor.feed(ctx, &Instruction::LocalGet(src_local))?;     // old, addr, old, src
+        reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
         match (width, op) {
-            (RmwWidth::W32, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I32LtS)?,
-            (RmwWidth::W64, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I64LtS)?,
-            (RmwWidth::W32, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I32GtS)?,
-            (RmwWidth::W64, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I64GtS)?,
+            (RmwWidth::W32, RmwOp::Min) => reactor.feed(ctx, &Instruction::I32LtS)?,
+            (RmwWidth::W64, RmwOp::Min) => reactor.feed(ctx, &Instruction::I64LtS)?,
+            (RmwWidth::W32, RmwOp::Max) => reactor.feed(ctx, &Instruction::I32GtS)?,
+            (RmwWidth::W64, RmwOp::Max) => reactor.feed(ctx, &Instruction::I64GtS)?,
             (RmwWidth::W32, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I32LtU)?,
             (RmwWidth::W64, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I64LtU)?,
             (RmwWidth::W32, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I32GtU)?,
@@ -710,15 +728,22 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
         }
         // stack: old, addr, pred
         reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, pred, old
-        reactor.feed(ctx, &Instruction::LocalGet(src_local))?;     // old, addr, pred, old, src
-        reactor.feed(ctx, &Instruction::Select)?;                  // old, addr, new
+        reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, pred, old, src
+        reactor.feed(ctx, &Instruction::Select)?; // old, addr, new
 
         // store new at addr; respects MemOrder.
         let store_instr = match width {
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, store_instr)?;
+        emit_store(
+            ctx,
+            reactor,
+            order,
+            AtomicOpts::NONE,
+            ValType::I32,
+            store_instr,
+        )?;
         // stack: old
         return Ok(());
     }
@@ -746,19 +771,19 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
     reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
 
     // Push addr, expected for cmpxchg
-    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;     // old, addr
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?;  // old, addr, expected
+    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected
 
     // Compute new = op(old, src) as replacement
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?;  // old, addr, expected, old
-    reactor.feed(ctx, &Instruction::LocalGet(src_local))?;      // old, addr, expected, old, src
+    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, old
+    reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, old, src
 
     // Emit the comparison operator; consumes [old, src], leaves [pred]
     match (width, op) {
-        (RmwWidth::W32, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I32LtS)?,
-        (RmwWidth::W64, RmwOp::Min)  => reactor.feed(ctx, &Instruction::I64LtS)?,
-        (RmwWidth::W32, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I32GtS)?,
-        (RmwWidth::W64, RmwOp::Max)  => reactor.feed(ctx, &Instruction::I64GtS)?,
+        (RmwWidth::W32, RmwOp::Min) => reactor.feed(ctx, &Instruction::I32LtS)?,
+        (RmwWidth::W64, RmwOp::Min) => reactor.feed(ctx, &Instruction::I64LtS)?,
+        (RmwWidth::W32, RmwOp::Max) => reactor.feed(ctx, &Instruction::I32GtS)?,
+        (RmwWidth::W64, RmwOp::Max) => reactor.feed(ctx, &Instruction::I64GtS)?,
         (RmwWidth::W32, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I32LtU)?,
         (RmwWidth::W64, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I64LtU)?,
         (RmwWidth::W32, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I32GtU)?,
@@ -767,8 +792,8 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
     }
     // stack: old, addr, expected, pred
     reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, pred, old
-    reactor.feed(ctx, &Instruction::LocalGet(src_local))?;     // old, addr, expected, pred, old, src
-    // select: pred ? old : src  (pred true → keep old = it IS the min/max)
+    reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, pred, old, src
+                                                           // select: pred ? old : src  (pred true → keep old = it IS the min/max)
     reactor.feed(ctx, &Instruction::Select)?; // old, addr, expected, new
 
     // cmpxchg: [addr, expected, replacement] → got
@@ -793,9 +818,9 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
     reactor.feed(ctx, &Instruction::Drop)?;
     reactor.feed(ctx, &Instruction::Br(0))?;
 
-    reactor.feed(ctx, &Instruction::End)?;        // end loop
+    reactor.feed(ctx, &Instruction::End)?; // end loop
     reactor.feed(ctx, &Instruction::Unreachable)?; // unreachable: loop exits only via br_if
-    reactor.feed(ctx, &Instruction::End)?;         // end block; result = old
+    reactor.feed(ctx, &Instruction::End)?; // end block; result = old
 
     Ok(())
 }
@@ -814,9 +839,9 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>>(
 /// wasm memory instructions are already sequentially ordered within a single
 /// thread; the fence is only needed to control the *lazy-deferral* buffer
 /// maintained by yecta.
-pub fn emit_fence<Context, E, F: InstructionSink<Context, E>>(
+pub fn emit_fence<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     ctx: &mut Context,
-    reactor: &mut Reactor<Context, E, F>,
+    reactor: &mut Reactor<Context, E, F, P>,
     _order: MemOrder,
 ) -> Result<(), E> {
     // Both Strong and Relaxed flush the bundle buffer.  Under Strong this is

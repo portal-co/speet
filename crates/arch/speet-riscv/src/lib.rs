@@ -563,7 +563,7 @@ where
     /// ```
     pub fn set_ecall_callback(
         &mut self,
-        callback: &'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
+        callback: &'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.ecall_callback = Some(callback);
     }
@@ -603,7 +603,7 @@ where
     /// ```
     pub fn set_ebreak_callback(
         &mut self,
-        callback: &'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
+        callback: &'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.ebreak_callback = Some(callback);
     }
@@ -643,7 +643,7 @@ where
     /// ```
     pub fn set_mapper_callback(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F>> + 'ctx),
+        callback: &'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.mapper_callback = Some(callback);
     }
@@ -699,7 +699,7 @@ where
     /// before the first `translate_instruction` call.
     pub fn set_instruction_trap(
         &mut self,
-        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.traps.set_instruction_trap(trap);
     }
@@ -715,7 +715,7 @@ where
     /// before the first `translate_instruction` call.
     pub fn set_jump_trap(
         &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F>> + 'ctx),
+        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
     ) {
         self.traps.set_jump_trap(trap);
     }
@@ -1287,7 +1287,7 @@ where
     }
 
     /// Get the reactor (consumes self)
-    pub fn into_reactor(self) -> Reactor<Context, E, F> {
+    pub fn into_reactor(self) -> Reactor<Context, E, F, P> {
         self.reactor
     }
 }

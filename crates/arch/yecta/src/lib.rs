@@ -97,6 +97,20 @@ pub trait LocalPoolBackend {
     /// The index and its type are stored for future allocation. If the pool
     /// is full, this operation has no effect.
     fn free(&mut self, idx: u32, ty: ValType);
+
+    /// Seed the pool with a contiguous range of i32 local indices.
+    ///
+    /// Adds `count` indices starting from `start` to the i32 pool. Used to
+    /// pre-populate the pool with reserved local slots that will be used for
+    /// deferred store operands and other temporary values.
+    fn seed_i32(&mut self, start: u32, count: u32);
+
+    /// Seed the pool with a contiguous range of i64 local indices.
+    ///
+    /// Adds `count` indices starting from `start` to the i64 pool. Used to
+    /// pre-populate the pool with reserved local slots that will be used for
+    /// deferred store operands and other temporary values.
+    fn seed_i64(&mut self, start: u32, count: u32);
 }
 
 /// A fixed-capacity pool of recyclable wasm local indices.
@@ -192,6 +206,24 @@ impl<const N: usize> LocalPoolBackend for LocalPool<N> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn seed_i32(&mut self, start: u32, count: u32) {
+        for i in 0..count as usize {
+            if self.i32_len < N {
+                self.i32s[self.i32_len] = start + i as u32;
+                self.i32_len += 1;
+            }
+        }
+    }
+
+    fn seed_i64(&mut self, start: u32, count: u32) {
+        for i in 0..count as usize {
+            if self.i64_len < N {
+                self.i64s[self.i64_len] = start + i as u32;
+                self.i64_len += 1;
+            }
         }
     }
 }
