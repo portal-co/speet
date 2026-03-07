@@ -64,7 +64,7 @@ use speet_traps::{
 };
 use speet_wasm_helpers::{mulh_signed, mulh_signed_unsigned, mulh_unsigned, MulhTemps};
 use wasm_encoder::{Instruction, ValType};
-use yecta::{EscapeTag, FuncIdx, LocalPool, LocalPoolBackend, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx, TypeIdx};
 
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
@@ -301,6 +301,18 @@ pub struct RiscVRecompiler<
     /// `jmp` / `ji` / `ji_with_params` call so that trap parameters (e.g. the
     /// ROP depth counter) are forwarded along every control-flow edge.
     total_params: u32,
+    /// Unified layout: arch params + trap params, then per-function locals.
+    layout: LocalLayout,
+    /// Mark placed after all param slots; used to rewind before each function.
+    locals_mark: Mark,
+    /// Slot for per-function int-type temp locals (num_temps of them).
+    temps_slot: LocalSlot,
+    /// Slot for the single load-address scratch local.
+    addr_scratch_slot: LocalSlot,
+    /// Slot for addr-type pool locals.
+    pool_addr_slot: LocalSlot,
+    /// Slot for i64 pool locals.
+    pool_i64_slot: LocalSlot,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> RiscVRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -328,7 +340,7 @@ where
     where
         P: Default,
     {
-        Self {
+        let mut recomp = Self {
             reactor: Reactor::default(),
             pool,
             escape_tag,
@@ -346,7 +358,15 @@ where
             atomic_opts: AtomicOpts::NONE,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
-        }
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            temps_slot: LocalSlot(0),
+            addr_scratch_slot: LocalSlot(0),
+            pool_addr_slot: LocalSlot(0),
+            pool_i64_slot: LocalSlot(0),
+        };
+        recomp.setup_traps();
+        recomp
     }
 
     /// Create a new RISC-V recompiler instance with all configuration options including base function offset
@@ -371,7 +391,7 @@ where
     where
         P: Default,
     {
-        Self {
+        let mut recomp = Self {
             reactor: Reactor::with_base_func_offset(base_func_offset),
             pool,
             escape_tag,
@@ -389,7 +409,15 @@ where
             atomic_opts: AtomicOpts::NONE,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
-        }
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            temps_slot: LocalSlot(0),
+            addr_scratch_slot: LocalSlot(0),
+            pool_addr_slot: LocalSlot(0),
+            pool_i64_slot: LocalSlot(0),
+        };
+        recomp.setup_traps();
+        recomp
     }
 
     /// Get the current base function offset.
@@ -735,7 +763,15 @@ where
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
     pub fn setup_traps(&mut self) -> u32 {
-        self.total_params = self.traps.setup(Self::BASE_PARAMS);
+        let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
+        self.layout = LocalLayout::empty();
+        self.layout.append(32, int_type);        // x0-x31 (params 0-31)
+        self.layout.append(32, ValType::F64);    // f0-f31 (params 32-63)
+        self.layout.append(1, ValType::I32);     // PC (param 64)
+        self.layout.append(1, int_type);         // expected_RA (param 65)
+        self.traps.declare_params(&mut self.layout);
+        self.locals_mark = self.layout.mark();
+        self.total_params = self.locals_mark.total_locals;
         self.total_params
     }
 
@@ -851,70 +887,28 @@ where
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
-        // Integer registers: locals 0-31 (i32 for RV32, i64 for RV64)
-        // Float registers: locals 32-63 (f64)
-        // PC: local 64 (i32)
-        // Expected RA: local 65 (i32/i64) - hidden register for speculative call returns
-        // Temps: locals 66+ (int_type):
-        //   66-68  mapper scratch
-        //   69     AMO scratch
-        //   70-65+num_temps   caller-requested extras
-        // Load-addr scratch: local 66+num_temps (addr_type: i32 or i64)
-        // Pool addr-type locals: locals 67+num_temps .. (N_POOL_ADDR of addr_type)
-        // Pool i64s: locals after pool addr-type slots (i64, for val saving in memory64)
-        // Trap non-param locals: immediately after pool i64s
-        let int_type = if self.enable_rv64 {
-            ValType::I64
-        } else {
-            ValType::I32
-        };
-        // The effective address type matches the memory model in use.
-        // memory64 uses i64 addresses; the default path uses i32.
-        let addr_type = if self.use_memory64 {
-            ValType::I64
-        } else {
-            ValType::I32
-        };
-        let arch_locals = [
-            (32, int_type),                   // x0-x31
-            (32, ValType::F64),               // f0-f31
-            (1, ValType::I32),                // PC
-            (1, int_type),                    // Expected RA
-            (num_temps, int_type),            // caller temps (mapper + AMO scratch)
-            (1, addr_type),                   // load-addr scratch (matches address width)
-            (Self::N_POOL_ADDR, addr_type),   // pool addr-type slots (for addr_local saving)
-            (Self::N_POOL_I64, ValType::I64), // pool i64 slots (for val_local saving)
-        ];
-        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
-        // Seed the reactor's local pool with the freshly-declared pool locals.
-        let pool_addr_start = 66 + num_temps + 1;
-        let pool_i64_start = pool_addr_start + Self::N_POOL_ADDR;
+        let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
+        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
+        // Rewind to the params mark, discarding any locals from the previous function.
+        self.layout.rewind(&self.locals_mark);
+        // Append per-function non-param locals in order:
+        self.temps_slot        = self.layout.append(num_temps, int_type);
+        self.addr_scratch_slot = self.layout.append(1, addr_type);
+        self.pool_addr_slot    = self.layout.append(Self::N_POOL_ADDR, addr_type);
+        self.pool_i64_slot     = self.layout.append(Self::N_POOL_I64, ValType::I64);
+        self.traps.declare_locals(&mut self.layout);
+        // Seed the reactor's local pool with the freshly-declared pool slots.
+        let pool_addr_start = self.layout.base(self.pool_addr_slot);
+        let pool_i64_start  = self.layout.base(self.pool_i64_slot);
         match addr_type {
-            ValType::I32 => self
-                .reactor
-                .local_pool
-                .seed_i32(pool_addr_start, Self::N_POOL_ADDR),
-            ValType::I64 => self
-                .reactor
-                .local_pool
-                .seed_i64(pool_addr_start, Self::N_POOL_ADDR),
+            ValType::I32 => self.reactor.local_pool.seed_i32(pool_addr_start, Self::N_POOL_ADDR),
+            ValType::I64 => self.reactor.local_pool.seed_i64(pool_addr_start, Self::N_POOL_ADDR),
             _ => {}
         }
-        self.reactor
-            .local_pool
-            .seed_i64(pool_i64_start, Self::N_POOL_I64);
-        // Phase 2a: collect trap non-param locals into a Vec to avoid borrow conflicts,
-        // then chain with the arch locals and pass to next_with.
-        let trap_locals: Vec<(u32, ValType)> =
-            self.traps.locals_iter().collect();
-        let mut all_locals = arch_locals
-            .iter()
-            .copied()
-            .chain(trap_locals.iter().copied());
-        self.reactor.next_with(ctx, f(&mut all_locals), 2)?;
-        // Phase 2b: assign absolute indices to trap non-param locals.
-        self.traps
-            .set_local_base(self.total_params + arch_local_count);
+        self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
+        // Declare only non-param locals to the function (params are already in the type).
+        let mut locals_iter = self.layout.iter_since(&self.locals_mark);
+        self.reactor.next_with(ctx, f(&mut locals_iter), 2)?;
         Ok(())
     }
 
@@ -953,19 +947,15 @@ where
     }
 
     /// Get the starting index for temporary registers
-    const fn temps_start() -> u32 {
-        66
+    fn temps_start(&self) -> u32 {
+        self.layout.base(self.temps_slot)
     }
 
     /// Scratch local used by AMO min/max synthesis (cmpxchg loop).
     ///
-    /// Locals 66–68 are reserved for the page-table mapper callbacks
-    /// (see [`PageMapLocals::consecutive`]).  Local 69 is therefore the first
-    /// free slot available for non-mapper scratch use.  It holds an i32 (or
-    /// i64 in RV64 mode) value type and is only live for the duration of a
-    /// single AMO instruction translation.
-    const fn amo_scratch_local() -> u32 {
-        69
+    /// Offset 3 within the temps slot: first 3 temps are mapper scratch locals.
+    fn amo_scratch_local(&self) -> u32 {
+        self.layout.local(self.temps_slot, 3)
     }
 
     /// The wasm [`ValType`] of an effective (post-mapper) memory address.
@@ -982,14 +972,8 @@ where
 
     /// Scratch local used to save the effective load address for alias checks
     /// against pending lazy stores.
-    ///
-    /// Follows immediately after the 8 `int_type` temp locals (66–73).
-    /// The type of this local matches the address type in use: `i32` for the
-    /// default memory model, `i64` for memory64.  The declaration in
-    /// `init_function` uses `addr_type` which is set accordingly.
-    const fn load_addr_scratch_local() -> u32 {
-        // 66 (first temp) + 8 (num_temps passed by translate_instruction) = 74
-        74
+    fn load_addr_scratch_local(&self) -> u32 {
+        self.layout.base(self.addr_scratch_slot)
     }
 
     /// Emit instructions to load an immediate value
@@ -1247,7 +1231,7 @@ where
     /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
     /// to the high 64 bits, only through carries.
     fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
-        let temps = MulhTemps::new(Self::temps_start());
+        let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed(src1, src2, temps);
         for instr in instrs {
             self.reactor.feed(ctx, &instr)?;
@@ -1257,7 +1241,7 @@ where
 
     /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
     fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32) -> Result<(), E> {
-        let temps = MulhTemps::new(Self::temps_start());
+        let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_unsigned(src1, src2, temps);
         for instr in instrs {
             self.reactor.feed(ctx, &instr)?;
@@ -1272,7 +1256,7 @@ where
         src1: u32,
         src2: u32,
     ) -> Result<(), E> {
-        let temps = MulhTemps::new(Self::temps_start());
+        let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed_unsigned(src1, src2, temps);
         for instr in instrs {
             self.reactor.feed(ctx, &instr)?;

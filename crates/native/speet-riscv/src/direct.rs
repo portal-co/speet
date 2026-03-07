@@ -92,7 +92,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Save the effective address into the load-addr scratch local so that
         // emit_load can compare it against any pending lazy store addresses.
-        let load_addr = Self::load_addr_scratch_local();
+        let load_addr = self.load_addr_scratch_local();
         let addr_type = self.addr_val_type();
         self.reactor.feed(ctx, &Instruction::LocalTee(load_addr))?;
 
@@ -485,7 +485,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         }
 
         // Save the effective address for alias checks.
-        let load_addr = Self::load_addr_scratch_local();
+        let load_addr = self.load_addr_scratch_local();
         let addr_type = self.addr_val_type();
         self.reactor.feed(ctx, &Instruction::LocalTee(load_addr))?;
 
@@ -820,7 +820,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
         if self
             .traps
-            .on_instruction(&insn_info, ctx, &mut self.reactor)?
+            .on_instruction(&insn_info, ctx, &mut self.reactor, &self.layout)?
             == TrapAction::Skip
         {
             return Ok(());
@@ -941,7 +941,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::DirectJump
                     };
                     let jal_info = JumpInfo::direct(pc as u64, target_pc, jal_kind);
-                    if self.traps.on_jump(&jal_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    if self.traps.on_jump(&jal_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                         return Ok(());
                     }
                     self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -968,13 +968,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if is_abi_return {
                     // Jump trap: jalr x0, ra, 0 → Return (indirect)
                     // Tee ra into load_addr_scratch_local so the trap can inspect it.
-                    let scratch = Self::load_addr_scratch_local();
+                    let scratch = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
                     self.reactor.feed(ctx, &Instruction::LocalTee(scratch))?;
                     self.reactor.feed(ctx, &Instruction::Drop)?; // balance the stack
                     let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
-                    if self.traps.on_jump(&jalr_ret_info, ctx, &mut self.reactor)?
+                    if self.traps.on_jump(&jalr_ret_info, ctx, &mut self.reactor, &self.layout)?
                         == TrapAction::Skip
                     {
                         return Ok(());
@@ -1188,7 +1188,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             .feed(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
                         self.reactor.feed(ctx, &Instruction::I32And)?;
                     }
-                    let scratch = Self::load_addr_scratch_local();
+                    let scratch = self.load_addr_scratch_local();
                     self.reactor.feed(ctx, &Instruction::LocalTee(scratch))?;
                     self.reactor
                         .feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
@@ -1199,7 +1199,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::IndirectJump
                     };
                     let jalr_info = JumpInfo::indirect(pc as u64, scratch, jalr_kind);
-                    if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                    if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                         return Ok(());
                     }
                     // For indirect jumps, seal with unreachable as we can't statically determine target
@@ -2365,17 +2365,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // thread.
                 if dest.0 != 0 {
                     let addr_type = self.addr_val_type();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                     // Tee address for alias check in emit_lr.
                     self.reactor
-                        .feed(ctx, &Instruction::LocalTee(Self::load_addr_scratch_local()))?;
+                        .feed(ctx, &Instruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         &mut self.reactor,
                         RmwWidth::W32,
                         self.atomic_opts,
-                        Self::load_addr_scratch_local(),
+                        load_addr,
                         addr_type,
                         MemOrder::Strong,
                     )?;
@@ -2915,7 +2916,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 let addr_local = Self::reg_to_local(*addr);
                 let src_local = Self::reg_to_local(*src);
-                let scratch = Self::amo_scratch_local();
+                let scratch = self.amo_scratch_local();
 
                 // Push addr and src onto the wasm stack for emit_rmw to consume.
                 self.reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;
@@ -3094,7 +3095,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Jump trap: conditional branch.
         let branch_info = JumpInfo::direct(pc as u64, target_pc, JumpKind::ConditionalBranch);
-        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
             return Ok(());
         }
 

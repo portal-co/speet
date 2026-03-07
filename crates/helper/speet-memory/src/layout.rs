@@ -4,4 +4,4 @@
 //! backward compatibility.  New code should prefer importing them from `yecta`
 //! directly.
 
-pub use yecta::{LocalLayout, LocalSlot};
+pub use yecta::{LocalLayout, LocalSlot, Mark};

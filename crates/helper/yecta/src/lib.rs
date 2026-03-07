@@ -66,7 +66,7 @@
 #![no_std]
 
 pub mod layout;
-pub use layout::{LocalLayout, LocalSlot};
+pub use layout::{LocalLayout, LocalSlot, Mark};
 
 use core::{
     convert::Infallible,

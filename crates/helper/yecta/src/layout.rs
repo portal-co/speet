@@ -4,57 +4,72 @@
 //! `LocalLayout` serves two distinct roles in the speet recompiler pipeline,
 //! both of which share the same resolution mechanism:
 //!
-//! ## Role 1 — architectural locals (constructed up-front)
+//! ## Role 1 — architectural params (declared once)
 //!
-//! A recompiler calls [`LocalLayout::build`] once with all its local groups in
-//! order.  The resulting [`LocalSlot`] handles are used throughout translation
-//! to look up absolute wasm indices.  An optional [`LocalLayout::set_base`]
-//! call shifts all indices if the locals do not start at 0 (e.g. they follow
-//! wasm function parameters).
+//! A recompiler appends its parameter groups in order to a single layout,
+//! starting from index 0.  Traps then append their own parameter groups.
+//! A [`Mark`] is placed after all params.  Because every group is appended in
+//! insertion order and the layout starts at 0, [`LocalLayout::local`] and
+//! [`LocalLayout::base`] return correct **absolute** wasm local indices
+//! immediately — no `set_base` call is needed.
 //!
 //! ```ignore
-//! let (layout, [regs, pc, flags, temps]) = LocalLayout::build([
-//!     (32, ValType::I64),  // 32 GP registers → locals 0-31
-//!     (1,  ValType::I64),  // PC              → local 32
-//!     (5,  ValType::I32),  // flags ZF..PF    → locals 33-37
-//!     (4,  ValType::I64),  // 4 temps         → locals 38-41
-//! ]);
-//! // locals start right after total_params wasm params:
-//! layout.set_base(total_params);
-//! assert_eq!(layout.base(pc), total_params + 32);
+//! let mut layout = LocalLayout::empty();
+//! // Architecture params (appended first → indices 0, 1, …):
+//! let regs = layout.append(32, ValType::I64);  // params 0-31
+//! let pc   = layout.append(1,  ValType::I32);  // param  32
+//! // Trap params (appended next → indices 33, …):
+//! trap.declare_params(&mut layout);
+//! let params_mark = layout.mark();             // total_locals() == total_params
 //! ```
 //!
-//! ## Role 2 — trap-contributed parameters and locals (grown incrementally)
+//! ## Role 2 — per-function locals (mark + rewind)
 //!
-//! [`TrapConfig`](crate) uses an empty `LocalLayout` to collect parameter and
-//! local slots from installed traps:
-//!
-//! ```ignore
-//! let mut params = LocalLayout::empty();
-//! // Each installed trap appends its own parameter groups and stores the
-//! // returned LocalSlot handles in its own fields for later use:
-//! my_trap.declare_params(&mut params);
-//! // After all traps have declared, set the absolute base:
-//! params.set_base(base_params);
-//! let total_params = base_params + params.total_locals();
-//! ```
-//!
-//! The same pattern applies to per-function locals:
+//! Per-function non-param locals are appended after the params mark and
+//! yielded to the function constructor via [`LocalLayout::iter_since`].  At
+//! the start of each new function the layout is rewound to the params mark
+//! so the same slots can be re-declared with fresh indices:
 //!
 //! ```ignore
-//! let mut locals = LocalLayout::empty();
-//! my_trap.declare_locals(&mut locals);
-//! // Per function, update the base when the first trap-local index is known:
-//! locals.set_base(total_params + arch_local_count);
+//! // In init_function():
+//! layout.rewind(&params_mark);           // discard previous function's locals
+//! let temps = layout.append(num_temps, ValType::I64);
+//! let pool  = layout.append(N_POOL, ValType::I32);
+//! trap.declare_locals(&mut layout);      // trap appends its own locals
+//! reactor.next_with(ctx, f(&mut layout.iter_since(&params_mark)), depth)?;
+//! // layout.base(pool) now gives the correct absolute wasm local index
 //! ```
 //!
 //! ## Iterating
 //!
-//! [`LocalLayout::iter`] yields `(count, ValType)` pairs in insertion order,
-//! directly usable as arguments to `wasm_encoder::Function::new`.
+//! [`LocalLayout::iter`] yields all `(count, ValType)` pairs in insertion
+//! order.  [`LocalLayout::iter_since`] yields only the pairs added after a
+//! given [`Mark`], suitable for passing to `wasm_encoder::Function::new`.
 
 use alloc::vec::Vec;
 use wasm_encoder::ValType;
+
+// ── Mark ─────────────────────────────────────────────────────────────────────
+
+/// An opaque snapshot of a [`LocalLayout`]'s size at a given moment.
+///
+/// Obtained from [`LocalLayout::mark`].  Pass to [`LocalLayout::rewind`] to
+/// truncate the layout back to that snapshot, or to
+/// [`LocalLayout::iter_since`] to iterate only the groups added after the
+/// mark.
+///
+/// The `total_locals` field is the total span of locals at the time the mark
+/// was taken — conveniently equal to the *total parameter count* when the
+/// mark is placed right after all parameter groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    /// Number of slots in the layout at mark time.
+    pub slot_count: usize,
+    /// Cumulative local count at mark time (`total_locals()` value).
+    pub total_locals: u32,
+}
+
+// ── LocalSlot ────────────────────────────────────────────────────────────────
 
 /// A handle to a named group of locals within a [`LocalLayout`].
 ///
@@ -64,48 +79,36 @@ use wasm_encoder::ValType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalSlot(pub usize);
 
+// ── LocalLayout ──────────────────────────────────────────────────────────────
+
 /// A map from `(count, ValType)` groups to contiguous wasm local indices.
 ///
 /// See the [module documentation](self) for usage patterns.
 pub struct LocalLayout {
-    /// `(count, type, relative_offset)` for each slot, in insertion order.
-    /// `relative_offset` is the offset from `base_offset` (always starts at 0
-    /// for the first slot regardless of base).
+    /// `(count, type, offset)` for each slot in insertion order.
+    /// `offset` is the cumulative count of locals in all *preceding* slots —
+    /// i.e. the absolute wasm local index of the first local in this slot.
     slots: Vec<(u32, ValType, u32)>,
-    /// Added to every relative offset when resolving absolute local indices.
-    /// Defaults to `0`; set via [`set_base`](Self::set_base).
-    base_offset: u32,
 }
 
 impl LocalLayout {
     // ── Constructors ─────────────────────────────────────────────────────────
 
-    /// Create an empty layout with no slots and base offset `0`.
+    /// Create an empty layout with no slots.
     ///
     /// Slots are added incrementally via [`append`](Self::append).
     #[inline]
     pub fn empty() -> Self {
-        Self { slots: Vec::new(), base_offset: 0 }
-    }
-
-    /// Create an empty layout with the given base offset already set.
-    ///
-    /// Equivalent to `LocalLayout::empty()` followed by `set_base(offset)`.
-    #[inline]
-    pub fn empty_with_base(offset: u32) -> Self {
-        Self { slots: Vec::new(), base_offset: offset }
+        Self { slots: Vec::new() }
     }
 
     /// Build a `LocalLayout` from a fixed-size array of `(count, ValType)` groups.
     ///
     /// Returns the frozen layout together with a same-length array of
-    /// [`LocalSlot`] handles, one per group, in the same order.
-    ///
-    /// Generic over `N` so the slot-handle array is stack-allocated.
-    ///
-    /// The initial base offset is `0`.  Call [`set_base`](Self::set_base) or
-    /// chain [`with_base`](Self::with_base) when absolute indices start
-    /// elsewhere.
+    /// [`LocalSlot`] handles, one per group, in the same order.  The first
+    /// group starts at absolute index 0 unless [`rewind`](Self::rewind) has
+    /// previously placed the layout at a non-zero start (which cannot happen
+    /// with this constructor).
     pub fn build<const N: usize>(groups: [(u32, ValType); N]) -> (Self, [LocalSlot; N]) {
         let mut layout = Self::empty();
         let mut handles = [LocalSlot(0); N];
@@ -116,8 +119,6 @@ impl LocalLayout {
     }
 
     /// Build a layout from a slice, returning a `Vec` of slot handles.
-    ///
-    /// The initial base offset is `0`.
     pub fn build_dynamic(groups: &[(u32, ValType)]) -> (Self, Vec<LocalSlot>) {
         let mut layout = Self::empty();
         let handles = groups.iter().map(|&(count, ty)| layout.append(count, ty)).collect();
@@ -131,11 +132,10 @@ impl LocalLayout {
     /// The new group immediately follows any previously appended groups.  The
     /// returned [`LocalSlot`] can be stored and later passed to
     /// [`base`](Self::base) or [`local`](Self::local) to obtain absolute wasm
-    /// local indices (after [`set_base`](Self::set_base) has been called if
-    /// needed).
+    /// local indices.
     ///
-    /// This is the primary entry point for traps that participate in the
-    /// incremental declaration protocol:
+    /// This is the primary entry point for both architecture-defined param
+    /// groups and trap-defined groups:
     ///
     /// ```ignore
     /// fn declare_params(&mut self, params: &mut LocalLayout) {
@@ -143,42 +143,40 @@ impl LocalLayout {
     /// }
     /// ```
     pub fn append(&mut self, count: u32, ty: ValType) -> LocalSlot {
-        let rel = self.total_locals(); // start of new group (relative)
+        let offset = self.total_locals(); // absolute start of new group
         let slot = LocalSlot(self.slots.len());
-        self.slots.push((count, ty, rel));
+        self.slots.push((count, ty, offset));
         slot
     }
 
-    // ── Base management ───────────────────────────────────────────────────────
+    // ── Mark / rewind ─────────────────────────────────────────────────────────
 
-    /// Assign (or replace) the base offset for all absolute-index calculations.
+    /// Capture the current layout size as a [`Mark`].
     ///
-    /// After this call, [`base`](Self::base) and [`local`](Self::local) return
-    /// indices offset by `offset`.  For example, after `set_base(32)`, a slot
-    /// at relative offset 0 resolves to absolute index 32.
+    /// The mark's `total_locals` field equals the current
+    /// [`total_locals()`](Self::total_locals) value.  When the mark is placed
+    /// after all parameter groups, this equals the total wasm parameter count.
     #[inline]
-    pub fn set_base(&mut self, offset: u32) {
-        self.base_offset = offset;
+    pub fn mark(&self) -> Mark {
+        Mark {
+            slot_count:   self.slots.len(),
+            total_locals: self.total_locals(),
+        }
     }
 
-    /// Return a copy of this layout with the given base offset applied.
+    /// Truncate the layout back to `mark`, removing all slots appended since.
     ///
-    /// Useful in builder chains:
+    /// Slot handles obtained *after* the mark (in e.g. `declare_locals`) are
+    /// invalidated by this call.  Slot handles obtained *before* the mark
+    /// remain valid and return the same indices as before.
     ///
-    /// ```ignore
-    /// let (layout, [scratch]) = LocalLayout::build([(3, ValType::I32)]);
-    /// let layout = layout.with_base(total_params + arch_locals);
-    /// ```
+    /// # Panics
+    /// Panics in debug builds if `mark.total_locals` doesn't match the
+    /// cumulative count after truncation.
     #[inline]
-    pub fn with_base(mut self, offset: u32) -> Self {
-        self.base_offset = offset;
-        self
-    }
-
-    /// Return the current base offset.
-    #[inline]
-    pub fn base_offset(&self) -> u32 {
-        self.base_offset
+    pub fn rewind(&mut self, mark: &Mark) {
+        self.slots.truncate(mark.slot_count);
+        debug_assert_eq!(self.total_locals(), mark.total_locals);
     }
 
     // ── Index resolution ──────────────────────────────────────────────────────
@@ -189,7 +187,7 @@ impl LocalLayout {
     /// Panics if `slot` was not produced by this layout.
     #[inline]
     pub fn base(&self, slot: LocalSlot) -> u32 {
-        self.base_offset + self.slots[slot.0].2
+        self.slots[slot.0].2
     }
 
     /// Return the absolute wasm local index for the *n*-th element inside
@@ -199,9 +197,9 @@ impl LocalLayout {
     /// Panics if `n >= count` for the slot or if `slot` is not from this layout.
     #[inline]
     pub fn local(&self, slot: LocalSlot, n: u32) -> u32 {
-        let (count, _, rel) = self.slots[slot.0];
+        let (count, _, offset) = self.slots[slot.0];
         assert!(n < count, "local index {n} out of range for slot (count={count})");
-        self.base_offset + rel + n
+        offset + n
     }
 
     // ── Inspection ───────────────────────────────────────────────────────────
@@ -218,21 +216,28 @@ impl LocalLayout {
         self.slots[slot.0].1
     }
 
-    /// Total number of wasm locals declared by this layout (span, not
-    /// including the base offset).
+    /// Total number of wasm locals declared by this layout (span from 0).
     ///
-    /// After `set_base(b)`, the locals occupy `b .. b + total_locals()`.
+    /// After appending param groups, this equals the total wasm parameter
+    /// count and is also stored in [`Mark::total_locals`] when
+    /// [`mark`](Self::mark) is called.
     #[inline]
     pub fn total_locals(&self) -> u32 {
-        self.slots.last().map(|&(count, _, rel)| rel + count).unwrap_or(0)
+        self.slots.last().map(|&(count, _, offset)| offset + count).unwrap_or(0)
     }
 
-    /// Iterate over `(count, ValType)` pairs in insertion order.
-    ///
-    /// The yielded pairs are directly usable as arguments to
-    /// `wasm_encoder::Function::new`.
+    /// Iterate over all `(count, ValType)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, ValType)> + '_ {
         self.slots.iter().map(|&(count, ty, _)| (count, ty))
+    }
+
+    /// Iterate over `(count, ValType)` pairs for slots added *after* `mark`.
+    ///
+    /// The yielded pairs are directly usable as arguments to
+    /// `wasm_encoder::Function::new` for declaring the non-param locals of a
+    /// wasm function.
+    pub fn iter_since<'a>(&'a self, mark: &Mark) -> impl Iterator<Item = (u32, ValType)> + 'a {
+        self.slots[mark.slot_count..].iter().map(|&(count, ty, _)| (count, ty))
     }
 
     /// Returns `true` if the layout has no slots.
@@ -245,9 +250,8 @@ impl LocalLayout {
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()
-            .entries(self.slots.iter().map(|&(count, ty, rel)| {
-                let abs = self.base_offset + rel;
-                (abs..abs + count, ty)
+            .entries(self.slots.iter().map(|&(count, ty, offset)| {
+                (offset..offset + count, ty)
             }))
             .finish()
     }

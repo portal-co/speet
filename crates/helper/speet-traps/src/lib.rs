@@ -33,15 +33,29 @@
 //!
 //! ## Usage
 //!
-//! A recompiler embeds a [`TrapConfig`] and calls:
+//! A recompiler embeds a [`TrapConfig`] and calls it at three phases:
 //!
-//! - `config.extra_locals_iter()` in `init_function` to chain trap locals
-//!   into the function's local declaration.
-//! - `config.set_extra_locals_base(arch_count)` after counting architecture
-//!   locals.
-//! - `config.on_instruction(&info, ctx, &mut self.reactor)` at the start of
-//!   `translate_instruction`.
-//! - `config.on_jump(&info, ctx, &mut self.reactor)` before each jump site.
+//! **Phase 1 — setup** (once, after installing traps):
+//! ```ignore
+//! // Arch recompiler appends arch params to its owned layout, then:
+//! self.traps.declare_params(&mut self.layout);
+//! self.locals_mark = self.layout.mark();  // mark = total_params
+//! self.total_params = self.locals_mark.total_locals;
+//! ```
+//!
+//! **Phase 2 — per function** (in `init_function`):
+//! ```ignore
+//! self.layout.rewind(&self.locals_mark);
+//! // append arch non-param locals (temps, pool, …) …
+//! self.traps.declare_locals(&mut self.layout);
+//! reactor.next_with(ctx, f(&mut self.layout.iter_since(&self.locals_mark)), depth)?;
+//! ```
+//!
+//! **Phase 3 — firing** (in translate_instruction / jump sites):
+//! ```ignore
+//! self.traps.on_instruction(&info, ctx, &mut self.reactor, &self.layout)?;
+//! self.traps.on_jump(&info, ctx, &mut self.reactor, &self.layout)?;
+//! ```
 //!
 //! ## `TrapAction::Skip` and skip snippets
 //!
@@ -94,4 +108,4 @@ pub use impls::{
 };
 pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};
 pub use jump::{JumpInfo, JumpKind, JumpTrap};
-pub use yecta::{LocalLayout, LocalSlot};
+pub use yecta::{LocalLayout, LocalSlot, Mark};

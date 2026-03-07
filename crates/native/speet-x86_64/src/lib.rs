@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, LocalPool, LocalPoolBackend, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
@@ -76,6 +76,10 @@ pub struct X86Recompiler<
     traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
     /// Total wasm function parameter count (recompiler params + trap params).
     total_params: u32,
+    /// Unified layout: arch params + trap params, then per-function locals.
+    layout: LocalLayout,
+    /// Mark placed after all param slots.
+    locals_mark: Mark,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> X86Recompiler<'cb, 'ctx, Context, E, F, P>
@@ -105,7 +109,7 @@ where
     /// Create a new recompiler whose RIP-relative addresses are resolved
     /// relative to `base_rip`.
     pub fn new_with_base_rip(base_rip: u64) -> Self {
-        Self {
+        let mut recomp = Self {
             reactor: Reactor::default(),
             pool: Pool {
                 table: TableIdx(0),
@@ -117,7 +121,11 @@ where
             enable_speculative_calls: false,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
-        }
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+        };
+        recomp.setup_traps();
+        recomp
     }
 
     /// Enable or disable speculative call optimization
@@ -226,7 +234,14 @@ where
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     pub fn setup_traps(&mut self) -> u32 {
-        self.total_params = self.traps.setup(Self::BASE_PARAMS);
+        self.layout = LocalLayout::empty();
+        self.layout.append(16, wasm_encoder::ValType::I64); // GPRs (params 0-15)
+        self.layout.append(1, wasm_encoder::ValType::I32);  // PC (param 16)
+        self.layout.append(5, wasm_encoder::ValType::I32);  // ZF/SF/CF/OF/PF (params 17-21)
+        self.layout.append(4, wasm_encoder::ValType::I64);  // temps + expected_RA (params 22-25)
+        self.traps.declare_params(&mut self.layout);
+        self.locals_mark = self.layout.mark();
+        self.total_params = self.locals_mark.total_locals;
         self.total_params
     }
 

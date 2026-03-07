@@ -337,7 +337,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
             Some(l) => l,
             None    => return Ok(TrapAction::Continue),
         };
-        let index_local = trap_ctx.locals().local(self.index_local_slot, 0);
+        let index_local = trap_ctx.layout().local(self.index_local_slot, 0);
         let handler     = self.violation_handler;
         let params      = self.handler_params;
 
@@ -448,7 +448,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Rop
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E> {
-        let depth_local = trap_ctx.params().local(self.depth_param_slot, 0);
+        let depth_local = trap_ctx.layout().local(self.depth_param_slot, 0);
         match info.kind {
             JumpKind::Call | JumpKind::IndirectCall => {
                 trap_ctx.emit(ctx, &Instruction::LocalGet(depth_local))?;

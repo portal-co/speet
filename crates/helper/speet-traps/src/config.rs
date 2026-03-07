@@ -3,46 +3,53 @@
 //! ## Overview
 //!
 //! A recompiler (e.g. `RiscVRecompiler`) embeds one `TrapConfig` field and
-//! calls methods at two phases:
+//! calls methods at three phases.  The arch recompiler **owns** the
+//! [`LocalLayout`] and passes it to `TrapConfig`; `TrapConfig` never owns a
+//! layout itself.
 //!
-//! ### Phase 1 — setup (once per recompiler instance)
+//! ### Phase 1 — parameter setup (once per recompiler instance)
 //!
-//! ```text
-//! self.total_params = self.traps.setup(Self::BASE_PARAMS);
+//! After appending all arch parameter groups to the layout, the recompiler
+//! calls `traps.declare_params(&mut layout)` so each installed trap can append
+//! its own parameter groups.  The recompiler then places a [`Mark`] on the
+//! layout to capture `total_params`:
+//!
+//! ```ignore
+//! let mut layout = LocalLayout::empty();
+//! // Arch params (32 int regs, PC, …):
+//! let regs = layout.append(32, ValType::I64);
+//! let pc   = layout.append(1,  ValType::I32);
+//! // Trap params:
+//! self.traps.declare_params(&mut layout);
+//! self.locals_mark = layout.mark();            // total_locals == total_params
+//! self.total_params = self.locals_mark.total_locals;
 //! ```
 //!
-//! `setup` calls `declare_params` on each installed trap, appending their
-//! parameter groups to an internal [`LocalLayout`].  It then sets the layout
-//! base to `base_params` and returns `base_params + trap_param_count` — the
-//! total wasm function parameter count.  The recompiler stores this and uses
-//! it as the `params` argument to every `jmp`, `ji`, and `ji_with_params` call.
+//! ### Phase 2 — per-function local setup (in `init_function`)
 //!
-//! ### Phase 2 — per function (in `init_function`)
+//! At the start of each new function, after rewinding and appending arch
+//! non-param locals, the recompiler calls `traps.declare_locals(&mut layout)`:
 //!
-//! ```text
-//! let arch_locals: &[(u32, ValType)] = &[…];
-//! let arch_local_count: u32 = arch_locals.iter().map(|(n,_)| n).sum();
-//! let all_locals: Vec<_> = arch_locals.iter().copied()
-//!     .chain(self.traps.locals_iter())
-//!     .collect();
-//! reactor.next_with(ctx, f(&mut all_locals.into_iter()), 2)?;
-//! self.traps.set_local_base(self.total_params + arch_local_count);
+//! ```ignore
+//! layout.rewind(&self.locals_mark);
+//! let temps = layout.append(num_temps, ValType::I64);
+//! let pool  = layout.append(N_POOL, ValType::I32);
+//! self.traps.declare_locals(&mut layout);
+//! reactor.next_with(ctx, f(&mut layout.iter_since(&self.locals_mark)), depth)?;
 //! ```
 //!
-//! `locals_iter()` yields the trap-contributed `(count, ValType)` groups to
-//! chain after the arch locals.  `set_local_base` updates the base offset of
-//! the internal locals layout so that `trap_ctx.locals().local(slot, n)`
-//! returns correct absolute indices for the current function.
+//! ### Phase 3 — firing
 //!
-//! ### Firing
+//! At each instruction and jump site the recompiler calls `on_instruction` /
+//! `on_jump`, passing a shared `&LocalLayout` so traps can resolve their slots:
 //!
-//! ```text
+//! ```ignore
 //! // at translate_instruction start:
-//! if self.traps.on_instruction(&info, ctx, &mut reactor)? == TrapAction::Skip {
+//! if self.traps.on_instruction(&info, ctx, &mut reactor, &self.layout)? == TrapAction::Skip {
 //!     return Ok(());
 //! }
 //! // at each jump site:
-//! if self.traps.on_jump(&info, ctx, &mut reactor)? == TrapAction::Skip {
+//! if self.traps.on_jump(&info, ctx, &mut reactor, &self.layout)? == TrapAction::Skip {
 //!     return Ok(());
 //! }
 //! ```
@@ -50,17 +57,15 @@
 //! ## Local / parameter layout
 //!
 //! ```text
-//! local 0           … base_params-1              recompiler params (regs, PC, …)
-//! local base_params … total_params-1             trap params (depth counter, …)
+//! local 0           … arch_params-1              arch params (regs, PC, …)
+//! local arch_params … total_params-1             trap params (depth counter, …)
 //! local total_params … total_params+arch_locals-1  arch non-param locals
 //! local total_params+arch_locals … (end)         trap non-param locals
 //! ```
 //!
-//! Both the params layout and the locals layout are owned by `TrapConfig`.
-//! Traps receive read-only references via [`TrapContext::params`] and
-//! [`TrapContext::locals`].
+//! The layout is owned by the arch recompiler and shared (read-only) with
+//! traps through [`TrapContext::layout`].
 
-use wasm_encoder::ValType;
 use wax_core::build::InstructionSink;
 use yecta::LocalLayout;
 
@@ -72,28 +77,18 @@ use crate::jump::{JumpInfo, JumpTrap};
 
 /// The configuration object a recompiler embeds.
 ///
-/// Holds an optional [`InstructionTrap`] and an optional [`JumpTrap`], each
-/// contributing parameter and local slots to shared [`LocalLayout`]s.  When
-/// no traps are installed, all methods are no-ops with zero overhead.
+/// Holds an optional [`InstructionTrap`] and an optional [`JumpTrap`].  All
+/// methods are no-ops when no trap is installed.  The arch recompiler owns
+/// the [`LocalLayout`] and passes it when calling the declare and firing
+/// methods.
 ///
 /// ## Lifetimes
 ///
 /// * `'cb` — lifetime of the borrowed trap implementations.
 /// * `'ctx` — lifetime of any data the callbacks capture.
 pub struct TrapConfig<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
-    // ── Instruction trap ──────────────────────────────────────────────────
     insn_trap: Option<&'cb mut (dyn InstructionTrap<Context, E, F> + 'ctx)>,
-
-    // ── Jump trap ─────────────────────────────────────────────────────────
     jump_trap: Option<&'cb mut (dyn JumpTrap<Context, E, F> + 'ctx)>,
-
-    // ── Shared layouts ────────────────────────────────────────────────────
-    /// Parameter slots contributed by all installed traps.
-    /// Base is set in [`setup`](Self::setup).
-    params_layout: LocalLayout,
-    /// Non-param local slots contributed by all installed traps.
-    /// Base is updated per-function in [`set_local_base`](Self::set_local_base).
-    locals_layout: LocalLayout,
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> Default
@@ -109,173 +104,112 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 {
     /// Create an empty `TrapConfig` with no traps installed.
     pub fn new() -> Self {
-        Self {
-            insn_trap: None,
-            jump_trap: None,
-            params_layout: LocalLayout::empty(),
-            locals_layout: LocalLayout::empty(),
-        }
+        Self { insn_trap: None, jump_trap: None }
     }
 
-    // ── Installation ─────────────────────────────────────────────────────
+    // ── Installation ──────────────────────────────────────────────────────
 
-    /// Install an instruction trap and collect its slot declarations.
+    /// Install an instruction trap.
     ///
-    /// Calls `trap.declare_params(&mut params_layout)` and
-    /// `trap.declare_locals(&mut locals_layout)` so the trap can append its
-    /// groups to the shared layouts and store the returned [`LocalSlot`]
-    /// handles in its own fields.
-    ///
-    /// Must be called **before** [`setup`](Self::setup).  Installing a trap
-    /// after `setup` is not supported and will produce incorrect indices.
-    ///
-    /// [`LocalSlot`]: yecta::LocalSlot
+    /// After installing all traps the recompiler must call
+    /// [`declare_params`](Self::declare_params) and later (per function)
+    /// [`declare_locals`](Self::declare_locals), passing its owned
+    /// [`LocalLayout`] both times.
     pub fn set_instruction_trap(
         &mut self,
         trap: &'cb mut (dyn InstructionTrap<Context, E, F> + 'ctx),
     ) {
-        trap.declare_params(&mut self.params_layout);
-        trap.declare_locals(&mut self.locals_layout);
         self.insn_trap = Some(trap);
     }
 
-    /// Install a jump trap and collect its slot declarations.
+    /// Install a jump trap.
     ///
     /// See [`set_instruction_trap`](Self::set_instruction_trap) for the
-    /// protocol.
+    /// post-install protocol.
     pub fn set_jump_trap(
         &mut self,
         trap: &'cb mut (dyn JumpTrap<Context, E, F> + 'ctx),
     ) {
-        trap.declare_params(&mut self.params_layout);
-        trap.declare_locals(&mut self.locals_layout);
         self.jump_trap = Some(trap);
     }
 
-    /// Remove the instruction trap and clear all declared slots.
+    /// Remove the instruction trap.
     ///
-    /// This resets both the params and locals layouts.  Any previously stored
-    /// [`LocalSlot`] handles from the removed trap become invalid.  If a jump
-    /// trap is still installed, it must be reinstalled to re-declare its slots.
-    ///
-    /// [`LocalSlot`]: yecta::LocalSlot
+    /// After clearing a trap, the recompiler must rebuild the layout from
+    /// scratch (re-append arch params, re-call `declare_params`, re-mark) to
+    /// ensure correct indices for any remaining traps.
     pub fn clear_instruction_trap(&mut self) {
         self.insn_trap = None;
-        self.params_layout = LocalLayout::empty();
-        self.locals_layout = LocalLayout::empty();
-        // Re-declare jump trap slots since we wiped the layouts.
-        if let Some(trap) = self.jump_trap.as_mut().map(|t| &mut **t as *mut _) {
-            // SAFETY: we hold an exclusive borrow on self; the trap pointer is
-            // valid as long as 'cb is alive.
-            let trap: &mut (dyn JumpTrap<Context, E, F> + 'ctx) = unsafe { &mut *trap };
-            trap.declare_params(&mut self.params_layout);
-            trap.declare_locals(&mut self.locals_layout);
-        }
     }
 
-    /// Remove the jump trap and clear its declared slots.
+    /// Remove the jump trap.
     ///
-    /// See [`clear_instruction_trap`](Self::clear_instruction_trap) for
-    /// caveats.
+    /// See [`clear_instruction_trap`](Self::clear_instruction_trap) for the
+    /// re-setup requirement.
     pub fn clear_jump_trap(&mut self) {
         self.jump_trap = None;
-        self.params_layout = LocalLayout::empty();
-        self.locals_layout = LocalLayout::empty();
-        if let Some(trap) = self.insn_trap.as_mut().map(|t| &mut **t as *mut _) {
-            let trap: &mut (dyn InstructionTrap<Context, E, F> + 'ctx) = unsafe { &mut *trap };
-            trap.declare_params(&mut self.params_layout);
-            trap.declare_locals(&mut self.locals_layout);
+    }
+
+    // ── Phase 1: declare params ───────────────────────────────────────────
+
+    /// **Phase 1** — let each installed trap append its parameter groups to
+    /// `layout`.
+    ///
+    /// Call this after the arch recompiler has appended its own parameter
+    /// groups, before placing the [`Mark`](yecta::Mark).  Each trap will call
+    /// [`LocalLayout::append`] for its parameter groups and store the returned
+    /// [`LocalSlot`](yecta::LocalSlot) handles in its own fields.
+    pub fn declare_params(&mut self, layout: &mut LocalLayout) {
+        if let Some(t) = self.insn_trap.as_mut() {
+            t.declare_params(layout);
+        }
+        if let Some(t) = self.jump_trap.as_mut() {
+            t.declare_params(layout);
         }
     }
 
-    // ── Phase 1: setup ────────────────────────────────────────────────────
+    // ── Phase 2: declare locals ───────────────────────────────────────────
 
-    /// **Phase 1** — fix the parameter base and return the total parameter count.
+    /// **Phase 2** — let each installed trap append its non-param local groups
+    /// to `layout`.
     ///
-    /// Call this once after installing all traps, before translation begins:
-    ///
-    /// ```ignore
-    /// self.total_params = self.traps.setup(Self::BASE_PARAMS);
-    /// ```
-    ///
-    /// Sets the base offset of the internal params layout to `base_params`,
-    /// so that every [`LocalSlot`] stored by traps during
-    /// `declare_params` resolves to the correct absolute wasm local index.
-    ///
-    /// Returns `base_params + total_trap_param_count`.  The recompiler must
-    /// store this and pass it as `params` to every `jmp` / `ji` /
-    /// `ji_with_params` call.
-    ///
-    /// [`LocalSlot`]: yecta::LocalSlot
-    pub fn setup(&mut self, base_params: u32) -> u32 {
-        self.params_layout.set_base(base_params);
-        base_params + self.params_layout.total_locals()
+    /// Call this after the arch recompiler has appended its own per-function
+    /// local groups (temps, pool slots, etc.) and before calling
+    /// `reactor.next_with`.  Each trap calls [`LocalLayout::append`] for its
+    /// local groups and stores the returned handles.
+    pub fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        if let Some(t) = self.insn_trap.as_mut() {
+            t.declare_locals(layout);
+        }
+        if let Some(t) = self.jump_trap.as_mut() {
+            t.declare_locals(layout);
+        }
     }
 
-    // ── Phase 2: per-function locals ──────────────────────────────────────
-
-    /// **Phase 2a** — yield the trap-contributed `(count, ValType)` local groups.
-    ///
-    /// Chain the result after the arch-defined local groups when calling
-    /// `reactor.next_with`:
-    ///
-    /// ```ignore
-    /// let all_locals: Vec<_> = arch_locals.iter().copied()
-    ///     .chain(self.traps.locals_iter())
-    ///     .collect();
-    /// reactor.next_with(ctx, f(&mut all_locals.into_iter()), depth)?;
-    /// self.traps.set_local_base(total_params + arch_local_count);
-    /// ```
-    pub fn locals_iter(&self) -> impl Iterator<Item = (u32, ValType)> + '_ {
-        self.locals_layout.iter()
-    }
-
-    /// **Phase 2b** — update the base offset of the locals layout for the
-    /// current function.
-    ///
-    /// `first_trap_local` is the absolute wasm local index of the first
-    /// trap-owned non-param local.  This equals
-    /// `total_params + arch_non_param_local_count`.
-    ///
-    /// After this call, `trap_ctx.locals().local(slot, n)` returns the
-    /// correct absolute index for all slots declared via `declare_locals`.
-    pub fn set_local_base(&mut self, first_trap_local: u32) {
-        self.locals_layout.set_base(first_trap_local);
-    }
-
-    // ── Param layout accessor ─────────────────────────────────────────────
-
-    /// Read-only access to the shared parameter layout.
-    ///
-    /// The iterator over this layout's `(count, ValType)` groups can be used
-    /// to extend the wasm function type when registering translated functions
-    /// with the module (only the trap-contributed groups, not the recompiler's
-    /// own base params).
-    pub fn params_layout(&self) -> &LocalLayout {
-        &self.params_layout
-    }
-
-    // ── Firing ────────────────────────────────────────────────────────────
+    // ── Phase 3: firing ───────────────────────────────────────────────────
 
     /// Fire the instruction trap (if installed).
     ///
-    /// Returns [`TrapAction::Continue`] when no trap is installed.  When the
-    /// trap returns [`TrapAction::Skip`], emits `skip_snippet` before
-    /// returning `Skip`.
+    /// `layout` is the arch recompiler's unified layout; it is passed to
+    /// [`TrapContext`] so traps can resolve their [`LocalSlot`](yecta::LocalSlot)
+    /// handles.
+    ///
+    /// Returns [`TrapAction::Continue`] when no trap is installed.
     pub fn on_instruction(
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
         sink: &mut F,
+        layout: &LocalLayout,
     ) -> Result<TrapAction, E> {
         let trap = match self.insn_trap.as_mut() {
             Some(t) => t,
             None    => return Ok(TrapAction::Continue),
         };
-        let mut trap_ctx = TrapContext::new(sink, &self.params_layout, &self.locals_layout);
+        let mut trap_ctx = TrapContext::new(sink, layout);
         let action = trap.on_instruction(info, ctx, &mut trap_ctx)?;
         if action == TrapAction::Skip {
-            let mut trap_ctx2 = TrapContext::new(sink, &self.params_layout, &self.locals_layout);
+            let mut trap_ctx2 = TrapContext::new(sink, layout);
             self.insn_trap
                 .as_ref()
                 .unwrap()
@@ -286,23 +220,25 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
     /// Fire the jump trap (if installed).
     ///
-    /// Returns [`TrapAction::Continue`] when no trap is installed.  When the
-    /// trap returns [`TrapAction::Skip`], emits `skip_snippet` before
-    /// returning `Skip`.
+    /// `layout` is the arch recompiler's unified layout; passed to
+    /// [`TrapContext`] for slot resolution.
+    ///
+    /// Returns [`TrapAction::Continue`] when no trap is installed.
     pub fn on_jump(
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
         sink: &mut F,
+        layout: &LocalLayout,
     ) -> Result<TrapAction, E> {
         let trap = match self.jump_trap.as_mut() {
             Some(t) => t,
             None    => return Ok(TrapAction::Continue),
         };
-        let mut trap_ctx = TrapContext::new(sink, &self.params_layout, &self.locals_layout);
+        let mut trap_ctx = TrapContext::new(sink, layout);
         let action = trap.on_jump(info, ctx, &mut trap_ctx)?;
         if action == TrapAction::Skip {
-            let mut trap_ctx2 = TrapContext::new(sink, &self.params_layout, &self.locals_layout);
+            let mut trap_ctx2 = TrapContext::new(sink, layout);
             self.jump_trap
                 .as_ref()
                 .unwrap()

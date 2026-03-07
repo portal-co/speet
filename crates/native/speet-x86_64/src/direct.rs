@@ -331,26 +331,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         ctx: &mut Context,
         _rip: u64,
         inst_len: u32,
-        num_temps: u32,
+        _num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, wasm_encoder::ValType)> + '_)) -> F
                   + '_),
     ) -> Result<(), E> {
-        let arch_locals = [
-            (16, wasm_encoder::ValType::I64),        // registers
-            (1, wasm_encoder::ValType::I32),         // PC
-            (5, wasm_encoder::ValType::I32),         // condition flags: ZF, SF, CF, OF, PF
-            (num_temps, wasm_encoder::ValType::I64), // temps
-        ];
-        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
-        let trap_locals: alloc::vec::Vec<(u32, wasm_encoder::ValType)> =
-            self.traps.locals_iter().collect();
-        let mut all_locals = arch_locals
-            .iter()
-            .copied()
-            .chain(trap_locals.iter().copied());
-        self.reactor.next_with(ctx, f(&mut all_locals), inst_len)?;
-        self.traps
-            .set_local_base(self.total_params + arch_local_count);
+        // x86-64 has no per-function arch locals — all arch state is in params 0-25.
+        // Rewind to the params mark, discarding any locals from the previous function.
+        self.layout.rewind(&self.locals_mark);
+        // Let traps declare their per-function locals.
+        self.traps.declare_locals(&mut self.layout);
+        // Yield only non-param locals to the function.
+        let mut locals_iter = self.layout.iter_since(&self.locals_mark);
+        self.reactor.next_with(ctx, f(&mut locals_iter), inst_len)?;
         Ok(())
     }
 
@@ -482,7 +474,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 };
                 if self
                     .traps
-                    .on_instruction(&insn_info, ctx, &mut self.reactor)?
+                    .on_instruction(&insn_info, ctx, &mut self.reactor, &self.layout)?
                     == TrapAction::Skip
                 {
                     continue;
@@ -1738,7 +1730,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
             let jmp_info = JumpInfo::direct(inst.ip(), target, JumpKind::DirectJump);
-            if self.traps.on_jump(&jmp_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            if self.traps.on_jump(&jmp_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                 return Ok(Some(()));
             }
         }
@@ -1769,7 +1761,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
             let jcc_info = JumpInfo::direct(inst.ip(), target, JumpKind::ConditionalBranch);
-            if self.traps.on_jump(&jcc_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+            if self.traps.on_jump(&jcc_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                 return Ok(Some(()));
             }
         }
@@ -1864,7 +1856,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let call_info = JumpInfo::direct(inst.ip(), target, JumpKind::Call);
-                if self.traps.on_jump(&call_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                if self.traps.on_jump(&call_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                     return Ok(Some(()));
                 }
             }
@@ -1967,7 +1959,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let ret_info = JumpInfo::indirect(inst.ip(), 23, JumpKind::Return);
-                if self.traps.on_jump(&ret_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                if self.traps.on_jump(&ret_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
                     return Ok(Some(()));
                 }
             }

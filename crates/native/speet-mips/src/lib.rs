@@ -51,7 +51,8 @@ use rabbitizer::{registers::GprO32, InstrId, Instruction};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalPool, LocalPoolBackend, Pool, Reactor, TableIdx, Target, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    TableIdx, Target, TypeIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -251,6 +252,18 @@ pub struct MipsRecompiler<
     traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
     /// Total wasm function parameter count (recompiler params + trap params).
     total_params: u32,
+    /// Unified layout: arch params + trap params, then per-function locals.
+    layout: LocalLayout,
+    /// Mark placed after all param slots; used to rewind before each function.
+    locals_mark: Mark,
+    /// Slot for per-function GPR-type temp locals (num_temps of them).
+    temps_slot: LocalSlot,
+    /// Slot for the single load-address scratch local.
+    addr_scratch_slot: LocalSlot,
+    /// Slot for i32 pool locals.
+    pool_i32_slot: LocalSlot,
+    /// Slot for i64 pool locals.
+    pool_i64_slot: LocalSlot,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> MipsRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -274,7 +287,7 @@ where
     where
         P: Default,
     {
-        Self {
+        let mut recomp = Self {
             reactor: Reactor::default(),
             pool,
             escape_tag,
@@ -287,7 +300,15 @@ where
             atomic_opts: AtomicOpts::NONE,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
-        }
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            temps_slot: LocalSlot(0),
+            addr_scratch_slot: LocalSlot(0),
+            pool_i32_slot: LocalSlot(0),
+            pool_i64_slot: LocalSlot(0),
+        };
+        recomp.setup_traps();
+        recomp
     }
 
     /// Create a new MIPS recompiler instance with all configuration options including base function offset
@@ -308,7 +329,7 @@ where
     where
         P: Default,
     {
-        Self {
+        let mut recomp = Self {
             reactor: Reactor::with_base_func_offset(base_func_offset),
             pool,
             escape_tag,
@@ -321,7 +342,15 @@ where
             atomic_opts: AtomicOpts::NONE,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
-        }
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            temps_slot: LocalSlot(0),
+            addr_scratch_slot: LocalSlot(0),
+            pool_i32_slot: LocalSlot(0),
+            pool_i64_slot: LocalSlot(0),
+        };
+        recomp.setup_traps();
+        recomp
     }
 
     /// Get the current base function offset.
@@ -499,7 +528,14 @@ where
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     pub fn setup_traps(&mut self) -> u32 {
-        self.total_params = self.traps.setup(Self::BASE_PARAMS);
+        let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
+        self.layout = LocalLayout::empty();
+        self.layout.append(32, gpr_type);        // $0-$31 (params 0-31)
+        self.layout.append(2, gpr_type);         // HI/LO (params 32-33)
+        self.layout.append(1, ValType::I32);     // PC (param 34)
+        self.traps.declare_params(&mut self.layout);
+        self.locals_mark = self.layout.mark();
+        self.total_params = self.locals_mark.total_locals;
         self.total_params
     }
 
@@ -578,41 +614,23 @@ where
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
-        let gpr_type = if self.enable_mips64 {
-            ValType::I64
-        } else {
-            ValType::I32
-        };
-        let arch_locals = [
-            (32, gpr_type),                   // $0-$31
-            (2, gpr_type),                    // HI/LO
-            (1, ValType::I32),                // PC
-            (num_temps, gpr_type),            // Temporary registers (match GPR type)
-            (1, ValType::I32),                // load-addr scratch
-            (Self::N_POOL_I32, ValType::I32), // pool i32 slots
-            (Self::N_POOL_I64, ValType::I64), // pool i64 slots
-        ];
-        let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
-        // Seed the reactor's local pool with the freshly-declared pool locals.
-        let pool_i32_start = 35 + num_temps + 1;
-        let pool_i64_start = pool_i32_start + Self::N_POOL_I32;
-        self.reactor
-            .local_pool
-            .seed_i32(pool_i32_start, Self::N_POOL_I32);
-        self.reactor
-            .local_pool
-            .seed_i64(pool_i64_start, Self::N_POOL_I64);
-        // Phase 2a: collect trap non-param locals to avoid borrow conflicts, then chain.
-        let trap_locals: alloc::vec::Vec<(u32, ValType)> =
-            self.traps.locals_iter().collect();
-        let mut all_locals = arch_locals
-            .iter()
-            .copied()
-            .chain(trap_locals.iter().copied());
-        self.reactor.next_with(ctx, f(&mut all_locals), 1)?;
-        // Phase 2b: assign absolute indices to trap non-param locals.
-        self.traps
-            .set_local_base(self.total_params + arch_local_count);
+        let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
+        // Rewind to the params mark, discarding any locals from the previous function.
+        self.layout.rewind(&self.locals_mark);
+        // Append per-function non-param locals in order:
+        self.temps_slot        = self.layout.append(num_temps, gpr_type);
+        self.addr_scratch_slot = self.layout.append(1, ValType::I32);
+        self.pool_i32_slot     = self.layout.append(Self::N_POOL_I32, ValType::I32);
+        self.pool_i64_slot     = self.layout.append(Self::N_POOL_I64, ValType::I64);
+        self.traps.declare_locals(&mut self.layout);
+        // Seed the reactor's local pool with the freshly-declared pool slots.
+        let pool_i32_start = self.layout.base(self.pool_i32_slot);
+        let pool_i64_start = self.layout.base(self.pool_i64_slot);
+        self.reactor.local_pool.seed_i32(pool_i32_start, Self::N_POOL_I32);
+        self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
+        // Declare only non-param locals to the function (params are already in the type).
+        let mut locals_iter = self.layout.iter_since(&self.locals_mark);
+        self.reactor.next_with(ctx, f(&mut locals_iter), 1)?;
         Ok(())
     }
 
@@ -626,9 +644,8 @@ where
     /// Follows immediately after the `num_temps` GPR-type temp locals.
     /// `translate_instruction` always passes `num_temps = 8`, so this is
     /// local 35 + 8 = 43.  Always `i32`.
-    const fn load_addr_scratch_local() -> u32 {
-        // 35 (first temp) + 8 (num_temps) = 43
-        43
+    fn load_addr_scratch_local(&self) -> u32 {
+        self.layout.base(self.addr_scratch_slot)
     }
 
     /// The wasm [`ValType`] of an effective (post-mapper) memory address.
@@ -872,7 +889,8 @@ where
         // Jump trap: conditional branch.
         let branch_info =
             JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::ConditionalBranch);
-        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+        let layout_ptr = &self.layout as *const LocalLayout;
+        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
             return Ok(());
         }
 
@@ -925,9 +943,10 @@ where
             arch: ArchTag::Mips,
             class: Self::classify_insn(instruction.unique_id),
         };
+        let layout_ptr = &self.layout as *const LocalLayout;
         if self
             .traps
-            .on_instruction(&insn_info, ctx, &mut self.reactor)?
+            .on_instruction(&insn_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
             == TrapAction::Skip
         {
             return Ok(());
@@ -1271,7 +1290,7 @@ where
                     }
 
                     // load byte (signed) -> i32
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1313,7 +1332,7 @@ where
                     }
 
                     // load byte unsigned -> i32
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1354,7 +1373,7 @@ where
                     }
 
                     // load halfword signed -> i32
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1395,7 +1414,7 @@ where
                     }
 
                     // load halfword unsigned -> i32
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1540,7 +1559,7 @@ where
                     }
 
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1639,7 +1658,7 @@ where
                     }
 
                     // perform 64-bit memory load
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
@@ -1706,7 +1725,8 @@ where
                 let target_pc = (pc & 0xF0000000) | target;
 
                 let j_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::DirectJump);
-                if self.traps.on_jump(&j_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                let layout_ptr = &self.layout as *const LocalLayout;
+                if self.traps.on_jump(&j_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
                     return Ok(());
                 }
                 self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -1727,7 +1747,8 @@ where
                 )?;
 
                 let jal_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::Call);
-                if self.traps.on_jump(&jal_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                let layout_ptr = &self.layout as *const LocalLayout;
+                if self.traps.on_jump(&jal_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
                     return Ok(());
                 }
                 self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -1738,7 +1759,7 @@ where
                 let rs: GprO32 = instruction.get_rs_o32();
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
-                let scratch = Self::load_addr_scratch_local();
+                let scratch = self.load_addr_scratch_local();
                 self.reactor
                     .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
                 self.reactor
@@ -1752,7 +1773,8 @@ where
                     JumpKind::IndirectJump
                 };
                 let jr_info = JumpInfo::indirect(pc as u64, scratch, jr_kind);
-                if self.traps.on_jump(&jr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                let layout_ptr = &self.layout as *const LocalLayout;
+                if self.traps.on_jump(&jr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
                     return Ok(());
                 }
 
@@ -1780,7 +1802,7 @@ where
                 }
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
-                let scratch = Self::load_addr_scratch_local();
+                let scratch = self.load_addr_scratch_local();
                 self.reactor
                     .feed(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
                 self.reactor
@@ -1788,7 +1810,8 @@ where
                 self.reactor.feed(ctx, &WasmInstruction::Drop)?;
 
                 let jalr_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::IndirectCall);
-                if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor)? == TrapAction::Skip {
+                let layout_ptr = &self.layout as *const LocalLayout;
+                if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
                     return Ok(());
                 }
 
@@ -1871,7 +1894,7 @@ where
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(
@@ -1959,7 +1982,7 @@ where
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
-                    let load_addr = Self::load_addr_scratch_local();
+                    let load_addr = self.load_addr_scratch_local();
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(

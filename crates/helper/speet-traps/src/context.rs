@@ -10,36 +10,31 @@
 //! | Method | What it does |
 //! |--------|-------------|
 //! | [`emit`] | Emit a single wasm instruction into the current function |
-//! | [`locals`] | Read-only access to the shared [`LocalLayout`] for non-param locals |
-//! | [`params`] | Read-only access to the shared [`LocalLayout`] for parameters |
+//! | [`layout`] | Read-only access to the unified [`LocalLayout`] (params + locals) |
 //! | [`jump`] | Emit an unconditional jump to a wasm function index |
 //! | [`jump_if`] | Emit a conditional jump (consumes the top `i32` on the stack) |
 //!
 //! ## Resolving local indices
 //!
 //! Traps store [`LocalSlot`] handles obtained during
-//! [`declare_locals`](crate::insn::InstructionTrap::declare_locals) /
+//! [`declare_locals`](crate::insn::InstructionTrap::declare_locals) or
 //! [`declare_params`](crate::insn::InstructionTrap::declare_params).  Inside
-//! `on_instruction` or `on_jump` they resolve those handles:
+//! `on_instruction` or `on_jump` they resolve those handles via the unified layout:
 //!
 //! ```ignore
 //! // A scratch local declared in declare_locals:
-//! let idx = trap_ctx.locals().local(self.scratch_slot, 0);
+//! let idx = trap_ctx.layout().local(self.scratch_slot, 0);
 //!
 //! // A depth counter declared in declare_params:
-//! let idx = trap_ctx.params().local(self.depth_slot, 0);
+//! let idx = trap_ctx.layout().local(self.depth_slot, 0);
 //! ```
 //!
-//! ## Parameter vs. local distinction
-//!
-//! Wasm function parameters are the first locals (indices `0..total_params-1`)
-//! and survive `return_call` chains.  `TrapContext::params()` gives the trap
-//! access to the shared parameter layout containing all trap-contributed
-//! parameters.
-//!
-//! Non-parameter locals (indices ≥ `total_params`) are reset to zero on each
-//! new function.  `TrapContext::locals()` gives access to the shared locals
-//! layout containing all trap-contributed non-param locals.
+//! Both params and function-locals live in the same [`LocalLayout`] owned by
+//! the arch recompiler: arch params first (at indices 0+), then trap params,
+//! then per-function arch locals, then per-function trap locals.  Because
+//! every group is appended in order, [`LocalLayout::local`] and
+//! [`LocalLayout::base`] return correct **absolute** wasm local indices without
+//! any additional base-offset arithmetic.
 //!
 //! ## Jump semantics
 //!
@@ -66,24 +61,18 @@ use core::marker::PhantomData;
 pub struct TrapContext<'a, Context, E, F: InstructionSink<Context, E>> {
     /// The underlying instruction sink — usually a `&mut Reactor<…>`.
     pub sink: &'a mut F,
-    /// Shared parameter layout (cross-function state).
-    params: &'a LocalLayout,
-    /// Shared locals layout (per-function non-param state).
-    locals: &'a LocalLayout,
+    /// Unified layout for all params and locals owned by the arch recompiler.
+    layout: &'a LocalLayout,
     _pd: PhantomData<fn(&mut Context) -> Result<(), E>>,
 }
 
 impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E, F> {
     /// Construct a `TrapContext`.
     ///
-    /// Only [`TrapConfig`] should call this — traps receive one as a `&mut`
-    /// argument.
-    pub(crate) fn new(
-        sink: &'a mut F,
-        params: &'a LocalLayout,
-        locals: &'a LocalLayout,
-    ) -> Self {
-        Self { sink, params, locals, _pd: PhantomData }
+    /// Only [`TrapConfig`](crate::config::TrapConfig) should call this —
+    /// traps receive one as a `&mut` argument.
+    pub(crate) fn new(sink: &'a mut F, layout: &'a LocalLayout) -> Self {
+        Self { sink, layout, _pd: PhantomData }
     }
 
     /// Emit a single wasm instruction into the current function.
@@ -92,24 +81,18 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
         self.sink.instruction(ctx, instr)
     }
 
-    /// Read-only access to the shared **parameter** layout.
+    /// Read-only access to the unified **param + locals** layout.
     ///
-    /// Use [`LocalLayout::local`] with a [`LocalSlot`] obtained during
-    /// [`declare_params`](crate::insn::InstructionTrap::declare_params) to
-    /// resolve absolute wasm local indices for cross-function state.
-    #[inline]
-    pub fn params(&self) -> &LocalLayout {
-        self.params
-    }
-
-    /// Read-only access to the shared **non-param locals** layout.
+    /// Use [`LocalLayout::local`] with a [`LocalSlot`](yecta::LocalSlot)
+    /// obtained during `declare_params` or `declare_locals` to resolve
+    /// absolute wasm local indices.
     ///
-    /// Use [`LocalLayout::local`] with a [`LocalSlot`] obtained during
-    /// [`declare_locals`](crate::insn::InstructionTrap::declare_locals) to
-    /// resolve absolute wasm local indices for per-function scratch state.
+    /// Because arch params start at index 0 and every group is appended in
+    /// order, the same layout correctly resolves both parameter slots and
+    /// per-function local slots without any base-offset adjustment.
     #[inline]
-    pub fn locals(&self) -> &LocalLayout {
-        self.locals
+    pub fn layout(&self) -> &LocalLayout {
+        self.layout
     }
 }
 
