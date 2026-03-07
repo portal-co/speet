@@ -1,0 +1,10 @@
+[package]
+name = "dex-bytecode"
+version = "0.1.0"
+edition = "2024"
+description = "Zero-dependency enum-based Dalvik/DEX bytecode decoder"
+license-file = "../../../COPYING.md"
+
+[dependencies]
+# No dependencies — this crate is intentionally standalone so it can be
+# extracted from the speet workspace and published independently.

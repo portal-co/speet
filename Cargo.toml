@@ -13,6 +13,7 @@ members = [
     "crates/native/speet-powerpc",
     # Managed architecture crates
     "crates/managed/speet-dex",
+    "crates/managed/dex-bytecode",
 ]
 resolver = "3"
 
@@ -38,3 +39,4 @@ rabbitizer = "1.14.3"
 powerpc = "0.4.1"
 disarm64 = "0.1.25"
 dex = {git="https://github.com/letmutx/dex-parser.git"}
+# Standalone DEX bytecode parser (extractable)
