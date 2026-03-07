@@ -14,6 +14,10 @@ pub struct LocalSlot(pub usize);
 ///
 /// # Building a layout
 ///
+/// When the absolute starting local index is known at build time, pass it to
+/// [`LocalLayout::build`] directly (the default base offset is 0, so indices
+/// start at 0 unless changed):
+///
 /// ```ignore
 /// use speet_memory::layout::{LocalLayout, LocalSlot};
 /// use wasm_encoder::ValType;
@@ -29,13 +33,37 @@ pub struct LocalSlot(pub usize);
 /// assert_eq!(layout.base(temps), 22);
 /// ```
 ///
+/// # Deferred base assignment
+///
+/// Sometimes the layout is built before the absolute starting index is known
+/// (e.g. a trap that appends its locals after architecture-defined ones).
+/// Use [`LocalLayout::set_base`] once the starting index is determined:
+///
+/// ```ignore
+/// let (mut layout, [scratch, counter]) = LocalLayout::build([
+///     (2, ValType::I32),  // two scratch i32s → relative 0, 1
+///     (1, ValType::I64),  // one i64 counter  → relative 2
+/// ]);
+/// // Arch uses 66 locals (total_params=2, arch=64) before these.
+/// layout.set_base(66);
+/// assert_eq!(layout.base(scratch), 66);
+/// assert_eq!(layout.base(counter), 68);
+/// ```
+///
+/// The builder method [`LocalLayout::with_base`] is also available for
+/// fluent construction.
+///
 /// # Iterating
 ///
-/// `LocalLayout` implements `Iterator<Item = (u32, ValType)>` (the format
-/// expected by `wasm_encoder::Function::new`).
+/// [`LocalLayout::iter`] yields `(count, ValType)` pairs in insertion order,
+/// suitable as arguments to `wasm_encoder::Function::new`.
 pub struct LocalLayout {
-    /// (count, type, base_local_index) for each slot in insertion order.
+    /// (count, type, relative_offset) for each slot in insertion order.
+    /// Relative offset is from 0 (independent of `base_offset`).
     slots: Vec<(u32, ValType, u32)>,
+    /// Added to every relative offset when resolving absolute local indices.
+    /// Set via [`set_base`](Self::set_base); defaults to `0`.
+    base_offset: u32,
 }
 
 impl LocalLayout {
@@ -46,6 +74,9 @@ impl LocalLayout {
     ///
     /// Generic over `N` so the slot-handle array is stack-allocated and the
     /// caller gets named handles without needing a `Vec`.
+    ///
+    /// The initial base offset is `0`.  Call [`set_base`](Self::set_base) or
+    /// use [`with_base`](Self::with_base) if absolute indices start elsewhere.
     pub fn build<const N: usize>(groups: [(u32, ValType); N]) -> (Self, [LocalSlot; N]) {
         let mut slots = Vec::with_capacity(N);
         let mut handles = [LocalSlot(0); N];
@@ -55,10 +86,13 @@ impl LocalLayout {
             slots.push((*count, *ty, cursor));
             cursor += count;
         }
-        (Self { slots }, handles)
+        (Self { slots, base_offset: 0 }, handles)
     }
 
     /// Build a layout from a slice, returning a `Vec` of slot handles.
+    ///
+    /// The initial base offset is `0`.  Call [`set_base`](Self::set_base) or
+    /// use [`with_base`](Self::with_base) if absolute indices start elsewhere.
     pub fn build_dynamic(groups: &[(u32, ValType)]) -> (Self, Vec<LocalSlot>) {
         let mut slots = Vec::with_capacity(groups.len());
         let mut handles = Vec::with_capacity(groups.len());
@@ -68,28 +102,62 @@ impl LocalLayout {
             slots.push((count, ty, cursor));
             cursor += count;
         }
-        (Self { slots }, handles)
+        (Self { slots, base_offset: 0 }, handles)
     }
 
-    /// Return the first wasm local index for `slot`.
+    /// Assign the base offset for all absolute local index calculations.
+    ///
+    /// After this call, [`base`](Self::base) and [`local`](Self::local) return
+    /// indices offset by `offset`.  For example, if `offset = 66` then what
+    /// was slot 0 at relative index 0 now resolves to absolute index 66.
+    ///
+    /// This method is idempotent: calling it again with a different value
+    /// simply replaces the previous base.
+    #[inline]
+    pub fn set_base(&mut self, offset: u32) {
+        self.base_offset = offset;
+    }
+
+    /// Return a copy of this layout with the given base offset applied.
+    ///
+    /// Equivalent to `layout.set_base(offset); layout` but usable in a
+    /// builder chain:
+    ///
+    /// ```ignore
+    /// let (layout, [scratch]) = LocalLayout::build([(3, ValType::I32)]);
+    /// let layout = layout.with_base(total_params + arch_locals);
+    /// ```
+    #[inline]
+    pub fn with_base(mut self, offset: u32) -> Self {
+        self.base_offset = offset;
+        self
+    }
+
+    /// Return the current base offset.
+    #[inline]
+    pub fn base_offset(&self) -> u32 {
+        self.base_offset
+    }
+
+    /// Return the first absolute wasm local index for `slot`.
     ///
     /// # Panics
     /// Panics if `slot` was not produced by this layout.
     #[inline]
     pub fn base(&self, slot: LocalSlot) -> u32 {
-        self.slots[slot.0].2
+        self.base_offset + self.slots[slot.0].2
     }
 
-    /// Return the wasm local index for the *n*-th element inside `slot`
-    /// (0-based).
+    /// Return the absolute wasm local index for the *n*-th element inside
+    /// `slot` (0-based).
     ///
     /// # Panics
     /// Panics if `n >= count` for the slot.
     #[inline]
     pub fn local(&self, slot: LocalSlot, n: u32) -> u32 {
-        let (count, _, base) = self.slots[slot.0];
+        let (count, _, rel) = self.slots[slot.0];
         assert!(n < count, "local index {n} out of range for slot (count={count})");
-        base + n
+        self.base_offset + rel + n
     }
 
     /// Return the count of locals in `slot`.
@@ -104,10 +172,11 @@ impl LocalLayout {
         self.slots[slot.0].1
     }
 
-    /// Total number of wasm locals declared by this layout.
+    /// Total number of wasm locals declared by this layout (the span, not
+    /// including the base offset).
     #[inline]
     pub fn total_locals(&self) -> u32 {
-        self.slots.last().map(|&(count, _, base)| base + count).unwrap_or(0)
+        self.slots.last().map(|&(count, _, rel)| rel + count).unwrap_or(0)
     }
 
     /// Iterate over `(count, ValType)` pairs in insertion order.
@@ -122,8 +191,9 @@ impl LocalLayout {
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()
-            .entries(self.slots.iter().map(|&(count, ty, base)| {
-                (base..base + count, ty)
+            .entries(self.slots.iter().map(|&(count, ty, rel)| {
+                let abs = self.base_offset + rel;
+                (abs..abs + count, ty)
             }))
             .finish()
     }
