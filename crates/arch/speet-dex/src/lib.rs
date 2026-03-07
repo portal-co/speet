@@ -65,7 +65,7 @@ pub struct FlatMethod {
     /// Handlers
     pub handlers: Vec<Handler>,
     /// Instructions
-    pub instructions: Vec<u16>,
+    pub instructions: u64, // Total instruction count for this method
     pub base: u64, // Base offset for function indices
 }
 
@@ -100,8 +100,9 @@ pub struct DexRecompiler<
     base_func_offset: u32,
     /// Flattened methods
     methods: Vec<FlatMethod>,
+    code: Vec<u16>,
     /// Total instruction count
-    total_instructions: usize,
+    total_instructions: u64,
     /// Memory ordering mode
     mem_order: MemOrder,
     /// Atomic options
@@ -136,6 +137,7 @@ where
             atomic_opts: AtomicOpts::NONE,
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
+            code: Vec::new(),
         }
     }
 
@@ -169,7 +171,7 @@ where
                     outs_size: code.outs_size(),
                     tries: Vec::new(),
                     handlers: Vec::new(),
-                    instructions: code.insns().clone(),
+                    instructions: code.insns().len() as u64,
                     base: self.total_instructions as u64,
                 };
 
@@ -194,8 +196,9 @@ where
                     });
                 }
 
-                self.total_instructions += flat_method.instructions.len();
+                self.total_instructions += flat_method.instructions;
                 self.methods.push(flat_method);
+                self.code.extend_from_slice(code.insns());
             }
         }
 
@@ -208,7 +211,7 @@ where
     }
 
     /// Get total instruction count
-    pub fn total_instructions(&self) -> usize {
+    pub fn total_instructions(&self) -> u64 {
         self.total_instructions
     }
 
