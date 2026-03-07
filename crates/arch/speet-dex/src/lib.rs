@@ -60,10 +60,7 @@ pub struct FlatMethod {
     pub ins_size: u16,
     /// Output register count
     pub outs_size: u16,
-    /// Try/catch blocks
-    pub tries: Vec<TryBlock>,
-    /// Handlers
-    pub handlers: Vec<Handler>,
+
     /// Instructions
     pub instructions: u64, // Total instruction count for this method
     pub base: u64, // Base offset for function indices
@@ -86,20 +83,28 @@ pub struct Handler {
 #[derive(Default)]
 pub struct FlatMethods {
     methods: Vec<FlatMethod>,
+    /// Try/catch blocks
+    tries: Vec<TryBlock>,
     code: Vec<u16>,
     total_instructions: u64,
 }
 impl FlatMethods {
-    pub fn params(&self) -> u32{
-        return self.methods.iter().map(|a|a.registers_size as u32).max().unwrap_or(0);
+    pub fn params(&self) -> u32 {
+        return self
+            .methods
+            .iter()
+            .map(|a| a.registers_size as u32)
+            .max()
+            .unwrap_or(0);
+    }
+    pub fn method_of(&self, idx: u64) -> Option<&FlatMethod> {
+        self.methods
+            .iter()
+            .find(|m| m.base.wrapping_sub(idx) < m.instructions)
     }
     /// Parse DEX file data into flat representation
     pub fn parse_dex(&mut self, data: &[u8]) -> Result<(), dex::Error> {
         let dex_file = DexReader::from_vec(data)?;
-
-        // Clear existing data
-        self.methods.clear();
-        self.total_instructions = 0;
 
         // Process each class
         for class_def_result in dex_file.classes() {
@@ -121,18 +126,12 @@ impl FlatMethods {
                     registers_size: code.registers_size(),
                     ins_size: code.ins_size(),
                     outs_size: code.outs_size(),
-                    tries: Vec::new(),
-                    handlers: Vec::new(),
                     instructions: code.insns().len() as u64,
                     base: self.total_instructions as u64,
                 };
 
-                // TODO: Parse instructions from insns (Vec<ushort>)
-                // For now, skip instruction parsing
-
-                // TODO: Process try/catch blocks
                 for try_item in code.tries().iter() {
-                    flat_method.tries.push(TryBlock {
+                    self.tries.push(TryBlock {
                         start_addr: try_item.start_addr() as u64 + flat_method.base as u64,
                         end_addr: try_item.insn_count() as u64
                             + flat_method.base as u64
@@ -211,7 +210,6 @@ where
             flat_methods: flat,
         })
     }
-
 }
 
 impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
