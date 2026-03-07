@@ -7,12 +7,12 @@ license-file.workspace = true
 
 [dependencies]
 wasm-encoder.workspace = true
-yecta = {path = "../yecta"}
+yecta = {path = "../../helper/yecta"}
 rabbitizer.workspace = true
 wax-core.workspace = true
-speet-memory = {path = "../speet-memory"}
-speet-ordering = {path = "../speet-ordering"}
-speet-traps = {path = "../speet-traps"}
+speet-memory = {path = "../../helper/speet-memory"}
+speet-ordering = {path = "../../helper/speet-ordering"}
+speet-traps = {path = "../../helper/speet-traps"}
 
 [dev-dependencies]
 object = "0.36"

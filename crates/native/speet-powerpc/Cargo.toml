@@ -7,5 +7,5 @@ license-file.workspace = true
 
 [dependencies]
 wasm-encoder.workspace = true
-yecta = {path = "../yecta"}
+yecta = {path = "../../helper/yecta"}
 powerpc.workspace = true

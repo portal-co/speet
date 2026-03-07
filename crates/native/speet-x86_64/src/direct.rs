@@ -436,8 +436,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         }
     }
 
-    /// Translate a sequence of bytes starting at `rip` to wasm using the provided function-local builder
-    /// This creates one yecta function per instruction; the `inst_len` is passed to yecta so fallthroughs are the correct distance.
+    /// Translate a sequence of x86-64 bytes to WebAssembly.
+    ///
+    /// Decodes `bytes` starting at virtual address `rip` and emits one yecta
+    /// function per instruction.  Fallthrough edges use the decoded instruction
+    /// length so the reactor can wire up correct basic-block successors.
+    ///
+    /// # Arguments
+    /// * `ctx`   – mutable context forwarded to every instruction sink call.
+    /// * `bytes` – raw x86-64 machine code to translate.
+    /// * `rip`   – virtual address of the first byte in `bytes`.
+    /// * `f`     – factory called once per function to construct the
+    ///             [`wax_core::build::InstructionSink`] for that function.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or the first error returned by the sink.
     pub fn translate_bytes(
         &mut self,
         ctx: &mut Context,

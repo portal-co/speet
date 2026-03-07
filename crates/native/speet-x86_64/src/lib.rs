@@ -1,6 +1,41 @@
-//! Minimal x86_64 to WebAssembly recompiler
+//! # speet-x86_64
 //!
-//! Supports a small subset of integer instructions for demonstration purposes.
+//! x86-64 to WebAssembly static recompiler.
+//!
+//! Translates a subset of x86-64 integer instructions to WebAssembly using
+//! the [`yecta`] reactor for control-flow management.
+//!
+//! ## Supported instructions
+//! Integer ALU (`ADD`, `SUB`, `IMUL`, `AND`, `OR`, `XOR`, `SHL`, `SHR`,
+//! `SAR`, `NOT`, `NEG`, `INC`, `DEC`, `CMP`, `TEST`), data movement
+//! (`MOV`, `MOVZX`, `MOVSX`, `MOVSXD`, `LEA`, `XCHG`, `PUSH`, `POP`),
+//! control flow (`Jcc`, `JMP`, `CALL`, `RET`), and memory string operations.
+//! Floating-point and SIMD instructions are recognised and classified but
+//! emitted as `unreachable` placeholders.
+//!
+//! ## Local-variable layout
+//! The generated WASM function uses a fixed local layout:
+//! - Locals 0–15: the 16 x86-64 general-purpose registers (each `i64`).
+//! - Local 16: the program counter / RIP (`i64`).
+//! - Locals 17–21: condition flags ZF, SF, CF, OF, PF (each `i32`).
+//! - Locals 22–24: scratch temporaries (`i64`).
+//! - Local 25: expected return address for speculative-call optimisation (`i64`).
+//!
+//! See [`X86Recompiler::BASE_PARAMS`] for the total count.
+//!
+//! ## Speculative calls
+//! When enabled via [`X86Recompiler::set_speculative_calls`], ABI-conformant
+//! `CALL` instructions are lowered to direct WASM `call` instructions wrapped
+//! in a try/catch block keyed by an [`EscapeTag`].  `RET` instructions check
+//! the top of the shadow stack against the expected return address and take
+//! the fast path when they match.
+//!
+//! ## Trap hooks
+//! Instruction-level and jump-level traps can be installed with
+//! [`X86Recompiler::set_instruction_trap`] and
+//! [`X86Recompiler::set_jump_trap`] (see [`speet_traps`] for the trait
+//! definitions).  Call [`X86Recompiler::setup_traps`] once before
+//! translation to register the trap parameters in the function layout.
 #![no_std]
 
 extern crate alloc;
@@ -14,7 +49,15 @@ use speet_traps::{
     FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
 };
-/// Simple x86_64 recompiler for integer ops
+/// x86-64 to WebAssembly recompiler.
+///
+/// Each instance manages a single [`yecta::Reactor`] and translates one
+/// contiguous region of x86-64 bytes into a sequence of WASM functions
+/// (one function per instruction) via [`direct::translate_bytes`].
+///
+/// # Type parameters
+/// - `Context` / `E` / `F` – forwarded to the underlying [`yecta::Reactor`].
+/// - `P` – the local-pool backend (defaults to [`yecta::LocalPool`]).
 pub struct X86Recompiler<
     'cb,
     'ctx,
@@ -40,17 +83,27 @@ where
     F: InstructionSink<Context, E>,
     P: yecta::LocalPoolBackend + Default,
 {
+    /// Returns the function-index base used by the underlying reactor.
+    ///
+    /// All WASM function indices emitted during translation are offset by
+    /// this value, allowing multiple recompilers to share a single WASM
+    /// module without index collisions.
     pub fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
     }
 
+    /// Sets the function-index base.  Must be called before translation
+    /// to ensure correct inter-function references.
     pub fn set_base_func_offset(&mut self, offset: u32) {
         self.reactor.set_base_func_offset(offset);
     }
+    /// Create a new recompiler with `base_rip = 0`.
     pub fn new() -> Self {
         Self::new_with_base_rip(0)
     }
 
+    /// Create a new recompiler whose RIP-relative addresses are resolved
+    /// relative to `base_rip`.
     pub fn new_with_base_rip(base_rip: u64) -> Self {
         Self {
             reactor: Reactor::default(),

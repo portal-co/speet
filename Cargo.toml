@@ -1,14 +1,18 @@
 [workspace]
 members = [
-    "crates/arch/speet-memory",
-    "crates/arch/speet-ordering",
-    "crates/arch/speet-powerpc",
-    "crates/arch/speet-riscv",
-    "crates/arch/yecta",
-    "crates/arch/speet-x86_64",
-    "crates/arch/speet-mips",
-    "crates/arch/speet-traps",
-    "crates/arch/speet-dex",
+    # Helper crates (yecta reactor + architecture-agnostic building blocks)
+    "crates/helper/yecta",
+    "crates/helper/speet-memory",
+    "crates/helper/speet-ordering",
+    "crates/helper/speet-traps",
+    "crates/helper/speet-wasm-helpers",
+    # Native architecture crates
+    "crates/native/speet-x86_64",
+    "crates/native/speet-riscv",
+    "crates/native/speet-mips",
+    "crates/native/speet-powerpc",
+    # Managed architecture crates
+    "crates/managed/speet-dex",
 ]
 resolver = "3"
 
