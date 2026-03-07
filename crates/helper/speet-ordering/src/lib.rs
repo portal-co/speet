@@ -331,25 +331,6 @@ fn rmw_memarg(w: RmwWidth) -> MemArg {
 /// The loaded value is left on the stack; the caller is responsible for
 /// storing it into the destination local.
 ///
-/// When `atomic.use_atomic_insns` is `true` this emits an
-/// `I32AtomicLoad` / `I64AtomicLoad`.  On a shared-memory wasm target those
-/// instructions provide the sequentially-consistent ordering that an LR
-/// requires.
-///
-/// When `atomic.use_atomic_insns` is `false` — an environment that does not
-/// support the wasm threads proposal — this falls back to a plain
-/// `I32Load` / `I64Load`.  There is no hardware reservation mechanism in this
-/// path; correctness relies on single-threaded execution.
-///
-/// The `_order` argument is accepted for API symmetry; wasm atomic loads are
-/// always sequentially consistent within a thread regardless of the guest
-/// ordering annotation.
-/// Emit an **atomic load-reserved** (`LR.W` / `LR.D`).
-///
-/// The effective address is already on the wasm stack when this is called.
-/// The loaded value is left on the stack; the caller is responsible for
-/// storing it into the destination local.
-///
 /// Before emitting the load, any pending lazy stores that alias `addr_local`
 /// are conditionally flushed (see [`emit_load`]).  `addr_local` must hold the
 /// same effective address that is on the stack.

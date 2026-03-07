@@ -67,11 +67,14 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Nul
 /// [`extra_locals`](InstructionTrap::extra_locals), `ChainedTrap` merges both
 /// into one flat `ExtraLocals` here.
 pub struct ChainedTrap<A, B> {
+    /// The first trap to run.
     pub a: A,
+    /// The second trap to run (skipped if `a` returns [`TrapAction::Skip`]).
     pub b: B,
 }
 
 impl<A, B> ChainedTrap<A, B> {
+    /// Construct a `ChainedTrap` that runs `a` first, then `b`.
     pub fn new(a: A, b: B) -> Self {
         Self { a, b }
     }
@@ -437,6 +440,12 @@ impl RopDetectTrap {
     /// `i32` depth counter.
     const DEPTH_PARAM: u32 = 0;
 
+    /// Construct a `RopDetectTrap`.
+    ///
+    /// `violation_handler` is called (via `return_call`) when the return depth
+    /// goes negative.  `handler_params` is the number of wasm parameters
+    /// forwarded to the handler (typically the same `total_params` used for
+    /// all `jmp` calls in this function group).
     pub fn new(violation_handler: FuncIdx, handler_params: u32) -> Self {
         Self { violation_handler, handler_params }
     }
