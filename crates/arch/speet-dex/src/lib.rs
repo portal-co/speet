@@ -83,64 +83,16 @@ pub struct Handler {
     pub addr: u64,
     pub type_idx: ExceptionType,
 }
-
-/// DEX Recompiler
-pub struct DexRecompiler<
-    'cb,
-    'ctx,
-    Context,
-    E,
-    F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend = yecta::LocalPool,
-> {
-    reactor: Reactor<Context, E, F, P>,
-    pool: Pool,
-    escape_tag: Option<EscapeTag>,
-    /// Base offset for function indices
-    base_func_offset: u32,
-    /// Flattened methods
+#[derive(Default)]
+pub struct FlatMethods {
     methods: Vec<FlatMethod>,
     code: Vec<u16>,
-    /// Total instruction count
     total_instructions: u64,
-    /// Memory ordering mode
-    mem_order: MemOrder,
-    /// Atomic options
-    atomic_opts: AtomicOpts,
-    /// Trap configuration
-    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
-    /// Total parameters
-    total_params: u32,
 }
-
-impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
-where
-    F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend,
-{
-    /// Create a new DEX recompiler
-    pub fn new() -> Self
-    where
-        P: Default,
-    {
-        Self {
-            reactor: Reactor::default(),
-            pool: Pool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
-            escape_tag: None,
-            base_func_offset: 0,
-            methods: Vec::new(),
-            total_instructions: 0,
-            mem_order: MemOrder::Strong,
-            atomic_opts: AtomicOpts::NONE,
-            traps: TrapConfig::new(),
-            total_params: Self::BASE_PARAMS,
-            code: Vec::new(),
-        }
+impl FlatMethods {
+    pub fn params(&self) -> u32{
+        return self.methods.iter().map(|a|a.registers_size as u32).max().unwrap_or(0);
     }
-
     /// Parse DEX file data into flat representation
     pub fn parse_dex(&mut self, data: &[u8]) -> Result<(), dex::Error> {
         let dex_file = DexReader::from_vec(data)?;
@@ -204,18 +156,62 @@ where
 
         Ok(())
     }
+}
+/// DEX Recompiler
+pub struct DexRecompiler<
+    'cb,
+    'ctx,
+    Context,
+    E,
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend = yecta::LocalPool,
+> {
+    reactor: Reactor<Context, E, F, P>,
+    pool: Pool,
+    escape_tag: Option<EscapeTag>,
+    /// Base offset for function indices
+    base_func_offset: u32,
+    /// Flattened methods
+    flat_methods: FlatMethods,
 
-    /// Get the flattened methods
-    pub fn methods(&self) -> &[FlatMethod] {
-        &self.methods
+    /// Memory ordering mode
+    mem_order: MemOrder,
+    /// Atomic options
+    atomic_opts: AtomicOpts,
+    /// Trap configuration
+    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
+    /// Total parameters
+    total_params: u32,
+}
+
+impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend,
+{
+    /// Create a new DEX recompiler
+    pub fn new(input: &[u8]) -> Result<Self, dex::Error>
+    where
+        P: Default,
+    {
+        let mut flat = FlatMethods::default();
+        flat.parse_dex(input)?;
+        Ok(Self {
+            reactor: Reactor::default(),
+            pool: Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
+            escape_tag: None,
+            base_func_offset: 0,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: flat.params(),
+            flat_methods: flat,
+        })
     }
 
-    /// Get total instruction count
-    pub fn total_instructions(&self) -> u64 {
-        self.total_instructions
-    }
-
-    const BASE_PARAMS: u32 = 0; // TODO: Define based on architecture
 }
 
 impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -224,11 +220,11 @@ where
     P: yecta::LocalPoolBackend + Default,
 {
     /// Create with custom configuration
-    pub fn new_with_config(base_func_offset: u32) -> Self {
-        Self {
+    pub fn new_with_config(input: &[u8], base_func_offset: u32) -> Result<Self, dex::Error> {
+        Ok(Self {
             reactor: Reactor::with_base_func_offset(base_func_offset),
             base_func_offset,
-            ..Self::new()
-        }
+            ..Self::new(input)?
+        })
     }
 }
