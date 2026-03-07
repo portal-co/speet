@@ -8,6 +8,7 @@ members = [
     "crates/arch/speet-x86_64",
     "crates/arch/speet-mips",
     "crates/arch/speet-traps",
+    "crates/arch/speet-dex",
 ]
 resolver = "3"
 
@@ -32,3 +33,4 @@ rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 rabbitizer = "1.14.3"
 powerpc = "0.4.1"
 disarm64 = "0.1.25"
+dex = {git="https://github.com/letmutx/dex-parser.git"}
