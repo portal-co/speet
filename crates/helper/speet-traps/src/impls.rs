@@ -15,13 +15,11 @@
 
 use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
+use yecta::{FuncIdx, LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
 use crate::insn::{InsnClass, InstructionInfo, InstructionTrap, TrapAction};
 use crate::jump::{JumpInfo, JumpKind, JumpTrap};
-use crate::layout::ExtraParams;
-use crate::locals::ExtraLocals;
-use yecta::FuncIdx;
 
 // ── NullTrap ──────────────────────────────────────────────────────────────────
 
@@ -62,10 +60,13 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Nul
 /// If `A` returns [`TrapAction::Skip`], `B`'s `on_instruction` / `on_jump` is
 /// **not** called, and `A`'s `skip_snippet` is used.
 ///
-/// Extra locals from both traps are declared in order (`A` first, then `B`).
-/// Because `TrapConfig` snapshots locals at installation time via
-/// [`extra_locals`](InstructionTrap::extra_locals), `ChainedTrap` merges both
-/// into one flat `ExtraLocals` here.
+/// Both traps append their parameter and local slots to the same shared
+/// [`LocalLayout`] during [`declare_params`] / [`declare_locals`].  Because
+/// they each receive a different [`LocalSlot`] handle, their indices will
+/// never conflict regardless of insertion order.
+///
+/// [`declare_params`]: ChainedTrap::declare_params
+/// [`declare_locals`]: ChainedTrap::declare_locals
 pub struct ChainedTrap<A, B> {
     /// The first trap to run.
     pub a: A,
@@ -86,6 +87,16 @@ where
     A: InstructionTrap<Context, E, F>,
     B: InstructionTrap<Context, E, F>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        self.a.declare_params(params);
+        self.b.declare_params(params);
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        self.a.declare_locals(locals);
+        self.b.declare_locals(locals);
+    }
+
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
@@ -104,26 +115,8 @@ where
         ctx: &mut Context,
         skip_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<(), E> {
-        // Only A's snippet is called since B never ran (see on_instruction).
+        // Only A's snippet is used since B never ran (see on_instruction).
         self.a.skip_snippet(info, ctx, skip_ctx)
-    }
-
-    /// Returns locals for A followed by locals for B.
-    fn extra_locals(&self) -> ExtraLocals {
-        use alloc::vec::Vec;
-        let groups: Vec<_> = self.a.extra_locals().iter()
-            .chain(self.b.extra_locals().iter())
-            .collect();
-        ExtraLocals::new(groups)
-    }
-
-    /// Returns params for A followed by params for B.
-    fn extra_params(&self) -> ExtraParams {
-        use alloc::vec::Vec;
-        let groups: Vec<_> = self.a.extra_params().iter()
-            .chain(self.b.extra_params().iter())
-            .collect();
-        ExtraParams::new(groups)
     }
 }
 
@@ -133,6 +126,16 @@ where
     A: JumpTrap<Context, E, F>,
     B: JumpTrap<Context, E, F>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        self.a.declare_params(params);
+        self.b.declare_params(params);
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        self.a.declare_locals(locals);
+        self.b.declare_locals(locals);
+    }
+
     fn on_jump(
         &mut self,
         info: &JumpInfo,
@@ -152,22 +155,6 @@ where
         skip_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<(), E> {
         self.a.skip_snippet(info, ctx, skip_ctx)
-    }
-
-    fn extra_locals(&self) -> ExtraLocals {
-        use alloc::vec::Vec;
-        let groups: Vec<_> = self.a.extra_locals().iter()
-            .chain(self.b.extra_locals().iter())
-            .collect();
-        ExtraLocals::new(groups)
-    }
-
-    fn extra_params(&self) -> ExtraParams {
-        use alloc::vec::Vec;
-        let groups: Vec<_> = self.a.extra_params().iter()
-            .chain(self.b.extra_params().iter())
-            .collect();
-        ExtraParams::new(groups)
     }
 }
 
@@ -301,13 +288,12 @@ pub struct CfiReturnTrap {
     pub violation_handler: FuncIdx,
     /// Number of wasm function parameters to pass to the violation handler.
     pub handler_params: u32,
+    /// Slot for the scratch `i32` local used to stash the computed bitmap index.
+    /// Set during [`declare_locals`](JumpTrap::declare_locals).
+    index_local_slot: LocalSlot,
 }
 
 impl CfiReturnTrap {
-    /// Local index 0 within this trap's `ExtraLocals`: scratch `i32` for the
-    /// computed bitmap index, used twice (range guard + byte load).
-    const INDEX_LOCAL: u32 = 0;
-
     /// Construct a new `CfiReturnTrap`.
     ///
     /// `granularity_shift = 2` is appropriate for ISAs where all valid call
@@ -328,14 +314,14 @@ impl CfiReturnTrap {
             granularity_shift,
             violation_handler,
             handler_params,
+            index_local_slot: LocalSlot(0), // overwritten in declare_locals
         }
     }
 }
 
 impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for CfiReturnTrap {
-    /// One `i32` scratch local for the computed bitmap index.
-    fn extra_locals(&self) -> ExtraLocals {
-        ExtraLocals::new([(1, ValType::I32)])
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        self.index_local_slot = locals.append(1, ValType::I32);
     }
 
     fn on_jump(
@@ -344,20 +330,18 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E> {
-        // Only check Returns (and IndirectJumps used as tail returns).
         if !matches!(info.kind, JumpKind::Return | JumpKind::IndirectJump) {
             return Ok(TrapAction::Continue);
         }
-        // Only when the recompiler made the return address visible as a local.
         let target_local = match info.target_local {
             Some(l) => l,
             None    => return Ok(TrapAction::Continue),
         };
-        let index_local   = trap_ctx.locals().local(Self::INDEX_LOCAL);
-        let handler       = self.violation_handler;
-        let params        = self.handler_params;
+        let index_local = trap_ctx.locals().local(self.index_local_slot, 0);
+        let handler     = self.violation_handler;
+        let params      = self.handler_params;
 
-        // ── Compute bitmap index: (target - guest_base) >> granularity_shift ──
+        // Compute bitmap index: (target - guest_base) >> granularity_shift
         trap_ctx.emit(ctx, &Instruction::LocalGet(target_local))?;
         trap_ctx.emit(ctx, &Instruction::I32Const(self.bitmap_guest_base as i32))?;
         trap_ctx.emit(ctx, &Instruction::I32Sub)?;
@@ -365,16 +349,15 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
             trap_ctx.emit(ctx, &Instruction::I32Const(self.granularity_shift as i32))?;
             trap_ctx.emit(ctx, &Instruction::I32ShrU)?;
         }
-        // Stash index; we need it twice (range check then load).
         trap_ctx.emit(ctx, &Instruction::LocalTee(index_local))?;
 
-        // ── Range guard: if index >= bitmap_byte_len → out of range → violation ──
+        // Range guard: if index >= bitmap_byte_len → violation
         trap_ctx.emit(ctx, &Instruction::I32Const(self.bitmap_byte_len as i32))?;
-        trap_ctx.emit(ctx, &Instruction::I32LtU)?;   // 1 if index < len (in range)
-        trap_ctx.emit(ctx, &Instruction::I32Eqz)?;   // 1 if out of range
+        trap_ctx.emit(ctx, &Instruction::I32LtU)?;
+        trap_ctx.emit(ctx, &Instruction::I32Eqz)?;
         trap_ctx.jump_if(ctx, handler, params)?;
 
-        // ── Bitmap byte load: bitmap_wasm_addr + index ──
+        // Bitmap byte load: bitmap_wasm_addr + index
         trap_ctx.emit(ctx, &Instruction::LocalGet(index_local))?;
         trap_ctx.emit(ctx, &Instruction::I32Const(self.bitmap_wasm_addr as i32))?;
         trap_ctx.emit(ctx, &Instruction::I32Add)?;
@@ -383,7 +366,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
             offset:       0,
             memory_index: 0,
         }))?;
-        trap_ctx.emit(ctx, &Instruction::I32Eqz)?;   // 1 if byte == 0 → not a call site
+        trap_ctx.emit(ctx, &Instruction::I32Eqz)?;
         trap_ctx.jump_if(ctx, handler, params)?;
 
         Ok(TrapAction::Continue)
@@ -409,7 +392,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
 /// ## Cross-function state via parameters
 ///
 /// The depth counter is declared as a wasm **parameter** (not a local) via
-/// [`extra_params`](JumpTrap::extra_params).  Parameters survive
+/// [`declare_params`](JumpTrap::declare_params).  Parameters survive
 /// `return_call` chains, so the depth correctly accumulates across the
 /// sequence of yecta wasm functions that together translate a single guest
 /// basic block.
@@ -433,13 +416,12 @@ pub struct RopDetectTrap {
     pub violation_handler: FuncIdx,
     /// Number of wasm function parameters to pass to the violation handler.
     pub handler_params: u32,
+    /// Slot for the `i32` depth-counter parameter.
+    /// Set during [`declare_params`](JumpTrap::declare_params).
+    depth_param_slot: LocalSlot,
 }
 
 impl RopDetectTrap {
-    /// Parameter slot index 0 within this trap's `ExtraParams` is the
-    /// `i32` depth counter.
-    const DEPTH_PARAM: u32 = 0;
-
     /// Construct a `RopDetectTrap`.
     ///
     /// `violation_handler` is called (via `return_call`) when the return depth
@@ -447,14 +429,17 @@ impl RopDetectTrap {
     /// forwarded to the handler (typically the same `total_params` used for
     /// all `jmp` calls in this function group).
     pub fn new(violation_handler: FuncIdx, handler_params: u32) -> Self {
-        Self { violation_handler, handler_params }
+        Self {
+            violation_handler,
+            handler_params,
+            depth_param_slot: LocalSlot(0), // overwritten in declare_params
+        }
     }
 }
 
 impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for RopDetectTrap {
-    /// One `i32` **parameter** for the depth counter (cross-function state).
-    fn extra_params(&self) -> ExtraParams {
-        ExtraParams::new([(1, ValType::I32)])
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        self.depth_param_slot = params.append(1, ValType::I32);
     }
 
     fn on_jump(
@@ -463,25 +448,21 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Rop
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E> {
-        let depth_local = trap_ctx.extra_params().param(Self::DEPTH_PARAM);
+        let depth_local = trap_ctx.params().local(self.depth_param_slot, 0);
         match info.kind {
             JumpKind::Call | JumpKind::IndirectCall => {
-                // depth++
                 trap_ctx.emit(ctx, &Instruction::LocalGet(depth_local))?;
                 trap_ctx.emit(ctx, &Instruction::I32Const(1))?;
                 trap_ctx.emit(ctx, &Instruction::I32Add)?;
                 trap_ctx.emit(ctx, &Instruction::LocalSet(depth_local))?;
             }
             JumpKind::Return => {
-                // depth--; if depth < 0 → more returns than calls → violation
                 trap_ctx.emit(ctx, &Instruction::LocalGet(depth_local))?;
                 trap_ctx.emit(ctx, &Instruction::I32Const(1))?;
                 trap_ctx.emit(ctx, &Instruction::I32Sub)?;
                 trap_ctx.emit(ctx, &Instruction::LocalTee(depth_local))?;
-                // stack: depth (after decrement)
                 trap_ctx.emit(ctx, &Instruction::I32Const(0))?;
                 trap_ctx.emit(ctx, &Instruction::I32LtS)?;
-                // stack: 1 if depth < 0
                 let handler = self.violation_handler;
                 let params  = self.handler_params;
                 trap_ctx.jump_if(ctx, handler, params)?;
@@ -515,13 +496,13 @@ pub struct TraceLogTrap {
 impl TraceLogTrap {
     fn kind_to_i32(kind: JumpKind) -> i32 {
         match kind {
-            JumpKind::DirectJump       => 0,
+            JumpKind::DirectJump        => 0,
             JumpKind::ConditionalBranch => 1,
-            JumpKind::Call             => 2,
-            JumpKind::Return           => 3,
-            JumpKind::IndirectJump     => 4,
-            JumpKind::IndirectCall     => 5,
-            JumpKind::Syscall          => 6,
+            JumpKind::Call              => 2,
+            JumpKind::Return            => 3,
+            JumpKind::IndirectJump      => 4,
+            JumpKind::IndirectCall      => 5,
+            JumpKind::Syscall           => 6,
         }
     }
 }

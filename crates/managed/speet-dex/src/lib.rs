@@ -38,7 +38,7 @@ use yecta::{EscapeTag, FuncIdx, LocalPool, LocalPoolBackend, Pool, Reactor, Tabl
 pub use speet_memory::{CallbackContext, MapperCallback};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 use speet_traps::{
-    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
     insn::{ArchTag, InsnClass},
 };

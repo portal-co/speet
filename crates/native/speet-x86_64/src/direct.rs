@@ -343,7 +343,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         ];
         let arch_local_count: u32 = arch_locals.iter().map(|(n, _)| n).sum();
         let trap_locals: alloc::vec::Vec<(u32, wasm_encoder::ValType)> =
-            self.traps.extend_locals(core::iter::empty()).collect();
+            self.traps.locals_iter().collect();
         let mut all_locals = arch_locals
             .iter()
             .copied()

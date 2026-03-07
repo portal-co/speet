@@ -46,7 +46,7 @@ use yecta::{EscapeTag, LocalPool, LocalPoolBackend, Pool, Reactor, TableIdx, Typ
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
-    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
 };
 /// x86-64 to WebAssembly recompiler.
@@ -226,8 +226,7 @@ where
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     pub fn setup_traps(&mut self) -> u32 {
-        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
-        self.total_params = self.traps.setup(&mut layout);
+        self.total_params = self.traps.setup(Self::BASE_PARAMS);
         self.total_params
     }
 

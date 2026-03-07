@@ -59,7 +59,7 @@ use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 use speet_traps::{
     insn::{ArchTag, InsnClass},
-    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
 };
 use speet_wasm_helpers::{mulh_signed, mulh_signed_unsigned, mulh_unsigned, MulhTemps};
@@ -735,8 +735,7 @@ where
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
     pub fn setup_traps(&mut self) -> u32 {
-        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
-        self.total_params = self.traps.setup(&mut layout);
+        self.total_params = self.traps.setup(Self::BASE_PARAMS);
         self.total_params
     }
 
@@ -907,7 +906,7 @@ where
         // Phase 2a: collect trap non-param locals into a Vec to avoid borrow conflicts,
         // then chain with the arch locals and pass to next_with.
         let trap_locals: Vec<(u32, ValType)> =
-            self.traps.extend_locals(core::iter::empty()).collect();
+            self.traps.locals_iter().collect();
         let mut all_locals = arch_locals
             .iter()
             .copied()

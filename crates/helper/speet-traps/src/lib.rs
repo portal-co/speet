@@ -85,16 +85,13 @@ pub mod context;
 pub mod impls;
 pub mod insn;
 pub mod jump;
-pub mod layout;
-pub mod locals;
 
 // Flat re-exports for the most commonly used items.
-pub use config::{TrapConfig, merge_insn_trap_locals, merge_jump_trap_locals};
+pub use config::TrapConfig;
 pub use context::{TrapContext, reactor_jump, reactor_jump_if};
 pub use impls::{
     CfiReturnTrap, ChainedTrap, CounterTrap, NullTrap, RopDetectTrap, TraceLogTrap,
 };
 pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};
 pub use jump::{JumpInfo, JumpKind, JumpTrap};
-pub use layout::{ExtraParams, FunctionLayout};
-pub use locals::ExtraLocals;
+pub use yecta::{LocalLayout, LocalSlot};

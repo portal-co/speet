@@ -58,7 +58,7 @@ pub use speet_memory::{CallbackContext, MapperCallback};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 use speet_traps::{
     insn::{ArchTag, InsnClass},
-    FunctionLayout, InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
     TrapConfig,
 };
 
@@ -499,8 +499,7 @@ where
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     pub fn setup_traps(&mut self) -> u32 {
-        let mut layout = FunctionLayout::new(Self::BASE_PARAMS);
-        self.total_params = self.traps.setup(&mut layout);
+        self.total_params = self.traps.setup(Self::BASE_PARAMS);
         self.total_params
     }
 
@@ -605,7 +604,7 @@ where
             .seed_i64(pool_i64_start, Self::N_POOL_I64);
         // Phase 2a: collect trap non-param locals to avoid borrow conflicts, then chain.
         let trap_locals: alloc::vec::Vec<(u32, ValType)> =
-            self.traps.extend_locals(core::iter::empty()).collect();
+            self.traps.locals_iter().collect();
         let mut all_locals = arch_locals
             .iter()
             .copied()

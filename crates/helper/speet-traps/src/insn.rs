@@ -25,6 +25,22 @@
 //! trap does not override it).  The recompiler must still emit a valid wasm
 //! function terminator; `unreachable` satisfies that requirement.
 //!
+//! ## Local / parameter declaration
+//!
+//! Traps that need wasm locals or parameters override
+//! [`declare_locals`](InstructionTrap::declare_locals) and/or
+//! [`declare_params`](InstructionTrap::declare_params).  Both methods receive
+//! a `&mut LocalLayout` to which the trap appends its groups via
+//! [`LocalLayout::append`].  The returned [`LocalSlot`] handles should be
+//! stored in the trap struct and used later (inside `on_instruction` /
+//! `skip_snippet`) via `trap_ctx.locals().local(slot, n)` and
+//! `trap_ctx.params().local(slot, n)`.
+//!
+//! `declare_params` is called **once** at trap-installation time (during
+//! [`TrapConfig::setup`]).  `declare_locals` is also called once at
+//! installation time; the base offset of the locals layout is updated per
+//! function via [`TrapConfig::set_local_base`].
+//!
 //! ## Blanket impl for closures
 //!
 //! Any `FnMut(&InstructionInfo, &mut Context, &mut TrapContext<…>) -> Result<TrapAction, E>`
@@ -34,10 +50,9 @@
 use alloc::{boxed::Box, vec::Vec};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
+use yecta::{LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
-use crate::layout::ExtraParams;
-use crate::locals::ExtraLocals;
 
 // ── Supporting types ──────────────────────────────────────────────────────────
 
@@ -48,85 +63,70 @@ pub enum ArchTag {
     Mips,
     X86_64,
     PowerPC,
-    Wasm,
+    Dex,
     Other,
 }
 
-/// Coarse opcode classification bitfield.
+/// Bit-mask of instruction semantic classes.
 ///
-/// Multiple flags may be set simultaneously (e.g. a `JALR` is both a `BRANCH`
-/// and a `CALL`).  Architecture recompilers set these flags when calling
-/// [`TrapConfig::on_instruction`].
+/// A single instruction may belong to multiple classes simultaneously
+/// (e.g. an atomic memory operation is both `MEMORY` and `ATOMIC`).
+/// Use bitwise-OR to combine flags and [`InsnClass::contains`] to test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct InsnClass(pub u32);
 
 impl InsnClass {
-    /// Instruction has no special classification.
-    pub const OTHER: Self = Self(0);
+    /// No class bits set — catches only instructions with `class == OTHER`.
+    pub const OTHER: InsnClass = InsnClass(0);
     /// Instruction accesses linear memory (load or store).
-    pub const MEMORY: Self = Self(1 << 0);
-    /// Conditional or unconditional branch (does not save a return address).
-    pub const BRANCH: Self = Self(1 << 1);
-    /// Subroutine call (saves a return address).
-    pub const CALL: Self = Self(1 << 2);
-    /// Return from subroutine.
-    pub const RETURN: Self = Self(1 << 3);
+    pub const MEMORY: InsnClass = InsnClass(1 << 0);
+    /// Control-flow transfer: branch or conditional jump.
+    pub const BRANCH: InsnClass = InsnClass(1 << 1);
+    /// Function call (direct or indirect).
+    pub const CALL: InsnClass = InsnClass(1 << 2);
+    /// Function return.
+    pub const RETURN: InsnClass = InsnClass(1 << 3);
     /// Privileged / system instruction (ECALL, SYSCALL, INT, …).
-    pub const PRIVILEGED: Self = Self(1 << 4);
-    /// Floating-point instruction.
-    pub const FLOAT: Self = Self(1 << 5);
-    /// Atomic memory operation.
-    pub const ATOMIC: Self = Self(1 << 6);
-    /// Instruction target is computed at runtime (indirect branch/call).
-    pub const INDIRECT: Self = Self(1 << 7);
+    pub const PRIVILEGED: InsnClass = InsnClass(1 << 4);
+    /// Floating-point operation.
+    pub const FLOAT: InsnClass = InsnClass(1 << 5);
+    /// Atomic memory operation (AMO / LL-SC / CMPXCHG).
+    pub const ATOMIC: InsnClass = InsnClass(1 << 6);
+    /// Target is computed at runtime (indirect branch/call/jump).
+    pub const INDIRECT: InsnClass = InsnClass(1 << 7);
 
-    /// Returns `true` if all bits of `other` are set in `self`.
+    /// Return `true` if every bit in `other` is also set in `self`.
     #[inline]
-    pub fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    /// Combine two classifications (bitwise OR).
-    #[inline]
-    pub fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+    pub fn contains(self, other: InsnClass) -> bool {
+        (self.0 & other.0) == other.0
     }
 }
 
 impl core::ops::BitOr for InsnClass {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
+    type Output = InsnClass;
+    fn bitor(self, rhs: InsnClass) -> InsnClass {
+        InsnClass(self.0 | rhs.0)
     }
 }
 
-/// Metadata about the guest instruction currently being translated.
-///
-/// Passed by the recompiler to [`TrapConfig::on_instruction`] and forwarded
-/// to the active [`InstructionTrap`].
-#[derive(Clone, Debug)]
+/// Metadata about the instruction that fired the trap.
 pub struct InstructionInfo {
     /// Guest program counter (byte address, before any base-offset subtraction).
     pub pc: u64,
     /// Byte length of the instruction in the guest ISA.
     pub len: u32,
-    /// Which guest ISA produced this instruction.
+    /// Which architecture emitted this instruction.
     pub arch: ArchTag,
-    /// Coarse opcode classification flags.
+    /// Semantic class of the instruction (may have multiple bits set).
     pub class: InsnClass,
 }
 
-/// What the recompiler should do after an instruction trap fires.
+/// Whether the recompiler should proceed normally or suppress the instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrapAction {
-    /// Continue with normal instruction translation.
+    /// Continue with normal translation of the instruction body.
     Continue,
-    /// Suppress the instruction body entirely.
-    ///
-    /// The recompiler will emit the trap's
-    /// [`InstructionTrap::skip_snippet`] in place of the translated
-    /// instruction body.  A `skip_snippet` that emits no instructions
-    /// causes a bare `unreachable` to be used.
+    /// Suppress the instruction body; use `skip_snippet` instead.
     Skip,
 }
 
@@ -156,32 +156,32 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E>;
 
-    /// The extra wasm locals this trap needs per translated function.
+    /// Append wasm **parameter** slots to `params` and store the returned
+    /// [`LocalSlot`] handles for later index resolution.
     ///
-    /// The default implementation returns [`ExtraLocals::none`] (no extra
-    /// locals).  Override this to declare per-function state.
+    /// Parameters (locals `0..total_params-1`) survive `return_call` chains.
+    /// Use them for state that must carry over from one translated-instruction
+    /// wasm function to the next (e.g. a depth counter).
     ///
-    /// This method is called once at trap-installation time by
-    /// [`TrapConfig::set_instruction_trap`] to obtain the initial
-    /// `ExtraLocals` declaration.  The same declaration is re-used for every
-    /// subsequent function; `set_base` is called anew each time by
-    /// `TrapConfig::set_extra_locals_base`.
-    fn extra_locals(&self) -> ExtraLocals {
-        ExtraLocals::none()
-    }
+    /// Called **once** at trap-installation time by [`TrapConfig::setup`].
+    /// The default does nothing (no extra parameters).
+    #[allow(unused_variables)]
+    fn declare_params(&mut self, params: &mut LocalLayout) {}
 
-    /// The extra wasm **parameters** this trap needs per translated function
-    /// group.
+    /// Append wasm **local** slots to `locals` and store the returned
+    /// [`LocalSlot`] handles for later index resolution.
     ///
-    /// Parameters (locals 0..params-1) survive `return_call` chains; use
-    /// them for state that must carry over from one translated-instruction
-    /// wasm function to the next.  The default returns [`ExtraParams::none`].
+    /// Non-parameter locals are reset to zero at the start of each new wasm
+    /// function.  Use them for state that is only needed within a single
+    /// translated instruction (e.g. a scratch index for a bitmap lookup).
     ///
-    /// Called once by [`TrapConfig::setup`]; the trap's `ExtraParams` base is
-    /// set there.
-    fn extra_params(&self) -> ExtraParams {
-        ExtraParams::none()
-    }
+    /// Called **once** at trap-installation time by
+    /// [`TrapConfig::set_instruction_trap`].  The base offset of the locals
+    /// layout is updated per function via [`TrapConfig::set_local_base`].
+    ///
+    /// The default does nothing (no extra locals).
+    #[allow(unused_variables)]
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
 
     /// Wasm instructions to emit in place of the instruction body when this
     /// trap returns [`TrapAction::Skip`].
@@ -189,9 +189,6 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
     /// The default emits a single `unreachable`, which is always a valid
     /// function terminator.  Traps that want to redirect control flow (e.g.
     /// jump to a violation handler) should override this.
-    ///
-    /// The `skip_ctx` gives full access to [`TrapContext`] so that
-    /// the snippet can emit a jump, access the trap's own locals, etc.
     fn skip_snippet(
         &self,
         info: &InstructionInfo,
@@ -226,23 +223,30 @@ where
 /// `Vec<Box<dyn InstructionTrap<…>>>` implements `InstructionTrap` by running
 /// each element in order and short-circuiting on the first `Skip`.
 ///
-/// The `skip_snippet` of the first element that returned `Skip` is used; all
-/// subsequent elements in the vec that did *not* return `Skip` have already
-/// had `on_instruction` called (with `Continue` result) and their
-/// `skip_snippet` is not invoked.
+/// The `skip_snippet` of the first element that returned `Skip` is used.
 ///
-/// `extra_locals` is the concatenation of all elements' locals in order.
-/// The base offsets are maintained by `TrapConfig`; each element's
-/// `ExtraLocals` has its own slice of the total.  Because `Vec` owns the
-/// elements, `TrapConfig` stores the locals separately (one `ExtraLocals` per
-/// trap slot) rather than delegating to the vec here.  This impl therefore
-/// returns `ExtraLocals::none()` — the real extra-locals handling for a
-/// `Vec`-based trap is done by `TrapConfig::set_instruction_trap_vec`.
+/// **Note on `declare_locals` / `declare_params`:** each element's declaration
+/// methods must be called individually before the vec is installed.  The vec
+/// impl delegates both methods to all elements in order, so installing the vec
+/// via [`TrapConfig::set_instruction_trap`] will call `declare_*` on each
+/// element once and append all their slots to the shared layout.
 impl<Context, E, F> InstructionTrap<Context, E, F>
     for Vec<Box<dyn InstructionTrap<Context, E, F> + '_>>
 where
     F: InstructionSink<Context, E>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        for trap in self.iter_mut() {
+            trap.declare_params(params);
+        }
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        for trap in self.iter_mut() {
+            trap.declare_locals(locals);
+        }
+    }
+
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
@@ -264,6 +268,14 @@ impl<Context, E, F> InstructionTrap<Context, E, F>
 where
     F: InstructionSink<Context, E>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        (**self).declare_params(params);
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        (**self).declare_locals(locals);
+    }
+
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
@@ -271,14 +283,6 @@ where
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E> {
         (**self).on_instruction(info, ctx, trap_ctx)
-    }
-
-    fn extra_locals(&self) -> ExtraLocals {
-        (**self).extra_locals()
-    }
-
-    fn extra_params(&self) -> ExtraParams {
-        (**self).extra_params()
     }
 
     fn skip_snippet(

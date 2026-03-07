@@ -26,13 +26,14 @@
 //! For static jumps `target_local` is `None`; the static target is available
 //! as [`JumpInfo::target_pc`].
 //!
-//! ## `TrapAction::Skip`
+//! ## Local / parameter declaration
 //!
-//! Returning [`TrapAction::Skip`] suppresses the original jump.  The
-//! recompiler instead calls [`JumpTrap::skip_snippet`] which may emit any
-//! code — typically a jump to a violation handler.  If `skip_snippet` emits
-//! no instructions, `unreachable` is used as the sole terminator so the wasm
-//! function remains valid.
+//! Same protocol as [`InstructionTrap`](crate::insn::InstructionTrap):
+//! override [`declare_locals`](JumpTrap::declare_locals) and/or
+//! [`declare_params`](JumpTrap::declare_params), append groups via
+//! [`LocalLayout::append`], store the returned [`LocalSlot`] handles in the
+//! trap struct, and later use `trap_ctx.locals().local(slot, n)` and
+//! `trap_ctx.params().local(slot, n)` inside `on_jump` / `skip_snippet`.
 //!
 //! ## Blanket impl for closures
 //!
@@ -42,11 +43,10 @@
 use alloc::{boxed::Box, vec::Vec};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
+use yecta::{LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
 use crate::insn::TrapAction;
-use crate::layout::ExtraParams;
-use crate::locals::ExtraLocals;
 
 // ── JumpKind ──────────────────────────────────────────────────────────────────
 
@@ -71,32 +71,15 @@ pub enum JumpKind {
 
 // ── JumpInfo ──────────────────────────────────────────────────────────────────
 
-/// Metadata about the control-flow transfer being emitted.
-///
-/// Passed by the recompiler to [`TrapConfig::on_jump`] and forwarded to the
-/// active [`JumpTrap`].
-#[derive(Clone, Debug)]
+/// Metadata about the control-flow transfer that fired the trap.
 pub struct JumpInfo {
-    /// Guest PC of the instruction performing the jump.
+    /// Guest PC of the instruction that produced this transfer.
     pub source_pc: u64,
-
-    /// Statically-known target guest PC, if available.
-    ///
-    /// `None` for indirect jumps (target computed at runtime).
+    /// Static target address, if known.  `None` for indirect jumps.
     pub target_pc: Option<u64>,
-
-    /// Wasm local index holding the **runtime** target value.
-    ///
-    /// * For **indirect** jumps this is always `Some(local)`, where `local`
-    ///   holds the runtime target (typically a guest PC or function index)
-    ///   as an `i32` or `i64` depending on the address width.  The recompiler
-    ///   ensures this local is populated with a `local.tee` before calling
-    ///   `on_jump`.
-    ///
-    /// * For **direct** jumps this is `None`; the static target is in
-    ///   `target_pc`.
+    /// Wasm local holding the runtime target address (for indirect jumps).
+    /// `None` if the target is statically known.
     pub target_local: Option<u32>,
-
     /// The kind of control-flow transfer.
     pub kind: JumpKind,
 }
@@ -146,19 +129,19 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E>;
 
-    /// Extra wasm locals needed per function.  Default: none.
-    fn extra_locals(&self) -> ExtraLocals {
-        ExtraLocals::none()
-    }
-
-    /// Extra wasm **parameters** needed per function group.
+    /// Append wasm **parameter** slots to `params`.
     ///
-    /// Parameters survive `return_call` — use them for state that must carry
-    /// over from one translated-instruction function to the next.
-    /// Default: none.
-    fn extra_params(&self) -> ExtraParams {
-        ExtraParams::none()
-    }
+    /// See [`InstructionTrap::declare_params`] for the full protocol.
+    /// Default: no extra parameters.
+    #[allow(unused_variables)]
+    fn declare_params(&mut self, params: &mut LocalLayout) {}
+
+    /// Append wasm **local** slots to `locals`.
+    ///
+    /// See [`InstructionTrap::declare_locals`] for the full protocol.
+    /// Default: no extra locals.
+    #[allow(unused_variables)]
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
 
     /// Code to emit in place of the suppressed jump when this trap returns
     /// [`TrapAction::Skip`].
@@ -199,14 +182,24 @@ where
 /// `Vec<Box<dyn JumpTrap<…>>>` runs each element in order, short-circuiting
 /// on the first [`TrapAction::Skip`].
 ///
-/// See the corresponding note on `Vec<Box<dyn InstructionTrap<…>>>` regarding
-/// `extra_locals`: the vec impl returns [`ExtraLocals::none`]; per-element
-/// locals are managed by [`TrapConfig`].
+/// `declare_params` and `declare_locals` delegate to all elements in order.
 impl<Context, E, F> JumpTrap<Context, E, F>
     for Vec<Box<dyn JumpTrap<Context, E, F> + '_>>
 where
     F: InstructionSink<Context, E>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        for trap in self.iter_mut() {
+            trap.declare_params(params);
+        }
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        for trap in self.iter_mut() {
+            trap.declare_locals(locals);
+        }
+    }
+
     fn on_jump(
         &mut self,
         info: &JumpInfo,
@@ -228,6 +221,14 @@ impl<Context, E, F> JumpTrap<Context, E, F>
 where
     F: InstructionSink<Context, E>,
 {
+    fn declare_params(&mut self, params: &mut LocalLayout) {
+        (**self).declare_params(params);
+    }
+
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {
+        (**self).declare_locals(locals);
+    }
+
     fn on_jump(
         &mut self,
         info: &JumpInfo,
@@ -235,14 +236,6 @@ where
         trap_ctx: &mut TrapContext<Context, E, F>,
     ) -> Result<TrapAction, E> {
         (**self).on_jump(info, ctx, trap_ctx)
-    }
-
-    fn extra_locals(&self) -> ExtraLocals {
-        (**self).extra_locals()
-    }
-
-    fn extra_params(&self) -> ExtraParams {
-        (**self).extra_params()
     }
 
     fn skip_snippet(

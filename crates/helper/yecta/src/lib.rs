@@ -65,6 +65,9 @@
 
 #![no_std]
 
+pub mod layout;
+pub use layout::{LocalLayout, LocalSlot};
+
 use core::{
     convert::Infallible,
     marker::PhantomData,

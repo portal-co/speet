@@ -10,20 +10,36 @@
 //! | Method | What it does |
 //! |--------|-------------|
 //! | [`emit`] | Emit a single wasm instruction into the current function |
-//! | [`locals`] | Read-only access to this trap's [`ExtraLocals`] (non-param, per-function) |
-//! | [`params`] | Read-only access to this trap's [`ExtraParams`] (params, cross-function) |
+//! | [`locals`] | Read-only access to the shared [`LocalLayout`] for non-param locals |
+//! | [`params`] | Read-only access to the shared [`LocalLayout`] for parameters |
 //! | [`jump`] | Emit an unconditional jump to a wasm function index |
 //! | [`jump_if`] | Emit a conditional jump (consumes the top `i32` on the stack) |
 //!
+//! ## Resolving local indices
+//!
+//! Traps store [`LocalSlot`] handles obtained during
+//! [`declare_locals`](crate::insn::InstructionTrap::declare_locals) /
+//! [`declare_params`](crate::insn::InstructionTrap::declare_params).  Inside
+//! `on_instruction` or `on_jump` they resolve those handles:
+//!
+//! ```ignore
+//! // A scratch local declared in declare_locals:
+//! let idx = trap_ctx.locals().local(self.scratch_slot, 0);
+//!
+//! // A depth counter declared in declare_params:
+//! let idx = trap_ctx.params().local(self.depth_slot, 0);
+//! ```
+//!
 //! ## Parameter vs. local distinction
 //!
-//! Wasm function parameters are the first locals (indices 0..params-1) and
-//! survive `return_call` chains.  `TrapContext::params()` gives the trap
-//! access to its slice of that range via [`ExtraParams`].
+//! Wasm function parameters are the first locals (indices `0..total_params-1`)
+//! and survive `return_call` chains.  `TrapContext::params()` gives the trap
+//! access to the shared parameter layout containing all trap-contributed
+//! parameters.
 //!
-//! Non-parameter locals (indices ≥ params) are reset to zero on each new
-//! function.  `TrapContext::locals()` gives access to those via
-//! [`ExtraLocals`].
+//! Non-parameter locals (indices ≥ `total_params`) are reset to zero on each
+//! new function.  `TrapContext::locals()` gives access to the shared locals
+//! layout containing all trap-contributed non-param locals.
 //!
 //! ## Jump semantics
 //!
@@ -33,15 +49,12 @@
 //!
 //! The `params` argument to both jump methods is the number of wasm function
 //! parameters to forward to the target function — the same meaning as in
-//! `Reactor::jmp`.  In practice this is always `total_params` from
-//! [`FunctionLayout`](crate::layout::FunctionLayout).
+//! `Reactor::jmp`.  In practice this is always `total_params` from the
+//! recompiler's stored field.
 
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{FuncIdx, LocalPoolBackend};
-
-use crate::layout::ExtraParams;
-use crate::locals::ExtraLocals;
+use yecta::{FuncIdx, LocalLayout, LocalPoolBackend};
 
 use core::marker::PhantomData;
 
@@ -53,10 +66,10 @@ use core::marker::PhantomData;
 pub struct TrapContext<'a, Context, E, F: InstructionSink<Context, E>> {
     /// The underlying instruction sink — usually a `&mut Reactor<…>`.
     pub sink: &'a mut F,
-    /// Non-param extra locals for this trap.
-    locals: &'a ExtraLocals,
-    /// Extra parameters for this trap (cross-function state).
-    params: &'a ExtraParams,
+    /// Shared parameter layout (cross-function state).
+    params: &'a LocalLayout,
+    /// Shared locals layout (per-function non-param state).
+    locals: &'a LocalLayout,
     _pd: PhantomData<fn(&mut Context) -> Result<(), E>>,
 }
 
@@ -65,13 +78,12 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     ///
     /// Only [`TrapConfig`] should call this — traps receive one as a `&mut`
     /// argument.
-    pub(crate) fn new(sink: &'a mut F, locals: &'a ExtraLocals, params: &'a ExtraParams) -> Self {
-        Self {
-            sink,
-            locals,
-            params,
-            _pd: PhantomData,
-        }
+    pub(crate) fn new(
+        sink: &'a mut F,
+        params: &'a LocalLayout,
+        locals: &'a LocalLayout,
+    ) -> Self {
+        Self { sink, params, locals, _pd: PhantomData }
     }
 
     /// Emit a single wasm instruction into the current function.
@@ -80,22 +92,24 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
         self.sink.instruction(ctx, instr)
     }
 
-    /// Read-only access to this trap's [`ExtraLocals`] layout (non-param,
-    /// per-function).
+    /// Read-only access to the shared **parameter** layout.
     ///
-    /// Use [`ExtraLocals::local`] to obtain absolute wasm local indices.
+    /// Use [`LocalLayout::local`] with a [`LocalSlot`] obtained during
+    /// [`declare_params`](crate::insn::InstructionTrap::declare_params) to
+    /// resolve absolute wasm local indices for cross-function state.
     #[inline]
-    pub fn locals(&self) -> &ExtraLocals {
-        self.locals
+    pub fn params(&self) -> &LocalLayout {
+        self.params
     }
 
-    /// Read-only access to this trap's [`ExtraParams`] layout (cross-function
-    /// parameter locals).
+    /// Read-only access to the shared **non-param locals** layout.
     ///
-    /// Use [`ExtraParams::param`] to obtain absolute wasm local indices.
+    /// Use [`LocalLayout::local`] with a [`LocalSlot`] obtained during
+    /// [`declare_locals`](crate::insn::InstructionTrap::declare_locals) to
+    /// resolve absolute wasm local indices for per-function scratch state.
     #[inline]
-    pub fn extra_params(&self) -> &ExtraParams {
-        self.params
+    pub fn locals(&self) -> &LocalLayout {
+        self.locals
     }
 }
 
