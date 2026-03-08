@@ -437,6 +437,7 @@ name = "speet-dex"
 version = "0.1.0"
 dependencies = [
  "dex",
+ "dex-bytecode",
  "speet-memory",
  "speet-ordering",
  "speet-traps",

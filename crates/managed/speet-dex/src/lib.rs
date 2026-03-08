@@ -41,14 +41,15 @@
 #![no_std]
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use wax_core::build::InstructionSink;
+use wax_core::build::{InstructionSink, InstructionSource, InstructionOperatorSource};
 
 use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    TableIdx, Target, TypeIdx,
 };
 
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -58,214 +59,160 @@ use speet_traps::{
     insn::{ArchTag, InsnClass},
 };
 
-// ── DEX opcode table ─────────────────────────────────────────────────────────
+use dex_bytecode::Instruction as DexInsn;
 
-/// A raw DEX opcode (low byte of the first 16-bit code unit of an instruction).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DexOpcode(pub u8);
+/// Classify a decoded DEX instruction into [`InsnClass`] flags for the trap system.
+fn insn_class(insn: &DexInsn) -> InsnClass {
+    match insn {
+        // Array access
+        DexInsn::Aget { .. } | DexInsn::AgetWide { .. } | DexInsn::AgetObject { .. }
+        | DexInsn::AgetBoolean { .. } | DexInsn::AgetByte { .. } | DexInsn::AgetChar { .. }
+        | DexInsn::AgetShort { .. } | DexInsn::Aput { .. } | DexInsn::AputWide { .. }
+        | DexInsn::AputObject { .. } | DexInsn::AputBoolean { .. } | DexInsn::AputByte { .. }
+        | DexInsn::AputChar { .. } | DexInsn::AputShort { .. }
+        // Instance and static field access
+        | DexInsn::Iget { .. } | DexInsn::IgetWide { .. } | DexInsn::IgetObject { .. }
+        | DexInsn::IgetBoolean { .. } | DexInsn::IgetByte { .. } | DexInsn::IgetChar { .. }
+        | DexInsn::IgetShort { .. } | DexInsn::Iput { .. } | DexInsn::IputWide { .. }
+        | DexInsn::IputObject { .. } | DexInsn::IputBoolean { .. } | DexInsn::IputByte { .. }
+        | DexInsn::IputChar { .. } | DexInsn::IputShort { .. }
+        | DexInsn::Sget { .. } | DexInsn::SgetWide { .. } | DexInsn::SgetObject { .. }
+        | DexInsn::SgetBoolean { .. } | DexInsn::SgetByte { .. } | DexInsn::SgetChar { .. }
+        | DexInsn::SgetShort { .. } | DexInsn::Sput { .. } | DexInsn::SputWide { .. }
+        | DexInsn::SputObject { .. } | DexInsn::SputBoolean { .. } | DexInsn::SputByte { .. }
+        | DexInsn::SputChar { .. } | DexInsn::SputShort { .. }
+        => InsnClass::MEMORY,
 
-impl DexOpcode {
-    /// Number of 16-bit code units this instruction occupies.
-    ///
-    /// Returns `1` for unknown/unused opcodes so the instruction walker can
-    /// always advance.  Returns `None` for variable-length pseudo-instructions
-    /// (`packed-switch-data`, `sparse-switch-data`, `fill-array-data`), which
-    /// must be sized at the call site.
-    pub fn code_units(self) -> Option<usize> {
-        // Lengths from the Dalvik Executable Format specification.
-        // https://source.android.com/docs/core/runtime/dalvik-bytecode
-        Some(match self.0 {
-            // ── 1-unit instructions ────────────────────────────────────────
-            0x00 => 1, // nop
-            0x01 => 1, // move vA, vB
-            0x04 => 1, // move-wide vA, vB
-            0x07 => 1, // move-object vA, vB
-            0x0a => 1, // move-result vAA
-            0x0b => 1, // move-result-wide vAA
-            0x0c => 1, // move-result-object vAA
-            0x0d => 1, // move-exception vAA
-            0x0e => 1, // return-void
-            0x0f => 1, // return vAA
-            0x10 => 1, // return-wide vAA
-            0x11 => 1, // return-object vAA
-            0x12 => 1, // const/4 vA, #+B
-            0x1d => 1, // monitor-enter vAA
-            0x1e => 1, // monitor-exit vAA
-            0x21 => 1, // array-length vA, vB
-            0x27 => 1, // throw vAA
-            0x28 => 1, // goto +AA
-            // 2addr unary and binary ops (12x format)
-            0x7b..=0x8f => 1, // neg-int .. int-to-short (unary)
-            0xb0..=0xcf => 1, // add-int/2addr .. rem-double/2addr
-            // unused / reserved (treat as 1-unit nops)
-            0x3e..=0x43 => 1,
-            0x73 => 1,
-            0x79 => 1,
-            0x7a => 1,
-            0xe3..=0xf9 => 1,
+        DexInsn::ReturnVoid | DexInsn::Return { .. }
+        | DexInsn::ReturnWide { .. } | DexInsn::ReturnObject { .. }
+        => InsnClass::RETURN,
 
-            // ── 2-unit instructions ────────────────────────────────────────
-            0x02 => 2, // move/from16 vAA, vBBBB
-            0x05 => 2, // move-wide/from16 vAA, vBBBB
-            0x08 => 2, // move-object/from16 vAA, vBBBB
-            0x13 => 2, // const/16 vAA, #+BBBB
-            0x15 => 2, // const/high16 vAA, #+BBBB0000
-            0x16 => 2, // const-wide/16 vAA, #+BBBB
-            0x19 => 2, // const-wide/high16 vAA, #+BBBB000000000000
-            0x1a => 2, // const-string vAA, string@BBBB
-            0x1c => 2, // const-class vAA, type@BBBB
-            0x1f => 2, // check-cast vAA, type@BBBB
-            0x20 => 2, // instance-of vA, vB, type@CCCC
-            0x22 => 2, // new-instance vAA, type@BBBB
-            0x23 => 2, // new-array vA, vB, type@CCCC
-            0x29 => 2, // goto/16 +AAAA
-            // cmp* (23x)
-            0x2d..=0x31 => 2,
-            // if-* (22t), if-*z (21t)
-            0x32..=0x3d => 2,
-            // array ops (23x)
-            0x44..=0x51 => 2,
-            // iget/iput (22c)
-            0x52..=0x5f => 2,
-            // sget/sput (21c)
-            0x60..=0x6d => 2,
-            // binary ALU (23x): add-int .. rem-double
-            0x90..=0xaf => 2,
-            // binary lit16 (22s)
-            0xd0..=0xd7 => 2,
-            // binary lit8 (22b)
-            0xd8..=0xe2 => 2,
-            // const-method-handle / const-method-type (21c)
-            0xfe => 2,
-            0xff => 2,
+        DexInsn::Throw { .. } | DexInsn::MonitorEnter { .. } | DexInsn::MonitorExit { .. }
+        => InsnClass::PRIVILEGED,
 
-            // ── 3-unit instructions ────────────────────────────────────────
-            0x03 => 3, // move/16 vAAAA, vBBBB
-            0x06 => 3, // move-wide/16 vAAAA, vBBBB
-            0x09 => 3, // move-object/16 vAAAA, vBBBB
-            0x14 => 3, // const vAA, #+BBBBBBBB
-            0x17 => 3, // const-wide/32 vAA, #+BBBBBBBB
-            0x1b => 3, // const-string/jumbo vAA, string@BBBBBBBB
-            0x24 => 3, // filled-new-array {vC..vG}, type@BBBB (35c)
-            0x25 => 3, // filled-new-array/range {vCCCC..vNNNN}, type@BBBB (3rc)
-            0x26 => 3, // fill-array-data vAA, +BBBBBBBB (31t)
-            0x2a => 3, // goto/32 +AAAAAAAA
-            0x2b => 3, // packed-switch vAA, +BBBBBBBB (31t)
-            0x2c => 3, // sparse-switch vAA, +BBBBBBBB (31t)
-            // invoke-* (35c, 3rc)
-            0x6e..=0x72 => 3,
-            0x74..=0x78 => 3,
-            // invoke-custom (35c, 3rc)
-            0xfc => 3,
-            0xfd => 3,
+        DexInsn::Goto { .. } | DexInsn::Goto16 { .. } | DexInsn::Goto32 { .. }
+        => InsnClass::BRANCH,
 
-            // ── 4-unit instructions ────────────────────────────────────────
-            0xfa => 4, // invoke-polymorphic (45cc)
-            0xfb => 4, // invoke-polymorphic/range (4rcc)
+        DexInsn::PackedSwitch { .. } | DexInsn::SparseSwitch { .. }
+        => InsnClass::BRANCH | InsnClass::INDIRECT,
 
-            // ── 5-unit instructions ────────────────────────────────────────
-            0x18 => 5, // const-wide vAA, #+BBBBBBBBBBBBBBBB
+        DexInsn::IfEq { .. } | DexInsn::IfNe { .. } | DexInsn::IfLt { .. }
+        | DexInsn::IfGe { .. } | DexInsn::IfGt { .. } | DexInsn::IfLe { .. }
+        | DexInsn::IfEqz { .. } | DexInsn::IfNez { .. } | DexInsn::IfLtz { .. }
+        | DexInsn::IfGez { .. } | DexInsn::IfGtz { .. } | DexInsn::IfLez { .. }
+        => InsnClass::BRANCH,
 
-            // Variable-length pseudo-instructions — caller must handle
-            // 0x00 with high-byte 0x01/0x02/0x03: packed-switch-data,
-            //   sparse-switch-data, fill-array-data
-            // We expose these through `pseudo_len` instead.
-            _ => return None,
-        })
-    }
+        DexInsn::InvokeDirect { .. } | DexInsn::InvokeStatic { .. }
+        | DexInsn::InvokeDirectRange { .. } | DexInsn::InvokeStaticRange { .. }
+        | DexInsn::InvokeCustom { .. } | DexInsn::InvokeCustomRange { .. }
+        => InsnClass::CALL,
 
-    /// Returns `true` if this opcode is a control-flow transfer.
-    pub fn is_jump(self) -> bool {
-        matches!(
-            self.0,
-            0x0e // return-void
-            | 0x0f // return
-            | 0x10 // return-wide
-            | 0x11 // return-object
-            | 0x27 // throw
-            | 0x28 // goto
-            | 0x29 // goto/16
-            | 0x2a // goto/32
-            | 0x2b // packed-switch
-            | 0x2c // sparse-switch
-            | 0x32..=0x3d // if-* / if-*z
-            | 0x6e..=0x72 // invoke-*
-            | 0x74..=0x78 // invoke-*/range
-            | 0xfa | 0xfb // invoke-polymorphic
-            | 0xfc | 0xfd // invoke-custom
-        )
-    }
+        DexInsn::InvokeVirtual { .. } | DexInsn::InvokeSuper { .. }
+        | DexInsn::InvokeInterface { .. } | DexInsn::InvokeVirtualRange { .. }
+        | DexInsn::InvokeSuperRange { .. } | DexInsn::InvokeInterfaceRange { .. }
+        | DexInsn::InvokePolymorphic { .. } | DexInsn::InvokePolymorphicRange { .. }
+        => InsnClass::CALL | InsnClass::INDIRECT,
 
-    /// Classify into [`InsnClass`] flags for the trap system.
-    pub fn classify(self) -> InsnClass {
-        match self.0 {
-            // Memory access
-            0x44..=0x51 // aget / aput
-            | 0x52..=0x5f // iget / iput
-            | 0x60..=0x6d // sget / sput
-            => InsnClass::MEMORY,
-            // Returns
-            0x0e..=0x11 => InsnClass::RETURN,
-            // Throw (privilege / exceptional control flow)
-            0x27 => InsnClass::PRIVILEGED,
-            // Goto (unconditional direct jump)
-            0x28..=0x2a => InsnClass::BRANCH,
-            // Switch (indirect branch)
-            0x2b | 0x2c => InsnClass::BRANCH | InsnClass::INDIRECT,
-            // Conditional branches
-            0x32..=0x3d => InsnClass::BRANCH,
-            // Direct calls
-            0x6e | 0x70 | 0x74 | 0x76 | 0xfc | 0xfd => InsnClass::CALL,
-            // Indirect / virtual calls
-            0x6f | 0x71 | 0x72 | 0x75 | 0x77 | 0x78
-            | 0xfa | 0xfb => InsnClass::CALL | InsnClass::INDIRECT,
-            // Floating-point ALU
-            0x2d | 0x2e // cmpl/cmpg-float
-            | 0x96 | 0x97 // add-float / sub-float
-            | 0x98 | 0x99 // mul-float / div-float
-            | 0x9a         // rem-float
-            | 0xa6..=0xaa  // add-double .. rem-double
-            | 0xb6..=0xbb  // add-float/2addr .. rem-float/2addr
-            | 0xbc..=0xc1  // add-double/2addr .. rem-double/2addr
-            | 0x85..=0x8f  // int-to-float .. long-to-float (casts)
-            => InsnClass::FLOAT,
-            _ => InsnClass::OTHER,
-        }
+        DexInsn::CmplFloat { .. } | DexInsn::CmpgFloat { .. }
+        | DexInsn::CmplDouble { .. } | DexInsn::CmpgDouble { .. }
+        | DexInsn::AddFloat { .. } | DexInsn::SubFloat { .. } | DexInsn::MulFloat { .. }
+        | DexInsn::DivFloat { .. } | DexInsn::RemFloat { .. }
+        | DexInsn::AddDouble { .. } | DexInsn::SubDouble { .. } | DexInsn::MulDouble { .. }
+        | DexInsn::DivDouble { .. } | DexInsn::RemDouble { .. }
+        | DexInsn::AddFloat2addr { .. } | DexInsn::SubFloat2addr { .. }
+        | DexInsn::MulFloat2addr { .. } | DexInsn::DivFloat2addr { .. }
+        | DexInsn::RemFloat2addr { .. }
+        | DexInsn::AddDouble2addr { .. } | DexInsn::SubDouble2addr { .. }
+        | DexInsn::MulDouble2addr { .. } | DexInsn::DivDouble2addr { .. }
+        | DexInsn::RemDouble2addr { .. }
+        | DexInsn::IntToFloat { .. } | DexInsn::IntToDouble { .. }
+        | DexInsn::LongToFloat { .. } | DexInsn::LongToDouble { .. }
+        | DexInsn::FloatToInt { .. } | DexInsn::FloatToLong { .. }
+        | DexInsn::FloatToDouble { .. } | DexInsn::DoubleToInt { .. }
+        | DexInsn::DoubleToLong { .. } | DexInsn::DoubleToFloat { .. }
+        | DexInsn::NegFloat { .. } | DexInsn::NegDouble { .. }
+        => InsnClass::FLOAT,
+
+        _ => InsnClass::OTHER,
     }
 }
 
-/// Length of a variable-length DEX pseudo-instruction starting at `units[0]`.
-///
-/// Called when the opcode byte is `0x00` and the high byte of the first
-/// code unit distinguishes the pseudo-instruction kind.
-pub fn pseudo_len(units: &[u16]) -> usize {
-    if units.is_empty() {
-        return 1;
+/// Comparison operation for a DEX conditional branch condition snippet.
+#[derive(Clone, Copy)]
+enum DexCondOp {
+    I32Eq,
+    I32Ne,
+    I32LtS,
+    I32GeS,
+    I32GtS,
+    I32LeS,
+    I32Eqz,
+    I32Nez,
+    I32LtzS,
+    I32GezS,
+    I32GtzS,
+    I32LezS,
+}
+
+/// Branch condition snippet for DEX if-* instructions.
+/// Emits an i32 condition value onto the wasm stack.
+struct DexCondSnippet {
+    a: u32,
+    b: u32,
+    op: DexCondOp,
+}
+
+impl<Context, E> InstructionSource<Context, E> for DexCondSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        use DexCondOp::*;
+        use Instruction as W;
+        sink.instruction(ctx, &W::LocalGet(self.a))?;
+        match self.op {
+            I32Eq  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Eq)?; }
+            I32Ne  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Ne)?; }
+            I32LtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LtS)?; }
+            I32GeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GeS)?; }
+            I32GtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GtS)?; }
+            I32LeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LeS)?; }
+            I32Eqz  => { sink.instruction(ctx, &W::I32Eqz)?; }
+            I32Nez  => { /* just the register value */ }
+            I32LtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LtS)?; }
+            I32GezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GeS)?; }
+            I32GtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GtS)?; }
+            I32LezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LeS)?; }
+        }
+        Ok(())
     }
-    match units[0] >> 8 {
-        0x01 => {
-            // packed-switch-data: size = 4 + 2*N
-            let n = units.get(1).copied().unwrap_or(0) as usize;
-            4 + 2 * n
+}
+
+impl<Context, E> InstructionOperatorSource<Context, E> for DexCondSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        use DexCondOp::*;
+        use Instruction as W;
+        sink.instruction(ctx, &W::LocalGet(self.a))?;
+        match self.op {
+            I32Eq  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Eq)?; }
+            I32Ne  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Ne)?; }
+            I32LtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LtS)?; }
+            I32GeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GeS)?; }
+            I32GtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GtS)?; }
+            I32LeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LeS)?; }
+            I32Eqz  => { sink.instruction(ctx, &W::I32Eqz)?; }
+            I32Nez  => { /* just the register value */ }
+            I32LtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LtS)?; }
+            I32GezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GeS)?; }
+            I32GtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GtS)?; }
+            I32LezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LeS)?; }
         }
-        0x02 => {
-            // sparse-switch-data: size = 2 + 4*N
-            let n = units.get(1).copied().unwrap_or(0) as usize;
-            2 + 4 * n
-        }
-        0x03 => {
-            // fill-array-data: size = 4 + ceil(N*element_width / 2)
-            let element_width = units.get(1).copied().unwrap_or(1) as usize;
-            let n = if units.len() >= 4 {
-                let lo = units[2] as u32;
-                let hi = units[3] as u32;
-                ((hi << 16) | lo) as usize
-            } else {
-                0
-            };
-            4 + (n * element_width + 1) / 2
-        }
-        _ => 1, // unknown — skip 1 unit
+        Ok(())
     }
 }
 
@@ -444,6 +391,8 @@ pub struct DexRecompiler<
     locals_mark: Mark,
     /// Slot for a single per-function scratch `i32` local.
     scratch_slot: LocalSlot,
+    /// Slot for a single per-function scratch `i64` local (used for wide operations).
+    scratch_i64_slot: LocalSlot,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -471,6 +420,7 @@ where
             layout: LocalLayout::empty(),
             locals_mark: Mark { slot_count: 0, total_locals: 0 },
             scratch_slot: LocalSlot(0),
+            scratch_i64_slot: LocalSlot(0),
         };
         recomp.setup_traps();
         Ok(recomp)
@@ -607,8 +557,9 @@ where
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
         self.layout.rewind(&self.locals_mark);
-        // Per-function scratch local for intermediate values.
+        // Per-function scratch locals for intermediate values.
         self.scratch_slot = self.layout.append(1, ValType::I32);
+        self.scratch_i64_slot = self.layout.append(1, ValType::I64);
         self.traps.declare_locals(&mut self.layout);
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), depth)?;
@@ -621,10 +572,9 @@ where
     ///
     /// `f` is the wasm function factory (same contract as in the native arches).
     ///
-    /// Fires [`InstructionTrap::on_instruction`] and, for control-flow
-    /// instructions, [`JumpTrap::on_jump`].  The instruction body is currently
-    /// a stub (`unreachable`) — a full DEX instruction translator will be added
-    /// when the DEX instruction parser is integrated.
+    /// Uses `dex_bytecode::decode` to parse the instruction, fires
+    /// [`InstructionTrap::on_instruction`] and, for control-flow instructions,
+    /// [`JumpTrap::on_jump`], then emits the wasm body via `translate_body`.
     pub fn translate_instruction(
         &mut self,
         ctx: &mut Context,
@@ -637,23 +587,29 @@ where
         // Each instruction becomes one wasm function.
         self.init_function(ctx, flat_idx, 1, f)?;
 
-        let code_slice = &self.flat.code
-            [method.base as usize..][..method.code_units as usize];
+        let code_base = method.base as usize;
+        let code_end = code_base + method.code_units as usize;
+        let units_at = &self.flat.code[code_base + offset..code_end];
 
-        let first_unit = code_slice.get(offset).copied().unwrap_or(0);
-        let opcode = DexOpcode((first_unit & 0xff) as u8);
-        let class = opcode.classify();
+        let (insn, insn_len) = match dex_bytecode::decode(units_at) {
+            Some(pair) => pair,
+            None => {
+                // Reserved opcode or pseudo-instruction marker — emit unreachable.
+                self.reactor.feed(ctx, &Instruction::Unreachable)?;
+                return Ok(());
+            }
+        };
 
-        // Fire instruction trap.
-        let insn_len = opcode.code_units().unwrap_or_else(|| {
-            pseudo_len(&code_slice[offset..])
-        });
+        let class = insn_class(&insn);
         let insn_info = InstructionInfo {
             pc: flat_idx,
             len: insn_len as u32,
             arch: ArchTag::Dex,
             class,
         };
+
+        // SAFETY: `traps` and `layout` are separate struct fields; the raw
+        // pointer borrow does not alias the reactor borrow used by on_instruction.
         let layout_ptr = &self.layout as *const LocalLayout;
         if self
             .traps
@@ -663,9 +619,9 @@ where
             return Ok(());
         }
 
-        // Fire jump trap for control-flow instructions.
-        if opcode.is_jump() {
-            let jump_info = self.build_jump_info(opcode, flat_idx, code_slice, offset, insn_len);
+        if insn.is_control_flow() {
+            let scratch = self.layout.base(self.scratch_slot);
+            let jump_info = Self::build_jump_info(flat_idx, &insn, scratch);
             if self
                 .traps
                 .on_jump(&jump_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
@@ -675,89 +631,1123 @@ where
             }
         }
 
-        // TODO: Translate opcode body.  Emit unreachable until the DEX
-        // instruction parser is integrated.
-        self.reactor.feed(ctx, &Instruction::Unreachable)?;
+        self.translate_body(ctx, flat_idx, &insn)?;
         Ok(())
     }
 
-    /// Build a [`JumpInfo`] for a known control-flow instruction.
-    fn build_jump_info(
-        &self,
-        opcode: DexOpcode,
-        flat_idx: u64,
-        code: &[u16],
-        offset: usize,
-        _len: usize,
-    ) -> JumpInfo {
-        match opcode.0 {
-            // return-void / return / return-wide / return-object
-            0x0e..=0x11 => JumpInfo::direct(flat_idx, 0, JumpKind::Return),
+    /// Build a [`JumpInfo`] for a decoded control-flow instruction.
+    fn build_jump_info(flat_idx: u64, insn: &DexInsn, scratch: u32) -> JumpInfo {
+        let branch_target = |off: i64| (flat_idx as i64).wrapping_add(off) as u64;
+        match insn {
+            DexInsn::ReturnVoid | DexInsn::Return { .. }
+            | DexInsn::ReturnWide { .. } | DexInsn::ReturnObject { .. }
+            => JumpInfo::direct(flat_idx, 0, JumpKind::Return),
 
-            // throw
-            0x27 => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
+            DexInsn::Throw { .. }
+            => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
 
-            // goto +AA (sign-extended 8-bit offset in bits 8-15 of first unit)
-            0x28 => {
-                let off = ((code[offset] >> 8) as i8) as i64;
-                let target = (flat_idx as i64).wrapping_add(off) as u64;
-                JumpInfo::direct(flat_idx, target, JumpKind::DirectJump)
-            }
+            DexInsn::Goto { offset } => JumpInfo::direct(
+                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
+            DexInsn::Goto16 { offset } => JumpInfo::direct(
+                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
+            DexInsn::Goto32 { offset } => JumpInfo::direct(
+                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
 
-            // goto/16 +AAAA (16-bit signed offset in second unit)
-            0x29 => {
-                let off = code.get(offset + 1).copied().unwrap_or(0) as i16 as i64;
-                let target = (flat_idx as i64).wrapping_add(off) as u64;
-                JumpInfo::direct(flat_idx, target, JumpKind::DirectJump)
-            }
+            DexInsn::PackedSwitch { .. } | DexInsn::SparseSwitch { .. }
+            => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
 
-            // goto/32 +AAAAAAAA (32-bit signed offset in units 1-2)
-            0x2a => {
-                let lo = code.get(offset + 1).copied().unwrap_or(0) as u32;
-                let hi = code.get(offset + 2).copied().unwrap_or(0) as u32;
-                let off = ((hi << 16) | lo) as i32 as i64;
-                let target = (flat_idx as i64).wrapping_add(off) as u64;
-                JumpInfo::direct(flat_idx, target, JumpKind::DirectJump)
-            }
+            DexInsn::IfEq { offset, .. } | DexInsn::IfNe { offset, .. }
+            | DexInsn::IfLt { offset, .. } | DexInsn::IfGe { offset, .. }
+            | DexInsn::IfGt { offset, .. } | DexInsn::IfLe { offset, .. }
+            => JumpInfo::direct(flat_idx, branch_target(*offset as i64), JumpKind::ConditionalBranch),
 
-            // packed-switch / sparse-switch (indirect via table)
-            0x2b | 0x2c => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
+            DexInsn::IfEqz { offset, .. } | DexInsn::IfNez { offset, .. }
+            | DexInsn::IfLtz { offset, .. } | DexInsn::IfGez { offset, .. }
+            | DexInsn::IfGtz { offset, .. } | DexInsn::IfLez { offset, .. }
+            => JumpInfo::direct(flat_idx, branch_target(*offset as i64), JumpKind::ConditionalBranch),
 
-            // if-* (22t): offset in bits 0-15 of second unit
-            0x32..=0x37 => {
-                let off = code.get(offset + 1).copied().unwrap_or(0) as i16 as i64;
-                let target = (flat_idx as i64).wrapping_add(off) as u64;
-                JumpInfo::direct(flat_idx, target, JumpKind::ConditionalBranch)
-            }
+            DexInsn::InvokeDirect { .. } | DexInsn::InvokeStatic { .. }
+            | DexInsn::InvokeDirectRange { .. } | DexInsn::InvokeStaticRange { .. }
+            | DexInsn::InvokeCustom { .. } | DexInsn::InvokeCustomRange { .. }
+            => JumpInfo::direct(flat_idx, 0, JumpKind::Call),
 
-            // if-*z (21t): offset in bits 0-15 of second unit
-            0x38..=0x3d => {
-                let off = code.get(offset + 1).copied().unwrap_or(0) as i16 as i64;
-                let target = (flat_idx as i64).wrapping_add(off) as u64;
-                JumpInfo::direct(flat_idx, target, JumpKind::ConditionalBranch)
-            }
-
-            // invoke-* / invoke-*/range: static/direct → Call; virtual/interface → indirect
-            0x6e | 0x70 | 0x74 | 0x76 | 0xfc | 0xfd => {
-                JumpInfo::direct(flat_idx, 0, JumpKind::Call)
-            }
-            0x6f | 0x71 | 0x72 | 0x75 | 0x77 | 0x78 | 0xfa | 0xfb => {
-                // Use the scratch local as a placeholder target local.
-                let scratch = self.layout.base(self.scratch_slot);
-                JumpInfo::indirect(flat_idx, scratch, JumpKind::IndirectCall)
-            }
+            DexInsn::InvokeVirtual { .. } | DexInsn::InvokeSuper { .. }
+            | DexInsn::InvokeInterface { .. } | DexInsn::InvokeVirtualRange { .. }
+            | DexInsn::InvokeSuperRange { .. } | DexInsn::InvokeInterfaceRange { .. }
+            | DexInsn::InvokePolymorphic { .. } | DexInsn::InvokePolymorphicRange { .. }
+            => JumpInfo::indirect(flat_idx, scratch, JumpKind::IndirectCall),
 
             _ => JumpInfo::direct(flat_idx, 0, JumpKind::DirectJump),
         }
     }
 
+    /// Emit the wasm body for a decoded DEX instruction.
+    ///
+    /// Non-object, non-array, non-invoke operations are fully translated.
+    /// Unimplemented operations (object operations, array access, field access,
+    /// invocations, switch) emit `unreachable` as a stub.
+    fn translate_body(
+        &mut self,
+        ctx: &mut Context,
+        flat_idx: u64,
+        insn: &DexInsn,
+    ) -> Result<(), E> {
+        // Precompute scratch indices before any reactor borrows.
+        let scratch = self.layout.base(self.scratch_slot);
+        let scratch_i64 = self.layout.base(self.scratch_i64_slot);
+        let total_params = self.total_params;
+        let pool = self.pool;
+        let bfo = self.reactor.base_func_offset();
+        let escape_tag = self.escape_tag;
+
+        // Compute target FuncIdx for a flat-index + signed branch offset.
+        let target = |off: i64| -> FuncIdx {
+            FuncIdx(bfo + (flat_idx as i64).wrapping_add(off) as u32)
+        };
+
+        macro_rules! feed {
+            ($insn:expr) => { self.reactor.feed(ctx, &$insn)? };
+        }
+
+        match insn {
+            // ── Nop ─────────────────────────────────────────────────────────
+            DexInsn::Nop => { /* fall-through */ }
+
+            // ── Move (i32) ──────────────────────────────────────────────────
+            DexInsn::Move { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MoveFrom16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::Move16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Move (wide — two adjacent i32 regs) ─────────────────────────
+            DexInsn::MoveWide { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32 + 1));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+            DexInsn::MoveWideFrom16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32 + 1));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+            DexInsn::MoveWide16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32 + 1));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+
+            // MoveResult*, MoveObject*, MoveException — object/result-register
+            // conventions require runtime support; stub.
+            DexInsn::MoveResult { .. } | DexInsn::MoveResultWide { .. }
+            | DexInsn::MoveResultObject { .. } | DexInsn::MoveException { .. }
+            | DexInsn::MoveObject { .. } | DexInsn::MoveObjectFrom16 { .. }
+            | DexInsn::MoveObject16 { .. }
+            => { feed!(Instruction::Unreachable); }
+
+            // ── Return ──────────────────────────────────────────────────────
+            DexInsn::ReturnVoid | DexInsn::Return { .. }
+            | DexInsn::ReturnWide { .. } | DexInsn::ReturnObject { .. } => {
+                if let Some(tag) = escape_tag {
+                    self.reactor.ret(ctx, total_params, tag)?;
+                } else {
+                    feed!(Instruction::Unreachable);
+                }
+            }
+
+            // ── Constants (i32) ─────────────────────────────────────────────
+            DexInsn::Const4 { dst, value } => {
+                feed!(Instruction::I32Const(*value as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::Const16 { dst, value } => {
+                feed!(Instruction::I32Const(*value as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::Const { dst, value } => {
+                feed!(Instruction::I32Const(*value));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ConstHigh16 { dst, value } => {
+                feed!(Instruction::I32Const((*value as i32) << 16));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Constants (wide / i64 split to two i32 regs) ────────────────
+            DexInsn::ConstWide16 { dst, value } => {
+                let v = *value as i64;
+                feed!(Instruction::I32Const(v as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::I32Const((v >> 32) as i32));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+            DexInsn::ConstWide32 { dst, value } => {
+                let v = *value as i64;
+                feed!(Instruction::I32Const(v as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::I32Const((v >> 32) as i32));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+            DexInsn::ConstWide { dst, value } => {
+                feed!(Instruction::I32Const(*value as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::I32Const((*value >> 32) as i32));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+            DexInsn::ConstWideHigh16 { dst, value } => {
+                // Value = (value as i64) << 48
+                let v = (*value as i64) << 48;
+                feed!(Instruction::I32Const(v as i32));
+                feed!(Instruction::LocalSet(*dst as u32));
+                feed!(Instruction::I32Const((v >> 32) as i32));
+                feed!(Instruction::LocalSet(*dst as u32 + 1));
+            }
+
+            // const-string / const-class — object operations; stub.
+            DexInsn::ConstString { .. } | DexInsn::ConstStringJumbo { .. }
+            | DexInsn::ConstClass { .. } | DexInsn::ConstMethodHandle { .. }
+            | DexInsn::ConstMethodType { .. }
+            => { feed!(Instruction::Unreachable); }
+
+            // ── Unary int ops ────────────────────────────────────────────────
+            DexInsn::NegInt { dst, src } => {
+                feed!(Instruction::I32Const(0));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::NotInt { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(-1));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Unary long ops (wide pair) ───────────────────────────────────
+            DexInsn::NegLong { dst, src } => {
+                // Combine src pair into i64, negate, split to dst pair.
+                feed!(Instruction::I64Const(0));
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Sub);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::NotLong { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Const(-1));
+                feed!(Instruction::I64Xor);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            // ── Unary float/double ────────────────────────────────────────────
+            DexInsn::NegFloat { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Neg);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::NegDouble { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Neg);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            // ── Type conversions ─────────────────────────────────────────────
+            DexInsn::IntToLong { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I64ExtendI32S);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::IntToFloat { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ConvertI32S);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IntToDouble { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F64ConvertI32S);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::LongToInt { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::LongToFloat { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F32ConvertI64S);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::LongToDouble { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ConvertI64S);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::FloatToInt { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::I32TruncSatF32S);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::FloatToLong { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::I64TruncSatF32S);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::FloatToDouble { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F64PromoteF32);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DoubleToInt { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::I32TruncSatF64S);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DoubleToLong { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::I64TruncSatF64S);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DoubleToFloat { dst, src } => {
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F32DemoteF64);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IntToByte { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(24));
+                feed!(Instruction::I32Shl);
+                feed!(Instruction::I32Const(24));
+                feed!(Instruction::I32ShrS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IntToChar { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(0xffff));
+                feed!(Instruction::I32And);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IntToShort { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(16));
+                feed!(Instruction::I32Shl);
+                feed!(Instruction::I32Const(16));
+                feed!(Instruction::I32ShrS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Binary int ops (23x: dst = a op b) ──────────────────────────
+            DexInsn::AddInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Add);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::SubInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Mul);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32DivS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32RemS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AndInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32And);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::OrInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Or);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::XorInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShlInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32Shl);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShrInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32ShrS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::UshrInt { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I32ShrU);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Binary int 2addr (12x: dst op= src) ─────────────────────────
+            DexInsn::AddInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Add);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::SubInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Mul);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32DivS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32RemS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AndInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32And);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::OrInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Or);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::XorInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShlInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Shl);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShrInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32ShrS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::UshrInt2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32ShrU);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Int lit16 (22s: dst = src op lit) ───────────────────────────
+            DexInsn::AddIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Add);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RsubInt { dst, src, lit } => {
+                // reverse-subtract: dst = lit - src
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Mul);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32DivS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32RemS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AndIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32And);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::OrIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Or);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::XorIntLit16 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Int lit8 (22b: dst = src op lit) ────────────────────────────
+            DexInsn::AddIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Add);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RsubIntLit8 { dst, src, lit } => {
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Mul);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32DivS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32RemS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AndIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32And);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::OrIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Or);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::XorIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShlIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32Shl);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::ShrIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32ShrS);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::UshrIntLit8 { dst, src, lit } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I32Const(*lit as i32));
+                feed!(Instruction::I32ShrU);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Binary long ops (23x — wide pairs) ──────────────────────────
+            DexInsn::AddLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64Add);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::SubLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64Sub);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::MulLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64Mul);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DivLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64DivS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::RemLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64RemS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::AndLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64And);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::OrLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64Or);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::XorLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::I64Xor);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            // Long shifts: value is a wide pair, shift amount is a single i32.
+            DexInsn::ShlLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64Shl);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::ShrLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64ShrS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::UshrLong { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64ShrU);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            // ── Binary long 2addr ────────────────────────────────────────────
+            DexInsn::AddLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Add);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::SubLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Sub);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::MulLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Mul);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DivLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64DivS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::RemLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64RemS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::AndLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64And);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::OrLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Or);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::XorLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::I64Xor);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::ShlLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64Shl);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::ShrLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64ShrS);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::UshrLong2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::I64ExtendI32U);
+                feed!(Instruction::I64ShrU);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            // ── Binary float ops (i32 as f32 bit pattern) ───────────────────
+            DexInsn::AddFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Add);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::SubFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Sub);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Mul);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Div);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemFloat { dst, a, b } => {
+                // wasm has no f32.rem; emit unreachable (runtime call needed).
+                let _ = (dst, a, b);
+                feed!(Instruction::Unreachable);
+            }
+
+            // ── Float 2addr ──────────────────────────────────────────────────
+            DexInsn::AddFloat2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Add);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::SubFloat2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Sub);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MulFloat2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Mul);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::DivFloat2addr { dst, src } => {
+                feed!(Instruction::LocalGet(*dst as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Div);
+                feed!(Instruction::I32ReinterpretF32);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::RemFloat2addr { dst, src } => {
+                let _ = (dst, src);
+                feed!(Instruction::Unreachable);
+            }
+
+            // ── Binary double ops (wide pair as f64 bit pattern) ─────────────
+            DexInsn::AddDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Add);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::SubDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Sub);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::MulDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Mul);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DivDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Div);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::RemDouble { dst, a, b } => {
+                let _ = (dst, a, b);
+                feed!(Instruction::Unreachable);
+            }
+
+            // ── Double 2addr ─────────────────────────────────────────────────
+            DexInsn::AddDouble2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Add);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::SubDouble2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Sub);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::MulDouble2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Mul);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::DivDouble2addr { dst, src } => {
+                self.emit_wide_to_stack(ctx, *dst)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *src)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Div);
+                feed!(Instruction::I64ReinterpretF64);
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+            DexInsn::RemDouble2addr { dst, src } => {
+                let _ = (dst, src);
+                feed!(Instruction::Unreachable);
+            }
+
+            // ── Comparisons ──────────────────────────────────────────────────
+
+            // cmpl-float: NaN → -1
+            // result = (a > b) - !(a >= b)
+            DexInsn::CmplFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Gt);
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Ge);
+                feed!(Instruction::I32Const(1));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // cmpg-float: NaN → +1
+            // result = !(a <= b) - (a < b)
+            DexInsn::CmpgFloat { dst, a, b } => {
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Le);
+                feed!(Instruction::I32Const(1));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::LocalGet(*a as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::LocalGet(*b as u32));
+                feed!(Instruction::F32ReinterpretI32);
+                feed!(Instruction::F32Lt);
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // cmpl-double: NaN → -1
+            DexInsn::CmplDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Gt);
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Ge);
+                feed!(Instruction::I32Const(1));
+                feed!(Instruction::I32Xor);
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // cmpg-double: NaN → +1
+            DexInsn::CmpgDouble { dst, a, b } => {
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Le);
+                feed!(Instruction::I32Const(1));
+                feed!(Instruction::I32Xor);
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::F64ReinterpretI64);
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::F64ReinterpretI64);
+                feed!(Instruction::F64Lt);
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // cmp-long: result = (a > b) - (a < b), -1/0/1
+            // Store b pair in scratch_i64, compute (a > scratch) - (a < scratch).
+            DexInsn::CmpLong { dst, a, b } => {
+                // Store b as i64 in scratch.
+                self.emit_wide_to_stack(ctx, *b)?;
+                feed!(Instruction::LocalSet(scratch_i64));
+                // (a > b): combine a, get scratch, compare.
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::LocalGet(scratch_i64));
+                feed!(Instruction::I64GtS);
+                // (a < b): combine a again, get scratch.
+                self.emit_wide_to_stack(ctx, *a)?;
+                feed!(Instruction::LocalGet(scratch_i64));
+                feed!(Instruction::I64LtS);
+                feed!(Instruction::I32Sub);
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── Unconditional branches ───────────────────────────────────────
+            DexInsn::Goto { offset } => {
+                let tgt = target(*offset as i64);
+                self.reactor.jmp(ctx, tgt, total_params)?;
+            }
+            DexInsn::Goto16 { offset } => {
+                let tgt = target(*offset as i64);
+                self.reactor.jmp(ctx, tgt, total_params)?;
+            }
+            DexInsn::Goto32 { offset } => {
+                let tgt = target(*offset as i64);
+                self.reactor.jmp(ctx, tgt, total_params)?;
+            }
+
+            // ── Conditional branches (two-register) ─────────────────────────
+            DexInsn::IfEq { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32Eq };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfNe { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32Ne };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfLt { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32LtS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfGe { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32GeS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfGt { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32GtS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfLe { a, b, offset } => {
+                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32LeS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+
+            // ── Conditional branches (register vs zero) ──────────────────────
+            DexInsn::IfEqz { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32Eqz };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfNez { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32Nez };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfLtz { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32LtzS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfGez { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32GezS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfGtz { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32GtzS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+            DexInsn::IfLez { reg, offset } => {
+                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32LezS };
+                let tgt = target(*offset as i64);
+                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+            }
+
+            // ── Not yet implemented: object/array/field/invoke/switch ────────
+            _ => {
+                feed!(Instruction::Unreachable);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit: combine adjacent i32 register pair `(v, v+1)` into an i64 on the
+    /// wasm stack (leaves the i64 value on the stack).
+    ///
+    /// The low register `v` contributes the low 32 bits; `v+1` the high 32 bits.
+    fn emit_wide_to_stack(&mut self, ctx: &mut Context, v: u8) -> Result<(), E> {
+        // low
+        self.reactor.feed(ctx, &Instruction::LocalGet(v as u32))?;
+        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
+        // high << 32
+        self.reactor.feed(ctx, &Instruction::LocalGet(v as u32 + 1))?;
+        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64Shl)?;
+        // low | (high << 32)
+        self.reactor.feed(ctx, &Instruction::I64Or)?;
+        Ok(())
+    }
+
+    /// Emit: split the i64 in `scratch_i64` into two adjacent i32 registers
+    /// `(dst, dst+1)`.  `scratch_i64` is overwritten with the high half.
+    fn emit_split_wide(&mut self, ctx: &mut Context, dst: u8, scratch_i64: u32) -> Result<(), E> {
+        // tee scratch_i64 so we can use it twice.
+        self.reactor.feed(ctx, &Instruction::LocalTee(scratch_i64))?;
+        // low 32 bits → dst
+        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(dst as u32))?;
+        // high 32 bits → dst+1
+        self.reactor.feed(ctx, &Instruction::LocalGet(scratch_i64))?;
+        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
+        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
+        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.feed(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
+        Ok(())
+    }
+
     /// Translate all instructions in `method`, invoking `f` once per instruction
     /// to construct the wasm function body.
     ///
-    /// The instruction walk handles both standard and variable-length
-    /// pseudo-instructions (`packed-switch-data`, `sparse-switch-data`,
-    /// `fill-array-data`), skipping pseudo-instructions without calling traps
-    /// (they are data, not executable code).
+    /// The instruction walk uses `dex_bytecode::decode` for standard instructions
+    /// and `dex_bytecode::pseudo_len` for variable-length data tables
+    /// (`packed-switch-data`, `sparse-switch-data`, `fill-array-data`),
+    /// skipping data tables silently.
     pub fn translate_method(
         &mut self,
         ctx: &mut Context,
@@ -767,7 +1757,6 @@ where
         // Clone just the metadata — code is borrowed from self.flat.code below.
         let method = self.flat.methods[method_idx].clone();
         let base = method.base as usize;
-        let end = base + method.code_units as usize;
 
         let mut offset = 0usize;
         while offset < method.code_units as usize {
@@ -775,19 +1764,20 @@ where
             if abs >= self.flat.code.len() {
                 break;
             }
-            let first_unit = self.flat.code[abs];
-            let opcode = DexOpcode((first_unit & 0xff) as u8);
+            let units_at = &self.flat.code[abs..];
 
-            // Variable-length pseudo-instructions (data, not code — skip silently).
-            if opcode.0 == 0x00 && (first_unit >> 8) != 0 {
-                let len = pseudo_len(&self.flat.code[abs..]);
-                offset += len.max(1);
+            // Pseudo-instruction data tables start with 0x00 + non-zero high byte.
+            if units_at[0] & 0xff == 0x00 && (units_at[0] >> 8) != 0 {
+                let len = dex_bytecode::pseudo_len(units_at).max(1);
+                offset += len;
                 continue;
             }
 
-            let len = opcode.code_units().unwrap_or(1);
+            let insn_len = dex_bytecode::decode(units_at)
+                .map(|(_, len)| len)
+                .unwrap_or(1);
             self.translate_instruction(ctx, &method, offset, f)?;
-            offset += len;
+            offset += insn_len;
         }
         Ok(())
     }
