@@ -23,8 +23,8 @@
 //!
 //! The [`ObjectModel`] trait abstracts over how objects are represented in
 //! wasm, how they are allocated, and how fields and elements are accessed.
-//! All methods emit wasm instructions into a `Vec<Instruction<'static>>`
-//! buffer that the caller drains into the reactor.
+//! All methods emit wasm instructions directly into an [`InstructionSink`],
+//! allowing implementations to write to the reactor without an intermediate buffer.
 //!
 //! Provided implementations:
 //!

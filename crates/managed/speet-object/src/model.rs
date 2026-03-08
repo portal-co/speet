@@ -1,8 +1,7 @@
 //! The [`ObjectModel`] trait and supporting types.
 
-use alloc::vec::Vec;
 use wasm_encoder::{Instruction, ValType};
-use yecta::LocalSlot;
+use wax_core::build::InstructionSink;
 
 use crate::TypeHash;
 
@@ -84,9 +83,9 @@ impl FieldValType {
 ///
 /// An implementation decides how heap objects and arrays are represented in
 /// wasm, and emits wasm instruction sequences to allocate, access, and type-
-/// check them.  Each method appends instructions to an `out: &mut
-/// Vec<Instruction<'static>>` buffer; the caller drains the buffer into the
-/// wasm reactor.
+/// check them.  Each method emits instructions directly into an
+/// [`InstructionSink`], allowing implementations to write to the reactor
+/// without an intermediate buffer.
 ///
 /// ## Object layout contract
 ///
@@ -125,9 +124,9 @@ pub trait ObjectModel<C, E> {
     fn emit_new_object(
         &self,
         ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         data_size: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E>;
 
     /// Emit wasm to allocate a new array.
@@ -141,10 +140,10 @@ pub trait ObjectModel<C, E> {
     fn emit_new_array(
         &self,
         ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         elem_hash: &TypeHash,
         dim: u32,
         elem_bytes: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E>;
 
     // ── Instance fields ───────────────────────────────────────────────────
@@ -163,10 +162,11 @@ pub trait ObjectModel<C, E> {
     ///   - `F64` → `i64` (bit-pattern; reinterpretation is done internally)
     fn emit_iget(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         byte_offset: u32,
         ty: FieldValType,
-        out: &mut Vec<Instruction<'static>>,
-    );
+    ) -> Result<(), E>;
 
     /// Emit wasm to store an instance field.
     ///
@@ -178,10 +178,11 @@ pub trait ObjectModel<C, E> {
     /// Stack after: `[]`
     fn emit_iput(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         byte_offset: u32,
         ty: FieldValType,
-        out: &mut Vec<Instruction<'static>>,
-    );
+    ) -> Result<(), E>;
 
     // ── Array access ──────────────────────────────────────────────────────
 
@@ -191,32 +192,38 @@ pub trait ObjectModel<C, E> {
     /// Stack after:  `[value]` — same type convention as [`emit_iget`](Self::emit_iget).
     fn emit_aget(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         ty: FieldValType,
-        out: &mut Vec<Instruction<'static>>,
-    );
+    ) -> Result<(), E>;
 
     /// Emit wasm to store one array element.
     ///
-    /// `scratch_i32` and `scratch_i64` must be wasm `local` slots of the
-    /// matching type; they are used as temporary storage while the element
-    /// address is being computed.
+    /// `scratch_i32` and `scratch_i64` are the absolute wasm local indices
+    /// (obtained via [`LocalLayout::base`](yecta::LocalLayout::base)) of
+    /// `i32` and `i64` temporaries; used while computing the element address.
     ///
     /// Stack before: `[ref, index: i32, value]` — same type convention as
     /// [`emit_iput`](Self::emit_iput).  
     /// Stack after: `[]`
     fn emit_aput(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         ty: FieldValType,
-        scratch_i32: LocalSlot,
-        scratch_i64: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    );
+        scratch_i32: u32,
+        scratch_i64: u32,
+    ) -> Result<(), E>;
 
     /// Emit wasm to read the length of an array.
     ///
     /// Stack before: `[ref]`  
     /// Stack after:  `[length: i32]`
-    fn emit_array_length(&self, out: &mut Vec<Instruction<'static>>);
+    fn emit_array_length(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+    ) -> Result<(), E>;
 
     // ── Type checks ───────────────────────────────────────────────────────
 
@@ -226,17 +233,19 @@ pub trait ObjectModel<C, E> {
     ///
     /// - `hash`: type hash of the *base* class (no array brackets).
     /// - `dim`: expected array dimension (0 for non-arrays).
-    /// - `scratch`: an `i32` local used as temporary storage.
+    /// - `scratch`: absolute wasm local index of an `i32` temporary
+    ///   (obtained via [`LocalLayout::base`](yecta::LocalLayout::base)).
     ///
     /// Stack before: `[ref]`  
     /// Stack after:  `[result: i32]` — 1 if the object is an instance, 0 otherwise.
     fn emit_instanceof(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         dim: u32,
-        scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    );
+        scratch: u32,
+    ) -> Result<(), E>;
 
     /// Emit wasm to assert that an object is an instance of a type, throwing
     /// a `ClassCastException` (or equivalent) if not.
@@ -245,17 +254,18 @@ pub trait ObjectModel<C, E> {
     ///
     /// - `hash`: type hash of the *base* class.
     /// - `dim`: expected array dimension.
-    /// - `scratch`: an `i32` local used as temporary storage.
+    /// - `scratch`: absolute wasm local index of an `i32` temporary.
     ///
     /// Stack before: `[ref]`  
     /// Stack after:  `[]`
     fn emit_check_cast(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         dim: u32,
-        scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    );
+        scratch: u32,
+    ) -> Result<(), E>;
 }
 
 // ── NoObjectModel ─────────────────────────────────────────────────────────────
@@ -276,70 +286,92 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
 
     fn emit_new_object(
         &self,
-        _ctx: &mut C,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         _hash: &TypeHash,
         _data_size: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E> {
-        out.push(Instruction::Unreachable);
-        Ok(())
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
     fn emit_new_array(
         &self,
-        _ctx: &mut C,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         _elem_hash: &TypeHash,
         _dim: u32,
         _elem_bytes: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E> {
-        out.push(Instruction::Unreachable);
-        Ok(())
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
-    fn emit_iget(&self, _byte_offset: u32, _ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
-        out.push(Instruction::Unreachable);
+    fn emit_iget(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+        _byte_offset: u32,
+        _ty: FieldValType,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
-    fn emit_iput(&self, _byte_offset: u32, _ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
-        out.push(Instruction::Unreachable);
+    fn emit_iput(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+        _byte_offset: u32,
+        _ty: FieldValType,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
-    fn emit_aget(&self, _ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
-        out.push(Instruction::Unreachable);
+    fn emit_aget(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+        _ty: FieldValType,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
     fn emit_aput(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         _ty: FieldValType,
-        _scratch_i32: LocalSlot,
-        _scratch_i64: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
-        out.push(Instruction::Unreachable);
+        _scratch_i32: u32,
+        _scratch_i64: u32,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
-    fn emit_array_length(&self, out: &mut Vec<Instruction<'static>>) {
-        out.push(Instruction::Unreachable);
+    fn emit_array_length(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
     fn emit_instanceof(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         _hash: &TypeHash,
         _dim: u32,
-        _scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
-        out.push(Instruction::Unreachable);
+        _scratch: u32,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 
     fn emit_check_cast(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         _hash: &TypeHash,
         _dim: u32,
-        _scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
-        out.push(Instruction::Unreachable);
+        _scratch: u32,
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::Unreachable)
     }
 }

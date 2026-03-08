@@ -360,10 +360,10 @@ where
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
             locals_mark: Mark { slot_count: 0, total_locals: 0 },
-            temps_slot: LocalSlot(0),
-            addr_scratch_slot: LocalSlot(0),
-            pool_addr_slot: LocalSlot(0),
-            pool_i64_slot: LocalSlot(0),
+            temps_slot: LocalSlot::default(),
+            addr_scratch_slot: LocalSlot::default(),
+            pool_addr_slot: LocalSlot::default(),
+            pool_i64_slot: LocalSlot::default(),
         };
         recomp.setup_traps();
         recomp
@@ -411,10 +411,10 @@ where
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
             locals_mark: Mark { slot_count: 0, total_locals: 0 },
-            temps_slot: LocalSlot(0),
-            addr_scratch_slot: LocalSlot(0),
-            pool_addr_slot: LocalSlot(0),
-            pool_i64_slot: LocalSlot(0),
+            temps_slot: LocalSlot::default(),
+            addr_scratch_slot: LocalSlot::default(),
+            pool_addr_slot: LocalSlot::default(),
+            pool_i64_slot: LocalSlot::default(),
         };
         recomp.setup_traps();
         recomp

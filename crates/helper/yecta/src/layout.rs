@@ -76,8 +76,8 @@ pub struct Mark {
 /// Obtained from [`LocalLayout::build`], [`LocalLayout::build_dynamic`], or
 /// [`LocalLayout::append`].  Pass to [`LocalLayout::base`] or
 /// [`LocalLayout::local`] to obtain absolute wasm local indices.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LocalSlot(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct LocalSlot(pub(crate) usize);
 
 // ── LocalLayout ──────────────────────────────────────────────────────────────
 

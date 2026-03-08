@@ -314,7 +314,7 @@ impl CfiReturnTrap {
             granularity_shift,
             violation_handler,
             handler_params,
-            index_local_slot: LocalSlot(0), // overwritten in declare_locals
+            index_local_slot: LocalSlot::default(), // overwritten in declare_locals
         }
     }
 }
@@ -432,7 +432,7 @@ impl RopDetectTrap {
         Self {
             violation_handler,
             handler_params,
-            depth_param_slot: LocalSlot(0), // overwritten in declare_params
+            depth_param_slot: LocalSlot::default(), // overwritten in declare_params
         }
     }
 }

@@ -1,8 +1,7 @@
 //! Linear-memory [`ObjectModel`] implementation.
 
-use alloc::vec::Vec;
 use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
-use yecta::LocalSlot;
+use wax_core::build::InstructionSink;
 
 use crate::{FieldValType, ObjectModel, TypeHash};
 
@@ -78,52 +77,56 @@ pub struct LinearMemoryObjects {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Emit a load-from-object-field instruction sequence.
-///
-/// Expects `[obj_ref]` on the wasm stack; leaves `[value]` (see
-/// [`FieldValType`] conventions in [`ObjectModel::emit_iget`]).
-fn push_load(byte_offset: u32, ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
+fn emit_load<C, E>(
+    sink: &mut dyn InstructionSink<C, E>,
+    ctx: &mut C,
+    byte_offset: u32,
+    ty: FieldValType,
+) -> Result<(), E> {
     let offset = (OBJECT_HEADER_SIZE + byte_offset) as u64;
     let memarg = MemArg { offset, align: 0, memory_index: 0 };
     match ty {
-        FieldValType::I32 | FieldValType::Ref => out.push(Instruction::I32Load(memarg)),
-        FieldValType::I64 => out.push(Instruction::I64Load(memarg)),
+        FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Load(memarg))?,
+        FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Load(memarg))?,
         FieldValType::F32 => {
-            out.push(Instruction::F32Load(memarg));
-            out.push(Instruction::I32ReinterpretF32);
+            sink.instruction(ctx, &Instruction::F32Load(memarg))?;
+            sink.instruction(ctx, &Instruction::I32ReinterpretF32)?;
         }
         FieldValType::F64 => {
-            out.push(Instruction::F64Load(memarg));
-            out.push(Instruction::I64ReinterpretF64);
+            sink.instruction(ctx, &Instruction::F64Load(memarg))?;
+            sink.instruction(ctx, &Instruction::I64ReinterpretF64)?;
         }
-        FieldValType::I8S  => out.push(Instruction::I32Load8S(memarg)),
-        FieldValType::I8U  => out.push(Instruction::I32Load8U(memarg)),
-        FieldValType::I16S => out.push(Instruction::I32Load16S(memarg)),
-        FieldValType::I16U => out.push(Instruction::I32Load16U(memarg)),
+        FieldValType::I8S  => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
+        FieldValType::I8U  => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
+        FieldValType::I16S => sink.instruction(ctx, &Instruction::I32Load16S(memarg))?,
+        FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Load16U(memarg))?,
     }
+    Ok(())
 }
 
-/// Emit a store-to-object-field instruction sequence.
-///
-/// Expects `[obj_ref, value]` on the wasm stack (see [`FieldValType`]
-/// conventions in [`ObjectModel::emit_iput`]).
-fn push_store(byte_offset: u32, ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
+fn emit_store<C, E>(
+    sink: &mut dyn InstructionSink<C, E>,
+    ctx: &mut C,
+    byte_offset: u32,
+    ty: FieldValType,
+) -> Result<(), E> {
     let offset = (OBJECT_HEADER_SIZE + byte_offset) as u64;
     let memarg = MemArg { offset, align: 0, memory_index: 0 };
     match ty {
-        FieldValType::I32 | FieldValType::Ref => out.push(Instruction::I32Store(memarg)),
-        FieldValType::I64 => out.push(Instruction::I64Store(memarg)),
+        FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Store(memarg))?,
+        FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Store(memarg))?,
         FieldValType::F32 => {
-            out.push(Instruction::F32ReinterpretI32);
-            out.push(Instruction::F32Store(memarg));
+            sink.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+            sink.instruction(ctx, &Instruction::F32Store(memarg))?;
         }
         FieldValType::F64 => {
-            out.push(Instruction::F64ReinterpretI64);
-            out.push(Instruction::F64Store(memarg));
+            sink.instruction(ctx, &Instruction::F64ReinterpretI64)?;
+            sink.instruction(ctx, &Instruction::F64Store(memarg))?;
         }
-        FieldValType::I8S | FieldValType::I8U   => out.push(Instruction::I32Store8(memarg)),
-        FieldValType::I16S | FieldValType::I16U => out.push(Instruction::I32Store16(memarg)),
+        FieldValType::I8S | FieldValType::I8U   => sink.instruction(ctx, &Instruction::I32Store8(memarg))?,
+        FieldValType::I16S | FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Store16(memarg))?,
     }
+    Ok(())
 }
 
 /// Emit the type-hash comparison sequence used by instanceof / check-cast.
@@ -131,39 +134,36 @@ fn push_store(byte_offset: u32, ty: FieldValType, out: &mut Vec<Instruction<'sta
 /// Assumes `scratch` has already been set to the object reference via
 /// `local.set(scratch)`.  Leaves a single `i32` (0 or 1) on the stack
 /// representing whether the object's stored hash matches `(hash, dim)`.
-fn push_hash_compare(
+fn emit_hash_compare<C, E>(
+    sink: &mut dyn InstructionSink<C, E>,
+    ctx: &mut C,
     hash: &TypeHash,
     dim: u32,
-    scratch: LocalSlot,
-    out: &mut Vec<Instruction<'static>>,
-) {
+    scratch: u32,
+) -> Result<(), E> {
     let chunks = hash.as_i32_chunks();
-    // Compare all 8 × 4-byte chunks of the stored hash against expected.
     let mut first = true;
     for (i, &expected) in chunks.iter().enumerate() {
-        out.push(Instruction::LocalGet(scratch.0 as u32));
-        out.push(Instruction::I32Load(MemArg {
+        sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
+        sink.instruction(ctx, &Instruction::I32Load(MemArg {
             offset: (i as u64) * 4,
             align: 0,
             memory_index: 0,
-        }));
-        out.push(Instruction::I32Const(expected));
-        out.push(Instruction::I32Eq);
+        }))?;
+        sink.instruction(ctx, &Instruction::I32Const(expected))?;
+        sink.instruction(ctx, &Instruction::I32Eq)?;
         if !first {
-            out.push(Instruction::I32And);
+            sink.instruction(ctx, &Instruction::I32And)?;
         }
         first = false;
     }
     // Compare stored array_dim against expected.
-    out.push(Instruction::LocalGet(scratch.0 as u32));
-    out.push(Instruction::I32Load(MemArg {
-        offset: 32,
-        align: 0,
-        memory_index: 0,
-    }));
-    out.push(Instruction::I32Const(dim as i32));
-    out.push(Instruction::I32Eq);
-    out.push(Instruction::I32And);
+    sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
+    sink.instruction(ctx, &Instruction::I32Load(MemArg { offset: 32, align: 0, memory_index: 0 }))?;
+    sink.instruction(ctx, &Instruction::I32Const(dim as i32))?;
+    sink.instruction(ctx, &Instruction::I32Eq)?;
+    sink.instruction(ctx, &Instruction::I32And)?;
+    Ok(())
 }
 
 // ── ObjectModel impl ──────────────────────────────────────────────────────────
@@ -175,99 +175,105 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
 
     fn emit_new_object(
         &self,
-        _ctx: &mut C,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         data_size: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E> {
         let [h0, h1, h2, h3] = hash.as_i64_chunks();
-        out.push(Instruction::I64Const(h0));
-        out.push(Instruction::I64Const(h1));
-        out.push(Instruction::I64Const(h2));
-        out.push(Instruction::I64Const(h3));
-        out.push(Instruction::I32Const(data_size as i32));
-        out.push(Instruction::Call(self.alloc_object_fn));
+        sink.instruction(ctx, &Instruction::I64Const(h0))?;
+        sink.instruction(ctx, &Instruction::I64Const(h1))?;
+        sink.instruction(ctx, &Instruction::I64Const(h2))?;
+        sink.instruction(ctx, &Instruction::I64Const(h3))?;
+        sink.instruction(ctx, &Instruction::I32Const(data_size as i32))?;
+        sink.instruction(ctx, &Instruction::Call(self.alloc_object_fn))?;
         Ok(())
     }
 
     fn emit_new_array(
         &self,
-        _ctx: &mut C,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         elem_hash: &TypeHash,
         dim: u32,
         elem_bytes: u32,
-        out: &mut Vec<Instruction<'static>>,
     ) -> Result<(), E> {
         // Stack before: [length: i32]
         // alloc_array_fn(length, h0, h1, h2, h3, dim, elem_bytes) → i32
         let [h0, h1, h2, h3] = elem_hash.as_i64_chunks();
-        out.push(Instruction::I64Const(h0));
-        out.push(Instruction::I64Const(h1));
-        out.push(Instruction::I64Const(h2));
-        out.push(Instruction::I64Const(h3));
-        out.push(Instruction::I32Const(dim as i32));
-        out.push(Instruction::I32Const(elem_bytes as i32));
-        out.push(Instruction::Call(self.alloc_array_fn));
+        sink.instruction(ctx, &Instruction::I64Const(h0))?;
+        sink.instruction(ctx, &Instruction::I64Const(h1))?;
+        sink.instruction(ctx, &Instruction::I64Const(h2))?;
+        sink.instruction(ctx, &Instruction::I64Const(h3))?;
+        sink.instruction(ctx, &Instruction::I32Const(dim as i32))?;
+        sink.instruction(ctx, &Instruction::I32Const(elem_bytes as i32))?;
+        sink.instruction(ctx, &Instruction::Call(self.alloc_array_fn))?;
         Ok(())
     }
 
     fn emit_iget(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         byte_offset: u32,
         ty: FieldValType,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
-        push_load(byte_offset, ty, out);
+    ) -> Result<(), E> {
+        emit_load(sink, ctx, byte_offset, ty)
     }
 
     fn emit_iput(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         byte_offset: u32,
         ty: FieldValType,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
-        push_store(byte_offset, ty, out);
+    ) -> Result<(), E> {
+        emit_store(sink, ctx, byte_offset, ty)
     }
 
-    fn emit_aget(&self, ty: FieldValType, out: &mut Vec<Instruction<'static>>) {
+    fn emit_aget(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+        ty: FieldValType,
+    ) -> Result<(), E> {
         // Stack before: [arr_ref: i32, index: i32]
         // Compute addr = arr_ref + ARRAY_DATA_OFFSET + index * elem_bytes
         let elem_bytes = ty.size_bytes();
-        // index × elem_bytes
-        out.push(Instruction::I32Const(elem_bytes as i32));
-        out.push(Instruction::I32Mul);
-        // + ARRAY_DATA_OFFSET
-        out.push(Instruction::I32Const(ARRAY_DATA_OFFSET as i32));
-        out.push(Instruction::I32Add);
-        // arr_ref + offset
-        out.push(Instruction::I32Add);
+        sink.instruction(ctx, &Instruction::I32Const(elem_bytes as i32))?;
+        sink.instruction(ctx, &Instruction::I32Mul)?;
+        sink.instruction(ctx, &Instruction::I32Const(ARRAY_DATA_OFFSET as i32))?;
+        sink.instruction(ctx, &Instruction::I32Add)?;
+        sink.instruction(ctx, &Instruction::I32Add)?; // arr_ref + offset
         // Load value — offset=0 since we computed the exact address above.
         let memarg = MemArg { offset: 0, align: 0, memory_index: 0 };
         match ty {
-            FieldValType::I32 | FieldValType::Ref => out.push(Instruction::I32Load(memarg)),
-            FieldValType::I64 => out.push(Instruction::I64Load(memarg)),
+            FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Load(memarg))?,
+            FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Load(memarg))?,
             FieldValType::F32 => {
-                out.push(Instruction::F32Load(memarg));
-                out.push(Instruction::I32ReinterpretF32);
+                sink.instruction(ctx, &Instruction::F32Load(memarg))?;
+                sink.instruction(ctx, &Instruction::I32ReinterpretF32)?;
             }
             FieldValType::F64 => {
-                out.push(Instruction::F64Load(memarg));
-                out.push(Instruction::I64ReinterpretF64);
+                sink.instruction(ctx, &Instruction::F64Load(memarg))?;
+                sink.instruction(ctx, &Instruction::I64ReinterpretF64)?;
             }
-            FieldValType::I8S  => out.push(Instruction::I32Load8S(memarg)),
-            FieldValType::I8U  => out.push(Instruction::I32Load8U(memarg)),
-            FieldValType::I16S => out.push(Instruction::I32Load16S(memarg)),
-            FieldValType::I16U => out.push(Instruction::I32Load16U(memarg)),
+            FieldValType::I8S  => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
+            FieldValType::I8U  => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
+            FieldValType::I16S => sink.instruction(ctx, &Instruction::I32Load16S(memarg))?,
+            FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Load16U(memarg))?,
         }
+        Ok(())
     }
 
     fn emit_aput(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         ty: FieldValType,
-        scratch_i32: LocalSlot,
-        scratch_i64: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
+        scratch_i32: u32,
+        scratch_i64: u32,
+    ) -> Result<(), E> {
         // Stack before: [arr_ref: i32, index: i32, value]
         //
         // We need [addr, value] for the store, where addr = arr_ref + ARRAY_DATA_OFFSET + idx*ebs.
@@ -276,107 +282,111 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
         let is_wide = matches!(ty, FieldValType::I64 | FieldValType::F64);
 
         if is_wide {
-            out.push(Instruction::LocalSet(scratch_i64.0 as u32));
+            sink.instruction(ctx, &Instruction::LocalSet(scratch_i64))?;
         } else {
-            out.push(Instruction::LocalSet(scratch_i32.0 as u32));
+            sink.instruction(ctx, &Instruction::LocalSet(scratch_i32))?;
         }
 
         // Stack: [arr_ref, index]
-        out.push(Instruction::I32Const(elem_bytes as i32));
-        out.push(Instruction::I32Mul);
-        out.push(Instruction::I32Const(ARRAY_DATA_OFFSET as i32));
-        out.push(Instruction::I32Add);
-        out.push(Instruction::I32Add); // addr
+        sink.instruction(ctx, &Instruction::I32Const(elem_bytes as i32))?;
+        sink.instruction(ctx, &Instruction::I32Mul)?;
+        sink.instruction(ctx, &Instruction::I32Const(ARRAY_DATA_OFFSET as i32))?;
+        sink.instruction(ctx, &Instruction::I32Add)?;
+        sink.instruction(ctx, &Instruction::I32Add)?; // addr
 
-        // Restore value and store.
         let memarg = MemArg { offset: 0, align: 0, memory_index: 0 };
         match ty {
             FieldValType::I32 | FieldValType::Ref => {
-                out.push(Instruction::LocalGet(scratch_i32.0 as u32));
-                out.push(Instruction::I32Store(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i32))?;
+                sink.instruction(ctx, &Instruction::I32Store(memarg))?;
             }
             FieldValType::I64 => {
-                out.push(Instruction::LocalGet(scratch_i64.0 as u32));
-                out.push(Instruction::I64Store(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i64))?;
+                sink.instruction(ctx, &Instruction::I64Store(memarg))?;
             }
             FieldValType::F32 => {
-                out.push(Instruction::LocalGet(scratch_i32.0 as u32));
-                out.push(Instruction::F32ReinterpretI32);
-                out.push(Instruction::F32Store(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i32))?;
+                sink.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+                sink.instruction(ctx, &Instruction::F32Store(memarg))?;
             }
             FieldValType::F64 => {
-                out.push(Instruction::LocalGet(scratch_i64.0 as u32));
-                out.push(Instruction::F64ReinterpretI64);
-                out.push(Instruction::F64Store(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i64))?;
+                sink.instruction(ctx, &Instruction::F64ReinterpretI64)?;
+                sink.instruction(ctx, &Instruction::F64Store(memarg))?;
             }
             FieldValType::I8S | FieldValType::I8U => {
-                out.push(Instruction::LocalGet(scratch_i32.0 as u32));
-                out.push(Instruction::I32Store8(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i32))?;
+                sink.instruction(ctx, &Instruction::I32Store8(memarg))?;
             }
             FieldValType::I16S | FieldValType::I16U => {
-                out.push(Instruction::LocalGet(scratch_i32.0 as u32));
-                out.push(Instruction::I32Store16(memarg));
+                sink.instruction(ctx, &Instruction::LocalGet(scratch_i32))?;
+                sink.instruction(ctx, &Instruction::I32Store16(memarg))?;
             }
         }
+        Ok(())
     }
 
-    fn emit_array_length(&self, out: &mut Vec<Instruction<'static>>) {
+    fn emit_array_length(
+        &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
+    ) -> Result<(), E> {
         // Stack: [arr_ref] → [length: i32]
-        out.push(Instruction::I32Load(MemArg {
+        sink.instruction(ctx, &Instruction::I32Load(MemArg {
             offset: ARRAY_LENGTH_OFFSET as u64,
             align: 0,
             memory_index: 0,
-        }));
+        }))
     }
 
     fn emit_instanceof(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         dim: u32,
-        scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
+        scratch: u32,
+    ) -> Result<(), E> {
         // Stack: [ref] → [i32 (0 or 1)]
         //
         // null → 0;  type match → 1;  type mismatch → 0.
-        out.push(Instruction::LocalSet(scratch.0 as u32));
+        sink.instruction(ctx, &Instruction::LocalSet(scratch))?;
 
-        // null check: if scratch == 0, return 0.
-        out.push(Instruction::LocalGet(scratch.0 as u32));
-        out.push(Instruction::I32Eqz);
-        out.push(Instruction::If(BlockType::Result(ValType::I32)));
-        out.push(Instruction::I32Const(0));
-        out.push(Instruction::Else);
-        // Non-null: compare hash and dim.
-        push_hash_compare(hash, dim, scratch, out);
-        out.push(Instruction::End);
+        sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
+        sink.instruction(ctx, &Instruction::I32Eqz)?;
+        sink.instruction(ctx, &Instruction::If(BlockType::Result(ValType::I32)))?;
+        sink.instruction(ctx, &Instruction::I32Const(0))?;
+        sink.instruction(ctx, &Instruction::Else)?;
+        emit_hash_compare(sink, ctx, hash, dim, scratch)?;
+        sink.instruction(ctx, &Instruction::End)?;
+        Ok(())
     }
 
     fn emit_check_cast(
         &self,
+        ctx: &mut C,
+        sink: &mut dyn InstructionSink<C, E>,
         hash: &TypeHash,
         dim: u32,
-        scratch: LocalSlot,
-        out: &mut Vec<Instruction<'static>>,
-    ) {
+        scratch: u32,
+    ) -> Result<(), E> {
         // Stack: [ref] → []
         //
         // null silently passes (Java semantics).  Type mismatch calls
         // throw_class_cast_fn (which must not return).
-        out.push(Instruction::LocalSet(scratch.0 as u32));
+        sink.instruction(ctx, &Instruction::LocalSet(scratch))?;
 
-        // null check: if null, skip the type test entirely.
-        out.push(Instruction::LocalGet(scratch.0 as u32));
-        out.push(Instruction::I32Eqz);
-        out.push(Instruction::If(BlockType::Empty));
-        out.push(Instruction::Else);
-        // Non-null: compare hash and dim; throw if mismatch.
-        push_hash_compare(hash, dim, scratch, out);
-        out.push(Instruction::I32Eqz); // 1 → mismatch
-        out.push(Instruction::If(BlockType::Empty));
-        out.push(Instruction::Call(self.throw_class_cast_fn));
-        out.push(Instruction::Unreachable);
-        out.push(Instruction::End);
-        out.push(Instruction::End);
+        sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
+        sink.instruction(ctx, &Instruction::I32Eqz)?;
+        sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+        sink.instruction(ctx, &Instruction::Else)?;
+        emit_hash_compare(sink, ctx, hash, dim, scratch)?;
+        sink.instruction(ctx, &Instruction::I32Eqz)?; // 1 → mismatch
+        sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+        sink.instruction(ctx, &Instruction::Call(self.throw_class_cast_fn))?;
+        sink.instruction(ctx, &Instruction::Unreachable)?;
+        sink.instruction(ctx, &Instruction::End)?;
+        sink.instruction(ctx, &Instruction::End)?;
+        Ok(())
     }
 }

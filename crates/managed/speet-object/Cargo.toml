@@ -9,3 +9,4 @@ license-file = "../../COPYING.md"
 wasm-encoder = { version = "0.240.0", default-features = false }
 yecta = { path = "../../helper/yecta" }
 tiny-keccak = { version = "2", features = ["sha3"] }
+wax-core.workspace = true
