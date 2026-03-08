@@ -1489,4 +1489,18 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     fn total_ifs(&self, FuncIdx(p_idx): FuncIdx) -> usize {
         return self.fns[p_idx as usize].if_stmts;
     }
+
+    /// Consume this reactor and return all built functions in order.
+    ///
+    /// Call this after all instructions have been emitted and `seal` has been
+    /// called on each function group.  The returned vector may be passed
+    /// directly to a `wasm_encoder::CodeSection`.
+    pub fn into_fns(self) -> Vec<F> {
+        self.fns.into_iter().map(|e| e.function).collect()
+    }
+
+    /// Return the number of functions currently held in this reactor.
+    pub fn fn_count(&self) -> usize {
+        self.fns.len()
+    }
 }
