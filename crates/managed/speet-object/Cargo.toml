@@ -1,0 +1,11 @@
+[package]
+name = "speet-object"
+version = "0.1.0"
+edition = "2024"
+description = "Pluggable object model for managed-runtime recompilers"
+license-file = "../../COPYING.md"
+
+[dependencies]
+wasm-encoder = { version = "0.240.0", default-features = false }
+yecta = { path = "../../helper/yecta" }
+tiny-keccak = { version = "2", features = ["sha3"] }

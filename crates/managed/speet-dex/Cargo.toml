@@ -16,3 +16,4 @@ speet-memory = {path = "../../helper/speet-memory"}
 speet-ordering = {path = "../../helper/speet-ordering"}
 speet-traps = {path = "../../helper/speet-traps"}
 dex-bytecode = {path = "../dex-bytecode"}
+speet-object = {path = "../speet-object"}

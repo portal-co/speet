@@ -60,6 +60,7 @@ use speet_traps::{
 };
 
 use dex_bytecode::Instruction as DexInsn;
+use speet_object::{FieldValType, NoObjectModel, ObjectModel, PrimitiveType, TypeHash};
 
 /// Classify a decoded DEX instruction into [`InsnClass`] flags for the trap system.
 fn insn_class(insn: &DexInsn) -> InsnClass {
@@ -348,6 +349,135 @@ impl FlatMethods {
     }
 }
 
+// ── Object-model helpers ──────────────────────────────────────────────────────
+
+/// Strip the class name from a DEX type descriptor.
+///
+/// - `"Ljava/lang/String;"` → `"java/lang/String"`
+/// - `"I"`, `"Z"`, etc.    → returned as-is
+/// - Array types like `"[I"` should be pre-stripped of leading `[` by the caller.
+fn type_desc_to_class_name(desc: &str) -> &str {
+    let s = desc.trim_start_matches('[');
+    if s.starts_with('L') && s.ends_with(';') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Map a DEX type descriptor to a [`FieldValType`].
+fn jtype_to_field_val_type(ty: &dex::jtype::Type) -> FieldValType {
+    match &**ty.type_descriptor() {
+        "Z" => FieldValType::I8U,  // boolean
+        "B" => FieldValType::I8S,  // byte
+        "C" => FieldValType::I16U, // char
+        "S" => FieldValType::I16S, // short
+        "I" => FieldValType::I32,  // int
+        "F" => FieldValType::F32,  // float
+        "J" => FieldValType::I64,  // long
+        "D" => FieldValType::F64,  // double
+        _   => FieldValType::Ref,  // reference (array or class)
+    }
+}
+
+/// Map a primitive type descriptor character to a [`PrimitiveType`].
+fn descriptor_to_primitive(desc: &str) -> Option<PrimitiveType> {
+    match desc {
+        "Z" => Some(PrimitiveType::Boolean),
+        "B" => Some(PrimitiveType::Byte),
+        "C" => Some(PrimitiveType::Char),
+        "S" => Some(PrimitiveType::Short),
+        "I" => Some(PrimitiveType::Int),
+        "F" => Some(PrimitiveType::Float),
+        "J" => Some(PrimitiveType::Long),
+        "D" => Some(PrimitiveType::Double),
+        _   => None,
+    }
+}
+
+/// Parse an array type descriptor and return `(elem_hash, dim, elem_bytes)`.
+///
+/// For example:
+/// - `"[I"` → `(TypeHash::primitive(Int), 1, 4)`
+/// - `"[Ljava/lang/String;"` → `(TypeHash::of_class("java/lang/String"), 1, 4)`
+/// - `"[[D"` → `(TypeHash::primitive(Double), 2, 8)`
+fn array_desc_to_info(desc: &str) -> (TypeHash, u32, u32) {
+    let dim = desc.chars().take_while(|c| *c == '[').count() as u32;
+    let elem_desc = &desc[dim as usize..];
+    let elem_hash = if let Some(prim) = descriptor_to_primitive(elem_desc) {
+        TypeHash::primitive(prim)
+    } else {
+        TypeHash::of_class(type_desc_to_class_name(elem_desc))
+    };
+    let elem_bytes = match elem_desc {
+        "Z" | "B" => 1,
+        "C" | "S" => 2,
+        "I" | "F" => 4,
+        "J" | "D" => 8,
+        _          => 4, // reference
+    };
+    (elem_hash, dim, elem_bytes)
+}
+
+/// Parse all type descriptors, instance field layouts, and class data sizes
+/// from raw DEX bytes.
+///
+/// Returns:
+/// - `field_map`: `field_id → (byte_offset_from_data_start, FieldValType)`
+/// - `class_sizes`: `class_type_id → total_instance_field_bytes`
+/// - `type_descs`: `type_id → type_descriptor_string`
+fn build_class_maps(
+    input: &[u8],
+) -> Result<
+    (
+        BTreeMap<u32, (u32, FieldValType)>,
+        BTreeMap<u32, u32>,
+        BTreeMap<u32, alloc::string::String>,
+    ),
+    dex::Error,
+> {
+    let dex_file = DexReader::from_vec(input)?;
+    let mut field_map: BTreeMap<u32, (u32, FieldValType)> = BTreeMap::new();
+    let mut class_sizes: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut type_descs: BTreeMap<u32, alloc::string::String> = BTreeMap::new();
+
+    // Collect all type descriptors by probing every type index until error.
+    let mut tid: u32 = 0;
+    loop {
+        match dex_file.get_type(tid) {
+            Ok(ty) => {
+                type_descs.insert(tid, alloc::string::String::from(&**ty.type_descriptor()));
+                tid += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Build instance-field layout for every defined class.
+    for class_result in dex_file.classes() {
+        let class = class_result?;
+        let type_id = class.id();
+
+        let mut offset: u32 = 0;
+        for field in class.instance_fields() {
+            let field_id = field.id() as u32;
+            let val_type = jtype_to_field_val_type(field.jtype());
+            let size = val_type.size_bytes();
+            // Align field to its natural size boundary.
+            if size > 1 {
+                offset = (offset + size - 1) & !(size - 1);
+            }
+            field_map.insert(field_id, (offset, val_type));
+            offset += size;
+        }
+        // Round total data size up to the next 8-byte boundary.
+        let data_size = if offset == 0 { 0 } else { (offset + 7) & !7 };
+        class_sizes.insert(type_id, data_size);
+    }
+
+    Ok((field_map, class_sizes, type_descs))
+}
+
 // ── DexRecompiler ─────────────────────────────────────────────────────────────
 
 /// DEX-to-WebAssembly recompiler.
@@ -363,6 +493,7 @@ pub struct DexRecompiler<
     E,
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend = yecta::LocalPool,
+    M = NoObjectModel,
 > {
     reactor: Reactor<Context, E, F, P>,
     pool: Pool,
@@ -393,14 +524,26 @@ pub struct DexRecompiler<
     scratch_slot: LocalSlot,
     /// Slot for a single per-function scratch `i64` local (used for wide operations).
     scratch_i64_slot: LocalSlot,
+
+    /// Pluggable object model for heap allocation, field access, and type checks.
+    obj_model: M,
+    /// Maps `field_id → (byte_offset, FieldValType)` for all instance fields.
+    field_map: BTreeMap<u32, (u32, FieldValType)>,
+    /// Maps `class type_id → total instance-field data size` (bytes).
+    class_sizes: BTreeMap<u32, u32>,
+    /// Maps `type_id → type descriptor string` (e.g. `"Ljava/lang/String;"`, `"[I"`).
+    type_descs: BTreeMap<u32, alloc::string::String>,
 }
 
-impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
+impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P, NoObjectModel>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend + Default,
 {
     /// Create a new DEX recompiler from raw DEX file bytes.
+    ///
+    /// Uses [`NoObjectModel`]: all object operations emit `unreachable`.  To
+    /// enable object operations, use [`with_model`](Self::with_model) instead.
     ///
     /// Call [`setup_traps`](Self::setup_traps) (even with no traps installed)
     /// before any translation calls.
@@ -421,6 +564,10 @@ where
             locals_mark: Mark { slot_count: 0, total_locals: 0 },
             scratch_slot: LocalSlot(0),
             scratch_i64_slot: LocalSlot(0),
+            obj_model: NoObjectModel,
+            field_map: BTreeMap::new(),
+            class_sizes: BTreeMap::new(),
+            type_descs: BTreeMap::new(),
         };
         recomp.setup_traps();
         Ok(recomp)
@@ -438,10 +585,53 @@ where
     }
 }
 
-impl<'cb, 'ctx, Context, E, F, P> DexRecompiler<'cb, 'ctx, Context, E, F, P>
+impl<'cb, 'ctx, Context, E, F, P, M> DexRecompiler<'cb, 'ctx, Context, E, F, P, M>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend + Default,
+    M: ObjectModel<Context, E>,
+{
+    /// Create a new DEX recompiler with a custom object model.
+    ///
+    /// The object model is used to emit wasm code for heap allocation, field
+    /// access, array operations, and type checks.  For pure arithmetic
+    /// translation without object support, use [`new`](Self::new) instead.
+    ///
+    /// Call [`setup_traps`](Self::setup_traps) (even with no traps installed)
+    /// before any translation calls.
+    pub fn with_model(input: &[u8], obj_model: M) -> Result<Self, dex::Error> {
+        let mut flat = FlatMethods::default();
+        flat.parse_dex(input)?;
+        let max_regs = flat.max_registers();
+        let (field_map, class_sizes, type_descs) = build_class_maps(input)?;
+        let mut recomp = Self {
+            reactor: Reactor::default(),
+            pool: Pool { table: TableIdx(0), ty: TypeIdx(0) },
+            escape_tag: None,
+            flat,
+            mem_order: MemOrder::Strong,
+            atomic_opts: AtomicOpts::NONE,
+            traps: TrapConfig::new(),
+            total_params: max_regs,
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            scratch_slot: LocalSlot(0),
+            scratch_i64_slot: LocalSlot(0),
+            obj_model,
+            field_map,
+            class_sizes,
+            type_descs,
+        };
+        recomp.setup_traps();
+        Ok(recomp)
+    }
+}
+
+impl<'cb, 'ctx, Context, E, F, P, M> DexRecompiler<'cb, 'ctx, Context, E, F, P, M>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
+    M: ObjectModel<Context, E>,
 {
     // ── Trap installation ─────────────────────────────────────────────────
 
@@ -747,13 +937,24 @@ where
                 feed!(Instruction::LocalSet(*dst as u32 + 1));
             }
 
-            // MoveResult*, MoveObject*, MoveException — object/result-register
-            // conventions require runtime support; stub.
+            // MoveResult*, MoveException — require result-register convention; stub.
             DexInsn::MoveResult { .. } | DexInsn::MoveResultWide { .. }
             | DexInsn::MoveResultObject { .. } | DexInsn::MoveException { .. }
-            | DexInsn::MoveObject { .. } | DexInsn::MoveObjectFrom16 { .. }
-            | DexInsn::MoveObject16 { .. }
             => { feed!(Instruction::Unreachable); }
+
+            // ── Move (object reference — same layout as i32 move) ────────────
+            DexInsn::MoveObject { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MoveObjectFrom16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::MoveObject16 { dst, src } => {
+                feed!(Instruction::LocalGet(*src as u32));
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
 
             // ── Return ──────────────────────────────────────────────────────
             DexInsn::ReturnVoid | DexInsn::Return { .. }
@@ -1698,7 +1899,314 @@ where
                 self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
             }
 
-            // ── Not yet implemented: object/array/field/invoke/switch ────────
+            // ── Object/array/field operations ───────────────────────────────
+
+            DexInsn::ArrayLength { dst, array } => {
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                feed!(Instruction::LocalGet(*array as u32));
+                self.obj_model.emit_array_length(&mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            DexInsn::NewInstance { dst, ty } => {
+                let type_id = ty.0 as u32;
+                let desc = self.type_descs.get(&type_id).map(|s| s.as_str()).unwrap_or("");
+                let class_name = type_desc_to_class_name(desc);
+                let hash = TypeHash::of_class(class_name);
+                let data_size = self.class_sizes.get(&type_id).copied().unwrap_or(0);
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                // SAFETY: obj_model and reactor are separate fields.
+                let obj_model_ptr = &self.obj_model as *const M;
+                let obj_model_ref = unsafe { &*obj_model_ptr };
+                obj_model_ref.emit_new_object(ctx, &hash, data_size, &mut obj_out)?;
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            DexInsn::NewArray { dst, size, ty } => {
+                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("[I");
+                let (elem_hash, dim, elem_bytes) = array_desc_to_info(desc);
+                feed!(Instruction::LocalGet(*size as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                let obj_model_ptr = &self.obj_model as *const M;
+                let obj_model_ref = unsafe { &*obj_model_ptr };
+                obj_model_ref.emit_new_array(ctx, &elem_hash, dim, elem_bytes, &mut obj_out)?;
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            DexInsn::CheckCast { reg, ty } => {
+                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("");
+                let (hash, dim) = if desc.starts_with('[') {
+                    let (h, d, _) = array_desc_to_info(desc);
+                    (h, d)
+                } else {
+                    (TypeHash::of_class(type_desc_to_class_name(desc)), 0u32)
+                };
+                feed!(Instruction::LocalGet(*reg as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_check_cast(&hash, dim, self.scratch_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+
+            DexInsn::InstanceOf { dst, obj, ty } => {
+                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("");
+                let (hash, dim) = if desc.starts_with('[') {
+                    let (h, d, _) = array_desc_to_info(desc);
+                    (h, d)
+                } else {
+                    (TypeHash::of_class(type_desc_to_class_name(desc)), 0u32)
+                };
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_instanceof(&hash, dim, self.scratch_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+
+            // ── iget / iput ──────────────────────────────────────────────────
+            // For wide fields (J/D), look them up as I64 and split/combine.
+
+            DexInsn::Iget { dst, obj, field } | DexInsn::IgetObject { dst, obj, field } => {
+                let (off, vt) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I32));
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, vt, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IgetBoolean { dst, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I8U));
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, FieldValType::I8U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IgetByte { dst, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I8S));
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, FieldValType::I8S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IgetChar { dst, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I16U));
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, FieldValType::I16U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IgetShort { dst, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I16S));
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, FieldValType::I16S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::IgetWide { dst, obj, field } => {
+                let (off, vt) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I64));
+                // Normalise to I64/F64 for wide access.
+                let mem_ty = if vt == FieldValType::F64 { FieldValType::F64 } else { FieldValType::I64 };
+                feed!(Instruction::LocalGet(*obj as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iget(off, mem_ty, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                // i64 on stack → split to (dst, dst+1)
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            DexInsn::Iput { src, obj, field } | DexInsn::IputObject { src, obj, field } => {
+                let (off, vt) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I32));
+                feed!(Instruction::LocalGet(*obj as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, vt, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::IputBoolean { src, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I8U));
+                feed!(Instruction::LocalGet(*obj as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, FieldValType::I8U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::IputByte { src, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I8S));
+                feed!(Instruction::LocalGet(*obj as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, FieldValType::I8S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::IputChar { src, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I16U));
+                feed!(Instruction::LocalGet(*obj as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, FieldValType::I16U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::IputShort { src, obj, field } => {
+                let (off, _) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I16S));
+                feed!(Instruction::LocalGet(*obj as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, FieldValType::I16S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::IputWide { src, obj, field } => {
+                let (off, vt) = self.field_map.get(&(field.0 as u32))
+                    .copied().unwrap_or((0, FieldValType::I64));
+                let mem_ty = if vt == FieldValType::F64 { FieldValType::F64 } else { FieldValType::I64 };
+                feed!(Instruction::LocalGet(*obj as u32));
+                self.emit_wide_to_stack(ctx, *src)?;
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_iput(off, mem_ty, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+
+            // ── aget / aput ──────────────────────────────────────────────────
+
+            DexInsn::Aget { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I32, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetObject { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::Ref, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetBoolean { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I8U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetByte { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I8S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetChar { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I16U, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetShort { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I16S, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                feed!(Instruction::LocalSet(*dst as u32));
+            }
+            DexInsn::AgetWide { dst, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aget(FieldValType::I64, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+                // i64 on stack → split to (dst, dst+1)
+                self.emit_split_wide(ctx, *dst, scratch_i64)?;
+            }
+
+            DexInsn::Aput { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I32,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputObject { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::Ref,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputBoolean { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I8U,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputByte { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I8S,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputChar { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I16U,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputShort { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                feed!(Instruction::LocalGet(*src as u32));
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I16S,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+            DexInsn::AputWide { src, array, index } => {
+                feed!(Instruction::LocalGet(*array as u32));
+                feed!(Instruction::LocalGet(*index as u32));
+                self.emit_wide_to_stack(ctx, *src)?;
+                let mut obj_out: Vec<Instruction<'static>> = Vec::new();
+                self.obj_model.emit_aput(FieldValType::I64,
+                    self.scratch_slot, self.scratch_i64_slot, &mut obj_out);
+                for insn in obj_out.drain(..) { self.reactor.feed(ctx, &insn)?; }
+            }
+
+            // ── Not yet implemented: invoke, switch, static fields, etc. ────
             _ => {
                 feed!(Instruction::Unreachable);
             }

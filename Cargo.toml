@@ -14,6 +14,7 @@ members = [
     # Managed architecture crates
     "crates/managed/speet-dex",
     "crates/managed/dex-bytecode",
+    "crates/managed/speet-object",
 ]
 resolver = "3"
 
