@@ -102,5 +102,5 @@ pub use builder::{MegabinaryBuilder, MegabinaryOutput};
 pub use context::ReactorContext;
 pub use linker::{Linker, LinkerPlugin};
 pub use recompiler::Recompile;
-pub use shim::{ShimSpec, emit_shim};
+pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};
 pub use unit::{BinaryUnit, FuncType};
