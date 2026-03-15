@@ -3036,3 +3036,58 @@ mod tests {
             .is_ok());
     }
 }
+
+// ── Recompile impl ────────────────────────────────────────────────────────────
+
+use alloc::string::String as AString;
+use speet_link::{
+    context::ReactorContext,
+    recompiler::Recompile,
+    unit::{BinaryUnit, FuncType},
+};
+
+impl<'cb, 'ctx, Context, E, F, P> Recompile<Context, E, F>
+    for RiscVRecompiler<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend + Default,
+{
+    /// New `base_pc` for the next RISC-V binary.
+    type BinaryArgs = u64;
+
+    fn reset_for_next_binary<RC>(
+        &mut self,
+        _ctx: &mut RC,
+        new_base_pc: u64,
+    )
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        self.base_pc = new_base_pc;
+        self.hints.clear();
+    }
+
+    fn drain_unit<RC>(
+        &mut self,
+        ctx: &mut RC,
+        entry_points: Vec<(AString, u32)>,
+    ) -> BinaryUnit<F>
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        // RISC-V: all params are i64 (int regs, fp regs, PC).
+        let param_types: Vec<ValType> =
+            (0..self.total_params).map(|_| ValType::I64).collect();
+        let func_type = FuncType::from_val_types(&param_types, &[]);
+
+        let base = ctx.base_func_offset();
+        let fns = ctx.drain_fns();
+        let count = fns.len();
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types: alloc::vec![func_type; count],
+        }
+    }
+}

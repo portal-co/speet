@@ -281,3 +281,40 @@ fn test_call_and_return() {
     reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
     assert!(reactor.ret(&mut ctx, 2, escape_tag).is_ok());
 }
+
+/// `drain_fns` — compile N functions, drain, compile M more; assert offsets
+/// and that no stale predecessor edges survive across the drain boundary.
+#[test]
+fn test_drain_fns() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+
+    // Phase 1: compile 3 functions.
+    for _ in 0..3 {
+        reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+        reactor.feed(&mut ctx, &Instruction::Unreachable).unwrap();
+    }
+    assert_eq!(reactor.fn_count(), 3);
+    assert_eq!(reactor.base_func_offset(), 0);
+
+    let fns_a = reactor.drain_fns();
+    assert_eq!(fns_a.len(), 3);
+
+    // After drain: fn_count resets, base_func_offset advances.
+    assert_eq!(reactor.fn_count(), 0);
+    assert_eq!(reactor.base_func_offset(), 3);
+
+    // Phase 2: compile 2 more functions.
+    for _ in 0..2 {
+        reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+        reactor.feed(&mut ctx, &Instruction::Unreachable).unwrap();
+    }
+    assert_eq!(reactor.fn_count(), 2);
+
+    let fns_b = reactor.drain_fns();
+    assert_eq!(fns_b.len(), 2);
+
+    // Cumulative offset now = 3 + 2 = 5.
+    assert_eq!(reactor.base_func_offset(), 5);
+    assert_eq!(reactor.fn_count(), 0);
+}

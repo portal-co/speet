@@ -448,11 +448,22 @@ version = "0.1.0"
 dependencies = [
  "dex",
  "dex-bytecode",
+ "speet-link",
  "speet-memory",
  "speet-object",
  "speet-ordering",
  "speet-traps",
  "speet-wasm-helpers",
+ "wasm-encoder",
+ "wax-core",
+ "yecta",
+]
+
+[[package]]
+name = "speet-link"
+version = "0.1.0"
+dependencies = [
+ "speet-traps",
  "wasm-encoder",
  "wax-core",
  "yecta",
@@ -473,6 +484,7 @@ version = "0.1.0"
 dependencies = [
  "object",
  "rabbitizer",
+ "speet-link",
  "speet-memory",
  "speet-ordering",
  "speet-traps",
@@ -515,6 +527,7 @@ version = "0.1.0"
 dependencies = [
  "object",
  "rv-asm",
+ "speet-link",
  "speet-memory",
  "speet-ordering",
  "speet-traps",
@@ -546,6 +559,7 @@ version = "0.1.0"
 dependencies = [
  "iced-x86",
  "object",
+ "speet-link",
  "speet-memory",
  "speet-traps",
  "wasm-encoder",

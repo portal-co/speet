@@ -1,0 +1,12 @@
+[package]
+name = "speet-link"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+yecta        = { path = "../../helper/yecta" }
+speet-traps  = { path = "../../helper/speet-traps" }
+wasm-encoder = { workspace = true }
+wax-core     = { workspace = true }

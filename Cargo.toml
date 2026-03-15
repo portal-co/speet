@@ -15,6 +15,7 @@ members = [
     "crates/managed/speet-dex",
     "crates/managed/dex-bytecode",
     "crates/managed/speet-object", "crates/os/osctx",
+    "crates/os/speet-link",
 ]
 resolver = "3"
 
@@ -23,6 +24,7 @@ description = "Fast static recompiler"
 license-file = "COPYING.md"
 
 [workspace.dependencies]
+speet-link = { path = "crates/os/speet-link" }
 wasmparser = { version = "0.240.0", default-features = false }
 wasm-encoder = { version = "0.240.0", default-features = false, features = [
     "wasmparser",

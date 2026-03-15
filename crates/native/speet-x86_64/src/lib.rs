@@ -667,3 +667,61 @@ impl Operand {
         }
     }
 }
+
+// ── Recompile impl ────────────────────────────────────────────────────────────
+
+use alloc::string::String;
+use speet_link::{
+    context::ReactorContext,
+    recompiler::Recompile,
+    unit::{BinaryUnit, FuncType},
+};
+use wasm_encoder::ValType;
+
+impl<'cb, 'ctx, Context, E, F, P> Recompile<Context, E, F>
+    for X86Recompiler<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend + Default,
+{
+    /// New `base_rip` for the next binary.
+    type BinaryArgs = u64;
+
+    fn reset_for_next_binary<RC>(
+        &mut self,
+        _ctx: &mut RC,
+        new_base_rip: u64,
+    )
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        self.base_rip = new_base_rip;
+        self.hints.clear();
+    }
+
+    fn drain_unit<RC>(
+        &mut self,
+        ctx: &mut RC,
+        entry_points: Vec<(String, u32)>,
+    ) -> BinaryUnit<F>
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        // Build the uniform function type: all params are i64 (x86-64 GPRs,
+        // PC, flags, temps are all i64 or i32, but each function shares the
+        // same total_params-wide signature).
+        let param_types: alloc::vec::Vec<ValType> =
+            (0..self.total_params).map(|_| ValType::I64).collect();
+        let func_type = FuncType::from_val_types(&param_types, &[]);
+
+        let base = ctx.base_func_offset();
+        let fns = ctx.drain_fns();
+        let count = fns.len();
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types: alloc::vec![func_type; count],
+        }
+    }
+}

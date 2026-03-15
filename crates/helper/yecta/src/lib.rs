@@ -1503,4 +1503,24 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     pub fn fn_count(&self) -> usize {
         self.fns.len()
     }
+
+    /// Non-consuming variant of [`into_fns`](Self::into_fns).
+    ///
+    /// Moves all compiled functions out, clears the internal function vec and
+    /// predecessor queue, and advances `base_func_offset` by the drained count.
+    /// The reactor is immediately ready to compile the next binary unit.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let fns_a = reactor.drain_fns();   // reactor now offset by fns_a.len()
+    /// // ... compile more functions into reactor ...
+    /// let fns_b = reactor.drain_fns();   // reactor offset by fns_a.len() + fns_b.len()
+    /// ```
+    pub fn drain_fns(&mut self) -> Vec<F> {
+        let count = self.fns.len() as u32;
+        let result = self.fns.drain(..).map(|e| e.function).collect();
+        self.base_func_offset += count;
+        self.lens.clear();
+        result
+    }
 }

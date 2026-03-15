@@ -2049,3 +2049,58 @@ where
         Ok(())
     }
 }
+
+// ── Recompile impl ────────────────────────────────────────────────────────────
+
+use alloc::{string::String, vec::Vec};
+use speet_link::{
+    context::ReactorContext,
+    recompiler::Recompile,
+    unit::{BinaryUnit, FuncType},
+};
+
+impl<'cb, 'ctx, Context, E, F, P> Recompile<Context, E, F>
+    for MipsRecompiler<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: yecta::LocalPoolBackend + Default,
+{
+    /// New `base_pc` for the next MIPS binary.
+    type BinaryArgs = u32;
+
+    fn reset_for_next_binary<RC>(
+        &mut self,
+        _ctx: &mut RC,
+        new_base_pc: u32,
+    )
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        self.base_pc = new_base_pc;
+    }
+
+    fn drain_unit<RC>(
+        &mut self,
+        ctx: &mut RC,
+        entry_points: Vec<(String, u32)>,
+    ) -> BinaryUnit<F>
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        use wasm_encoder::ValType;
+        // All MIPS params are i32 (32-bit register file + PC).
+        let param_types: alloc::vec::Vec<ValType> =
+            (0..self.total_params).map(|_| ValType::I32).collect();
+        let func_type = FuncType::from_val_types(&param_types, &[]);
+
+        let base = ctx.base_func_offset();
+        let fns = ctx.drain_fns();
+        let count = fns.len();
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types: alloc::vec![func_type; count],
+        }
+    }
+}

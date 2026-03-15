@@ -2257,3 +2257,67 @@ where
         Ok(())
     }
 }
+
+// ── Recompile impl ────────────────────────────────────────────────────────────
+
+use alloc::string::String as AString;
+use speet_link::{
+    context::ReactorContext,
+    recompiler::Recompile,
+    unit::{BinaryUnit, FuncType},
+};
+
+/// Arguments for resetting a [`DexRecompiler`] to a new DEX binary.
+pub struct DexBinaryArgs {
+    /// Pre-parsed flat method / code-unit data for the new binary.
+    pub flat: FlatMethods,
+}
+
+impl<'cb, 'ctx, Context, E, F, P, M> Recompile<Context, E, F>
+    for DexRecompiler<'cb, 'ctx, Context, E, F, P, M>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend + Default,
+    M: speet_object::ObjectModel<Context, E> + Default,
+{
+    type BinaryArgs = DexBinaryArgs;
+
+    fn reset_for_next_binary<RC>(
+        &mut self,
+        _ctx: &mut RC,
+        args: DexBinaryArgs,
+    )
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        self.flat = args.flat;
+        // Rebuild total_params for the new binary's register count.
+        let max_regs = self.flat.max_registers();
+        self.total_params = max_regs; // traps may add more; caller should re-run setup_traps
+    }
+
+    fn drain_unit<RC>(
+        &mut self,
+        ctx: &mut RC,
+        entry_points: Vec<(AString, u32)>,
+    ) -> BinaryUnit<F>
+    where
+        RC: ReactorContext<Context, E, FnType = F>,
+    {
+        use wasm_encoder::ValType;
+        // DEX: all params are i32 (Dalvik register file).
+        let param_types: alloc::vec::Vec<ValType> =
+            (0..self.total_params).map(|_| ValType::I32).collect();
+        let func_type = FuncType::from_val_types(&param_types, &[]);
+
+        let base = ctx.base_func_offset();
+        let fns = ctx.drain_fns();
+        let count = fns.len();
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types: alloc::vec![func_type; count],
+        }
+    }
+}
