@@ -210,6 +210,10 @@ where
     fn drain_fns(&mut self) -> Vec<F> {
         self.reactor.drain_fns()
     }
+    fn advance_base_func_offset(&mut self, n: u32) {
+        self.reactor
+            .set_base_func_offset(self.reactor.base_func_offset() + n);
+    }
 
     // Trap support
     fn declare_trap_params(&mut self) {

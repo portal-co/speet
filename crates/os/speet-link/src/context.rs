@@ -64,6 +64,12 @@ pub trait ReactorContext<Context, E> {
     /// and the reactor is ready for the next binary unit.
     fn drain_fns(&mut self) -> Vec<Self::FnType>;
 
+    /// Advance `base_func_offset` by `n` without going through the reactor.
+    ///
+    /// Non-yecta frontends that accumulate `F` values directly call this at
+    /// the end of `drain_unit` to keep the linker's offset in sync.
+    fn advance_base_func_offset(&mut self, n: u32);
+
     // ── Trap support ──────────────────────────────────────────────────────
 
     /// **Phase 1** — let installed traps append their parameter groups to the
@@ -175,6 +181,10 @@ where
     }
     fn drain_fns(&mut self) -> Vec<F> {
         self.reactor.drain_fns()
+    }
+    fn advance_base_func_offset(&mut self, n: u32) {
+        self.reactor
+            .set_base_func_offset(self.reactor.base_func_offset() + n);
     }
 
     // No traps — no-op.

@@ -547,6 +547,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "speet-wasm"
+version = "0.1.0"
+dependencies = [
+ "speet-link",
+ "speet-memory",
+ "wasm-encoder",
+ "wasmparser",
+ "wax-core",
+]
+
+[[package]]
 name = "speet-wasm-helpers"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,14 @@
+[package]
+name    = "speet-wasm"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+wasmparser  = { workspace = true }
+wasm-encoder = { workspace = true }
+wax-core    = { workspace = true }
+speet-memory = { path = "../../helper/speet-memory" }
+speet-link   = { path = "../../os/speet-link" }
+
