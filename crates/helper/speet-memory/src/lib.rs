@@ -47,6 +47,7 @@ pub use layout::{LocalLayout, LocalSlot};
 pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback};
 pub use mem::{AddressWidth, IntWidth, LoadKind, MemoryEmitter, StoreKind};
 pub use paging::{
-    PageMapLocals, PageTableBase, multilevel_page_table_mapper, multilevel_page_table_mapper_32,
-    standard_page_table_mapper, standard_page_table_mapper_32,
+    MultilevelPageTableMapper, MultilevelPageTableMapper32, PageMapLocals, PageTableBase,
+    StandardPageTableMapper, StandardPageTableMapper32, multilevel_page_table_mapper,
+    multilevel_page_table_mapper_32, standard_page_table_mapper, standard_page_table_mapper_32,
 };

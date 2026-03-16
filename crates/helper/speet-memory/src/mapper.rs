@@ -1,6 +1,7 @@
 //! [`CallbackContext`] and [`MapperCallback`] — the generic mapper-callback
 //! interface shared by all architecture recompilers.
 
+use yecta::LocalLayout;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 
@@ -85,6 +86,15 @@ pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
     fn chunk_size(&self) -> Option<u64> {
         None
     }
+
+    /// Declare parameter-level locals (persisted across functions; called once
+    /// before the params mark is set).  Default: no-op.
+    fn declare_params(&mut self, _layout: &mut LocalLayout) {}
+
+    /// Declare per-function scratch locals.  Called once per translated
+    /// function after the params mark.  The mapper appends its own groups and
+    /// resolves its `PageMapLocals` internally.  Default: no-op.
+    fn declare_locals(&mut self, _layout: &mut LocalLayout) {}
 }
 
 // ── ChunkedMapper ──────────────────────────────────────────────────────────────
@@ -120,6 +130,16 @@ where
     #[inline]
     fn chunk_size(&self) -> Option<u64> {
         Some(self.page_size)
+    }
+
+    #[inline]
+    fn declare_params(&mut self, layout: &mut LocalLayout) {
+        self.inner.declare_params(layout);
+    }
+
+    #[inline]
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        self.inner.declare_locals(layout);
     }
 }
 

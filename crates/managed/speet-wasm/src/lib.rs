@@ -13,15 +13,19 @@
 //!
 //! ```ignore
 //! use speet_wasm::{WasmFrontend, GuestMemoryConfig, IndexOffsets};
-//! use speet_memory::{AddressWidth, standard_page_table_mapper, PageMapLocals, PageTableBase};
+//! use speet_memory::{AddressWidth, standard_page_table_mapper, PageTableBase};
+//! use speet_link::Linker;
 //! use wasm_encoder::Function;
 //!
-//! let mapper_factory: Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
-//!     Box::new(|locals| Box::new(standard_page_table_mapper(
-//!         PageTableBase::Constant(0x1000_0000),
-//!         PageTableBase::Constant(0x2000_0000),
-//!         0, false, locals,
-//!     )));
+//! let mapper_factory: Box<dyn Fn() -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
+//!     Box::new(|| {
+//!         let mut m = standard_page_table_mapper(
+//!             PageTableBase::Constant(0x1000_0000),
+//!             PageTableBase::Constant(0x2000_0000),
+//!             0, false,
+//!         );
+//!         Box::new(m)
+//!     });
 //!
 //! let mut frontend = WasmFrontend::new(
 //!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: Some(mapper_factory) }],
@@ -29,7 +33,8 @@
 //!     IndexOffsets { func: 10, global: 0, table: 0 },
 //!     Box::new(|locals| Function::new(locals)),
 //! );
-//! frontend.translate_module(&mut ctx, &wasm_bytes)?;
+//! let mut linker: Linker<_, _, Function> = Linker::new();
+//! frontend.translate_module(&mut ctx, &mut linker, &wasm_bytes)?;
 //!
 //! let unit = frontend.drain_unit(&mut linker, entry_points);
 //! // unit.data_segments are passive blobs; unit.data_init_fn loads them.
@@ -37,14 +42,15 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, vec::Vec};
-use speet_link::{BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use speet_link::{
+    BinaryUnit, BaseContext, DataSegment, Recompile, context::ReactorContext, unit::FuncType,
+};
 use speet_memory::{
-    AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter,
-    PageMapLocals, StoreKind,
+    AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter, StoreKind,
 };
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
-use wasm_layout::{LocalLayout, LocalSlot};
+use wasm_layout::{LocalLayout, LocalSlot, Mark};
 use wax_core::build::InstructionSink;
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 
@@ -60,9 +66,10 @@ pub struct GuestMemoryConfig<Context, E, F = Function> {
     pub addr_width: AddressWidth,
     /// Optional mapper factory.  Called once per function to produce a
     /// [`MapperCallback`] that translates virtual → physical addresses.
+    /// The mapper declares its own scratch locals via `declare_locals`.
     /// `None` = identity (physical address == virtual address).
     pub mapper_factory:
-        Option<Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<Context, E, F>>>>,
+        Option<Box<dyn Fn() -> Box<dyn MapperCallback<Context, E, F>>>>,
 }
 
 // ── IndexOffsets ──────────────────────────────────────────────────────────────
@@ -137,6 +144,11 @@ pub struct WasmFrontend<Context, E, F = Function> {
     offsets: IndexOffsets,
     /// Factory that constructs an output function from its local-variable list.
     fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
+    /// Cache of (params-layout snapshot, params_mark) per unique guest function type.
+    ///
+    /// Populated lazily in `translate_fn`; cleared at the start of each
+    /// `translate_module` call (traps may change between calls).
+    fn_type_param_layouts: BTreeMap<FuncType, (LocalLayout, Mark)>,
     /// Extra parameters injected into every translated function.
     ///
     /// Each type here is appended to both the parameter list **and** the result
@@ -175,6 +187,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             offsets,
             fn_creator,
             injected_params: Vec::new(),
+            fn_type_param_layouts: BTreeMap::new(),
         }
     }
 
@@ -235,9 +248,9 @@ where
     fn chunk_size_for_memory(&self, mem_idx: usize) -> Option<u64> {
         let cfg = self.per_memory.get(mem_idx)?;
         let factory = cfg.mapper_factory.as_ref()?;
-        // Instantiate a throw-away mapper with locals at index 0 just to
-        // query the chunk size — no instructions are emitted.
-        let mapper = factory(PageMapLocals::consecutive(0));
+        // Instantiate a throw-away mapper just to query the chunk size.
+        // `declare_locals` is not needed for chunk_size queries.
+        let mapper = factory();
         mapper.chunk_size()
     }
 
@@ -246,14 +259,26 @@ where
     /// Parse a WASM module's type, memory, data, and code sections and transform
     /// every function.
     ///
+    /// `base_ctx` provides layout management and trap coordination.  Pass a
+    /// [`Linker`](speet_link::Linker) (which implements [`BaseContext`]) to
+    /// wire up installed traps.
+    ///
     /// After this call:
     /// - `self.memory_infos()` reflects the parsed memory section.
     /// - Translated functions and data segments are accumulated internally.
     /// - Call `Recompile::drain_unit` to collect everything into a [`BinaryUnit`].
-    pub fn translate_module(&mut self, ctx: &mut Context, bytes: &[u8]) -> Result<(), E> {
+    pub fn translate_module(
+        &mut self,
+        ctx: &mut Context,
+        base_ctx: &mut dyn BaseContext<Context, E>,
+        bytes: &[u8],
+    ) -> Result<(), E> {
         let mut types: Vec<FuncType> = Vec::new();
         let mut fn_type_indices: Vec<u32> = Vec::new();
         let mut code_fn_idx: usize = 0;
+
+        // Clear the per-type layout cache: traps may have changed since last call.
+        self.fn_type_param_layouts.clear();
 
         self.memory_infos.clear();
         self.data_segs.clear();
@@ -359,7 +384,7 @@ where
                         .get(type_idx)
                         .cloned()
                         .unwrap_or_else(|| FuncType { params: Vec::new(), results: Vec::new() });
-                    self.translate_fn(ctx, func_type, body)?;
+                    self.translate_fn(ctx, base_ctx, func_type, body)?;
                     code_fn_idx += 1;
                 }
 
@@ -369,7 +394,7 @@ where
 
         // Build the data-init function after all sections are parsed.
         if !self.data_init_ops.is_empty() {
-            self.build_data_init_fn(ctx)?;
+            self.build_data_init_fn(ctx, base_ctx)?;
         }
 
         Ok(())
@@ -379,22 +404,57 @@ where
     ///
     /// Emits `i[32|64].const <va>; [mapper]; i32.const 0; i32.const <len>;
     /// memory.init <seg> <host>; data.drop <seg>` for each chunk, then `End`.
-    fn build_data_init_fn(&mut self, ctx: &mut Context) -> Result<(), E> {
-        // Build a LocalLayout for the data-init function.
-        // Injected params are implicit (not in iter_since output); register them
-        // as a placeholder group so that subsequent slots get correct indices.
+    fn build_data_init_fn(
+        &mut self,
+        ctx: &mut Context,
+        base_ctx: &mut dyn BaseContext<Context, E>,
+    ) -> Result<(), E> {
+        // The data-init function has type (inj...) -> (inj...).
+        // We cache its params layout snapshot just like regular functions.
         let n_injected = self.injected_params.len() as u32;
-        let mut layout = LocalLayout::empty();
-        if n_injected > 0 {
-            layout.append(n_injected, ValType::I32); // placeholder; type irrelevant
-        }
-        let params_mark = layout.mark();
+        let inj_clone = self.injected_params.clone();
+        let init_fn_type = FuncType::from_val_types(&inj_clone, &inj_clone);
 
-        // 4 × i32 locals for PageMapLocals scratch.
-        let map_slot = layout.append(4, ValType::I32);
-        let map_locals = PageMapLocals::consecutive(layout.base(map_slot));
+        let (params_snap, params_mark) =
+            match self.fn_type_param_layouts.get(&init_fn_type) {
+                Some(entry) => entry.clone(),
+                None => {
+                    *base_ctx.layout_mut() = LocalLayout::empty();
+                    if n_injected > 0 {
+                        base_ctx.layout_mut().append(n_injected, ValType::I32);
+                    }
+                    base_ctx.declare_trap_params();
+                    let mark = base_ctx.layout().mark();
+                    base_ctx.set_locals_mark(mark);
+                    let snap = base_ctx.layout().clone();
+                    self.fn_type_param_layouts
+                        .insert(init_fn_type, (snap.clone(), mark));
+                    (snap, mark)
+                }
+            };
 
-        let out_locals: Vec<(u32, ValType)> = layout.iter_since(&params_mark).collect();
+        *base_ctx.layout_mut() = params_snap;
+        base_ctx.set_locals_mark(params_mark);
+
+        // Create one mapper instance, call declare_locals to allocate its scratch.
+        // This mapper is reused for all init ops (sequential calls are safe).
+        let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
+            if let Some(cfg) = self.per_memory.get(0) {
+                if let Some(factory) = &cfg.mapper_factory {
+                    let mut m = factory();
+                    m.declare_locals(base_ctx.layout_mut());
+                    Some(m)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        base_ctx.declare_trap_locals();
+
+        let out_locals: Vec<(u32, ValType)> =
+            base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
         let host_memory = self.host_memory;
@@ -421,13 +481,10 @@ where
                 out.instruction(ctx, &Instruction::I32Const(guest_va as i32))?;
             }
 
-            // Call mapper if configured for this memory.
-            if let Some(cfg) = self.per_memory.get(memory_idx) {
-                if let Some(factory) = &cfg.mapper_factory {
-                    let mut mapper = factory(map_locals);
-                    let mut cb = CallbackContext::new(&mut out);
-                    mapper.call(ctx, &mut cb)?;
-                }
+            // Call mapper if configured.
+            if let Some(m) = mapper_box.as_deref_mut() {
+                let mut cb = CallbackContext::new(&mut out);
+                m.call(ctx, &mut cb)?;
             }
 
             // memory.init seg_idx host_memory
@@ -454,6 +511,7 @@ where
     fn translate_fn(
         &mut self,
         ctx: &mut Context,
+        base_ctx: &mut dyn BaseContext<Context, E>,
         func_type: FuncType,
         body: FunctionBody<'_>,
     ) -> Result<(), E> {
@@ -475,16 +533,31 @@ where
             func_type
         };
 
-        // ── Build LocalLayout ────────────────────────────────────────────
+        // ── Params layout snapshot (cached per function type) ─────────────
         // Params are implicit in WASM (not in Function::new locals list).
-        // Register them as a single placeholder group so that all subsequent
-        // slot base indices are offset correctly.
+        // We cache the (layout snapshot, mark) per unique extended function type
+        // so that trap params are only declared once per type.
         let param_count = func_type.params_val_types().count() as u32; // extended count
-        let mut layout = LocalLayout::empty();
-        if param_count > 0 {
-            layout.append(param_count, ValType::I32); // placeholder; type irrelevant
-        }
-        let params_mark = layout.mark();
+        let (params_snap, params_mark) =
+            match self.fn_type_param_layouts.get(&func_type) {
+                Some(entry) => entry.clone(),
+                None => {
+                    *base_ctx.layout_mut() = LocalLayout::empty();
+                    if param_count > 0 {
+                        base_ctx.layout_mut().append(param_count, ValType::I32);
+                    }
+                    base_ctx.declare_trap_params();
+                    let mark = base_ctx.layout().mark();
+                    base_ctx.set_locals_mark(mark);
+                    let snap = base_ctx.layout().clone();
+                    self.fn_type_param_layouts
+                        .insert(func_type.clone(), (snap.clone(), mark));
+                    (snap, mark)
+                }
+            };
+
+        *base_ctx.layout_mut() = params_snap;
+        base_ctx.set_locals_mark(params_mark);
 
         // Guest declared locals: collect first, then append to layout in order.
         let locals_reader = body.get_locals_reader()?;
@@ -494,7 +567,7 @@ where
             guest_locals.push((count, val_type_from_wasmparser(wasm_ty)));
         }
         for &(count, ty) in &guest_locals {
-            layout.append(count, ty);
+            base_ctx.layout_mut().append(count, ty);
         }
 
         // 4 type-specific scratch locals for store value saving:
@@ -502,35 +575,32 @@ where
         //   slot_i64 → i64 scratch  (offset +0 from base)
         //   slot_f32 → f32 scratch  (offset +0 from base)
         //   slot_f64 → f64 scratch  (offset +0 from base)
-        let slot_i32 = layout.append(1, ValType::I32);
-        let slot_i64 = layout.append(1, ValType::I64);
-        let slot_f32 = layout.append(1, ValType::F32);
-        let slot_f64 = layout.append(1, ValType::F64);
+        let slot_i32 = base_ctx.layout_mut().append(1, ValType::I32);
+        let slot_i64 = base_ctx.layout_mut().append(1, ValType::I64);
+        let slot_f32 = base_ctx.layout_mut().append(1, ValType::F32);
+        let slot_f64 = base_ctx.layout_mut().append(1, ValType::F64);
         // base_scratch_idx is the absolute index of slot_i32 (the first scratch).
         // emit_store uses base_scratch_idx + {0,1,2,3} for the four scratch types.
-        let base_scratch_idx = layout.base(slot_i32);
+        let base_scratch_idx = base_ctx.layout().base(slot_i32);
         // Verify the four scratch slots are contiguous (they always are since
         // each is exactly 1 local, but make it explicit via debug assert).
-        debug_assert_eq!(layout.base(slot_i64), base_scratch_idx + 1);
-        debug_assert_eq!(layout.base(slot_f32), base_scratch_idx + 2);
-        debug_assert_eq!(layout.base(slot_f64), base_scratch_idx + 3);
+        debug_assert_eq!(base_ctx.layout().base(slot_i64), base_scratch_idx + 1);
+        debug_assert_eq!(base_ctx.layout().base(slot_f32), base_scratch_idx + 2);
+        debug_assert_eq!(base_ctx.layout().base(slot_f64), base_scratch_idx + 3);
 
         // Use the primary memory's (index 0) mapper and addr_width for this function.
         let addr_width = self.addr_width_for_memory(0);
 
         // Mapper and loop scratch locals (only when a mapper is configured).
+        // loop_slot is appended first; mapper declares its own locals via declare_locals.
         let (mut mapper_box, loop_dst_local, loop_src_local, loop_len_local) =
             if let Some(cfg) = self.per_memory.get(0) {
                 if let Some(factory) = &cfg.mapper_factory {
-                    let map_slot = layout.append(4, ValType::I32);
-                    let loop_slot = layout.append(3, ValType::I32);
-                    let map_locals = PageMapLocals::consecutive(layout.base(map_slot));
-                    (
-                        Some(factory(map_locals)),
-                        layout.base(loop_slot),
-                        layout.base(loop_slot) + 1,
-                        layout.base(loop_slot) + 2,
-                    )
+                    let loop_slot = base_ctx.layout_mut().append(3, ValType::I32);
+                    let loop_base = base_ctx.layout().base(loop_slot);
+                    let mut m = factory();
+                    m.declare_locals(base_ctx.layout_mut());
+                    (Some(m), loop_base, loop_base + 1, loop_base + 2)
                 } else {
                     (None, 0, 0, 0)
                 }
@@ -538,16 +608,19 @@ where
                 (None, 0, 0, 0)
             };
 
+        // Let traps declare their per-function locals.
+        base_ctx.declare_trap_locals();
+
         // Extra scratch for call_indirect: saves the table index while we push
         // injected params onto the stack.  Only allocated when n_injected > 0.
         let call_indirect_scratch = if n_injected > 0 {
-            let slot: LocalSlot = layout.append(1, ValType::I32);
-            layout.base(slot)
+            let slot: LocalSlot = base_ctx.layout_mut().append(1, ValType::I32);
+            base_ctx.layout().base(slot)
         } else {
             0 // unused
         };
 
-        let out_locals: Vec<(u32, ValType)> = layout.iter_since(&params_mark).collect();
+        let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
         let ops_reader = body.get_operators_reader()?;
@@ -619,7 +692,7 @@ where
         out: &mut F,
         base_scratch_idx: u32,
         addr_width: AddressWidth,
-        mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
+        mut mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
         loop_dst_local: u32,
         loop_src_local: u32,
         loop_len_local: u32,
@@ -842,27 +915,17 @@ where
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Eqz)?;
                     out.instruction(ctx, &Instruction::BrIf(1))?;
-                    // physical dst (re-borrow mapper as dst mapper)
+                    // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(cfg) = self.per_memory.get(0) {
-                        if let Some(factory) = &cfg.mapper_factory {
-                            let map_locals =
-                                PageMapLocals::consecutive(base_scratch_idx + 4);
-                            let mut dst_mapper = factory(map_locals);
-                            let mut cb = CallbackContext::new(out);
-                            dst_mapper.call(ctx, &mut cb)?;
-                        }
+                    if let Some(m) = mapper.as_deref_mut() {
+                        let mut cb = CallbackContext::new(out);
+                        m.call(ctx, &mut cb)?;
                     }
                     // physical src
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
-                    if let Some(cfg) = self.per_memory.get(0) {
-                        if let Some(factory) = &cfg.mapper_factory {
-                            let map_locals =
-                                PageMapLocals::consecutive(base_scratch_idx + 4);
-                            let mut src_mapper = factory(map_locals);
-                            let mut cb = CallbackContext::new(out);
-                            src_mapper.call(ctx, &mut cb)?;
-                        }
+                    if let Some(m) = mapper.as_deref_mut() {
+                        let mut cb = CallbackContext::new(out);
+                        m.call(ctx, &mut cb)?;
                     }
                     // len = min(chunk, remaining_len)
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
@@ -919,14 +982,9 @@ where
                     out.instruction(ctx, &Instruction::BrIf(1))?;
                     // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(cfg) = self.per_memory.get(0) {
-                        if let Some(factory) = &cfg.mapper_factory {
-                            let map_locals =
-                                PageMapLocals::consecutive(base_scratch_idx + 4);
-                            let mut dst_mapper = factory(map_locals);
-                            let mut cb = CallbackContext::new(out);
-                            dst_mapper.call(ctx, &mut cb)?;
-                        }
+                    if let Some(m) = mapper.as_deref_mut() {
+                        let mut cb = CallbackContext::new(out);
+                        m.call(ctx, &mut cb)?;
                     }
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?; // val
                     // len = min(chunk, remaining)
@@ -1149,6 +1207,7 @@ fn func_type_from_wasmparser(ft: &wasmparser::FuncType) -> FuncType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use speet_link::Linker;
     use wasmparser::BinaryReaderError;
 
     type TestError = BinaryReaderError;
@@ -1217,7 +1276,8 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
         assert_eq!(frontend.compiled.len(), 1, "expected 1 compiled function");
     }
 
@@ -1231,7 +1291,8 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
 
         let infos = frontend.memory_infos();
         assert_eq!(infos.len(), 1);
@@ -1253,7 +1314,8 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
         // One passive segment (no chunking without mapper).
         assert_eq!(frontend.data_segs.len(), 1);
         assert_eq!(&frontend.data_segs[0].data, b"hello world!");
@@ -1264,7 +1326,7 @@ mod tests {
     #[test]
     fn data_segment_chunked_with_mapper() {
         // 3 × 64 KiB at 0x10000 with a ChunkedMapper → 3 passive segments + init fn.
-        use speet_memory::{ChunkedMapper, PageMapLocals};
+        use speet_memory::ChunkedMapper;
         use wasm_encoder::*;
 
         let mut module = Module::new();
@@ -1298,8 +1360,8 @@ mod tests {
 
         // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
         let mapper_factory: Box<
-            dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), TestError, Function>>,
-        > = Box::new(|_locals| {
+            dyn Fn() -> Box<dyn MapperCallback<(), TestError, Function>>,
+        > = Box::new(|| {
             Box::new(ChunkedMapper {
                 page_size: 0x10000,
                 inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
@@ -1315,7 +1377,8 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
 
         assert_eq!(frontend.data_segs.len(), 3, "should split into 3 page-sized chunks");
         assert_eq!(frontend.data_segs[0].data.len(), 65536);
@@ -1336,9 +1399,8 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
-
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
 
         assert_eq!(linker.base_func_offset(), 0);
         let unit = frontend.drain_unit(&mut linker, alloc::vec![]);
@@ -1361,7 +1423,8 @@ mod tests {
             Box::new(|locals| Function::new(locals)),
         );
 
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
         assert_eq!(frontend.compiled.len(), 1);
     }
 
@@ -1399,7 +1462,8 @@ mod tests {
             0,
             IndexOffsets::default(),
         );
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
         // Just check it compiled successfully (instruction lowering does not panic).
         assert_eq!(frontend.compiled.len(), 1);
     }
@@ -1407,7 +1471,7 @@ mod tests {
     #[test]
     fn memory_copy_lowered_to_loop_with_mapper() {
         // memory.copy with a mapper should emit a block/loop, not a single instruction.
-        use speet_memory::{ChunkedMapper, PageMapLocals};
+        use speet_memory::ChunkedMapper;
         use wasm_encoder::*;
 
         let mut module = Module::new();
@@ -1439,8 +1503,8 @@ mod tests {
         let bytes = module.finish();
 
         let mapper_factory: Box<
-            dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), TestError, Function>>,
-        > = Box::new(|_locals| {
+            dyn Fn() -> Box<dyn MapperCallback<(), TestError, Function>>,
+        > = Box::new(|| {
             Box::new(ChunkedMapper {
                 page_size: 0x10000,
                 inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
@@ -1455,7 +1519,8 @@ mod tests {
             0,
             IndexOffsets::default(),
         );
-        frontend.translate_module(&mut (), &bytes).unwrap();
+        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
         // Verify the function was produced (the loop lowering did not error).
         assert_eq!(frontend.compiled.len(), 1);
     }

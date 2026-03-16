@@ -88,6 +88,7 @@ pub struct LocalSlot(pub(crate) usize);
 /// A map from `(count, ValType)` groups to contiguous wasm local indices.
 ///
 /// See the [module documentation](self) for usage patterns.
+#[derive(Clone)]
 pub struct LocalLayout {
     /// `(count, type, offset)` for each slot in insertion order.
     /// `offset` is the cumulative count of locals in all *preceding* slots —

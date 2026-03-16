@@ -99,7 +99,7 @@ mod tests;
 
 // Flat re-exports for the most commonly used items.
 pub use builder::{MegabinaryBuilder, MegabinaryOutput};
-pub use context::ReactorContext;
+pub use context::{BaseContext, ReactorContext};
 pub use linker::{Linker, LinkerPlugin};
 pub use recompiler::Recompile;
 pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};

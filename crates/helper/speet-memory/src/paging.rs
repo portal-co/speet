@@ -1,39 +1,36 @@
 //! Page-table code-generation helpers.
 //!
 //! Each function in this module is a *builder*: it takes the static
-//! configuration up-front and returns a [`MapperCallback`]-compatible closure.
-//! The returned closure can be handed directly to
-//! `recompiler.set_mapper_callback(…)`.
+//! configuration up-front and returns a struct that implements
+//! [`MapperCallback`].  The returned struct calls `declare_locals` to
+//! allocate its own scratch locals from a [`LocalLayout`], removing the
+//! need for callers to manage [`PageMapLocals`] manually.
 //!
 //! ```ignore
-//! // Pick which wasm locals to use for the mapper's scratch space.
-//! let locals = PageMapLocals::new(66, [67, 68, 69]);
-//!
 //! let mut mapper = standard_page_table_mapper(
 //!     0x1000_0000u64,     // page_table_base
 //!     0x2000_0000u64,     // security_directory_base
 //!     0,                   // wasm memory index
 //!     true,                // use i64 (RV64 / memory64)
-//!     locals,
 //! );
+//! mapper.declare_locals(&mut layout);  // allocates 4 × i32 scratch locals
 //! recompiler.set_mapper_callback(&mut mapper);
 //! ```
 //!
 //! # Scratch-local convention
 //!
-//! Callers choose which wasm locals the mapper may use by supplying a
-//! [`PageMapLocals`] value.  The mapper closure saves the incoming virtual
-//! address into `locals.vaddr` with `LocalTee` at the start so it can reload
-//! it later.  Up to three additional scratch locals (`locals.scratch`) are
-//! used by the multi-level and 32-bit-physical-address variants.
+//! The mapper calls `declare_locals` to append four consecutive `i32` locals
+//! to the layout and stores them internally via [`PageMapLocals::consecutive`].
+//! Calling `call` before `declare_locals` will panic.
 //!
 //! # Stack contract (all variants)
 //! * **Before**: virtual address (`i32` when `use_i64 = false`, `i64` when
 //!   `use_i64 = true`) is on the wasm value stack.
 //! * **After**: physical address of the same type is on the stack.
 
-use crate::mapper::{CallbackContext, ChunkedMapper, MapperCallback};
-use wasm_encoder::{Instruction, MemArg};
+use crate::mapper::{CallbackContext, MapperCallback};
+use yecta::LocalLayout;
+use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 
 // ── PageTableBase ──────────────────────────────────────────────────────────────
@@ -84,7 +81,7 @@ impl PageTableBase {
 
 // ── PageMapLocals ──────────────────────────────────────────────────────────────
 
-/// The wasm local variable indices that a page-table mapper closure may use as
+/// The wasm local variable indices that a page-table mapper may use as
 /// scratch space.
 ///
 /// The `vaddr` local is used to save the incoming virtual address so it can be
@@ -129,9 +126,9 @@ impl PageMapLocals {
     }
 }
 
-// ── standard_page_table_mapper ─────────────────────────────────────────────────
+// ── StandardPageTableMapper ────────────────────────────────────────────────────
 
-/// Build a single-level 64 KiB page-table mapper closure.
+/// A single-level 64 KiB page-table mapper.
 ///
 /// Each page-table entry is 8 bytes (`i64`) for `use_i64 = true` or 4 bytes
 /// (`i32`) for `use_i64 = false`.  Bits \[63:16\] of the virtual address
@@ -140,102 +137,102 @@ impl PageMapLocals {
 /// The top 16 bits of the physical address come from a "security directory"
 /// entry and are combined with the lower 48 bits from the page-table entry.
 ///
-/// # Scratch locals consumed
-/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`.
-///
-/// # Returns
-/// A closure implementing [`MapperCallback`] that can be passed directly to
-/// `recompiler.set_mapper_callback`.
-pub fn standard_page_table_mapper<Context, E, F>(
-    page_table_base: impl Into<PageTableBase>,
-    security_directory_base: impl Into<PageTableBase>,
+/// Construct via [`standard_page_table_mapper`].  Call `declare_locals` on the
+/// returned struct before using it as a mapper callback.
+pub struct StandardPageTableMapper {
+    page_table_base: PageTableBase,
+    security_dir_base: PageTableBase,
     memory_index: u32,
     use_i64: bool,
-    locals: PageMapLocals,
-) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
-where
-    F: InstructionSink<Context, E>,
-{
-    let pt_base = page_table_base.into();
-    let sec_dir_base = security_directory_base.into();
+    locals: Option<PageMapLocals>,
+}
 
-    ChunkedMapper {
-        page_size: 0x10000,
-        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+    for StandardPageTableMapper
+{
+    fn chunk_size(&self) -> Option<u64> {
+        Some(0x10000)
+    }
+
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        cb: &mut CallbackContext<Context, E, F>,
+    ) -> Result<(), E> {
+        let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
-        if use_i64 {
-            // Save vaddr, then compute page index
+        if self.use_i64 {
             cb.emit(ctx, &Instruction::LocalTee(lv))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            pt_base.emit_load(ctx, cb, true)?;
+            self.page_table_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
 
-            // page_pointer → scratch[0]; page_base_low48 → scratch[1]
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?; // security_index on stack
+            cb.emit(ctx, &Instruction::I64And)?;
 
             cb.emit(ctx, &Instruction::LocalGet(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_base_low48
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
 
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            sec_dir_base.emit_load(ctx, cb, true)?;
+            self.security_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
-            // page_base_top16 = sec_entry >> 16
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            // phys_page_base = (top16 << 48) | low48
             cb.emit(ctx, &Instruction::I64Const(48))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Or)?;
 
-            // page_offset = vaddr & 0xFFFF
             cb.emit(ctx, &Instruction::LocalGet(lv))?;
             cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
             cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::I64Add)?;
         } else {
-            // 32-bit fallback — simple single-level
             cb.emit(ctx, &Instruction::LocalTee(lv))?;
             cb.emit(ctx, &Instruction::I32Const(16))?;
             cb.emit(ctx, &Instruction::I32ShrU)?;
             cb.emit(ctx, &Instruction::I32Const(3))?;
             cb.emit(ctx, &Instruction::I32Shl)?;
-            pt_base.emit_load(ctx, cb, false)?;
+            self.page_table_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::LocalGet(lv))?;
@@ -244,81 +241,100 @@ where
             cb.emit(ctx, &Instruction::I32Add)?;
         }
         Ok(())
-        },
     }
 }
 
-// ── standard_page_table_mapper_32 ─────────────────────────────────────────────
-
-/// Build a single-level page-table mapper with 32-bit physical addresses.
+/// Build a single-level 64 KiB page-table mapper.
 ///
-/// Each page-table entry is 4 bytes (`i32`).  The physical page base occupies
-/// bits \[31:8\] of the entry; bits \[7:0\] are a security index.
-///
-/// # Scratch locals consumed
-/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`, `locals.scratch[2]`.
-///
-/// # Returns
-/// A closure implementing [`MapperCallback`].
-pub fn standard_page_table_mapper_32<Context, E, F>(
+/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// it as a mapper callback.
+pub fn standard_page_table_mapper(
     page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-    locals: PageMapLocals,
-) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
-where
-    F: InstructionSink<Context, E>,
-{
-    let pt_base = page_table_base.into();
-    let sec_dir_base = security_directory_base.into();
+) -> StandardPageTableMapper {
+    StandardPageTableMapper {
+        page_table_base: page_table_base.into(),
+        security_dir_base: security_directory_base.into(),
+        memory_index,
+        use_i64,
+        locals: None,
+    }
+}
 
-    ChunkedMapper {
-        page_size: 0x10000,
-        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+// ── StandardPageTableMapper32 ─────────────────────────────────────────────────
+
+/// A single-level page-table mapper with 32-bit physical addresses.
+///
+/// Construct via [`standard_page_table_mapper_32`].
+pub struct StandardPageTableMapper32 {
+    page_table_base: PageTableBase,
+    security_dir_base: PageTableBase,
+    memory_index: u32,
+    use_i64: bool,
+    locals: Option<PageMapLocals>,
+}
+
+impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+    for StandardPageTableMapper32
+{
+    fn chunk_size(&self) -> Option<u64> {
+        Some(0x10000)
+    }
+
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        cb: &mut CallbackContext<Context, E, F>,
+    ) -> Result<(), E> {
+        let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
-        if use_i64 {
+        if self.use_i64 {
             cb.emit(ctx, &Instruction::LocalTee(lv))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            pt_base.emit_load(ctx, cb, true)?;
+            self.page_table_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?; // page_pointer (i32)
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_pointer as i64
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
 
-            // security_index = page_pointer & 0xFF
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(0xFF))?;
             cb.emit(ctx, &Instruction::I64And)?;
-            // page_base_low24 = page_pointer >> 8
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(8))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?; // page_base_low24
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?;
 
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            sec_dir_base.emit_load(ctx, cb, true)?;
+            self.security_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
@@ -339,22 +355,20 @@ where
             cb.emit(ctx, &Instruction::I32ShrU)?;
             cb.emit(ctx, &Instruction::I32Const(2))?;
             cb.emit(ctx, &Instruction::I32Shl)?;
-            pt_base.emit_load(ctx, cb, false)?;
+            self.page_table_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
 
-            // security_index = page_pointer & 0xFF
             cb.emit(ctx, &Instruction::I32Const(0xFF))?;
             cb.emit(ctx, &Instruction::I32And)?;
-            // page_base_low24 = page_pointer >> 8
             cb.emit(ctx, &Instruction::LocalGet(ls0))?;
             cb.emit(ctx, &Instruction::I32Const(8))?;
             cb.emit(ctx, &Instruction::I32ShrU)?;
@@ -362,14 +376,14 @@ where
 
             cb.emit(ctx, &Instruction::I32Const(2))?;
             cb.emit(ctx, &Instruction::I32Shl)?;
-            sec_dir_base.emit_load(ctx, cb, false)?;
+            self.security_dir_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I32Const(24))?;
@@ -385,47 +399,63 @@ where
             cb.emit(ctx, &Instruction::I32Add)?;
         }
         Ok(())
-        },
     }
 }
 
-// ── multilevel_page_table_mapper ───────────────────────────────────────────────
-
-/// Build a three-level page-table mapper for 64 KiB pages with 64-bit
-/// physical addresses.
+/// Build a single-level page-table mapper with 32-bit physical addresses.
 ///
-/// Level indices: bits \[63:48\], \[47:32\], \[31:16\] of the virtual address.
-/// Each entry is 8 bytes (`i64`).
-///
-/// When `use_i64 = false` this delegates to
-/// [`standard_page_table_mapper_32`] (the 32-bit multi-level fallback).
-///
-/// # Scratch locals consumed
-/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`.
-///
-/// # Returns
-/// A closure implementing [`MapperCallback`].
-pub fn multilevel_page_table_mapper<Context, E, F>(
-    l3_table_base: impl Into<PageTableBase>,
+/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// it as a mapper callback.
+pub fn standard_page_table_mapper_32(
+    page_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-    locals: PageMapLocals,
-) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
-where
-    F: InstructionSink<Context, E>,
-{
-    let l3_base = l3_table_base.into();
-    let sec_dir_base = security_directory_base.into();
+) -> StandardPageTableMapper32 {
+    StandardPageTableMapper32 {
+        page_table_base: page_table_base.into(),
+        security_dir_base: security_directory_base.into(),
+        memory_index,
+        use_i64,
+        locals: None,
+    }
+}
 
-    ChunkedMapper {
-        page_size: 0x10000,
-        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+// ── MultilevelPageTableMapper ──────────────────────────────────────────────────
+
+/// A three-level page-table mapper for 64 KiB pages with 64-bit physical addresses.
+///
+/// Construct via [`multilevel_page_table_mapper`].
+pub struct MultilevelPageTableMapper {
+    l3_base: PageTableBase,
+    security_dir_base: PageTableBase,
+    memory_index: u32,
+    use_i64: bool,
+    locals: Option<PageMapLocals>,
+}
+
+impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+    for MultilevelPageTableMapper
+{
+    fn chunk_size(&self) -> Option<u64> {
+        Some(0x10000)
+    }
+
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        cb: &mut CallbackContext<Context, E, F>,
+    ) -> Result<(), E> {
+        let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
-        if use_i64 {
-            // Save vaddr
+        if self.use_i64 {
             cb.emit(ctx, &Instruction::LocalTee(lv))?;
 
             // Level 3 lookup
@@ -436,14 +466,14 @@ where
             cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            l3_base.emit_load(ctx, cb, true)?;
+            self.l3_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
 
@@ -461,7 +491,7 @@ where
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
 
@@ -479,28 +509,28 @@ where
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
 
-            // Security + final address (same as standard mapper)
+            // Security + final address
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?; // security_index
+            cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::LocalGet(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_base_low48
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            sec_dir_base.emit_load(ctx, cb, true)?;
+            self.security_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64Const(48))?;
@@ -516,51 +546,77 @@ where
             cb.emit(ctx, &Instruction::I64Add)?;
         } else {
             // 32-bit vaddr/paddr: delegate to the 32-bit single-level mapper
-            let mut inner =
-                standard_page_table_mapper_32(l3_base, sec_dir_base, memory_index, false, locals);
+            let mut inner = StandardPageTableMapper32 {
+                page_table_base: self.l3_base,
+                security_dir_base: self.security_dir_base,
+                memory_index: self.memory_index,
+                use_i64: false,
+                locals: self.locals,
+            };
             inner.call(ctx, cb)?;
         }
         Ok(())
-        },
     }
 }
 
-// ── multilevel_page_table_mapper_32 ───────────────────────────────────────────
-
-/// Build a three-level page-table mapper with 32-bit physical addresses.
-///
-/// Each entry is 4 bytes.  The upper 8 bits of the physical address come from
-/// the security directory; the lower 24 bits from the page-table entry.
+/// Build a three-level page-table mapper for 64 KiB pages with 64-bit
+/// physical addresses.
 ///
 /// When `use_i64 = false` this delegates to
-/// [`standard_page_table_mapper_32`].
+/// [`standard_page_table_mapper_32`] (the 32-bit multi-level fallback).
 ///
-/// # Scratch locals consumed
-/// `locals.vaddr`, `locals.scratch[0]`, `locals.scratch[1]`, `locals.scratch[2]`.
-///
-/// # Returns
-/// A closure implementing [`MapperCallback`].
-pub fn multilevel_page_table_mapper_32<Context, E, F>(
+/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// it as a mapper callback.
+pub fn multilevel_page_table_mapper(
     l3_table_base: impl Into<PageTableBase>,
     security_directory_base: impl Into<PageTableBase>,
     memory_index: u32,
     use_i64: bool,
-    locals: PageMapLocals,
-) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
-where
-    F: InstructionSink<Context, E>,
-{
-    let l3_base = l3_table_base.into();
-    let sec_dir_base = security_directory_base.into();
+) -> MultilevelPageTableMapper {
+    MultilevelPageTableMapper {
+        l3_base: l3_table_base.into(),
+        security_dir_base: security_directory_base.into(),
+        memory_index,
+        use_i64,
+        locals: None,
+    }
+}
 
-    ChunkedMapper {
-        page_size: 0x10000,
-        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+// ── MultilevelPageTableMapper32 ────────────────────────────────────────────────
+
+/// A three-level page-table mapper with 32-bit physical addresses.
+///
+/// Construct via [`multilevel_page_table_mapper_32`].
+pub struct MultilevelPageTableMapper32 {
+    l3_base: PageTableBase,
+    security_dir_base: PageTableBase,
+    memory_index: u32,
+    use_i64: bool,
+    locals: Option<PageMapLocals>,
+}
+
+impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+    for MultilevelPageTableMapper32
+{
+    fn chunk_size(&self) -> Option<u64> {
+        Some(0x10000)
+    }
+
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        cb: &mut CallbackContext<Context, E, F>,
+    ) -> Result<(), E> {
+        let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
-        if use_i64 {
-            // Save vaddr
+        if self.use_i64 {
             cb.emit(ctx, &Instruction::LocalTee(lv))?;
 
             // Level 3
@@ -571,14 +627,14 @@ where
             cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            l3_base.emit_load(ctx, cb, true)?;
+            self.l3_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
@@ -597,7 +653,7 @@ where
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
@@ -616,30 +672,30 @@ where
                 &Instruction::I32Load(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?; // page_pointer (i32)
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_pointer as i64
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
 
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-            cb.emit(ctx, &Instruction::I64And)?; // security_index
+            cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(8))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?; // page_base_low24
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?;
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
-            sec_dir_base.emit_load(ctx, cb, true)?;
+            self.security_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
             cb.emit(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
-                    memory_index,
+                    memory_index: self.memory_index,
                 }),
             )?;
             cb.emit(ctx, &Instruction::I64Const(56))?;
@@ -654,12 +710,38 @@ where
             cb.emit(ctx, &Instruction::I64And)?;
             cb.emit(ctx, &Instruction::I64Add)?;
         } else {
-            // 32-bit fallback
-            let mut inner =
-                standard_page_table_mapper_32(l3_base, sec_dir_base, memory_index, false, locals);
+            // 32-bit fallback: delegate to standard_page_table_mapper_32
+            let mut inner = StandardPageTableMapper32 {
+                page_table_base: self.l3_base,
+                security_dir_base: self.security_dir_base,
+                memory_index: self.memory_index,
+                use_i64: false,
+                locals: self.locals,
+            };
             inner.call(ctx, cb)?;
         }
         Ok(())
-        },
+    }
+}
+
+/// Build a three-level page-table mapper with 32-bit physical addresses.
+///
+/// When `use_i64 = false` this delegates to
+/// [`standard_page_table_mapper_32`].
+///
+/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// it as a mapper callback.
+pub fn multilevel_page_table_mapper_32(
+    l3_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
+    memory_index: u32,
+    use_i64: bool,
+) -> MultilevelPageTableMapper32 {
+    MultilevelPageTableMapper32 {
+        l3_base: l3_table_base.into(),
+        security_dir_base: security_directory_base.into(),
+        memory_index,
+        use_i64,
+        locals: None,
     }
 }

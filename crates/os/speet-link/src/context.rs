@@ -1,10 +1,12 @@
-//! [`ReactorContext`] — the single borrow a recompiler takes from its environment.
+//! [`BaseContext`] and [`ReactorContext`] — the environment a recompiler borrows.
 //!
-//! A `ReactorContext` is the unified interface through which an arch
-//! recompiler accesses:
-//! - the [`yecta::Reactor`] (instruction emission, function management),
-//! - the [`speet_traps::TrapConfig`] (trap declaration and firing), and
-//! - any configuration (pool, escape tag, layout).
+//! [`BaseContext`] provides layout management and trap coordination for any
+//! translation frontend — including the WASM frontend which does not use a
+//! yecta Reactor.
+//!
+//! [`ReactorContext`] extends [`BaseContext`] with reactor emission methods
+//! (`feed`, `jmp`, `next_with`, `seal_fn`) used only by native recompilers
+//! backed by yecta.
 //!
 //! The canonical implementation is [`Linker`](crate::linker::Linker), which
 //! owns the reactor and traps.  Recompilers receive a `&mut impl
@@ -23,19 +25,17 @@ use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor};
 
-// ── ReactorContext ────────────────────────────────────────────────────────────
+// ── BaseContext ───────────────────────────────────────────────────────────────
 
-/// The unified environment a recompiler borrows from its caller.
+/// Minimal context for layout management and trap/mapper coordination.
 ///
-/// See the [module documentation](self) for an overview.
+/// Does not require a yecta Reactor, so it can be used by the WASM frontend
+/// as well as native recompilers.
 ///
 /// ## Type parameters
-/// - `Context` — the translation context passed through to the reactor.
+/// - `Context` — the translation context passed through to instruction sinks.
 /// - `E` — the error type.
-pub trait ReactorContext<Context, E> {
-    /// The function type produced by the underlying reactor.
-    type FnType;
-
+pub trait BaseContext<Context, E> {
     // ── Layout ────────────────────────────────────────────────────────────
 
     /// Read-only access to the unified parameter + local layout.
@@ -50,19 +50,10 @@ pub trait ReactorContext<Context, E> {
     /// Overwrite the stored [`Mark`].
     fn set_locals_mark(&mut self, mark: Mark);
 
-    // ── Reactor state ─────────────────────────────────────────────────────
+    // ── Function offset ───────────────────────────────────────────────────
 
     /// Absolute WASM function index of the first function compiled so far.
     fn base_func_offset(&self) -> u32;
-
-    /// Number of compiled functions currently held in the reactor.
-    fn fn_count(&self) -> usize;
-
-    /// Drain all compiled functions from the reactor.
-    ///
-    /// After draining, `base_func_offset` is advanced by the drained count
-    /// and the reactor is ready for the next binary unit.
-    fn drain_fns(&mut self) -> Vec<Self::FnType>;
 
     /// Advance `base_func_offset` by `n` without going through the reactor.
     ///
@@ -84,7 +75,7 @@ pub trait ReactorContext<Context, E> {
     /// to the internal layout.
     ///
     /// Call this after the arch recompiler has appended its own per-function
-    /// locals and before calling [`next_with`](Self::next_with).
+    /// locals and before building the output function.
     fn declare_trap_locals(&mut self);
 
     /// Fire the instruction trap (if any).
@@ -100,6 +91,34 @@ pub trait ReactorContext<Context, E> {
     ///
     /// Returns [`TrapAction::Continue`] when no trap is installed.
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E>;
+}
+
+// ── ReactorContext ────────────────────────────────────────────────────────────
+
+/// The unified environment a native recompiler borrows from its caller.
+///
+/// Extends [`BaseContext`] with reactor emission methods used only by
+/// yecta-backed native frontends.
+///
+/// See the [module documentation](self) for an overview.
+///
+/// ## Type parameters
+/// - `Context` — the translation context passed through to the reactor.
+/// - `E` — the error type.
+pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
+    /// The function type produced by the underlying reactor.
+    type FnType;
+
+    // ── Reactor state ─────────────────────────────────────────────────────
+
+    /// Number of compiled functions currently held in the reactor.
+    fn fn_count(&self) -> usize;
+
+    /// Drain all compiled functions from the reactor.
+    ///
+    /// After draining, `base_func_offset` is advanced by the drained count
+    /// and the reactor is ready for the next binary unit.
+    fn drain_fns(&mut self) -> Vec<Self::FnType>;
 
     // ── Reactor operations ────────────────────────────────────────────────
 
@@ -152,14 +171,12 @@ where
     pub escape_tag: Option<EscapeTag>,
 }
 
-impl<'a, Context, E, F, P> ReactorContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
+impl<'a, Context, E, F, P> BaseContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
     F: InstructionSink<Context, E> + Default,
     P: LocalPoolBackend,
     Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
-    type FnType = F;
-
     fn layout(&self) -> &LocalLayout {
         &self.layout
     }
@@ -175,12 +192,6 @@ where
 
     fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
-    }
-    fn fn_count(&self) -> usize {
-        self.reactor.fn_count()
-    }
-    fn drain_fns(&mut self) -> Vec<F> {
-        self.reactor.drain_fns()
     }
     fn advance_base_func_offset(&mut self, n: u32) {
         self.reactor
@@ -199,6 +210,22 @@ where
     }
     fn on_jump(&mut self, _info: &JumpInfo, _ctx: &mut Context) -> Result<TrapAction, E> {
         Ok(TrapAction::Continue)
+    }
+}
+
+impl<'a, Context, E, F, P> ReactorContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
+where
+    F: InstructionSink<Context, E> + Default,
+    P: LocalPoolBackend,
+    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+{
+    type FnType = F;
+
+    fn fn_count(&self) -> usize {
+        self.reactor.fn_count()
+    }
+    fn drain_fns(&mut self) -> Vec<F> {
+        self.reactor.drain_fns()
     }
 
     fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {

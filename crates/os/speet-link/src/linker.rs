@@ -37,7 +37,7 @@ use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor};
 
-use crate::context::ReactorContext;
+use crate::context::{BaseContext, ReactorContext};
 use crate::recompiler::Recompile;
 use crate::unit::BinaryUnit;
 
@@ -174,9 +174,9 @@ where
     }
 }
 
-// ── ReactorContext impl ───────────────────────────────────────────────────────
+// ── BaseContext impl ──────────────────────────────────────────────────────────
 
-impl<'cb, 'ctx, Context, E, F, P, Plugin> ReactorContext<Context, E>
+impl<'cb, 'ctx, Context, E, F, P, Plugin> BaseContext<Context, E>
     for Linker<'cb, 'ctx, Context, E, F, P, Plugin>
 where
     F: InstructionSink<Context, E>,
@@ -184,9 +184,6 @@ where
     Plugin: LinkerPlugin<F>,
     Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
-    type FnType = F;
-
-    // Layout
     fn layout(&self) -> &LocalLayout {
         &self.layout
     }
@@ -200,22 +197,14 @@ where
         self.locals_mark = mark;
     }
 
-    // Reactor state
     fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
-    }
-    fn fn_count(&self) -> usize {
-        self.reactor.fn_count()
-    }
-    fn drain_fns(&mut self) -> Vec<F> {
-        self.reactor.drain_fns()
     }
     fn advance_base_func_offset(&mut self, n: u32) {
         self.reactor
             .set_base_func_offset(self.reactor.base_func_offset() + n);
     }
 
-    // Trap support
     fn declare_trap_params(&mut self) {
         self.traps.declare_params(&mut self.layout);
     }
@@ -241,8 +230,27 @@ where
         let layout_ref = unsafe { &*layout };
         self.traps.on_jump(info, ctx, &mut self.reactor, layout_ref)
     }
+}
 
-    // Reactor operations
+// ── ReactorContext impl ───────────────────────────────────────────────────────
+
+impl<'cb, 'ctx, Context, E, F, P, Plugin> ReactorContext<Context, E>
+    for Linker<'cb, 'ctx, Context, E, F, P, Plugin>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Plugin: LinkerPlugin<F>,
+    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+{
+    type FnType = F;
+
+    fn fn_count(&self) -> usize {
+        self.reactor.fn_count()
+    }
+    fn drain_fns(&mut self) -> Vec<F> {
+        self.reactor.drain_fns()
+    }
+
     fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.feed(ctx, insn)
     }
@@ -256,7 +264,6 @@ where
         self.reactor.seal(ctx, insn)
     }
 
-    // Configuration
     fn pool(&self) -> &Pool {
         &self.pool
     }
