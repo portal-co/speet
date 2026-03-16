@@ -2282,27 +2282,22 @@ where
 {
     type BinaryArgs = DexBinaryArgs;
 
-    fn reset_for_next_binary<RC>(
+    fn reset_for_next_binary(
         &mut self,
-        _ctx: &mut RC,
+        _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         args: DexBinaryArgs,
-    )
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) {
         self.flat = args.flat;
         // Rebuild total_params for the new binary's register count.
         let max_regs = self.flat.max_registers();
         self.total_params = max_regs; // traps may add more; caller should re-run setup_traps
     }
 
-    fn drain_unit<RC>(
+    fn drain_unit(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(AString, u32)>,
     ) -> BinaryUnit<F>
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
     {
         use wasm_encoder::ValType;
         // DEX: all params are i32 (Dalvik register file).

@@ -42,12 +42,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{
+    EscapeTag, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx,
+};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
-    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
-    TrapConfig,
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
 };
 /// x86-64 to WebAssembly recompiler.
 ///
@@ -122,7 +123,10 @@ where
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
         };
         recomp.setup_traps();
         recomp
@@ -236,9 +240,9 @@ where
     pub fn setup_traps(&mut self) -> u32 {
         self.layout = LocalLayout::empty();
         self.layout.append(16, wasm_encoder::ValType::I64); // GPRs (params 0-15)
-        self.layout.append(1, wasm_encoder::ValType::I32);  // PC (param 16)
-        self.layout.append(5, wasm_encoder::ValType::I32);  // ZF/SF/CF/OF/PF (params 17-21)
-        self.layout.append(4, wasm_encoder::ValType::I64);  // temps + expected_RA (params 22-25)
+        self.layout.append(1, wasm_encoder::ValType::I32); // PC (param 16)
+        self.layout.append(5, wasm_encoder::ValType::I32); // ZF/SF/CF/OF/PF (params 17-21)
+        self.layout.append(4, wasm_encoder::ValType::I64); // temps + expected_RA (params 22-25)
         self.traps.declare_params(&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
@@ -687,26 +691,20 @@ where
     /// New `base_rip` for the next binary.
     type BinaryArgs = u64;
 
-    fn reset_for_next_binary<RC>(
+    fn reset_for_next_binary(
         &mut self,
-        _ctx: &mut RC,
+        _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         new_base_rip: u64,
-    )
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) {
         self.base_rip = new_base_rip;
         self.hints.clear();
     }
 
-    fn drain_unit<RC>(
+    fn drain_unit(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(String, u32)>,
-    ) -> BinaryUnit<F>
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) -> BinaryUnit<F> {
         // Build the uniform function type: all params are i64 (x86-64 GPRs,
         // PC, flags, temps are all i64 or i32, but each function shares the
         // same total_params-wide signature).

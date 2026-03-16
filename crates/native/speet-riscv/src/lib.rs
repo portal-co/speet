@@ -58,19 +58,21 @@ use wax_core::build::InstructionSink;
 use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 use speet_traps::{
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
     insn::{ArchTag, InsnClass},
-    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
-    TrapConfig,
 };
-use speet_wasm_helpers::{mulh_signed, mulh_signed_unsigned, mulh_unsigned, MulhTemps};
+use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{
+    EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    TableIdx, TypeIdx,
+};
 
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
 pub use speet_memory::{
-    multilevel_page_table_mapper, multilevel_page_table_mapper_32, standard_page_table_mapper,
-    standard_page_table_mapper_32, CallbackContext, MapperCallback, PageMapLocals, PageTableBase,
+    CallbackContext, MapperCallback, PageMapLocals, PageTableBase, multilevel_page_table_mapper,
+    multilevel_page_table_mapper_32, standard_page_table_mapper, standard_page_table_mapper_32,
 };
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 
@@ -359,7 +361,10 @@ where
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
@@ -410,7 +415,10 @@ where
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
@@ -763,12 +771,16 @@ where
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
     pub fn setup_traps(&mut self) -> u32 {
-        let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
+        let int_type = if self.enable_rv64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         self.layout = LocalLayout::empty();
-        self.layout.append(32, int_type);        // x0-x31 (params 0-31)
-        self.layout.append(32, ValType::F64);    // f0-f31 (params 32-63)
-        self.layout.append(1, ValType::I32);     // PC (param 64)
-        self.layout.append(1, int_type);         // expected_RA (param 65)
+        self.layout.append(32, int_type); // x0-x31 (params 0-31)
+        self.layout.append(32, ValType::F64); // f0-f31 (params 32-63)
+        self.layout.append(1, ValType::I32); // PC (param 64)
+        self.layout.append(1, int_type); // expected_RA (param 65)
         self.traps.declare_params(&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
@@ -887,25 +899,41 @@ where
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
-        let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
-        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
+        let int_type = if self.enable_rv64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
+        let addr_type = if self.use_memory64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         // Rewind to the params mark, discarding any locals from the previous function.
         self.layout.rewind(&self.locals_mark);
         // Append per-function non-param locals in order:
-        self.temps_slot        = self.layout.append(num_temps, int_type);
+        self.temps_slot = self.layout.append(num_temps, int_type);
         self.addr_scratch_slot = self.layout.append(1, addr_type);
-        self.pool_addr_slot    = self.layout.append(Self::N_POOL_ADDR, addr_type);
-        self.pool_i64_slot     = self.layout.append(Self::N_POOL_I64, ValType::I64);
+        self.pool_addr_slot = self.layout.append(Self::N_POOL_ADDR, addr_type);
+        self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
         self.traps.declare_locals(&mut self.layout);
         // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_addr_start = self.layout.base(self.pool_addr_slot);
-        let pool_i64_start  = self.layout.base(self.pool_i64_slot);
+        let pool_i64_start = self.layout.base(self.pool_i64_slot);
         match addr_type {
-            ValType::I32 => self.reactor.local_pool.seed_i32(pool_addr_start, Self::N_POOL_ADDR),
-            ValType::I64 => self.reactor.local_pool.seed_i64(pool_addr_start, Self::N_POOL_ADDR),
+            ValType::I32 => self
+                .reactor
+                .local_pool
+                .seed_i32(pool_addr_start, Self::N_POOL_ADDR),
+            ValType::I64 => self
+                .reactor
+                .local_pool
+                .seed_i64(pool_addr_start, Self::N_POOL_ADDR),
             _ => {}
         }
-        self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
+        self.reactor
+            .local_pool
+            .seed_i64(pool_i64_start, Self::N_POOL_I64);
         // Declare only non-param locals to the function (params are already in the type).
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), 2)?;
@@ -1366,11 +1394,13 @@ mod tests {
             src1: rv_asm::Reg(0),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1385,11 +1415,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1405,11 +1437,13 @@ mod tests {
             base: rv_asm::Reg(2),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1424,11 +1458,13 @@ mod tests {
             base: rv_asm::Reg(2),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1444,11 +1480,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1464,11 +1502,13 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1484,11 +1524,13 @@ mod tests {
             src2: rv_asm::FReg(3),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1501,11 +1543,13 @@ mod tests {
             RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
         let mut ctx = ();
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, is_compressed, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, is_compressed, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1520,11 +1564,13 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst1, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst1, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // addi x2, x0, 3
         let inst2 = Inst::Addi {
@@ -1532,11 +1578,13 @@ mod tests {
             dest: rv_asm::Reg(2),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst2, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst2, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // add x3, x1, x2  (should compute 5 + 3 = 8)
         let inst3 = Inst::Add {
@@ -1544,11 +1592,13 @@ mod tests {
             src1: rv_asm::Reg(1),
             src2: rv_asm::Reg(2),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst3, 0x1008, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst3, 0x1008, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1621,11 +1671,13 @@ mod tests {
             src1: rv_asm::Reg(0),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint_inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint_inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Should not have collected any hints since tracking is disabled
         assert_eq!(recompiler.get_hints().len(), 0);
@@ -1653,11 +1705,13 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Translate another HINT: addi x0, x0, 2
         let hint2 = Inst::Addi {
@@ -1665,11 +1719,13 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Should have collected both hints
         let hints = recompiler.get_hints();
@@ -1701,15 +1757,17 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(
-                &mut ctx,
-                &regular_addi,
-                0x1000,
-                IsCompressed::No,
-                &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-            )
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(
+                    &mut ctx,
+                    &regular_addi,
+                    0x1000,
+                    IsCompressed::No,
+                    &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                )
+                .is_ok()
+        );
 
         // Should not be tracked as a HINT
         assert_eq!(recompiler.get_hints().len(), 0);
@@ -1720,11 +1778,13 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Should only have the HINT
         let hints = recompiler.get_hints();
@@ -1754,11 +1814,13 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
         assert_eq!(recompiler.get_hints().len(), 1);
 
         // Clear hints
@@ -1779,30 +1841,36 @@ mod tests {
         };
 
         // Initially disabled
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
         assert_eq!(recompiler.get_hints().len(), 0);
 
         // Enable tracking
         recompiler.set_hint_tracking(true);
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
         assert_eq!(recompiler.get_hints().len(), 1);
 
         // Disable tracking (should clear existing hints)
         recompiler.set_hint_tracking(false);
         assert_eq!(recompiler.get_hints().len(), 0);
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &hint, 0x1008, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &hint, 0x1008, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
         assert_eq!(recompiler.get_hints().len(), 0);
     }
     #[test]
@@ -1829,11 +1897,13 @@ mod tests {
                 src1: rv_asm::Reg(0),
             };
             let pc = 0x1000 + (test_case as u32 * 4);
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint, pc, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint, pc, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
         }
 
         // Verify all test case markers were collected
@@ -1882,22 +1952,26 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             let hint2 = Inst::Addi {
                 imm: rv_asm::Imm::new_i32(2),
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Drop recompiler before checking results
         }
@@ -1949,11 +2023,13 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint, 0x2000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint, 0x2000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Clear callback and get tracked hints before dropping
             recompiler.clear_hint_callback();
@@ -2010,11 +2086,13 @@ mod tests {
             };
 
             // First HINT should invoke callback
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Clear callback
             recompiler.clear_hint_callback();
@@ -2025,11 +2103,13 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Drop recompiler
         }
@@ -2070,11 +2150,13 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Get hints before dropping
             assert_eq!(recompiler.get_hints().len(), 0);
@@ -2115,15 +2197,17 @@ mod tests {
                 dest: rv_asm::Reg(1),
                 src1: rv_asm::Reg(0),
             };
-            assert!(recompiler
-                .translate_instruction(
-                    &mut ctx,
-                    &regular_addi,
-                    0x1000,
-                    IsCompressed::No,
-                    &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                )
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(
+                        &mut ctx,
+                        &regular_addi,
+                        0x1000,
+                        IsCompressed::No,
+                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                    )
+                    .is_ok()
+            );
 
             // Drop recompiler
         }
@@ -2165,15 +2249,17 @@ mod tests {
                     dest: rv_asm::Reg(0),
                     src1: rv_asm::Reg(0),
                 };
-                assert!(recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &hint,
-                        0x1000 + (i as u32 * 4),
-                        IsCompressed::No,
-                        &mut |a| Function::new(a.collect::<Vec<_>>())
-                    )
-                    .is_ok());
+                assert!(
+                    recompiler
+                        .translate_instruction(
+                            &mut ctx,
+                            &hint,
+                            0x1000 + (i as u32 * 4),
+                            IsCompressed::No,
+                            &mut |a| Function::new(a.collect::<Vec<_>>())
+                        )
+                        .is_ok()
+                );
             }
 
             // Drop recompiler
@@ -2212,11 +2298,13 @@ mod tests {
 
             // Translate an ECALL instruction
             let ecall = Inst::Ecall;
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &ecall, 0x2000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &ecall, 0x2000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Drop recompiler
         }
@@ -2252,11 +2340,13 @@ mod tests {
 
             // Translate an EBREAK instruction
             let ebreak = Inst::Ebreak;
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &ebreak, 0x3000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(&mut ctx, &ebreak, 0x3000, IsCompressed::No, &mut |a| {
+                        Function::new(a.collect::<Vec<_>>())
+                    })
+                    .is_ok()
+            );
 
             // Drop recompiler
         }
@@ -2296,11 +2386,13 @@ mod tests {
             for i in 0..3 {
                 let ecall = Inst::Ecall;
                 let pc = 0x1000 + (i * 4);
-                assert!(recompiler
-                    .translate_instruction(&mut ctx, &ecall, pc, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok());
+                assert!(
+                    recompiler
+                        .translate_instruction(&mut ctx, &ecall, pc, IsCompressed::No, &mut |a| {
+                            Function::new(a.collect::<Vec<_>>())
+                        })
+                        .is_ok()
+                );
             }
 
             // Drop recompiler
@@ -2338,11 +2430,13 @@ mod tests {
             for i in 0..3 {
                 let ebreak = Inst::Ebreak;
                 let pc = 0x2000 + (i * 4);
-                assert!(recompiler
-                    .translate_instruction(&mut ctx, &ebreak, pc, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok());
+                assert!(
+                    recompiler
+                        .translate_instruction(&mut ctx, &ebreak, pc, IsCompressed::No, &mut |a| {
+                            Function::new(a.collect::<Vec<_>>())
+                        })
+                        .is_ok()
+                );
             }
 
             // Drop recompiler
@@ -2388,40 +2482,56 @@ mod tests {
             recompiler.set_ebreak_callback(&mut ebreak_cb);
 
             // First ECALL and EBREAK should invoke callbacks
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &Inst::Ecall, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
-            assert!(recompiler
-                .translate_instruction(
-                    &mut ctx,
-                    &Inst::Ebreak,
-                    0x1004,
-                    IsCompressed::No,
-                    &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                )
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(
+                        &mut ctx,
+                        &Inst::Ecall,
+                        0x1000,
+                        IsCompressed::No,
+                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                    )
+                    .is_ok()
+            );
+            assert!(
+                recompiler
+                    .translate_instruction(
+                        &mut ctx,
+                        &Inst::Ebreak,
+                        0x1004,
+                        IsCompressed::No,
+                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                    )
+                    .is_ok()
+            );
 
             // Clear callbacks
             recompiler.clear_ecall_callback();
             recompiler.clear_ebreak_callback();
 
             // Second ECALL and EBREAK should not invoke callbacks (will use default behavior)
-            assert!(recompiler
-                .translate_instruction(&mut ctx, &Inst::Ecall, 0x1008, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok());
-            assert!(recompiler
-                .translate_instruction(
-                    &mut ctx,
-                    &Inst::Ebreak,
-                    0x100c,
-                    IsCompressed::No,
-                    &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                )
-                .is_ok());
+            assert!(
+                recompiler
+                    .translate_instruction(
+                        &mut ctx,
+                        &Inst::Ecall,
+                        0x1008,
+                        IsCompressed::No,
+                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                    )
+                    .is_ok()
+            );
+            assert!(
+                recompiler
+                    .translate_instruction(
+                        &mut ctx,
+                        &Inst::Ebreak,
+                        0x100c,
+                        IsCompressed::No,
+                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
+                    )
+                    .is_ok()
+            );
 
             // Drop recompiler
         }
@@ -2451,11 +2561,13 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(2),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test ADDW (Add Word)
         let addw = Inst::AddW {
@@ -2463,11 +2575,13 @@ mod tests {
             src1: rv_asm::Reg(4),
             src2: rv_asm::Reg(5),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &addw, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &addw, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test SLLIW (Shift Left Logical Word Immediate)
         let slliw = Inst::SlliW {
@@ -2475,11 +2589,13 @@ mod tests {
             dest: rv_asm::Reg(6),
             src1: rv_asm::Reg(7),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &slliw, 0x1008, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &slliw, 0x1008, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test LWU (Load Word Unsigned)
         let lwu = Inst::Lwu {
@@ -2487,11 +2603,13 @@ mod tests {
             dest: rv_asm::Reg(8),
             base: rv_asm::Reg(9),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &lwu, 0x100c, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &lwu, 0x100c, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test LD (Load Double-word)
         let ld = Inst::Ld {
@@ -2499,11 +2617,13 @@ mod tests {
             dest: rv_asm::Reg(10),
             base: rv_asm::Reg(11),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &ld, 0x1010, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &ld, 0x1010, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test SD (Store Double-word)
         let sd = Inst::Sd {
@@ -2511,11 +2631,13 @@ mod tests {
             base: rv_asm::Reg(12),
             src: rv_asm::Reg(13),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &sd, 0x1014, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &sd, 0x1014, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2534,11 +2656,13 @@ mod tests {
 
         // When RV64 is disabled, we emit Unreachable, which should still succeed
         // but the generated code will trap if executed
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
     #[test]
     fn test_rv64_with_memory64() {
@@ -2562,11 +2686,13 @@ mod tests {
             dest: rv_asm::Reg(10),
             base: rv_asm::Reg(11),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &ld, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &ld, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test SD with memory64
         let sd = Inst::Sd {
@@ -2574,11 +2700,13 @@ mod tests {
             base: rv_asm::Reg(12),
             src: rv_asm::Reg(13),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &sd, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &sd, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
     #[test]
     fn test_rv64_mulh_instructions() {
@@ -2602,11 +2730,13 @@ mod tests {
             src1: rv_asm::Reg(2),
             src2: rv_asm::Reg(3),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &mulh, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &mulh, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test MULHU (unsigned x unsigned)
         let mulhu = Inst::Mulhu {
@@ -2614,11 +2744,13 @@ mod tests {
             src1: rv_asm::Reg(5),
             src2: rv_asm::Reg(6),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &mulhu, 0x1004, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &mulhu, 0x1004, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Test MULHSU (signed x unsigned)
         let mulhsu = Inst::Mulhsu {
@@ -2626,11 +2758,13 @@ mod tests {
             src1: rv_asm::Reg(8),
             src2: rv_asm::Reg(9),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &mulhsu, 0x1008, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &mulhsu, 0x1008, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
 
         // Verify that writing to x0 is properly ignored
         let mulh_x0 = Inst::Mulh {
@@ -2638,11 +2772,13 @@ mod tests {
             src1: rv_asm::Reg(2),
             src2: rv_asm::Reg(3),
         };
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &mulh_x0, 0x100c, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &mulh_x0, 0x100c, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
     #[cfg(false)]
     #[test]
@@ -2656,11 +2792,13 @@ mod tests {
             src: rv_asm::FReg(2),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_ls, 0x1000, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ls, 0x1000, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.LU.S (float to unsigned i64)
         let fcvt_lus = Inst::FcvtLuS {
@@ -2668,11 +2806,13 @@ mod tests {
             src: rv_asm::FReg(4),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_lus, 0x1004, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_lus, 0x1004, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.S.L (signed i64 to float)
         let fcvt_sl = Inst::FcvtSL {
@@ -2680,11 +2820,13 @@ mod tests {
             src: rv_asm::Reg(6),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_sl, 0x1008, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_sl, 0x1008, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.S.LU (unsigned i64 to float)
         let fcvt_slu = Inst::FcvtSLu {
@@ -2692,11 +2834,13 @@ mod tests {
             src: rv_asm::Reg(8),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_slu, 0x100c, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_slu, 0x100c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.L.D (double to signed i64)
         let fcvt_ld = Inst::FcvtLD {
@@ -2704,11 +2848,13 @@ mod tests {
             src: rv_asm::FReg(10),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_ld, 0x1010, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ld, 0x1010, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.LU.D (double to unsigned i64)
         let fcvt_lud = Inst::FcvtLuD {
@@ -2716,11 +2862,13 @@ mod tests {
             src: rv_asm::FReg(12),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_lud, 0x1014, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_lud, 0x1014, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.D.L (signed i64 to double)
         let fcvt_dl = Inst::FcvtDL {
@@ -2728,11 +2876,13 @@ mod tests {
             src: rv_asm::Reg(14),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_dl, 0x1018, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_dl, 0x1018, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FCVT.D.LU (unsigned i64 to double)
         let fcvt_dlu = Inst::FcvtDLu {
@@ -2740,33 +2890,39 @@ mod tests {
             src: rv_asm::Reg(16),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_dlu, 0x101c, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_dlu, 0x101c, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FMV.X.D (double register to integer register)
         let fmv_xd = Inst::FmvXD {
             dest: rv_asm::Reg(17),
             src: rv_asm::FReg(18),
         };
-        assert!(recompiler
-            .translate_instruction(&fmv_xd, 0x1020, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fmv_xd, 0x1020, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Test FMV.D.X (integer register to double register)
         let fmv_dx = Inst::FmvDX {
             dest: rv_asm::FReg(19),
             src: rv_asm::Reg(20),
         };
-        assert!(recompiler
-            .translate_instruction(&fmv_dx, 0x1024, IsCompressed::No, &mut |a| Function::new(
-                a.collect::<Vec<_>>()
-            ))
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fmv_dx, 0x1024, IsCompressed::No, &mut |a| Function::new(
+                    a.collect::<Vec<_>>()
+                ))
+                .is_ok()
+        );
 
         // Verify that writing to x0 is properly ignored (for conversion to integer)
         let fcvt_ls_x0 = Inst::FcvtLS {
@@ -2774,11 +2930,13 @@ mod tests {
             src: rv_asm::FReg(2),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(recompiler
-            .translate_instruction(&fcvt_ls_x0, 0x1028, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&fcvt_ls_x0, 0x1028, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2849,11 +3007,13 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2880,11 +3040,13 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2911,11 +3073,13 @@ mod tests {
             dest: rv_asm::Reg(5), // t0, not ra
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2942,11 +3106,13 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2965,11 +3131,13 @@ mod tests {
         };
 
         // Should still work, just uses non-speculative path
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2998,11 +3166,13 @@ mod tests {
             dest: rv_asm::Reg(0), // x0 (no link)
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3029,11 +3199,13 @@ mod tests {
             dest: rv_asm::Reg(0),
         };
 
-        assert!(recompiler
-            .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .is_ok());
+        assert!(
+            recompiler
+                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .is_ok()
+        );
     }
 }
 
@@ -3055,29 +3227,22 @@ where
     /// New `base_pc` for the next RISC-V binary.
     type BinaryArgs = u64;
 
-    fn reset_for_next_binary<RC>(
+    fn reset_for_next_binary(
         &mut self,
-        _ctx: &mut RC,
+        _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         new_base_pc: u64,
-    )
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) {
         self.base_pc = new_base_pc;
         self.hints.clear();
     }
 
-    fn drain_unit<RC>(
+    fn drain_unit(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(AString, u32)>,
-    ) -> BinaryUnit<F>
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) -> BinaryUnit<F> {
         // RISC-V: all params are i64 (int regs, fp regs, PC).
-        let param_types: Vec<ValType> =
-            (0..self.total_params).map(|_| ValType::I64).collect();
+        let param_types: Vec<ValType> = (0..self.total_params).map(|_| ValType::I64).collect();
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
         let base = ctx.base_func_offset();

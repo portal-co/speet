@@ -47,7 +47,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use wax_core::build::InstructionSink;
 
-use rabbitizer::{registers::GprO32, InstrId, Instruction};
+use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
@@ -58,9 +58,8 @@ use yecta::{
 pub use speet_memory::{CallbackContext, MapperCallback};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 use speet_traps::{
+    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
     insn::{ArchTag, InsnClass},
-    InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction,
-    TrapConfig,
 };
 
 /// Branch operation types for conditional branches
@@ -301,7 +300,10 @@ where
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
@@ -343,7 +345,10 @@ where
             traps: TrapConfig::new(),
             total_params: Self::BASE_PARAMS,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
@@ -528,11 +533,15 @@ where
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     pub fn setup_traps(&mut self) -> u32 {
-        let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
+        let gpr_type = if self.enable_mips64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         self.layout = LocalLayout::empty();
-        self.layout.append(32, gpr_type);        // $0-$31 (params 0-31)
-        self.layout.append(2, gpr_type);         // HI/LO (params 32-33)
-        self.layout.append(1, ValType::I32);     // PC (param 34)
+        self.layout.append(32, gpr_type); // $0-$31 (params 0-31)
+        self.layout.append(2, gpr_type); // HI/LO (params 32-33)
+        self.layout.append(1, ValType::I32); // PC (param 34)
         self.traps.declare_params(&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
@@ -614,20 +623,28 @@ where
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
-        let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
+        let gpr_type = if self.enable_mips64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         // Rewind to the params mark, discarding any locals from the previous function.
         self.layout.rewind(&self.locals_mark);
         // Append per-function non-param locals in order:
-        self.temps_slot        = self.layout.append(num_temps, gpr_type);
+        self.temps_slot = self.layout.append(num_temps, gpr_type);
         self.addr_scratch_slot = self.layout.append(1, ValType::I32);
-        self.pool_i32_slot     = self.layout.append(Self::N_POOL_I32, ValType::I32);
-        self.pool_i64_slot     = self.layout.append(Self::N_POOL_I64, ValType::I64);
+        self.pool_i32_slot = self.layout.append(Self::N_POOL_I32, ValType::I32);
+        self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
         self.traps.declare_locals(&mut self.layout);
         // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_i32_start = self.layout.base(self.pool_i32_slot);
         let pool_i64_start = self.layout.base(self.pool_i64_slot);
-        self.reactor.local_pool.seed_i32(pool_i32_start, Self::N_POOL_I32);
-        self.reactor.local_pool.seed_i64(pool_i64_start, Self::N_POOL_I64);
+        self.reactor
+            .local_pool
+            .seed_i32(pool_i32_start, Self::N_POOL_I32);
+        self.reactor
+            .local_pool
+            .seed_i64(pool_i64_start, Self::N_POOL_I64);
         // Declare only non-param locals to the function (params are already in the type).
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), 1)?;
@@ -890,7 +907,13 @@ where
         let branch_info =
             JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::ConditionalBranch);
         let layout_ptr = &self.layout as *const LocalLayout;
-        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
+        if self
+            .traps
+            .on_jump(&branch_info, ctx, &mut self.reactor, unsafe {
+                &*layout_ptr
+            })?
+            == TrapAction::Skip
+        {
             return Ok(());
         }
 
@@ -1726,7 +1749,11 @@ where
 
                 let j_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::DirectJump);
                 let layout_ptr = &self.layout as *const LocalLayout;
-                if self.traps.on_jump(&j_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&j_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+                    == TrapAction::Skip
+                {
                     return Ok(());
                 }
                 self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -1748,7 +1775,11 @@ where
 
                 let jal_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::Call);
                 let layout_ptr = &self.layout as *const LocalLayout;
-                if self.traps.on_jump(&jal_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&jal_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+                    == TrapAction::Skip
+                {
                     return Ok(());
                 }
                 self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -1774,7 +1805,11 @@ where
                 };
                 let jr_info = JumpInfo::indirect(pc as u64, scratch, jr_kind);
                 let layout_ptr = &self.layout as *const LocalLayout;
-                if self.traps.on_jump(&jr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&jr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+                    == TrapAction::Skip
+                {
                     return Ok(());
                 }
 
@@ -1811,7 +1846,11 @@ where
 
                 let jalr_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::IndirectCall);
                 let layout_ptr = &self.layout as *const LocalLayout;
-                if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&jalr_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+                    == TrapAction::Skip
+                {
                     return Ok(());
                 }
 
@@ -2068,25 +2107,19 @@ where
     /// New `base_pc` for the next MIPS binary.
     type BinaryArgs = u32;
 
-    fn reset_for_next_binary<RC>(
+    fn reset_for_next_binary(
         &mut self,
-        _ctx: &mut RC,
+        _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         new_base_pc: u32,
-    )
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) {
         self.base_pc = new_base_pc;
     }
 
-    fn drain_unit<RC>(
+    fn drain_unit(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(String, u32)>,
-    ) -> BinaryUnit<F>
-    where
-        RC: ReactorContext<Context, E, FnType = F>,
-    {
+    ) -> BinaryUnit<F> {
         use wasm_encoder::ValType;
         // All MIPS params are i32 (32-bit register file + PC).
         let param_types: alloc::vec::Vec<ValType> =

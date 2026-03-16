@@ -27,9 +27,9 @@
 //! linker.commit(&mut rc, entry_points_2);
 //! ```
 
-use alloc::{string::String, vec::Vec};
 use crate::context::ReactorContext;
 use crate::unit::BinaryUnit;
+use alloc::{string::String, vec::Vec};
 
 // ── Recompile ─────────────────────────────────────────────────────────────────
 
@@ -56,13 +56,11 @@ pub trait Recompile<Context, E, F> {
     /// the recompiler for the next binary unit.  The `ctx` argument is
     /// provided so the recompiler can, if needed, call methods such as
     /// `ctx.layout_mut()` to rebuild the local layout for the new binary.
-    fn reset_for_next_binary<RC>(
+    fn reset_for_next_binary(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         args: Self::BinaryArgs,
-    )
-    where
-        RC: ReactorContext<Context, E, FnType = F>;
+    );
 
     /// Drain the reactor (via `ctx`) into a [`BinaryUnit`] and return it.
     ///
@@ -72,11 +70,9 @@ pub trait Recompile<Context, E, F> {
     ///
     /// The `entry_points` argument carries `(symbol, absolute_wasm_func_index)`
     /// pairs that will become WASM exports in the final module.
-    fn drain_unit<RC>(
+    fn drain_unit(
         &mut self,
-        ctx: &mut RC,
+        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(String, u32)>,
-    ) -> BinaryUnit<F>
-    where
-        RC: ReactorContext<Context, E, FnType = F>;
+    ) -> BinaryUnit<F>;
 }

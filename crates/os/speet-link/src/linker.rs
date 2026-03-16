@@ -154,10 +154,7 @@ where
     ///
     /// `entry_points` — `(symbol, absolute_wasm_func_index)` pairs that will
     /// become exports in the final module.
-    pub fn commit<R>(&mut self, rc: &mut R, entry_points: Vec<(String, u32)>)
-    where
-        R: Recompile<Context, E, F>,
-    {
+    pub fn commit<B>(&mut self, rc: &mut (dyn Recompile<Context,E,F,BinaryArgs = B> + '_), entry_points: Vec<(String, u32)>) {
         let unit = rc.drain_unit(self, entry_points);
         self.plugin.on_unit(unit);
     }
