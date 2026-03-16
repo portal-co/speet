@@ -136,6 +136,18 @@ pub struct WasmFrontend<Context, E, F = Function> {
     offsets: IndexOffsets,
     /// Factory that constructs an output function from its local-variable list.
     fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
+    /// Extra parameters injected into every translated function.
+    ///
+    /// Each type here is appended to both the parameter list **and** the result
+    /// list of every translated function.  They are threaded transparently through
+    /// all `call`, `call_indirect`, `return_call`, `return_call_indirect`,
+    /// `return`, and function-level `end` instructions so that the caller can
+    /// pass opaque values through an arbitrary call chain without modifying
+    /// individual functions.
+    ///
+    /// Declared locals in the guest are shifted to make room for the injected
+    /// parameters immediately after the original parameters.
+    pub injected_params: Vec<ValType>,
 }
 
 impl<Context, E, F> WasmFrontend<Context, E, F> {
@@ -161,6 +173,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             host_memory,
             offsets,
             fn_creator,
+            injected_params: Vec::new(),
         }
     }
 
@@ -366,11 +379,14 @@ where
     /// Emits `i[32|64].const <va>; [mapper]; i32.const 0; i32.const <len>;
     /// memory.init <seg> <host>; data.drop <seg>` for each chunk, then `End`.
     fn build_data_init_fn(&mut self, ctx: &mut Context) -> Result<(), E> {
+        // Injected params occupy local indices 0..n_injected (implicit params,
+        // not in out_locals).  PageMapLocals scratch starts after them.
+        let n_injected = self.injected_params.len() as u32;
         // 4 × i32 locals for PageMapLocals (vaddr + scratch[0..2]).
         let out_locals: Vec<(u32, ValType)> = alloc::vec![(4, ValType::I32)];
         let mut out = (self.fn_creator)(out_locals);
 
-        let map_locals = PageMapLocals::consecutive(0);
+        let map_locals = PageMapLocals::consecutive(n_injected);
         let host_memory = self.host_memory;
 
         // We need to borrow `self.data_init_ops` but also call `self.per_memory`.
@@ -410,9 +426,15 @@ where
             out.instruction(ctx, &Instruction::DataDrop(seg_idx))?;
         }
 
+        // Push injected params back as return values before End.
+        for i in 0..n_injected {
+            out.instruction(ctx, &Instruction::LocalGet(i))?;
+        }
         out.instruction(ctx, &Instruction::End)?;
 
-        let func_type = FuncType::from_val_types(&[], &[]);
+        // Function type: (inj...) -> (inj...)
+        let inj = &self.injected_params.clone();
+        let func_type = FuncType::from_val_types(inj, inj);
         self.data_init_fn_result = Some((out, func_type));
         Ok(())
     }
@@ -425,6 +447,24 @@ where
         func_type: FuncType,
         body: FunctionBody<'_>,
     ) -> Result<(), E> {
+        // ── Extend function type with injected params ─────────────────────
+        let orig_param_count = func_type.params_val_types().count() as u32;
+        let n_injected = self.injected_params.len() as u32;
+        // Injected params live at local indices orig_param_count..orig_param_count+n_injected.
+        let injected_base = orig_param_count;
+
+        let func_type = if n_injected > 0 {
+            let orig_params: Vec<ValType> = func_type.params_val_types().collect();
+            let orig_results: Vec<ValType> = func_type.results_val_types().collect();
+            let mut new_params = orig_params;
+            new_params.extend_from_slice(&self.injected_params);
+            let mut new_results = orig_results;
+            new_results.extend_from_slice(&self.injected_params);
+            FuncType::from_val_types(&new_params, &new_results)
+        } else {
+            func_type
+        };
+
         // ── Collect locals ────────────────────────────────────────────────
         let mut out_locals: Vec<(u32, ValType)> = Vec::new();
         let mut original_local_count: u32 = 0;
@@ -437,7 +477,8 @@ where
             original_local_count += count;
         }
 
-        // Params occupy indices 0..param_count; explicit locals follow.
+        // Params occupy indices 0..param_count (extended); explicit locals follow.
+        // param_count = orig_param_count + n_injected after type extension.
         let param_count = func_type.params_val_types().count() as u32;
         let base_scratch_idx = param_count + original_local_count;
 
@@ -475,11 +516,57 @@ where
         let loop_src_local = base_scratch_idx + 9;
         let loop_len_local = base_scratch_idx + 10;
 
+        // Extra scratch for call_indirect: saves the table index while we push
+        // injected params onto the stack.  Only allocated when n_injected > 0.
+        let next_scratch_after_loop =
+            base_scratch_idx + 4 + if mapper_box.is_some() { 7 } else { 0 };
+        let call_indirect_scratch = if n_injected > 0 {
+            out_locals.push((1, ValType::I32));
+            next_scratch_after_loop
+        } else {
+            0 // unused
+        };
+
         let mut out = (self.fn_creator)(out_locals);
 
         let ops_reader = body.get_operators_reader()?;
+        let mut depth: u32 = 0;
         for op_result in ops_reader {
             let op = op_result?;
+
+            // Track block depth so we can identify the function-level `End`.
+            // Also intercept `Return` and function-level `End` to push injected
+            // params as extra return values.
+            match &op {
+                Operator::Block { .. }
+                | Operator::Loop { .. }
+                | Operator::If { .. }
+                | Operator::Try { .. }
+                | Operator::TryTable { .. } => {
+                    depth += 1;
+                }
+                Operator::End => {
+                    if depth == 0 {
+                        // Function-level end: push injected locals as extra returns.
+                        for i in 0..n_injected {
+                            out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                        }
+                        out.instruction(ctx, &Instruction::End)?;
+                        continue;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                Operator::Return => {
+                    for i in 0..n_injected {
+                        out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                    }
+                    out.instruction(ctx, &Instruction::Return)?;
+                    continue;
+                }
+                _ => {}
+            }
+
             let mapper_ref: Option<&mut (dyn MapperCallback<Context, E, F> + '_)> =
                 mapper_box.as_mut().map(|b| b.as_mut() as _);
             self.translate_op(
@@ -492,6 +579,10 @@ where
                 loop_dst_local,
                 loop_src_local,
                 loop_len_local,
+                orig_param_count,
+                n_injected,
+                injected_base,
+                call_indirect_scratch,
             )?;
         }
 
@@ -511,6 +602,10 @@ where
         loop_dst_local: u32,
         loop_src_local: u32,
         loop_len_local: u32,
+        orig_param_count: u32,
+        n_injected: u32,
+        injected_base: u32,
+        call_indirect_scratch: u32,
     ) -> Result<(), E> {
         let memory_index = self.host_memory;
         let offsets = self.offsets;
@@ -603,6 +698,35 @@ where
                 emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I32, IntWidth::I64, base_scratch_idx)?;
             }
 
+            // ── Local variable accesses ───────────────────────────────────
+            // Guest local indices >= orig_param_count must be shifted by
+            // n_injected because the injected params are inserted between the
+            // original params and the original declared locals.
+            Operator::LocalGet { local_index } => {
+                let idx = if *local_index < orig_param_count {
+                    *local_index
+                } else {
+                    local_index + n_injected
+                };
+                out.instruction(ctx, &Instruction::LocalGet(idx))?;
+            }
+            Operator::LocalSet { local_index } => {
+                let idx = if *local_index < orig_param_count {
+                    *local_index
+                } else {
+                    local_index + n_injected
+                };
+                out.instruction(ctx, &Instruction::LocalSet(idx))?;
+            }
+            Operator::LocalTee { local_index } => {
+                let idx = if *local_index < orig_param_count {
+                    *local_index
+                } else {
+                    local_index + n_injected
+                };
+                out.instruction(ctx, &Instruction::LocalTee(idx))?;
+            }
+
             // ── Global accesses ───────────────────────────────────────────
             Operator::GlobalGet { global_index } => {
                 let host_idx = (*global_index as i64 + offsets.global) as u32;
@@ -615,10 +739,50 @@ where
 
             // ── Function calls ────────────────────────────────────────────
             Operator::Call { function_index } => {
+                // Push injected params as extra call arguments.
+                for i in 0..n_injected {
+                    out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                }
                 out.instruction(ctx, &Instruction::Call(function_index + offsets.func))?;
+                // Callee returns injected params; save them back in reverse order.
+                for i in (0..n_injected).rev() {
+                    out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
+                }
             }
             Operator::CallIndirect { type_index, table_index } => {
+                if n_injected > 0 {
+                    // Stack top is the table index; save it so we can push
+                    // injected params between the args and the table index.
+                    out.instruction(ctx, &Instruction::LocalSet(call_indirect_scratch))?;
+                    for i in 0..n_injected {
+                        out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                    }
+                    out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
+                }
                 out.instruction(ctx, &Instruction::CallIndirect {
+                    type_index: *type_index,
+                    table_index: table_index + offsets.table,
+                })?;
+                for i in (0..n_injected).rev() {
+                    out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
+                }
+            }
+            Operator::ReturnCall { function_index } => {
+                // Tail call: push injected params, then tail-call.  No save needed.
+                for i in 0..n_injected {
+                    out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                }
+                out.instruction(ctx, &Instruction::ReturnCall(function_index + offsets.func))?;
+            }
+            Operator::ReturnCallIndirect { type_index, table_index } => {
+                if n_injected > 0 {
+                    out.instruction(ctx, &Instruction::LocalSet(call_indirect_scratch))?;
+                    for i in 0..n_injected {
+                        out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
+                    }
+                    out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
+                }
+                out.instruction(ctx, &Instruction::ReturnCallIndirect {
                     type_index: *type_index,
                     table_index: table_index + offsets.table,
                 })?;
