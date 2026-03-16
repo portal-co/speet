@@ -2,6 +2,8 @@
 //!
 //! Parses a WebAssembly module and re-emits each function with optional
 //! address-space translation, global-index remapping, and call-index offsetting.
+//! Data segments and memory information are also extracted and forwarded through
+//! the `speet-link` linking pipeline.
 //!
 //! Unlike the native-arch recompilers, this frontend bypasses `yecta::Reactor`
 //! entirely: WASM functions are already self-contained, so no CFG reconstruction
@@ -16,22 +18,29 @@
 //!
 //! let mut frontend = WasmFrontend::new(
 //!     MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
-//!     IndexOffsets { func: 10, global: 0, table: 0 },
+//!     IndexOffsets { func: 10, global: 0, table: 0, memory: 0 },
 //!     Box::new(|locals| Function::new(locals)),
 //!     None,
 //! );
 //! frontend.translate_module(&mut ctx, &wasm_bytes)?;
+//!
+//! // Inspect parsed memory section to inform mapper selection.
+//! if let Some(info) = frontend.memory_infos().first() {
+//!     println!("guest memory: {} pages, memory64={}", info.min_pages, info.memory64);
+//! }
+//!
 //! let unit = frontend.drain_unit(&mut linker, entry_points);
+//! // unit.data_segments contains chunked data segments ready for the linker.
 //! ```
 
 extern crate alloc;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
-use speet_link::{BinaryUnit, Recompile, context::ReactorContext, unit::FuncType};
+use speet_link::{BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType};
 use speet_memory::{AddressWidth, IntWidth, LoadKind, MapperCallback, MemoryEmitter, PageMapLocals, StoreKind};
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
-use wasmparser::{CompositeInnerType, FunctionBody, Operator, Parser, Payload};
+use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -44,7 +53,7 @@ pub struct MemoryMapConfig {
     pub memory_index: u32,
 }
 
-/// Additive offsets applied when re-emitting call and global instructions.
+/// Additive offsets applied when re-emitting call, global, and memory instructions.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct IndexOffsets {
     /// Added to every `call N` function index in the guest.
@@ -53,6 +62,26 @@ pub struct IndexOffsets {
     pub global: i64,
     /// Added to `call_indirect` table indices.
     pub table: u32,
+    /// Added to the memory index in data segments (and `memory.*` instructions).
+    pub memory: u32,
+}
+
+// ── MemoryInfo ────────────────────────────────────────────────────────────────
+
+/// Information about one linear memory parsed from the guest WASM memory section.
+///
+/// Inspect this after [`WasmFrontend::translate_module`] to select the appropriate
+/// mapper variant (standard vs. multi-level, 32-bit vs. 64-bit physical addresses).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryInfo {
+    /// Minimum size in 64 KiB pages.
+    pub min_pages: u64,
+    /// Maximum size in 64 KiB pages, or `None` if unbounded.
+    pub max_pages: Option<u64>,
+    /// `true` when the memory uses 64-bit addressing (memory64 proposal).
+    pub memory64: bool,
+    /// `true` when the memory is shared (threading proposal).
+    pub shared: bool,
 }
 
 // ── WasmFrontend ──────────────────────────────────────────────────────────────
@@ -65,10 +94,23 @@ pub struct IndexOffsets {
 pub struct WasmFrontend<Context, E, F = Function> {
     /// Accumulated (function, type) pairs; drained by `drain_unit`.
     compiled: Vec<(F, FuncType)>,
+    /// Accumulated data segments; drained by `drain_unit`.
+    data_segs: Vec<DataSegment>,
+    /// Memory information parsed from the most recent `translate_module` call.
+    memory_infos: Vec<MemoryInfo>,
     /// Memory-access configuration.
     memory_cfg: MemoryMapConfig,
-    /// Index offsets for calls, globals, and tables.
+    /// Index offsets for calls, globals, tables, and memories.
     offsets: IndexOffsets,
+    /// Page size for chunking data segments.
+    ///
+    /// When `Some(n)`, data segments are split at `n`-byte boundaries so that
+    /// each chunk fits within a single virtual page and can be independently
+    /// mapped to a physical location.  `None` disables chunking (the segment
+    /// is emitted as-is).
+    ///
+    /// The standard page-table mappers use 64 KiB pages (`chunk_size = 0x10000`).
+    pub chunk_size: Option<u64>,
     /// Factory that constructs an output function from its local-variable list.
     ///
     /// Called once per translated function; receives the full local list
@@ -83,7 +125,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
     /// Create a new `WasmFrontend`.
     ///
     /// * `memory_cfg`     — address width and target memory index.
-    /// * `offsets`        — additive index offsets for calls/globals/tables.
+    /// * `offsets`        — additive index offsets for calls/globals/tables/memories.
     /// * `fn_creator`     — closure that builds an `F` from a local-variable list.
     /// * `mapper_factory` — optional factory producing a per-function mapper.
     pub fn new(
@@ -94,11 +136,38 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
     ) -> Self {
         Self {
             compiled: Vec::new(),
+            data_segs: Vec::new(),
+            memory_infos: Vec::new(),
             memory_cfg,
             offsets,
+            chunk_size: None,
             fn_creator,
             mapper_factory,
         }
+    }
+
+    /// Return memory information parsed during the last [`translate_module`](Self::translate_module) call.
+    ///
+    /// Use this to choose the appropriate mapper variant before the next
+    /// translation pass:
+    /// - `memory64 = false` → `AddressWidth::W32` or `W64 { memory64: false }`
+    /// - `memory64 = true`  → `AddressWidth::W64 { memory64: true }`
+    /// - `min_pages * 65536 > 4 GiB` → consider a multi-level page-table mapper
+    pub fn memory_infos(&self) -> &[MemoryInfo] {
+        &self.memory_infos
+    }
+
+    /// Convenience: infer the appropriate [`AddressWidth`] from the first parsed memory.
+    ///
+    /// Returns `None` if no memory section was seen.
+    pub fn inferred_addr_width(&self) -> Option<AddressWidth> {
+        self.memory_infos.first().map(|m| {
+            if m.memory64 {
+                AddressWidth::W64 { memory64: true }
+            } else {
+                AddressWidth::W32
+            }
+        })
     }
 }
 
@@ -129,14 +198,19 @@ where
 {
     // ── Public API ────────────────────────────────────────────────────────
 
-    /// Parse a WASM module's type + code sections and transform every function.
+    /// Parse a WASM module's type, memory, data, and code sections and transform
+    /// every function.
     ///
-    /// Translated functions are accumulated in `self.compiled`.  Call
-    /// `Recompile::drain_unit` to collect them into a [`BinaryUnit`].
+    /// After this call:
+    /// - `self.memory_infos()` reflects the parsed memory section.
+    /// - Translated functions and data segments are accumulated internally.
+    /// - Call `Recompile::drain_unit` to collect everything into a [`BinaryUnit`].
     pub fn translate_module(&mut self, ctx: &mut Context, bytes: &[u8]) -> Result<(), E> {
         let mut types: Vec<FuncType> = Vec::new();
         let mut fn_type_indices: Vec<u32> = Vec::new();
         let mut code_fn_idx: usize = 0;
+
+        self.memory_infos.clear();
 
         for payload in Parser::new(0).parse_all(bytes) {
             let payload = payload?;
@@ -163,6 +237,49 @@ where
                 Payload::FunctionSection(reader) => {
                     for type_idx in reader {
                         fn_type_indices.push(type_idx?);
+                    }
+                }
+
+                Payload::MemorySection(reader) => {
+                    for mem_ty in reader {
+                        let mt = mem_ty?;
+                        self.memory_infos.push(MemoryInfo {
+                            min_pages: mt.initial,
+                            max_pages: mt.maximum,
+                            memory64: mt.memory64,
+                            shared: mt.shared,
+                        });
+                    }
+                }
+
+                Payload::DataSection(reader) => {
+                    for data_result in reader {
+                        let data = data_result?;
+                        if let DataKind::Active { memory_index, ref offset_expr } = data.kind {
+                            let host_mem = memory_index + self.offsets.memory;
+                            if let Some(guest_addr) = eval_const_expr(offset_expr) {
+                                let raw = data.data;
+                                match self.chunk_size {
+                                    Some(page) => {
+                                        self.data_segs.extend(
+                                            chunk_segment(guest_addr, raw, page, host_mem),
+                                        );
+                                    }
+                                    None => {
+                                        self.data_segs.push(DataSegment {
+                                            guest_addr,
+                                            memory_index: host_mem,
+                                            data: raw.to_vec(),
+                                        });
+                                    }
+                                }
+                            }
+                            // Segments with non-const offset expressions (e.g.
+                            // global.get) are silently skipped — they cannot be
+                            // statically resolved at translation time.
+                        }
+                        // Passive segments have no address; they are loaded
+                        // explicitly by `memory.init` and are not chunked.
                     }
                 }
 
@@ -384,6 +501,23 @@ where
                 })?;
             }
 
+            // ── Memory instructions with memory index ─────────────────────
+            Operator::MemorySize { mem } => {
+                out.instruction(ctx, &Instruction::MemorySize(mem + offsets.memory))?;
+            }
+            Operator::MemoryGrow { mem } => {
+                out.instruction(ctx, &Instruction::MemoryGrow(mem + offsets.memory))?;
+            }
+            Operator::MemoryCopy { dst_mem, src_mem } => {
+                out.instruction(ctx, &Instruction::MemoryCopy {
+                    src_mem: src_mem + offsets.memory,
+                    dst_mem: dst_mem + offsets.memory,
+                })?;
+            }
+            Operator::MemoryFill { mem } => {
+                out.instruction(ctx, &Instruction::MemoryFill(mem + offsets.memory))?;
+            }
+
             // ── Pass-through ──────────────────────────────────────────────
             other => {
                 let insn = Instruction::try_from(other.clone())
@@ -409,8 +543,8 @@ where
         _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         _args: (),
     ) {
-        // `compiled` was already drained by `drain_unit`; no per-binary
-        // state other than that accumulator needs resetting.
+        // `compiled` and `data_segs` were already drained by `drain_unit`;
+        // no per-binary state other than those accumulators needs resetting.
     }
 
     fn drain_unit(
@@ -422,12 +556,58 @@ where
         let collected: Vec<(F, FuncType)> = core::mem::take(&mut self.compiled);
         let n = collected.len() as u32;
         let (fns, func_types): (Vec<F>, Vec<FuncType>) = collected.into_iter().unzip();
+        let data_segments = core::mem::take(&mut self.data_segs);
         ctx.advance_base_func_offset(n);
-        BinaryUnit { fns, base_func_offset: base, entry_points, func_types }
+        BinaryUnit { fns, base_func_offset: base, entry_points, func_types, data_segments }
     }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Split `data` at page boundaries aligned to `page_size`.
+///
+/// Each returned [`DataSegment`] is guaranteed to start and end within the
+/// same virtual page, so that a per-page mapper can relocate each chunk to
+/// its physical location without spanning page-table entries.
+fn chunk_segment(
+    guest_addr: u64,
+    data: &[u8],
+    page_size: u64,
+    memory_index: u32,
+) -> Vec<DataSegment> {
+    let mut segments = Vec::new();
+    let mut offset: u64 = 0;
+    let total = data.len() as u64;
+    while offset < total {
+        let vaddr = guest_addr + offset;
+        // How many bytes remain in the current page starting at `vaddr`.
+        let space_in_page = page_size - (vaddr % page_size);
+        let chunk_len = (total - offset).min(space_in_page) as usize;
+        segments.push(DataSegment {
+            guest_addr: vaddr,
+            memory_index,
+            data: data[offset as usize..offset as usize + chunk_len].to_vec(),
+        });
+        offset += chunk_len as u64;
+    }
+    segments
+}
+
+/// Evaluate a WASM constant expression that is an `i32.const` or `i64.const`.
+///
+/// Returns `None` for expressions that cannot be statically resolved (e.g.
+/// `global.get`, which is valid in active data segments but requires runtime
+/// evaluation).
+fn eval_const_expr(expr: &wasmparser::ConstExpr<'_>) -> Option<u64> {
+    let mut reader = expr.get_binary_reader();
+    // Read the leading opcode byte directly — we only handle the common
+    // integer-constant cases (0x41 = i32.const, 0x42 = i64.const).
+    match reader.read_u8().ok()? {
+        0x41 => Some(reader.read_var_i32().ok()? as u32 as u64),
+        0x42 => Some(reader.read_var_i64().ok()? as u64),
+        _ => None,
+    }
+}
 
 /// Emit the offset addition for a memory instruction.
 ///
@@ -595,7 +775,8 @@ mod tests {
     type TestError = BinaryReaderError;
 
     /// Build a minimal WASM module with one function that exercises
-    /// loads, stores (with non-zero offsets), globals, and a call.
+    /// loads, stores (with non-zero offsets), globals, and a call,
+    /// plus a data segment and a memory section.
     fn build_test_wasm() -> Vec<u8> {
         use wasm_encoder::*;
 
@@ -611,8 +792,8 @@ mod tests {
 
         let mut mems = MemorySection::new();
         mems.memory(MemoryType {
-            minimum: 1,
-            maximum: None,
+            minimum: 4,
+            maximum: Some(16),
             memory64: false,
             shared: false,
             page_size_log2: None,
@@ -640,6 +821,11 @@ mod tests {
         codes.function(&f);
         module.section(&codes);
 
+        // Data segment: 12 bytes at guest address 0x1000.
+        let mut data = DataSection::new();
+        data.active(0, &ConstExpr::i32_const(0x1000), b"hello world!".iter().copied());
+        module.section(&data);
+
         module.finish()
     }
 
@@ -655,6 +841,103 @@ mod tests {
 
         frontend.translate_module(&mut (), &bytes).unwrap();
         assert_eq!(frontend.compiled.len(), 1, "expected 1 compiled function");
+    }
+
+    #[test]
+    fn memory_info_parsed() {
+        let bytes = build_test_wasm();
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            IndexOffsets::default(),
+            None,
+        );
+
+        frontend.translate_module(&mut (), &bytes).unwrap();
+
+        let infos = frontend.memory_infos();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].min_pages, 4);
+        assert_eq!(infos[0].max_pages, Some(16));
+        assert!(!infos[0].memory64);
+        assert_eq!(frontend.inferred_addr_width(), Some(AddressWidth::W32));
+    }
+
+    #[test]
+    fn data_segment_parsed() {
+        let bytes = build_test_wasm();
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            IndexOffsets::default(),
+            None,
+        );
+
+        frontend.translate_module(&mut (), &bytes).unwrap();
+        assert_eq!(frontend.data_segs.len(), 1);
+        assert_eq!(frontend.data_segs[0].guest_addr, 0x1000);
+        assert_eq!(frontend.data_segs[0].memory_index, 0);
+        assert_eq!(&frontend.data_segs[0].data, b"hello world!");
+    }
+
+    #[test]
+    fn data_segment_chunked() {
+        // Build a module with a 200 KiB data segment starting at address 0xF000.
+        // With a 64 KiB page size the segment spans pages:
+        //   page 0: 0xF000..0x10000  (4096 bytes)
+        //   page 1: 0x10000..0x20000 (65536 bytes)
+        //   page 2: 0x20000..0x30000 (65536 bytes)
+        //   page 3: 0x30000..0x3D800 (55296 bytes — the last partial page)
+        // Total: 4096 + 65536 + 65536 + 55296 = 190464 = 186 KiB... let's use a simpler size.
+        // Use 3 * 64 KiB = 196608 bytes starting at 0x10000 (aligned to page).
+        // All 3 chunks should be exactly 64 KiB each.
+        use wasm_encoder::*;
+
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut mems = MemorySection::new();
+        mems.memory(MemoryType {
+            minimum: 8,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&mems);
+        let mut codes = CodeSection::new();
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::End);
+        codes.function(&f);
+        module.section(&codes);
+
+        let big_data = alloc::vec![0xABu8; 3 * 65536];
+        let mut data_sec = DataSection::new();
+        data_sec.active(0, &ConstExpr::i32_const(0x10000), big_data);
+        module.section(&data_sec);
+
+        let bytes = module.finish();
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            IndexOffsets::default(),
+            None,
+        );
+        frontend.chunk_size = Some(0x10000); // 64 KiB pages
+
+        frontend.translate_module(&mut (), &bytes).unwrap();
+
+        assert_eq!(frontend.data_segs.len(), 3, "should split into 3 page-sized chunks");
+        assert_eq!(frontend.data_segs[0].guest_addr, 0x10000);
+        assert_eq!(frontend.data_segs[0].data.len(), 65536);
+        assert_eq!(frontend.data_segs[1].guest_addr, 0x20000);
+        assert_eq!(frontend.data_segs[1].data.len(), 65536);
+        assert_eq!(frontend.data_segs[2].guest_addr, 0x30000);
+        assert_eq!(frontend.data_segs[2].data.len(), 65536);
     }
 
     #[test]
@@ -677,6 +960,8 @@ mod tests {
         let unit = frontend.drain_unit(&mut linker, alloc::vec![]);
         assert_eq!(unit.base_func_offset, 0);
         assert_eq!(unit.fns.len(), 1);
+        assert_eq!(unit.data_segments.len(), 1);
+        assert_eq!(unit.data_segments[0].guest_addr, 0x1000);
         assert_eq!(linker.base_func_offset(), 1, "offset should advance by 1");
     }
 
@@ -687,7 +972,7 @@ mod tests {
         // Custom fn_creator: same as Function::new but via the generic path.
         let mut frontend: WasmFrontend<(), TestError, Function> = WasmFrontend::new(
             MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
-            IndexOffsets { func: 5, global: 0, table: 0 },
+            IndexOffsets { func: 5, global: 0, table: 0, memory: 0 },
             Box::new(|locals| Function::new(locals)),
             None,
         );

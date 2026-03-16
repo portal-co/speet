@@ -19,7 +19,7 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use crate::linker::LinkerPlugin;
-use crate::unit::{BinaryUnit, FuncType};
+use crate::unit::{BinaryUnit, DataSegment, FuncType};
 
 // ── MegabinaryOutput ──────────────────────────────────────────────────────────
 
@@ -33,6 +33,7 @@ use crate::unit::{BinaryUnit, FuncType};
 /// | `func_type_indices` | FunctionSection (per-function type index) |
 /// | `fns` | CodeSection |
 /// | `exports` | ExportSection |
+/// | `data_segments` | DataSection |
 pub struct MegabinaryOutput<F> {
     /// Deduplicated function types.  Index `i` is used by any function whose
     /// `func_type_indices` entry equals `i`.
@@ -43,6 +44,13 @@ pub struct MegabinaryOutput<F> {
     pub fns: Vec<F>,
     /// `(symbol_name, absolute_wasm_func_index)` exports.
     pub exports: Vec<(String, u32)>,
+    /// All data segments accumulated from every [`BinaryUnit`].
+    ///
+    /// For WASM output, emit each as an active data segment:
+    /// `(data (memory <memory_index>) (i32.const <guest_addr>) <data>)`.
+    /// For native output, the caller maps each segment's bytes to the
+    /// physical address corresponding to `guest_addr`.
+    pub data_segments: Vec<DataSegment>,
 }
 
 // ── MegabinaryBuilder ─────────────────────────────────────────────────────────
@@ -63,6 +71,7 @@ pub struct MegabinaryBuilder<F> {
     func_type_indices: Vec<u32>,
     fns: Vec<F>,
     exports: Vec<(String, u32)>,
+    data_segments: Vec<DataSegment>,
 }
 
 impl<F> Default for MegabinaryBuilder<F> {
@@ -80,6 +89,7 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: Vec::new(),
             fns: Vec::new(),
             exports: Vec::new(),
+            data_segments: Vec::new(),
         }
     }
 
@@ -99,6 +109,7 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: self.func_type_indices,
             fns: self.fns,
             exports: self.exports,
+            data_segments: self.data_segments,
         }
     }
 }
@@ -114,5 +125,8 @@ impl<F> LinkerPlugin<F> for MegabinaryBuilder<F> {
             self.func_type_indices.push(idx);
             self.fns.push(f);
         }
+
+        // Absorb data segments.
+        self.data_segments.extend(unit.data_segments);
     }
 }

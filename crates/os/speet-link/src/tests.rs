@@ -65,6 +65,7 @@ mod unit_tests {
             base_func_offset: 0,
             entry_points: vec![("foo".to_string(), 0)],
             func_types: vec![type_a.clone(), type_a.clone(), type_b.clone()],
+            data_segments: vec![],
         });
 
         // Unit 2: one function of type_a (duplicate type) and one new type_b.
@@ -73,6 +74,7 @@ mod unit_tests {
             base_func_offset: 3,
             entry_points: vec![("bar".to_string(), 3)],
             func_types: vec![type_a.clone(), type_b.clone()],
+            data_segments: vec![],
         });
 
         let out = builder.finish();
@@ -109,6 +111,7 @@ mod unit_tests {
             base_func_offset: 100,
             entry_points: vec![("main".to_string(), 100)],
             func_types: vec![ft.clone(), ft.clone()],
+            data_segments: vec![],
         };
         assert_eq!(unit.fns.len(), 2);
         assert_eq!(unit.base_func_offset, 100);

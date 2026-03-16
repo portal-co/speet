@@ -10,6 +10,26 @@
 use alloc::{string::String, vec::Vec};
 use wasm_encoder::ValType;
 
+// ── DataSegment ───────────────────────────────────────────────────────────────
+
+/// A data segment extracted from a translated binary.
+///
+/// For WASM output targets this maps 1:1 to a WASM active data segment.
+/// For native output targets the caller loads `data` into host memory at the
+/// physical address obtained by walking the page table for `guest_addr`.
+/// When a mapper is active, the `WasmFrontend` already chunks large segments
+/// at page boundaries so each `DataSegment` fits within a single virtual page.
+#[derive(Clone, Debug)]
+pub struct DataSegment {
+    /// Guest virtual address of the first byte (evaluated from the WASM
+    /// `offset` constant expression).
+    pub guest_addr: u64,
+    /// Host memory index in the output module.
+    pub memory_index: u32,
+    /// Raw data bytes.
+    pub data: Vec<u8>,
+}
+
 // ── ValType byte encoding ─────────────────────────────────────────────────────
 //
 // We store ValType discriminants as raw bytes so that `FuncType` can derive
@@ -104,6 +124,7 @@ impl FuncType {
 /// * `base_func_offset` — the absolute WASM function index of `fns[0]`.
 /// * `entry_points` — `(symbol, absolute_wasm_func_index)` pairs for exports.
 /// * `func_types` — per-function type, parallel to `fns`.
+/// * `data_segments` — data segments sourced from this binary unit.
 pub struct BinaryUnit<F> {
     /// Compiled WASM functions, in order.
     pub fns: Vec<F>,
@@ -114,4 +135,9 @@ pub struct BinaryUnit<F> {
     /// Per-function type, parallel to `fns`.  `func_types[i]` is the type
     /// of `fns[i]`.
     pub func_types: Vec<FuncType>,
+    /// Data segments associated with this binary unit.
+    ///
+    /// Already chunked at page boundaries when a mapper is active, so each
+    /// segment fits within a single virtual page.
+    pub data_segments: Vec<DataSegment>,
 }

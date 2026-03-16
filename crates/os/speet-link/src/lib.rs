@@ -103,4 +103,4 @@ pub use context::ReactorContext;
 pub use linker::{Linker, LinkerPlugin};
 pub use recompiler::Recompile;
 pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};
-pub use unit::{BinaryUnit, FuncType};
+pub use unit::{BinaryUnit, DataSegment, FuncType};
