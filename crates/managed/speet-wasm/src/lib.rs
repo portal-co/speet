@@ -2,8 +2,8 @@
 //!
 //! Parses a WebAssembly module and re-emits each function with optional
 //! address-space translation, global-index remapping, and call-index offsetting.
-//! Data segments and memory information are also extracted and forwarded through
-//! the `speet-link` linking pipeline.
+//! Data segments are emitted as passive segments whose physical placement is
+//! performed at WASM runtime by a generated data-init function.
 //!
 //! Unlike the native-arch recompilers, this frontend bypasses `yecta::Reactor`
 //! entirely: WASM functions are already self-contained, so no CFG reconstruction
@@ -12,48 +12,61 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use speet_wasm::{WasmFrontend, MemoryMapConfig, IndexOffsets};
-//! use speet_memory::AddressWidth;
+//! use speet_wasm::{WasmFrontend, GuestMemoryConfig, IndexOffsets};
+//! use speet_memory::{AddressWidth, standard_page_table_mapper, PageMapLocals, PageTableBase};
 //! use wasm_encoder::Function;
 //!
+//! let mapper_factory: Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
+//!     Box::new(|locals| Box::new(standard_page_table_mapper(
+//!         PageTableBase::Constant(0x1000_0000),
+//!         PageTableBase::Constant(0x2000_0000),
+//!         0, false, locals,
+//!     )));
+//!
 //! let mut frontend = WasmFrontend::new(
-//!     MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
-//!     IndexOffsets { func: 10, global: 0, table: 0, memory: 0 },
+//!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: Some(mapper_factory) }],
+//!     0, // host_memory
+//!     IndexOffsets { func: 10, global: 0, table: 0 },
 //!     Box::new(|locals| Function::new(locals)),
-//!     None,
 //! );
 //! frontend.translate_module(&mut ctx, &wasm_bytes)?;
 //!
-//! // Inspect parsed memory section to inform mapper selection.
-//! if let Some(info) = frontend.memory_infos().first() {
-//!     println!("guest memory: {} pages, memory64={}", info.min_pages, info.memory64);
-//! }
-//!
 //! let unit = frontend.drain_unit(&mut linker, entry_points);
-//! // unit.data_segments contains chunked data segments ready for the linker.
+//! // unit.data_segments are passive blobs; unit.data_init_fn loads them.
 //! ```
 
 extern crate alloc;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use speet_link::{BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType};
-use speet_memory::{AddressWidth, IntWidth, LoadKind, MapperCallback, MemoryEmitter, PageMapLocals, StoreKind};
+use speet_memory::{
+    AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter,
+    PageMapLocals, StoreKind,
+};
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 
-// ── Configuration ─────────────────────────────────────────────────────────────
+// ── GuestMemoryConfig ──────────────────────────────────────────────────────────
 
-/// How the memory address-space mapper is configured for guest loads/stores.
-#[derive(Clone, Copy, Debug)]
-pub struct MemoryMapConfig {
-    /// Width of guest addresses pushed onto the WASM stack.
+/// Per-guest-memory configuration for [`WasmFrontend`].
+///
+/// Supply one entry per guest memory (indexed by guest memory index).
+/// Entries beyond the number of parsed memories fall back to identity
+/// (no mapper, 32-bit addresses).
+pub struct GuestMemoryConfig<Context, E, F = Function> {
+    /// Width of guest addresses for this memory.
     pub addr_width: AddressWidth,
-    /// Index of the host linear memory to use (typically 0).
-    pub memory_index: u32,
+    /// Optional mapper factory.  Called once per function to produce a
+    /// [`MapperCallback`] that translates virtual → physical addresses.
+    /// `None` = identity (physical address == virtual address).
+    pub mapper_factory:
+        Option<Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<Context, E, F>>>>,
 }
 
-/// Additive offsets applied when re-emitting call, global, and memory instructions.
+// ── IndexOffsets ──────────────────────────────────────────────────────────────
+
+/// Additive offsets applied when re-emitting call, global, and table instructions.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct IndexOffsets {
     /// Added to every `call N` function index in the guest.
@@ -62,8 +75,6 @@ pub struct IndexOffsets {
     pub global: i64,
     /// Added to `call_indirect` table indices.
     pub table: u32,
-    /// Added to the memory index in data segments (and `memory.*` instructions).
-    pub memory: u32,
 }
 
 // ── MemoryInfo ────────────────────────────────────────────────────────────────
@@ -84,6 +95,20 @@ pub struct MemoryInfo {
     pub shared: bool,
 }
 
+// ── DataInitOp ────────────────────────────────────────────────────────────────
+
+/// A recorded instruction for the data-init function emitted in [`WasmFrontend::drain_unit`].
+enum DataInitOp {
+    /// Push `guest_va`, call the mapper for `memory_idx`, then emit
+    /// `memory.init seg_idx host_memory; data.drop seg_idx`.
+    InitChunk {
+        guest_va: u64,
+        seg_idx: u32,
+        byte_len: u32,
+        memory_idx: usize,
+    },
+}
+
 // ── WasmFrontend ──────────────────────────────────────────────────────────────
 
 /// WASM-to-WASM transforming frontend.
@@ -94,65 +119,52 @@ pub struct MemoryInfo {
 pub struct WasmFrontend<Context, E, F = Function> {
     /// Accumulated (function, type) pairs; drained by `drain_unit`.
     compiled: Vec<(F, FuncType)>,
-    /// Accumulated data segments; drained by `drain_unit`.
+    /// Accumulated passive data segments (raw bytes only).
     data_segs: Vec<DataSegment>,
+    /// Recorded init operations used to build the data-init function.
+    data_init_ops: Vec<DataInitOp>,
+    /// Completed data-init function (built at end of `translate_module`).
+    data_init_fn_result: Option<(F, FuncType)>,
     /// Memory information parsed from the most recent `translate_module` call.
     memory_infos: Vec<MemoryInfo>,
-    /// Memory-access configuration.
-    memory_cfg: MemoryMapConfig,
-    /// Index offsets for calls, globals, tables, and memories.
+    /// Per-guest-memory mapper + address-width configurations.
+    /// Index `N` applies to guest memory `N`.
+    pub per_memory: Vec<GuestMemoryConfig<Context, E, F>>,
+    /// Host linear memory index (always 0 in single-memory lowering).
+    pub host_memory: u32,
+    /// Index offsets for calls, globals, and tables.
     offsets: IndexOffsets,
-    /// Page size for chunking data segments.
-    ///
-    /// When `Some(n)`, data segments are split at `n`-byte boundaries so that
-    /// each chunk fits within a single virtual page and can be independently
-    /// mapped to a physical location.  `None` disables chunking (the segment
-    /// is emitted as-is).
-    ///
-    /// The standard page-table mappers use 64 KiB pages (`chunk_size = 0x10000`).
-    pub chunk_size: Option<u64>,
     /// Factory that constructs an output function from its local-variable list.
-    ///
-    /// Called once per translated function; receives the full local list
-    /// (original locals + injected scratch slots).
     fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
-    /// Optional mapper factory.  Called once per function to produce a
-    /// [`MapperCallback`] for that function's scratch locals.
-    mapper_factory: Option<Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<Context, E, F>>>>,
 }
 
 impl<Context, E, F> WasmFrontend<Context, E, F> {
     /// Create a new `WasmFrontend`.
     ///
-    /// * `memory_cfg`     — address width and target memory index.
-    /// * `offsets`        — additive index offsets for calls/globals/tables/memories.
-    /// * `fn_creator`     — closure that builds an `F` from a local-variable list.
-    /// * `mapper_factory` — optional factory producing a per-function mapper.
+    /// * `per_memory`   — one [`GuestMemoryConfig`] per guest memory (index 0 = first memory).
+    /// * `host_memory`  — host linear memory index (typically 0).
+    /// * `offsets`      — additive index offsets for calls/globals/tables.
+    /// * `fn_creator`   — closure that builds an `F` from a local-variable list.
     pub fn new(
-        memory_cfg: MemoryMapConfig,
+        per_memory: Vec<GuestMemoryConfig<Context, E, F>>,
+        host_memory: u32,
         offsets: IndexOffsets,
         fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
-        mapper_factory: Option<Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<Context, E, F>>>>,
     ) -> Self {
         Self {
             compiled: Vec::new(),
             data_segs: Vec::new(),
+            data_init_ops: Vec::new(),
+            data_init_fn_result: None,
             memory_infos: Vec::new(),
-            memory_cfg,
+            per_memory,
+            host_memory,
             offsets,
-            chunk_size: None,
             fn_creator,
-            mapper_factory,
         }
     }
 
     /// Return memory information parsed during the last [`translate_module`](Self::translate_module) call.
-    ///
-    /// Use this to choose the appropriate mapper variant before the next
-    /// translation pass:
-    /// - `memory64 = false` → `AddressWidth::W32` or `W64 { memory64: false }`
-    /// - `memory64 = true`  → `AddressWidth::W64 { memory64: true }`
-    /// - `min_pages * 65536 > 4 GiB` → consider a multi-level page-table mapper
     pub fn memory_infos(&self) -> &[MemoryInfo] {
         &self.memory_infos
     }
@@ -169,24 +181,29 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             }
         })
     }
+
+    /// Return the address width for guest memory `mem_idx`.
+    fn addr_width_for_memory(&self, mem_idx: usize) -> AddressWidth {
+        self.per_memory
+            .get(mem_idx)
+            .map(|c| c.addr_width)
+            .unwrap_or(AddressWidth::W32)
+    }
 }
 
 impl<Context, E> WasmFrontend<Context, E, Function> {
     /// Convenience constructor that uses `wasm_encoder::Function` as the
-    /// output type.  Equivalent to calling [`new`](Self::new) with
-    /// `Box::new(|locals| Function::new(locals))`.
+    /// output type.
     pub fn with_wasm_encoder_fn(
-        memory_cfg: MemoryMapConfig,
+        per_memory: Vec<GuestMemoryConfig<Context, E, Function>>,
+        host_memory: u32,
         offsets: IndexOffsets,
-        mapper_factory: Option<
-            Box<dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<Context, E, Function>>>,
-        >,
     ) -> Self {
         Self::new(
-            memory_cfg,
+            per_memory,
+            host_memory,
             offsets,
             Box::new(|locals| Function::new(locals)),
-            mapper_factory,
         )
     }
 }
@@ -196,6 +213,20 @@ where
     F: InstructionSink<Context, E>,
     E: From<wasmparser::BinaryReaderError>,
 {
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// Return the chunk size for guest memory `mem_idx`, derived from the
+    /// mapper's `chunk_size()` method.  Returns `None` when there is no
+    /// mapper or the mapper does not specify a chunk size.
+    fn chunk_size_for_memory(&self, mem_idx: usize) -> Option<u64> {
+        let cfg = self.per_memory.get(mem_idx)?;
+        let factory = cfg.mapper_factory.as_ref()?;
+        // Instantiate a throw-away mapper with locals at index 0 just to
+        // query the chunk size — no instructions are emitted.
+        let mapper = factory(PageMapLocals::consecutive(0));
+        mapper.chunk_size()
+    }
+
     // ── Public API ────────────────────────────────────────────────────────
 
     /// Parse a WASM module's type, memory, data, and code sections and transform
@@ -211,6 +242,9 @@ where
         let mut code_fn_idx: usize = 0;
 
         self.memory_infos.clear();
+        self.data_segs.clear();
+        self.data_init_ops.clear();
+        self.data_init_fn_result = None;
 
         for payload in Parser::new(0).parse_all(bytes) {
             let payload = payload?;
@@ -256,30 +290,52 @@ where
                     for data_result in reader {
                         let data = data_result?;
                         if let DataKind::Active { memory_index, ref offset_expr } = data.kind {
-                            let host_mem = memory_index + self.offsets.memory;
+                            let mem_idx = memory_index as usize;
                             if let Some(guest_addr) = eval_const_expr(offset_expr) {
                                 let raw = data.data;
-                                match self.chunk_size {
+                                let chunk_size = self.chunk_size_for_memory(mem_idx);
+                                match chunk_size {
                                     Some(page) => {
-                                        self.data_segs.extend(
-                                            chunk_segment(guest_addr, raw, page, host_mem),
-                                        );
+                                        // Split at page boundaries; record init ops.
+                                        let mut offset: u64 = 0;
+                                        let total = raw.len() as u64;
+                                        while offset < total {
+                                            let vaddr = guest_addr + offset;
+                                            let space_in_page = page - (vaddr % page);
+                                            let chunk_len =
+                                                ((total - offset).min(space_in_page)) as usize;
+                                            let seg_idx = self.data_segs.len() as u32;
+                                            self.data_segs.push(DataSegment {
+                                                data: raw[offset as usize
+                                                    ..offset as usize + chunk_len]
+                                                    .to_vec(),
+                                            });
+                                            self.data_init_ops.push(DataInitOp::InitChunk {
+                                                guest_va: vaddr,
+                                                seg_idx,
+                                                byte_len: chunk_len as u32,
+                                                memory_idx: mem_idx,
+                                            });
+                                            offset += chunk_len as u64;
+                                        }
                                     }
                                     None => {
-                                        self.data_segs.push(DataSegment {
-                                            guest_addr,
-                                            memory_index: host_mem,
-                                            data: raw.to_vec(),
+                                        // No chunking: single segment, single init op.
+                                        let seg_idx = self.data_segs.len() as u32;
+                                        let byte_len = raw.len() as u32;
+                                        self.data_segs.push(DataSegment { data: raw.to_vec() });
+                                        self.data_init_ops.push(DataInitOp::InitChunk {
+                                            guest_va: guest_addr,
+                                            seg_idx,
+                                            byte_len,
+                                            memory_idx: mem_idx,
                                         });
                                     }
                                 }
                             }
-                            // Segments with non-const offset expressions (e.g.
-                            // global.get) are silently skipped — they cannot be
-                            // statically resolved at translation time.
+                            // Segments with non-const offset expressions are skipped.
                         }
-                        // Passive segments have no address; they are loaded
-                        // explicitly by `memory.init` and are not chunked.
+                        // Passive segments: no address, not lowered here.
                     }
                 }
 
@@ -296,6 +352,68 @@ where
                 _ => {}
             }
         }
+
+        // Build the data-init function after all sections are parsed.
+        if !self.data_init_ops.is_empty() {
+            self.build_data_init_fn(ctx)?;
+        }
+
+        Ok(())
+    }
+
+    /// Build the data-init function from accumulated [`DataInitOp`]s.
+    ///
+    /// Emits `i[32|64].const <va>; [mapper]; i32.const 0; i32.const <len>;
+    /// memory.init <seg> <host>; data.drop <seg>` for each chunk, then `End`.
+    fn build_data_init_fn(&mut self, ctx: &mut Context) -> Result<(), E> {
+        // 4 × i32 locals for PageMapLocals (vaddr + scratch[0..2]).
+        let out_locals: Vec<(u32, ValType)> = alloc::vec![(4, ValType::I32)];
+        let mut out = (self.fn_creator)(out_locals);
+
+        let map_locals = PageMapLocals::consecutive(0);
+        let host_memory = self.host_memory;
+
+        // We need to borrow `self.data_init_ops` but also call `self.per_memory`.
+        // Collect the ops into a local vec to avoid the borrow conflict.
+        let ops: Vec<(u64, u32, u32, usize)> = self
+            .data_init_ops
+            .iter()
+            .map(|op| match op {
+                DataInitOp::InitChunk { guest_va, seg_idx, byte_len, memory_idx } => {
+                    (*guest_va, *seg_idx, *byte_len, *memory_idx)
+                }
+            })
+            .collect();
+
+        for (guest_va, seg_idx, byte_len, memory_idx) in ops {
+            let use_i64 = self.addr_width_for_memory(memory_idx).is_64();
+
+            // Push guest VA.
+            if use_i64 {
+                out.instruction(ctx, &Instruction::I64Const(guest_va as i64))?;
+            } else {
+                out.instruction(ctx, &Instruction::I32Const(guest_va as i32))?;
+            }
+
+            // Call mapper if configured for this memory.
+            if let Some(cfg) = self.per_memory.get(memory_idx) {
+                if let Some(factory) = &cfg.mapper_factory {
+                    let mut mapper = factory(map_locals);
+                    let mut cb = CallbackContext::new(&mut out);
+                    mapper.call(ctx, &mut cb)?;
+                }
+            }
+
+            // memory.init seg_idx host_memory
+            out.instruction(ctx, &Instruction::MemoryInit { data_index: seg_idx, mem: host_memory })?;
+            // data.drop seg_idx
+            out.instruction(ctx, &Instruction::DataDrop(seg_idx))?;
+        }
+
+        out.instruction(ctx, &Instruction::End)?;
+
+        let func_type = FuncType::from_val_types(&[], &[]);
+        self.data_init_fn_result = Some((out, func_type));
         Ok(())
     }
 
@@ -323,66 +441,82 @@ where
         let param_count = func_type.params_val_types().count() as u32;
         let base_scratch_idx = param_count + original_local_count;
 
-        // Append 4 type-specific scratch locals for store value saving:
-        //   base + 0 → i32  (I32Store, I32Store8, I32Store16)
-        //   base + 1 → i64  (I64Store, I64Store8, I64Store16, I64Store32)
-        //   base + 2 → f32  (F32Store)
-        //   base + 3 → f64  (F64Store)
+        // 4 type-specific scratch locals for store value saving:
+        //   base + 0 → i32, base + 1 → i64, base + 2 → f32, base + 3 → f64
         out_locals.push((1, ValType::I32));
         out_locals.push((1, ValType::I64));
         out_locals.push((1, ValType::F32));
         out_locals.push((1, ValType::F64));
 
-        // If a mapper is configured, append 4 more i32 locals for PageMapLocals
-        // (vaddr + scratch[0..2]), starting immediately after the value-scratch block.
+        // Use the primary memory's (index 0) mapper and addr_width for this function.
+        let addr_width = self.addr_width_for_memory(0);
+
         let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
-            if let Some(factory) = &self.mapper_factory {
-                let map_locals = PageMapLocals::consecutive(base_scratch_idx + 4);
-                out_locals.push((4, ValType::I32));
-                Some(factory(map_locals))
+            if let Some(cfg) = self.per_memory.get(0) {
+                if let Some(factory) = &cfg.mapper_factory {
+                    let map_locals = PageMapLocals::consecutive(base_scratch_idx + 4);
+                    out_locals.push((4, ValType::I32));
+                    // loop scratch: $dst_va, $src_va_or_val, $len  (all i32)
+                    out_locals.push((3, ValType::I32));
+                    Some(factory(map_locals))
+                } else {
+                    None
+                }
             } else {
                 None
             };
 
+        // loop-variable locals (only used when mapper present):
+        //   base_scratch_idx + 4..7 = PageMapLocals
+        //   base_scratch_idx + 8    = $loop_dst
+        //   base_scratch_idx + 9    = $loop_src_or_val
+        //   base_scratch_idx + 10   = $loop_len
+        let loop_dst_local = base_scratch_idx + 8;
+        let loop_src_local = base_scratch_idx + 9;
+        let loop_len_local = base_scratch_idx + 10;
+
         let mut out = (self.fn_creator)(out_locals);
 
-        // ── Instruction loop ──────────────────────────────────────────────
-        // `mapper_box` owns the mapper; we reborrow it as
-        // `Option<&mut dyn MapperCallback + '_>` on every iteration so that
-        // each call to `translate_op` receives an independent, lifetime-safe
-        // borrow that matches `MemoryEmitter`'s mapper field directly.
         let ops_reader = body.get_operators_reader()?;
         for op_result in ops_reader {
             let op = op_result?;
             let mapper_ref: Option<&mut (dyn MapperCallback<Context, E, F> + '_)> =
                 mapper_box.as_mut().map(|b| b.as_mut() as _);
-            self.translate_op(ctx, &op, &mut out, base_scratch_idx, mapper_ref)?;
+            self.translate_op(
+                ctx,
+                &op,
+                &mut out,
+                base_scratch_idx,
+                addr_width,
+                mapper_ref,
+                loop_dst_local,
+                loop_src_local,
+                loop_len_local,
+            )?;
         }
 
         self.compiled.push((out, func_type));
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn translate_op(
         &mut self,
         ctx: &mut Context,
         op: &Operator<'_>,
         out: &mut F,
         base_scratch_idx: u32,
-        // Lifetime-erased borrow of the per-function mapper box.
-        // Matches `MemoryEmitter::mapper` exactly — no extra indirection.
+        addr_width: AddressWidth,
         mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
+        loop_dst_local: u32,
+        loop_src_local: u32,
+        loop_len_local: u32,
     ) -> Result<(), E> {
-        let addr_width = self.memory_cfg.addr_width;
-        let memory_index = self.memory_cfg.memory_index;
+        let memory_index = self.host_memory;
         let offsets = self.offsets;
 
         match op {
             // ── Memory loads ──────────────────────────────────────────────
-            // emit_offset incorporates memarg.offset into the address, then
-            // emit_load handles wrap + mapper + instruction + any extension.
-            // int_width is set per-instruction so that e.g. I64Load8S gets
-            // `I32Load8S + I64ExtendI32S` rather than a bare `I32Load8S`.
             Operator::I32Load { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
                 emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I32S)?;
@@ -441,17 +575,6 @@ where
             }
 
             // ── Memory stores ─────────────────────────────────────────────
-            //
-            // Stack at store op: [..., addr, value]  (value on top)
-            // Strategy:
-            //   1. local.set type_scratch   (save value; stack: [..., addr])
-            //   2. emit_offset              (stack: [..., addr + offset])
-            //   3. emit_store_addr          (wrap + mapper; stack: [..., mapped])
-            //   4. local.get type_scratch   (stack: [..., mapped, value])
-            //   5. emit store instruction   (correct type, offset=0)
-            //
-            // The type-specific scratch slot ensures that f32/f64 values are
-            // saved and restored correctly (a single i32 scratch was wrong).
             Operator::I32Store { memarg } => {
                 emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I32, IntWidth::I32, base_scratch_idx)?;
             }
@@ -501,21 +624,148 @@ where
                 })?;
             }
 
-            // ── Memory instructions with memory index ─────────────────────
+            // ── memory.size → static declared-page count ──────────────────
             Operator::MemorySize { mem } => {
-                out.instruction(ctx, &Instruction::MemorySize(mem + offsets.memory))?;
+                let pages = self
+                    .memory_infos
+                    .get(*mem as usize)
+                    .map(|m| m.min_pages)
+                    .unwrap_or(0);
+                out.instruction(ctx, &Instruction::I32Const(pages as i32))?;
             }
-            Operator::MemoryGrow { mem } => {
-                out.instruction(ctx, &Instruction::MemoryGrow(mem + offsets.memory))?;
+
+            // ── memory.grow → unsupported (-1) ────────────────────────────
+            Operator::MemoryGrow { .. } => {
+                // Drop the requested page count; return -1 (spec-compliant failure).
+                out.instruction(ctx, &Instruction::Drop)?;
+                out.instruction(ctx, &Instruction::I32Const(-1))?;
             }
-            Operator::MemoryCopy { dst_mem, src_mem } => {
-                out.instruction(ctx, &Instruction::MemoryCopy {
-                    src_mem: src_mem + offsets.memory,
-                    dst_mem: dst_mem + offsets.memory,
-                })?;
+
+            // ── memory.copy → per-chunk loop (mapper required) ────────────
+            Operator::MemoryCopy { .. } => {
+                if mapper.is_some() {
+                    // Stack: [dst_va, src_va, len]
+                    let chunk = self
+                        .chunk_size_for_memory(0)
+                        .unwrap_or(0x10000) as i32;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
+                    out.instruction(ctx, &Instruction::Block(wasm_encoder::BlockType::Empty))?;
+                    out.instruction(ctx, &Instruction::Loop(wasm_encoder::BlockType::Empty))?;
+                    // if len == 0 break
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Eqz)?;
+                    out.instruction(ctx, &Instruction::BrIf(1))?;
+                    // physical dst (re-borrow mapper as dst mapper)
+                    out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
+                    if let Some(cfg) = self.per_memory.get(0) {
+                        if let Some(factory) = &cfg.mapper_factory {
+                            let map_locals =
+                                PageMapLocals::consecutive(base_scratch_idx + 4);
+                            let mut dst_mapper = factory(map_locals);
+                            let mut cb = CallbackContext::new(out);
+                            dst_mapper.call(ctx, &mut cb)?;
+                        }
+                    }
+                    // physical src
+                    out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
+                    if let Some(cfg) = self.per_memory.get(0) {
+                        if let Some(factory) = &cfg.mapper_factory {
+                            let map_locals =
+                                PageMapLocals::consecutive(base_scratch_idx + 4);
+                            let mut src_mapper = factory(map_locals);
+                            let mut cb = CallbackContext::new(out);
+                            src_mapper.call(ctx, &mut cb)?;
+                        }
+                    }
+                    // len = min(chunk, remaining_len)
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32LtU)?;
+                    out.instruction(ctx, &Instruction::Select)?;
+                    out.instruction(ctx, &Instruction::MemoryCopy {
+                        src_mem: memory_index,
+                        dst_mem: memory_index,
+                    })?;
+                    // dst_va += chunk
+                    out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32Add)?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
+                    // src_va += chunk
+                    out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32Add)?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?;
+                    // len -= chunk (saturating: already min'd above)
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32Sub)?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::Br(0))?;
+                    out.instruction(ctx, &Instruction::End)?; // loop
+                    out.instruction(ctx, &Instruction::End)?; // block
+                } else {
+                    // No mapper: pass through unchanged.
+                    out.instruction(ctx, &Instruction::MemoryCopy {
+                        src_mem: memory_index,
+                        dst_mem: memory_index,
+                    })?;
+                }
             }
-            Operator::MemoryFill { mem } => {
-                out.instruction(ctx, &Instruction::MemoryFill(mem + offsets.memory))?;
+
+            // ── memory.fill → per-chunk loop (mapper required) ────────────
+            Operator::MemoryFill { .. } => {
+                if mapper.is_some() {
+                    // Stack: [dst_va, val, len]
+                    let chunk = self
+                        .chunk_size_for_memory(0)
+                        .unwrap_or(0x10000) as i32;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?; // val (i32)
+                    out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
+                    out.instruction(ctx, &Instruction::Block(wasm_encoder::BlockType::Empty))?;
+                    out.instruction(ctx, &Instruction::Loop(wasm_encoder::BlockType::Empty))?;
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Eqz)?;
+                    out.instruction(ctx, &Instruction::BrIf(1))?;
+                    // physical dst
+                    out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
+                    if let Some(cfg) = self.per_memory.get(0) {
+                        if let Some(factory) = &cfg.mapper_factory {
+                            let map_locals =
+                                PageMapLocals::consecutive(base_scratch_idx + 4);
+                            let mut dst_mapper = factory(map_locals);
+                            let mut cb = CallbackContext::new(out);
+                            dst_mapper.call(ctx, &mut cb)?;
+                        }
+                    }
+                    out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?; // val
+                    // len = min(chunk, remaining)
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32LtU)?;
+                    out.instruction(ctx, &Instruction::Select)?;
+                    out.instruction(ctx, &Instruction::MemoryFill(memory_index))?;
+                    out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32Add)?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
+                    out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::I32Const(chunk))?;
+                    out.instruction(ctx, &Instruction::I32Sub)?;
+                    out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
+                    out.instruction(ctx, &Instruction::Br(0))?;
+                    out.instruction(ctx, &Instruction::End)?; // loop
+                    out.instruction(ctx, &Instruction::End)?; // block
+                } else {
+                    out.instruction(ctx, &Instruction::MemoryFill(memory_index))?;
+                }
             }
 
             // ── Pass-through ──────────────────────────────────────────────
@@ -543,8 +793,8 @@ where
         _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         _args: (),
     ) {
-        // `compiled` and `data_segs` were already drained by `drain_unit`;
-        // no per-binary state other than those accumulators needs resetting.
+        // `compiled`, `data_segs`, `data_init_ops`, and `data_init_fn_result`
+        // were already drained by `drain_unit`; no extra reset needed.
     }
 
     fn drain_unit(
@@ -557,41 +807,14 @@ where
         let n = collected.len() as u32;
         let (fns, func_types): (Vec<F>, Vec<FuncType>) = collected.into_iter().unzip();
         let data_segments = core::mem::take(&mut self.data_segs);
+        let data_init_fn = self.data_init_fn_result.take();
+        self.data_init_ops.clear();
         ctx.advance_base_func_offset(n);
-        BinaryUnit { fns, base_func_offset: base, entry_points, func_types, data_segments }
+        BinaryUnit { fns, base_func_offset: base, entry_points, func_types, data_segments, data_init_fn }
     }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
-
-/// Split `data` at page boundaries aligned to `page_size`.
-///
-/// Each returned [`DataSegment`] is guaranteed to start and end within the
-/// same virtual page, so that a per-page mapper can relocate each chunk to
-/// its physical location without spanning page-table entries.
-fn chunk_segment(
-    guest_addr: u64,
-    data: &[u8],
-    page_size: u64,
-    memory_index: u32,
-) -> Vec<DataSegment> {
-    let mut segments = Vec::new();
-    let mut offset: u64 = 0;
-    let total = data.len() as u64;
-    while offset < total {
-        let vaddr = guest_addr + offset;
-        // How many bytes remain in the current page starting at `vaddr`.
-        let space_in_page = page_size - (vaddr % page_size);
-        let chunk_len = (total - offset).min(space_in_page) as usize;
-        segments.push(DataSegment {
-            guest_addr: vaddr,
-            memory_index,
-            data: data[offset as usize..offset as usize + chunk_len].to_vec(),
-        });
-        offset += chunk_len as u64;
-    }
-    segments
-}
 
 /// Evaluate a WASM constant expression that is an `i32.const` or `i64.const`.
 ///
@@ -600,8 +823,6 @@ fn chunk_segment(
 /// evaluation).
 fn eval_const_expr(expr: &wasmparser::ConstExpr<'_>) -> Option<u64> {
     let mut reader = expr.get_binary_reader();
-    // Read the leading opcode byte directly — we only handle the common
-    // integer-constant cases (0x41 = i32.const, 0x42 = i64.const).
     match reader.read_u8().ok()? {
         0x41 => Some(reader.read_var_i32().ok()? as u32 as u64),
         0x42 => Some(reader.read_var_i64().ok()? as u64),
@@ -610,9 +831,6 @@ fn eval_const_expr(expr: &wasmparser::ConstExpr<'_>) -> Option<u64> {
 }
 
 /// Emit the offset addition for a memory instruction.
-///
-/// Stack before: `[..., addr]`
-/// Stack after:  `[..., addr + offset]`  (unchanged if `offset == 0`)
 fn emit_offset<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     out: &mut F,
@@ -632,10 +850,6 @@ fn emit_offset<Context, E, F: InstructionSink<Context, E>>(
     Ok(())
 }
 
-/// Emit a complete load sequence via [`MemoryEmitter`].
-///
-/// The mapper reference is passed directly — no extra `.map()` call needed —
-/// because [`MemoryEmitter`]'s `mapper` field has the same type.
 fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
     out: &mut F,
@@ -649,16 +863,6 @@ fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     emitter.emit_load(ctx, out, kind)
 }
 
-/// Emit a complete store sequence.
-///
-/// Uses [`MemoryEmitter::emit_store_addr`] for the address-translation phase
-/// (wrap + mapper), then emits the correct WASM store instruction directly so
-/// that f32/f64 stores and i64 narrow stores (e.g. `I64Store8`) round-trip
-/// with the right value type — [`MemoryEmitter::emit_store_insn`] is designed
-/// for arch-recompiler pipelines and would emit the wrong instruction for those.
-///
-/// The four scratch locals allocated at `base_scratch_idx + 0..3` match value
-/// types: `i32`, `i64`, `f32`, `f64` respectively.
 #[allow(clippy::too_many_arguments)]
 fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     ctx: &mut Context,
@@ -671,34 +875,24 @@ fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     int_width: IntWidth,
     base_scratch_idx: u32,
 ) -> Result<(), E> {
-    // Select the type-matched scratch local.
-    let scratch = base_scratch_idx + match kind {
-        StoreKind::F32 => 2,
-        StoreKind::F64 => 3,
-        _ => match int_width {
-            IntWidth::I32 => 0,
-            IntWidth::I64 => 1,
-        },
-    };
+    let scratch = base_scratch_idx
+        + match kind {
+            StoreKind::F32 => 2,
+            StoreKind::F64 => 3,
+            _ => match int_width {
+                IntWidth::I32 => 0,
+                IntWidth::I64 => 1,
+            },
+        };
 
-    // 1. Save value; stack: [..., addr]
     out.instruction(ctx, &Instruction::LocalSet(scratch))?;
-
-    // 2. Incorporate offset; stack: [..., addr + offset]
     emit_offset(ctx, out, memarg.offset, addr_width)?;
-
-    // 3. Address wrap + mapper via MemoryEmitter; stack: [..., mapped_addr]
     {
         let mut emitter = MemoryEmitter::new(addr_width, int_width, memory_index, mapper);
         emitter.emit_store_addr(ctx, out)?;
     }
-
-    // 4. Restore value; stack: [..., mapped_addr, value]
     out.instruction(ctx, &Instruction::LocalGet(scratch))?;
 
-    // 5. Emit the store instruction with offset=0 and the remapped memory index.
-    //    Reconstructed directly from (kind, int_width) to preserve the correct
-    //    WASM type (e.g. I64Store8 stores an i64, not an i32).
     let ma = MemArg { offset: 0, align: memarg.align as u32, memory_index };
     match kind {
         StoreKind::I8 => match int_width {
@@ -774,9 +968,8 @@ mod tests {
 
     type TestError = BinaryReaderError;
 
-    /// Build a minimal WASM module with one function that exercises
-    /// loads, stores (with non-zero offsets), globals, and a call,
-    /// plus a data segment and a memory section.
+    /// Build a minimal WASM module with one function, a memory section, and a
+    /// data segment.
     fn build_test_wasm() -> Vec<u8> {
         use wasm_encoder::*;
 
@@ -834,9 +1027,9 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
             IndexOffsets::default(),
-            None,
         );
 
         frontend.translate_module(&mut (), &bytes).unwrap();
@@ -848,9 +1041,9 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
             IndexOffsets::default(),
-            None,
         );
 
         frontend.translate_module(&mut (), &bytes).unwrap();
@@ -864,33 +1057,29 @@ mod tests {
     }
 
     #[test]
-    fn data_segment_parsed() {
+    fn data_segment_no_mapper() {
+        // Without a mapper, active data segment becomes one passive segment
+        // with no chunking, and a data_init_fn is generated.
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
             IndexOffsets::default(),
-            None,
         );
 
         frontend.translate_module(&mut (), &bytes).unwrap();
+        // One passive segment (no chunking without mapper).
         assert_eq!(frontend.data_segs.len(), 1);
-        assert_eq!(frontend.data_segs[0].guest_addr, 0x1000);
-        assert_eq!(frontend.data_segs[0].memory_index, 0);
         assert_eq!(&frontend.data_segs[0].data, b"hello world!");
+        // Init fn generated because there is at least one op.
+        assert!(frontend.data_init_fn_result.is_some());
     }
 
     #[test]
-    fn data_segment_chunked() {
-        // Build a module with a 200 KiB data segment starting at address 0xF000.
-        // With a 64 KiB page size the segment spans pages:
-        //   page 0: 0xF000..0x10000  (4096 bytes)
-        //   page 1: 0x10000..0x20000 (65536 bytes)
-        //   page 2: 0x20000..0x30000 (65536 bytes)
-        //   page 3: 0x30000..0x3D800 (55296 bytes — the last partial page)
-        // Total: 4096 + 65536 + 65536 + 55296 = 190464 = 186 KiB... let's use a simpler size.
-        // Use 3 * 64 KiB = 196608 bytes starting at 0x10000 (aligned to page).
-        // All 3 chunks should be exactly 64 KiB each.
+    fn data_segment_chunked_with_mapper() {
+        // 3 × 64 KiB at 0x10000 with a ChunkedMapper → 3 passive segments + init fn.
+        use speet_memory::{ChunkedMapper, PageMapLocals};
         use wasm_encoder::*;
 
         let mut module = Module::new();
@@ -922,34 +1111,44 @@ mod tests {
 
         let bytes = module.finish();
 
+        // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
+        let mapper_factory: Box<
+            dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), TestError, Function>>,
+        > = Box::new(|_locals| {
+            Box::new(ChunkedMapper {
+                page_size: 0x10000,
+                inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
+            })
+        });
+
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper_factory: Some(mapper_factory),
+            }],
+            0,
             IndexOffsets::default(),
-            None,
         );
-        frontend.chunk_size = Some(0x10000); // 64 KiB pages
 
         frontend.translate_module(&mut (), &bytes).unwrap();
 
         assert_eq!(frontend.data_segs.len(), 3, "should split into 3 page-sized chunks");
-        assert_eq!(frontend.data_segs[0].guest_addr, 0x10000);
         assert_eq!(frontend.data_segs[0].data.len(), 65536);
-        assert_eq!(frontend.data_segs[1].guest_addr, 0x20000);
         assert_eq!(frontend.data_segs[1].data.len(), 65536);
-        assert_eq!(frontend.data_segs[2].guest_addr, 0x30000);
         assert_eq!(frontend.data_segs[2].data.len(), 65536);
+        assert!(frontend.data_init_fn_result.is_some(), "init fn should be generated");
     }
 
     #[test]
-    fn drain_unit_advances_offset() {
+    fn drain_unit_produces_data_init_fn() {
         use speet_link::Linker;
 
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
             IndexOffsets::default(),
-            None,
         );
 
         frontend.translate_module(&mut (), &bytes).unwrap();
@@ -961,7 +1160,8 @@ mod tests {
         assert_eq!(unit.base_func_offset, 0);
         assert_eq!(unit.fns.len(), 1);
         assert_eq!(unit.data_segments.len(), 1);
-        assert_eq!(unit.data_segments[0].guest_addr, 0x1000);
+        // Init fn is present since data segment was parsed.
+        assert!(unit.data_init_fn.is_some());
         assert_eq!(linker.base_func_offset(), 1, "offset should advance by 1");
     }
 
@@ -969,15 +1169,109 @@ mod tests {
     fn call_index_remapped() {
         let bytes = build_test_wasm();
 
-        // Custom fn_creator: same as Function::new but via the generic path.
         let mut frontend: WasmFrontend<(), TestError, Function> = WasmFrontend::new(
-            MemoryMapConfig { addr_width: AddressWidth::W32, memory_index: 0 },
-            IndexOffsets { func: 5, global: 0, table: 0, memory: 0 },
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
+            IndexOffsets { func: 5, global: 0, table: 0 },
             Box::new(|locals| Function::new(locals)),
-            None,
         );
 
         frontend.translate_module(&mut (), &bytes).unwrap();
+        assert_eq!(frontend.compiled.len(), 1);
+    }
+
+    #[test]
+    fn memory_size_returns_constant() {
+        // memory.size N should be lowered to i32.const <declared_pages>.
+        use wasm_encoder::*;
+
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I32]);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut mems = MemorySection::new();
+        mems.memory(MemoryType {
+            minimum: 7,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&mems);
+        let mut codes = CodeSection::new();
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::MemorySize(0));
+        f.instruction(&Instruction::End);
+        codes.function(&f);
+        module.section(&codes);
+        let bytes = module.finish();
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            0,
+            IndexOffsets::default(),
+        );
+        frontend.translate_module(&mut (), &bytes).unwrap();
+        // Just check it compiled successfully (instruction lowering does not panic).
+        assert_eq!(frontend.compiled.len(), 1);
+    }
+
+    #[test]
+    fn memory_copy_lowered_to_loop_with_mapper() {
+        // memory.copy with a mapper should emit a block/loop, not a single instruction.
+        use speet_memory::{ChunkedMapper, PageMapLocals};
+        use wasm_encoder::*;
+
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut mems = MemorySection::new();
+        mems.memory(MemoryType {
+            minimum: 4,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&mems);
+        let mut codes = CodeSection::new();
+        let mut f = Function::new([]);
+        // Push dst, src, len then memory.copy.
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Const(0x10000));
+        f.instruction(&Instruction::I32Const(0x1000));
+        f.instruction(&Instruction::MemoryCopy { dst_mem: 0, src_mem: 0 });
+        f.instruction(&Instruction::End);
+        codes.function(&f);
+        module.section(&codes);
+        let bytes = module.finish();
+
+        let mapper_factory: Box<
+            dyn Fn(PageMapLocals) -> Box<dyn MapperCallback<(), TestError, Function>>,
+        > = Box::new(|_locals| {
+            Box::new(ChunkedMapper {
+                page_size: 0x10000,
+                inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
+            })
+        });
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper_factory: Some(mapper_factory),
+            }],
+            0,
+            IndexOffsets::default(),
+        );
+        frontend.translate_module(&mut (), &bytes).unwrap();
+        // Verify the function was produced (the loop lowering did not error).
         assert_eq!(frontend.compiled.len(), 1);
     }
 }

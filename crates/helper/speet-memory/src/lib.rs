@@ -44,7 +44,7 @@ pub mod mem;
 pub mod paging;
 
 pub use layout::{LocalLayout, LocalSlot};
-pub use mapper::{CallbackContext, MapperCallback};
+pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback};
 pub use mem::{AddressWidth, IntWidth, LoadKind, MemoryEmitter, StoreKind};
 pub use paging::{
     PageMapLocals, PageTableBase, multilevel_page_table_mapper, multilevel_page_table_mapper_32,

@@ -76,6 +76,51 @@ pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
         ctx: &mut Context,
         callback_ctx: &mut CallbackContext<Context, E, F>,
     ) -> Result<(), E>;
+
+    /// Page granularity for data-segment chunking.
+    ///
+    /// When `Some(n)`, data segments should be split at `n`-byte page
+    /// boundaries so that each chunk maps to exactly one physical page.
+    /// Returns `None` when no chunking is required (e.g. identity mappers).
+    fn chunk_size(&self) -> Option<u64> {
+        None
+    }
+}
+
+// ── ChunkedMapper ──────────────────────────────────────────────────────────────
+
+/// Wraps any [`MapperCallback`] and advertises a fixed page granularity for
+/// data-segment chunking via [`MapperCallback::chunk_size`].
+///
+/// All four page-table helper builders (`standard_page_table_mapper`, etc.)
+/// return `ChunkedMapper<impl MapperCallback<…>>` with `page_size = 0x10000`
+/// so that callers can derive the chunk size without knowing the concrete
+/// mapper type.
+pub struct ChunkedMapper<M> {
+    /// The underlying mapper callback that performs address translation.
+    pub inner: M,
+    /// The page granularity advertised by [`MapperCallback::chunk_size`].
+    pub page_size: u64,
+}
+
+impl<Context, E, F, M> MapperCallback<Context, E, F> for ChunkedMapper<M>
+where
+    F: InstructionSink<Context, E>,
+    M: MapperCallback<Context, E, F>,
+{
+    #[inline]
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E, F>,
+    ) -> Result<(), E> {
+        self.inner.call(ctx, callback_ctx)
+    }
+
+    #[inline]
+    fn chunk_size(&self) -> Option<u64> {
+        Some(self.page_size)
+    }
 }
 
 /// Blanket impl: any compatible `FnMut` closure is a `MapperCallback`.

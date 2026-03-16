@@ -19,7 +19,7 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use crate::linker::LinkerPlugin;
-use crate::unit::{BinaryUnit, DataSegment, FuncType};
+use crate::unit::{BinaryUnit, FuncType};
 
 // ── MegabinaryOutput ──────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ use crate::unit::{BinaryUnit, DataSegment, FuncType};
 /// | `func_type_indices` | FunctionSection (per-function type index) |
 /// | `fns` | CodeSection |
 /// | `exports` | ExportSection |
-/// | `data_segments` | DataSection |
+/// | `passive_data` | DataSection (passive segments) |
 pub struct MegabinaryOutput<F> {
     /// Deduplicated function types.  Index `i` is used by any function whose
     /// `func_type_indices` entry equals `i`.
@@ -44,13 +44,14 @@ pub struct MegabinaryOutput<F> {
     pub fns: Vec<F>,
     /// `(symbol_name, absolute_wasm_func_index)` exports.
     pub exports: Vec<(String, u32)>,
-    /// All data segments accumulated from every [`BinaryUnit`].
-    ///
-    /// For WASM output, emit each as an active data segment:
-    /// `(data (memory <memory_index>) (i32.const <guest_addr>) <data>)`.
-    /// For native output, the caller maps each segment's bytes to the
-    /// physical address corresponding to `guest_addr`.
-    pub data_segments: Vec<DataSegment>,
+    /// Raw byte blobs for all passive data segments accumulated from every
+    /// [`BinaryUnit`].  Emit as passive WASM data segments; physical placement
+    /// is performed at WASM runtime by the data-init functions.
+    pub passive_data: Vec<Vec<u8>>,
+    /// Data-init functions accumulated from every [`BinaryUnit`], one per
+    /// unit that produced segments.  Callers may emit these as start
+    /// functions or export them as `"__speet_data_init"`.
+    pub data_init_fns: Vec<(F, FuncType)>,
 }
 
 // ── MegabinaryBuilder ─────────────────────────────────────────────────────────
@@ -71,7 +72,8 @@ pub struct MegabinaryBuilder<F> {
     func_type_indices: Vec<u32>,
     fns: Vec<F>,
     exports: Vec<(String, u32)>,
-    data_segments: Vec<DataSegment>,
+    passive_data: Vec<Vec<u8>>,
+    data_init_fns: Vec<(F, FuncType)>,
 }
 
 impl<F> Default for MegabinaryBuilder<F> {
@@ -89,7 +91,8 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: Vec::new(),
             fns: Vec::new(),
             exports: Vec::new(),
-            data_segments: Vec::new(),
+            passive_data: Vec::new(),
+            data_init_fns: Vec::new(),
         }
     }
 
@@ -109,7 +112,8 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: self.func_type_indices,
             fns: self.fns,
             exports: self.exports,
-            data_segments: self.data_segments,
+            passive_data: self.passive_data,
+            data_init_fns: self.data_init_fns,
         }
     }
 }
@@ -126,7 +130,14 @@ impl<F> LinkerPlugin<F> for MegabinaryBuilder<F> {
             self.fns.push(f);
         }
 
-        // Absorb data segments.
-        self.data_segments.extend(unit.data_segments);
+        // Absorb passive data segments.
+        for seg in unit.data_segments {
+            self.passive_data.push(seg.data);
+        }
+
+        // Accumulate data-init functions.
+        if let Some(init_fn) = unit.data_init_fn {
+            self.data_init_fns.push(init_fn);
+        }
     }
 }

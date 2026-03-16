@@ -2134,6 +2134,8 @@ where
             base_func_offset: base,
             entry_points,
             func_types: alloc::vec![func_type; count],
+            data_segments: alloc::vec![],
+            data_init_fn: None,
         }
     }
 }

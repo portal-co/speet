@@ -32,7 +32,7 @@
 //!   `use_i64 = true`) is on the wasm value stack.
 //! * **After**: physical address of the same type is on the stack.
 
-use crate::mapper::{CallbackContext, MapperCallback};
+use crate::mapper::{CallbackContext, ChunkedMapper, MapperCallback};
 use wasm_encoder::{Instruction, MemArg};
 use wax_core::build::InstructionSink;
 
@@ -152,14 +152,16 @@ pub fn standard_page_table_mapper<Context, E, F>(
     memory_index: u32,
     use_i64: bool,
     locals: PageMapLocals,
-) -> impl MapperCallback<Context, E, F>
+) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
 where
     F: InstructionSink<Context, E>,
 {
     let pt_base = page_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+    ChunkedMapper {
+        page_size: 0x10000,
+        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
@@ -242,6 +244,7 @@ where
             cb.emit(ctx, &Instruction::I32Add)?;
         }
         Ok(())
+        },
     }
 }
 
@@ -263,14 +266,16 @@ pub fn standard_page_table_mapper_32<Context, E, F>(
     memory_index: u32,
     use_i64: bool,
     locals: PageMapLocals,
-) -> impl MapperCallback<Context, E, F>
+) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
 where
     F: InstructionSink<Context, E>,
 {
     let pt_base = page_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+    ChunkedMapper {
+        page_size: 0x10000,
+        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
@@ -380,6 +385,7 @@ where
             cb.emit(ctx, &Instruction::I32Add)?;
         }
         Ok(())
+        },
     }
 }
 
@@ -405,14 +411,16 @@ pub fn multilevel_page_table_mapper<Context, E, F>(
     memory_index: u32,
     use_i64: bool,
     locals: PageMapLocals,
-) -> impl MapperCallback<Context, E, F>
+) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
 where
     F: InstructionSink<Context, E>,
 {
     let l3_base = l3_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+    ChunkedMapper {
+        page_size: 0x10000,
+        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
@@ -513,6 +521,7 @@ where
             inner.call(ctx, cb)?;
         }
         Ok(())
+        },
     }
 }
 
@@ -537,14 +546,16 @@ pub fn multilevel_page_table_mapper_32<Context, E, F>(
     memory_index: u32,
     use_i64: bool,
     locals: PageMapLocals,
-) -> impl MapperCallback<Context, E, F>
+) -> ChunkedMapper<impl MapperCallback<Context, E, F>>
 where
     F: InstructionSink<Context, E>,
 {
     let l3_base = l3_table_base.into();
     let sec_dir_base = security_directory_base.into();
 
-    move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
+    ChunkedMapper {
+        page_size: 0x10000,
+        inner: move |ctx: &mut Context, cb: &mut CallbackContext<Context, E, F>| {
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
@@ -649,5 +660,6 @@ where
             inner.call(ctx, cb)?;
         }
         Ok(())
+        },
     }
 }
