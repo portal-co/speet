@@ -33,8 +33,8 @@ use wasm_encoder::Function;
 /// Panics on any I/O or parse error — the files are version-controlled and
 /// must always be readable.
 fn load_text_section(elf_path: &Path) -> (Vec<u8>, u64) {
-    let bytes = fs::read(elf_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
+    let bytes =
+        fs::read(elf_path).unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
     let obj = object::File::parse(&*bytes)
         .unwrap_or_else(|e| panic!("failed to parse ELF {}: {e}", elf_path.display()));
     let section = obj
@@ -126,8 +126,7 @@ fn test_x86_edge_cases() {
 /// Smoke test: recompile all corpus ELF objects in a single pass.
 #[test]
 fn test_x86_full_corpus() {
-    let corpus_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/x86_64-corpus");
+    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/x86_64-corpus");
 
     let mut entries: Vec<_> = fs::read_dir(&corpus_dir)
         .expect("reading x86_64-corpus dir")

@@ -42,9 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{
-    EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx,
-};
+use yecta::{EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},

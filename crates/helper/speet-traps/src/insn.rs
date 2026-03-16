@@ -205,8 +205,11 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
 impl<Context, E, F, Fn> InstructionTrap<Context, E, F> for Fn
 where
     F: InstructionSink<Context, E>,
-    Fn: FnMut(&InstructionInfo, &mut Context, &mut TrapContext<Context, E, F>)
-            -> Result<TrapAction, E>,
+    Fn: FnMut(
+        &InstructionInfo,
+        &mut Context,
+        &mut TrapContext<Context, E, F>,
+    ) -> Result<TrapAction, E>,
 {
     fn on_instruction(
         &mut self,
@@ -263,8 +266,7 @@ where
 }
 
 /// `Box<dyn InstructionTrap<…>>` simply delegates to the inner value.
-impl<Context, E, F> InstructionTrap<Context, E, F>
-    for Box<dyn InstructionTrap<Context, E, F> + '_>
+impl<Context, E, F> InstructionTrap<Context, E, F> for Box<dyn InstructionTrap<Context, E, F> + '_>
 where
     F: InstructionSink<Context, E>,
 {

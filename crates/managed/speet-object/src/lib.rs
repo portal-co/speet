@@ -45,7 +45,5 @@ mod linear;
 mod model;
 
 pub use hash::{PrimitiveType, TypeHash};
-pub use linear::{
-    LinearMemoryObjects, ARRAY_DATA_OFFSET, ARRAY_LENGTH_OFFSET, OBJECT_HEADER_SIZE,
-};
+pub use linear::{ARRAY_DATA_OFFSET, ARRAY_LENGTH_OFFSET, LinearMemoryObjects, OBJECT_HEADER_SIZE};
 pub use model::{FieldValType, NoObjectModel, ObjectModel};

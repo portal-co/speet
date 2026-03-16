@@ -63,8 +63,8 @@ use speet_traps::{
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
+    TypeIdx,
 };
 
 // Re-export the shared memory/mapper abstractions so existing users do not

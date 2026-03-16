@@ -111,71 +111,86 @@ impl MemWidth {
     /// Natural alignment exponent (log₂ of the byte width being transferred).
     pub fn natural_align(&self) -> u32 {
         match self {
-            MemWidth::I32U8  | MemWidth::I32S8
-            | MemWidth::I64U8  | MemWidth::I64S8   => 0,
-            MemWidth::I32U16 | MemWidth::I32S16
-            | MemWidth::I64U16 | MemWidth::I64S16  => 1,
-            MemWidth::I32    | MemWidth::F32
-            | MemWidth::I64U32 | MemWidth::I64S32  => 2,
-            MemWidth::I64    | MemWidth::F64        => 3,
+            MemWidth::I32U8 | MemWidth::I32S8 | MemWidth::I64U8 | MemWidth::I64S8 => 0,
+            MemWidth::I32U16 | MemWidth::I32S16 | MemWidth::I64U16 | MemWidth::I64S16 => 1,
+            MemWidth::I32 | MemWidth::F32 | MemWidth::I64U32 | MemWidth::I64S32 => 2,
+            MemWidth::I64 | MemWidth::F64 => 3,
         }
     }
 
     /// The WASM `ValType` produced by loading through this width.
     pub fn result_type(&self) -> ValType {
         match self {
-            MemWidth::I32 | MemWidth::I32U8 | MemWidth::I32S8
-            | MemWidth::I32U16 | MemWidth::I32S16 => ValType::I32,
-            MemWidth::I64 | MemWidth::I64U8 | MemWidth::I64S8
-            | MemWidth::I64U16 | MemWidth::I64S16
-            | MemWidth::I64U32 | MemWidth::I64S32 => ValType::I64,
+            MemWidth::I32
+            | MemWidth::I32U8
+            | MemWidth::I32S8
+            | MemWidth::I32U16
+            | MemWidth::I32S16 => ValType::I32,
+            MemWidth::I64
+            | MemWidth::I64U8
+            | MemWidth::I64S8
+            | MemWidth::I64U16
+            | MemWidth::I64S16
+            | MemWidth::I64U32
+            | MemWidth::I64S32 => ValType::I64,
             MemWidth::F32 => ValType::F32,
             MemWidth::F64 => ValType::F64,
         }
     }
 
     fn memarg(&self, offset: u64, memory: u32) -> MemArg {
-        MemArg { offset, align: self.natural_align(), memory_index: memory }
+        MemArg {
+            offset,
+            align: self.natural_align(),
+            memory_index: memory,
+        }
     }
 
     fn load_insn(&self, offset: u64, memory: u32) -> Instruction<'static> {
         let a = self.memarg(offset, memory);
         match self {
-            MemWidth::I32    => Instruction::I32Load(a),
-            MemWidth::I32U8  => Instruction::I32Load8U(a),
-            MemWidth::I32S8  => Instruction::I32Load8S(a),
+            MemWidth::I32 => Instruction::I32Load(a),
+            MemWidth::I32U8 => Instruction::I32Load8U(a),
+            MemWidth::I32S8 => Instruction::I32Load8S(a),
             MemWidth::I32U16 => Instruction::I32Load16U(a),
             MemWidth::I32S16 => Instruction::I32Load16S(a),
-            MemWidth::I64    => Instruction::I64Load(a),
-            MemWidth::I64U8  => Instruction::I64Load8U(a),
-            MemWidth::I64S8  => Instruction::I64Load8S(a),
+            MemWidth::I64 => Instruction::I64Load(a),
+            MemWidth::I64U8 => Instruction::I64Load8U(a),
+            MemWidth::I64S8 => Instruction::I64Load8S(a),
             MemWidth::I64U16 => Instruction::I64Load16U(a),
             MemWidth::I64S16 => Instruction::I64Load16S(a),
             MemWidth::I64U32 => Instruction::I64Load32U(a),
             MemWidth::I64S32 => Instruction::I64Load32S(a),
-            MemWidth::F32    => Instruction::F32Load(a),
-            MemWidth::F64    => Instruction::F64Load(a),
+            MemWidth::F32 => Instruction::F32Load(a),
+            MemWidth::F64 => Instruction::F64Load(a),
         }
     }
 
     fn store_insn(&self, offset: u64, memory: u32) -> Instruction<'static> {
         let a = self.memarg(offset, memory);
         match self {
-            MemWidth::I32 | MemWidth::I32U8 | MemWidth::I32S8
-            | MemWidth::I32U16 | MemWidth::I32S16  => match self {
-                MemWidth::I32    => Instruction::I32Store(a),
-                MemWidth::I32U8  => Instruction::I32Store8(a),
-                MemWidth::I32S8  => Instruction::I32Store8(a),
+            MemWidth::I32
+            | MemWidth::I32U8
+            | MemWidth::I32S8
+            | MemWidth::I32U16
+            | MemWidth::I32S16 => match self {
+                MemWidth::I32 => Instruction::I32Store(a),
+                MemWidth::I32U8 => Instruction::I32Store8(a),
+                MemWidth::I32S8 => Instruction::I32Store8(a),
                 MemWidth::I32U16 => Instruction::I32Store16(a),
                 MemWidth::I32S16 => Instruction::I32Store16(a),
                 _ => unreachable!(),
             },
-            MemWidth::I64 | MemWidth::I64U8 | MemWidth::I64S8
-            | MemWidth::I64U16 | MemWidth::I64S16
-            | MemWidth::I64U32 | MemWidth::I64S32 => match self {
-                MemWidth::I64    => Instruction::I64Store(a),
-                MemWidth::I64U8  => Instruction::I64Store8(a),
-                MemWidth::I64S8  => Instruction::I64Store8(a),
+            MemWidth::I64
+            | MemWidth::I64U8
+            | MemWidth::I64S8
+            | MemWidth::I64U16
+            | MemWidth::I64S16
+            | MemWidth::I64U32
+            | MemWidth::I64S32 => match self {
+                MemWidth::I64 => Instruction::I64Store(a),
+                MemWidth::I64U8 => Instruction::I64Store8(a),
+                MemWidth::I64S8 => Instruction::I64Store8(a),
                 MemWidth::I64U16 => Instruction::I64Store16(a),
                 MemWidth::I64S16 => Instruction::I64Store16(a),
                 MemWidth::I64U32 => Instruction::I64Store32(a),
@@ -231,7 +246,12 @@ impl Place {
             Place::Global(idx) => {
                 f.instruction(&Instruction::GlobalGet(*idx));
             }
-            Place::Deref { base, offset, width, memory } => {
+            Place::Deref {
+                base,
+                offset,
+                width,
+                memory,
+            } => {
                 // Push address, then load.
                 base.emit_load(f);
                 f.instruction(&width.load_insn(*offset, *memory));
@@ -259,10 +279,15 @@ impl Place {
                 emit_value(f);
                 f.instruction(&Instruction::GlobalSet(*idx));
             }
-            Place::Deref { base, offset, width, memory } => {
+            Place::Deref {
+                base,
+                offset,
+                width,
+                memory,
+            } => {
                 // WASM memory stores: [addr, value] → store.
-                base.emit_load(f);   // push address
-                emit_value(f);       // push value
+                base.emit_load(f); // push address
+                emit_value(f); // push value
                 f.instruction(&width.store_insn(*offset, *memory));
             }
         }
@@ -303,10 +328,18 @@ impl ParamSource {
         match self {
             ParamSource::Load(place) => place.emit_load(f),
             ParamSource::Zero => emit_zero(f, callee_ty),
-            ParamSource::I32Const(v) => { f.instruction(&Instruction::I32Const(*v)); }
-            ParamSource::I64Const(v) => { f.instruction(&Instruction::I64Const(*v)); }
-            ParamSource::F32Const(v) => { f.instruction(&Instruction::F32Const((*v).into())); }
-            ParamSource::F64Const(v) => { f.instruction(&Instruction::F64Const((*v).into())); }
+            ParamSource::I32Const(v) => {
+                f.instruction(&Instruction::I32Const(*v));
+            }
+            ParamSource::I64Const(v) => {
+                f.instruction(&Instruction::I64Const(*v));
+            }
+            ParamSource::F32Const(v) => {
+                f.instruction(&Instruction::F32Const((*v).into()));
+            }
+            ParamSource::F64Const(v) => {
+                f.instruction(&Instruction::F64Const((*v).into()));
+            }
         }
     }
 }
@@ -414,9 +447,17 @@ pub fn emit_shim(spec: &ShimSpec) -> Function {
 
 fn emit_zero(f: &mut Function, ty: ValType) {
     match ty {
-        ValType::I64 => { f.instruction(&Instruction::I64Const(0)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Const(0.0_f32.into())); }
-        ValType::F64 => { f.instruction(&Instruction::F64Const(0.0_f64.into())); }
-        _            => { f.instruction(&Instruction::I32Const(0)); }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Const(0));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Const(0.0_f32.into()));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Const(0.0_f64.into()));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Const(0));
+        }
     }
 }

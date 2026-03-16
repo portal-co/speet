@@ -840,9 +840,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 let f = &mut self.fns[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
-                                           // Drain deferred stores: emit the flag-guarded unconditional flush.
-                                           // We can't borrow `self.local_pool` and `f` simultaneously so we
-                                           // drain into a local vec first.
+                // Drain deferred stores: emit the flag-guarded unconditional flush.
+                // We can't borrow `self.local_pool` and `f` simultaneously so we
+                // drain into a local vec first.
                 let stores: Vec<LazyStore> = f.bundles.drain(..).collect();
                 for s in stores {
                     // Emit only if not already emitted before a load.

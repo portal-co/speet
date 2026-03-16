@@ -99,12 +99,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> Default
     }
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
-    TrapConfig<'cb, 'ctx, Context, E, F>
-{
+impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx, Context, E, F> {
     /// Create an empty `TrapConfig` with no traps installed.
     pub fn new() -> Self {
-        Self { insn_trap: None, jump_trap: None }
+        Self {
+            insn_trap: None,
+            jump_trap: None,
+        }
     }
 
     // ── Installation ──────────────────────────────────────────────────────
@@ -126,10 +127,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     ///
     /// See [`set_instruction_trap`](Self::set_instruction_trap) for the
     /// post-install protocol.
-    pub fn set_jump_trap(
-        &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E, F> + 'ctx),
-    ) {
+    pub fn set_jump_trap(&mut self, trap: &'cb mut (dyn JumpTrap<Context, E, F> + 'ctx)) {
         self.jump_trap = Some(trap);
     }
 
@@ -204,7 +202,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     ) -> Result<TrapAction, E> {
         let trap = match self.insn_trap.as_mut() {
             Some(t) => t,
-            None    => return Ok(TrapAction::Continue),
+            None => return Ok(TrapAction::Continue),
         };
         let mut trap_ctx = TrapContext::new(sink, layout);
         let action = trap.on_instruction(info, ctx, &mut trap_ctx)?;
@@ -233,7 +231,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     ) -> Result<TrapAction, E> {
         let trap = match self.jump_trap.as_mut() {
             Some(t) => t,
-            None    => return Ok(TrapAction::Continue),
+            None => return Ok(TrapAction::Continue),
         };
         let mut trap_ctx = TrapContext::new(sink, layout);
         let action = trap.on_jump(info, ctx, &mut trap_ctx)?;

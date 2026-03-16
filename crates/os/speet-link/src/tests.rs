@@ -117,8 +117,8 @@ mod unit_tests {
 
     // ── Shim tests ────────────────────────────────────────────────────────────
 
+    use crate::shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};
     use alloc::boxed::Box;
-    use crate::shim::{emit_shim, MemWidth, ParamSource, Place, SavePair, ShimSpec};
 
     /// `emit_shim` with `ParamSource::Load(Local)` and `ParamSource::Zero`
     /// must produce a function that validates as WASM.
@@ -188,7 +188,10 @@ mod unit_tests {
             ],
             saves: vec![
                 // Save caller local 0 into global 1 before the call.
-                SavePair { src: Place::Local(0), dst: Place::Global(1) },
+                SavePair {
+                    src: Place::Local(0),
+                    dst: Place::Global(1),
+                },
             ],
             extra_locals: vec![],
         };

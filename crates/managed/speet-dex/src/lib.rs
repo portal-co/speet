@@ -43,13 +43,13 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use wax_core::build::{InstructionSink, InstructionSource, InstructionOperatorSource};
+use wax_core::build::{InstructionOperatorSource, InstructionSink, InstructionSource};
 
 use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
+    Target, TypeIdx,
 };
 
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -173,18 +173,50 @@ impl<Context, E> InstructionSource<Context, E> for DexCondSnippet {
         use Instruction as W;
         sink.instruction(ctx, &W::LocalGet(self.a))?;
         match self.op {
-            I32Eq  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Eq)?; }
-            I32Ne  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Ne)?; }
-            I32LtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LtS)?; }
-            I32GeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GeS)?; }
-            I32GtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GtS)?; }
-            I32LeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LeS)?; }
-            I32Eqz  => { sink.instruction(ctx, &W::I32Eqz)?; }
-            I32Nez  => { /* just the register value */ }
-            I32LtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LtS)?; }
-            I32GezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GeS)?; }
-            I32GtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GtS)?; }
-            I32LezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LeS)?; }
+            I32Eq => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32Eq)?;
+            }
+            I32Ne => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32Ne)?;
+            }
+            I32LtS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32LtS)?;
+            }
+            I32GeS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32GeS)?;
+            }
+            I32GtS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32GtS)?;
+            }
+            I32LeS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32LeS)?;
+            }
+            I32Eqz => {
+                sink.instruction(ctx, &W::I32Eqz)?;
+            }
+            I32Nez => { /* just the register value */ }
+            I32LtzS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32LtS)?;
+            }
+            I32GezS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32GeS)?;
+            }
+            I32GtzS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32GtS)?;
+            }
+            I32LezS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32LeS)?;
+            }
         }
         Ok(())
     }
@@ -200,18 +232,50 @@ impl<Context, E> InstructionOperatorSource<Context, E> for DexCondSnippet {
         use Instruction as W;
         sink.instruction(ctx, &W::LocalGet(self.a))?;
         match self.op {
-            I32Eq  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Eq)?; }
-            I32Ne  => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32Ne)?; }
-            I32LtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LtS)?; }
-            I32GeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GeS)?; }
-            I32GtS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32GtS)?; }
-            I32LeS => { sink.instruction(ctx, &W::LocalGet(self.b))?; sink.instruction(ctx, &W::I32LeS)?; }
-            I32Eqz  => { sink.instruction(ctx, &W::I32Eqz)?; }
-            I32Nez  => { /* just the register value */ }
-            I32LtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LtS)?; }
-            I32GezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GeS)?; }
-            I32GtzS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32GtS)?; }
-            I32LezS => { sink.instruction(ctx, &W::I32Const(0))?; sink.instruction(ctx, &W::I32LeS)?; }
+            I32Eq => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32Eq)?;
+            }
+            I32Ne => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32Ne)?;
+            }
+            I32LtS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32LtS)?;
+            }
+            I32GeS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32GeS)?;
+            }
+            I32GtS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32GtS)?;
+            }
+            I32LeS => {
+                sink.instruction(ctx, &W::LocalGet(self.b))?;
+                sink.instruction(ctx, &W::I32LeS)?;
+            }
+            I32Eqz => {
+                sink.instruction(ctx, &W::I32Eqz)?;
+            }
+            I32Nez => { /* just the register value */ }
+            I32LtzS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32LtS)?;
+            }
+            I32GezS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32GeS)?;
+            }
+            I32GtzS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32GtS)?;
+            }
+            I32LezS => {
+                sink.instruction(ctx, &W::I32Const(0))?;
+                sink.instruction(ctx, &W::I32LeS)?;
+            }
         }
         Ok(())
     }
@@ -376,7 +440,7 @@ fn jtype_to_field_val_type(ty: &dex::jtype::Type) -> FieldValType {
         "F" => FieldValType::F32,  // float
         "J" => FieldValType::I64,  // long
         "D" => FieldValType::F64,  // double
-        _   => FieldValType::Ref,  // reference (array or class)
+        _ => FieldValType::Ref,    // reference (array or class)
     }
 }
 
@@ -391,7 +455,7 @@ fn descriptor_to_primitive(desc: &str) -> Option<PrimitiveType> {
         "F" => Some(PrimitiveType::Float),
         "J" => Some(PrimitiveType::Long),
         "D" => Some(PrimitiveType::Double),
-        _   => None,
+        _ => None,
     }
 }
 
@@ -414,7 +478,7 @@ fn array_desc_to_info(desc: &str) -> (TypeHash, u32, u32) {
         "C" | "S" => 2,
         "I" | "F" => 4,
         "J" | "D" => 8,
-        _          => 4, // reference
+        _ => 4, // reference
     };
     (elem_hash, dim, elem_bytes)
 }
@@ -553,7 +617,10 @@ where
         let max_regs = flat.max_registers();
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: Pool { table: TableIdx(0), ty: TypeIdx(0) },
+            pool: Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
             escape_tag: None,
             flat,
             mem_order: MemOrder::Strong,
@@ -561,7 +628,10 @@ where
             traps: TrapConfig::new(),
             total_params: max_regs,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             scratch_slot: LocalSlot::default(),
             scratch_i64_slot: LocalSlot::default(),
             obj_model: NoObjectModel,
@@ -606,7 +676,10 @@ where
         let (field_map, class_sizes, type_descs) = build_class_maps(input)?;
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: Pool { table: TableIdx(0), ty: TypeIdx(0) },
+            pool: Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
             escape_tag: None,
             flat,
             mem_order: MemOrder::Strong,
@@ -614,7 +687,10 @@ where
             traps: TrapConfig::new(),
             total_params: max_regs,
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
             scratch_slot: LocalSlot::default(),
             scratch_i64_slot: LocalSlot::default(),
             obj_model,
@@ -829,43 +905,72 @@ where
     fn build_jump_info(flat_idx: u64, insn: &DexInsn, scratch: u32) -> JumpInfo {
         let branch_target = |off: i64| (flat_idx as i64).wrapping_add(off) as u64;
         match insn {
-            DexInsn::ReturnVoid | DexInsn::Return { .. }
-            | DexInsn::ReturnWide { .. } | DexInsn::ReturnObject { .. }
-            => JumpInfo::direct(flat_idx, 0, JumpKind::Return),
+            DexInsn::ReturnVoid
+            | DexInsn::Return { .. }
+            | DexInsn::ReturnWide { .. }
+            | DexInsn::ReturnObject { .. } => JumpInfo::direct(flat_idx, 0, JumpKind::Return),
 
-            DexInsn::Throw { .. }
-            => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
+            DexInsn::Throw { .. } => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
 
             DexInsn::Goto { offset } => JumpInfo::direct(
-                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
+                flat_idx,
+                branch_target(*offset as i64),
+                JumpKind::DirectJump,
+            ),
             DexInsn::Goto16 { offset } => JumpInfo::direct(
-                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
+                flat_idx,
+                branch_target(*offset as i64),
+                JumpKind::DirectJump,
+            ),
             DexInsn::Goto32 { offset } => JumpInfo::direct(
-                flat_idx, branch_target(*offset as i64), JumpKind::DirectJump),
+                flat_idx,
+                branch_target(*offset as i64),
+                JumpKind::DirectJump,
+            ),
 
-            DexInsn::PackedSwitch { .. } | DexInsn::SparseSwitch { .. }
-            => JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump),
+            DexInsn::PackedSwitch { .. } | DexInsn::SparseSwitch { .. } => {
+                JumpInfo::direct(flat_idx, 0, JumpKind::IndirectJump)
+            }
 
-            DexInsn::IfEq { offset, .. } | DexInsn::IfNe { offset, .. }
-            | DexInsn::IfLt { offset, .. } | DexInsn::IfGe { offset, .. }
-            | DexInsn::IfGt { offset, .. } | DexInsn::IfLe { offset, .. }
-            => JumpInfo::direct(flat_idx, branch_target(*offset as i64), JumpKind::ConditionalBranch),
+            DexInsn::IfEq { offset, .. }
+            | DexInsn::IfNe { offset, .. }
+            | DexInsn::IfLt { offset, .. }
+            | DexInsn::IfGe { offset, .. }
+            | DexInsn::IfGt { offset, .. }
+            | DexInsn::IfLe { offset, .. } => JumpInfo::direct(
+                flat_idx,
+                branch_target(*offset as i64),
+                JumpKind::ConditionalBranch,
+            ),
 
-            DexInsn::IfEqz { offset, .. } | DexInsn::IfNez { offset, .. }
-            | DexInsn::IfLtz { offset, .. } | DexInsn::IfGez { offset, .. }
-            | DexInsn::IfGtz { offset, .. } | DexInsn::IfLez { offset, .. }
-            => JumpInfo::direct(flat_idx, branch_target(*offset as i64), JumpKind::ConditionalBranch),
+            DexInsn::IfEqz { offset, .. }
+            | DexInsn::IfNez { offset, .. }
+            | DexInsn::IfLtz { offset, .. }
+            | DexInsn::IfGez { offset, .. }
+            | DexInsn::IfGtz { offset, .. }
+            | DexInsn::IfLez { offset, .. } => JumpInfo::direct(
+                flat_idx,
+                branch_target(*offset as i64),
+                JumpKind::ConditionalBranch,
+            ),
 
-            DexInsn::InvokeDirect { .. } | DexInsn::InvokeStatic { .. }
-            | DexInsn::InvokeDirectRange { .. } | DexInsn::InvokeStaticRange { .. }
-            | DexInsn::InvokeCustom { .. } | DexInsn::InvokeCustomRange { .. }
-            => JumpInfo::direct(flat_idx, 0, JumpKind::Call),
+            DexInsn::InvokeDirect { .. }
+            | DexInsn::InvokeStatic { .. }
+            | DexInsn::InvokeDirectRange { .. }
+            | DexInsn::InvokeStaticRange { .. }
+            | DexInsn::InvokeCustom { .. }
+            | DexInsn::InvokeCustomRange { .. } => JumpInfo::direct(flat_idx, 0, JumpKind::Call),
 
-            DexInsn::InvokeVirtual { .. } | DexInsn::InvokeSuper { .. }
-            | DexInsn::InvokeInterface { .. } | DexInsn::InvokeVirtualRange { .. }
-            | DexInsn::InvokeSuperRange { .. } | DexInsn::InvokeInterfaceRange { .. }
-            | DexInsn::InvokePolymorphic { .. } | DexInsn::InvokePolymorphicRange { .. }
-            => JumpInfo::indirect(flat_idx, scratch, JumpKind::IndirectCall),
+            DexInsn::InvokeVirtual { .. }
+            | DexInsn::InvokeSuper { .. }
+            | DexInsn::InvokeInterface { .. }
+            | DexInsn::InvokeVirtualRange { .. }
+            | DexInsn::InvokeSuperRange { .. }
+            | DexInsn::InvokeInterfaceRange { .. }
+            | DexInsn::InvokePolymorphic { .. }
+            | DexInsn::InvokePolymorphicRange { .. } => {
+                JumpInfo::indirect(flat_idx, scratch, JumpKind::IndirectCall)
+            }
 
             _ => JumpInfo::direct(flat_idx, 0, JumpKind::DirectJump),
         }
@@ -891,12 +996,13 @@ where
         let escape_tag = self.escape_tag;
 
         // Compute target FuncIdx for a flat-index + signed branch offset.
-        let target = |off: i64| -> FuncIdx {
-            FuncIdx(bfo + (flat_idx as i64).wrapping_add(off) as u32)
-        };
+        let target =
+            |off: i64| -> FuncIdx { FuncIdx(bfo + (flat_idx as i64).wrapping_add(off) as u32) };
 
         macro_rules! feed {
-            ($insn:expr) => { self.reactor.feed(ctx, &$insn)? };
+            ($insn:expr) => {
+                self.reactor.feed(ctx, &$insn)?
+            };
         }
 
         match insn {
@@ -938,9 +1044,12 @@ where
             }
 
             // MoveResult*, MoveException — require result-register convention; stub.
-            DexInsn::MoveResult { .. } | DexInsn::MoveResultWide { .. }
-            | DexInsn::MoveResultObject { .. } | DexInsn::MoveException { .. }
-            => { feed!(Instruction::Unreachable); }
+            DexInsn::MoveResult { .. }
+            | DexInsn::MoveResultWide { .. }
+            | DexInsn::MoveResultObject { .. }
+            | DexInsn::MoveException { .. } => {
+                feed!(Instruction::Unreachable);
+            }
 
             // ── Move (object reference — same layout as i32 move) ────────────
             DexInsn::MoveObject { dst, src } => {
@@ -957,8 +1066,10 @@ where
             }
 
             // ── Return ──────────────────────────────────────────────────────
-            DexInsn::ReturnVoid | DexInsn::Return { .. }
-            | DexInsn::ReturnWide { .. } | DexInsn::ReturnObject { .. } => {
+            DexInsn::ReturnVoid
+            | DexInsn::Return { .. }
+            | DexInsn::ReturnWide { .. }
+            | DexInsn::ReturnObject { .. } => {
                 if let Some(tag) = escape_tag {
                     self.reactor.ret(ctx, total_params, tag)?;
                 } else {
@@ -1015,10 +1126,13 @@ where
             }
 
             // const-string / const-class — object operations; stub.
-            DexInsn::ConstString { .. } | DexInsn::ConstStringJumbo { .. }
-            | DexInsn::ConstClass { .. } | DexInsn::ConstMethodHandle { .. }
-            | DexInsn::ConstMethodType { .. }
-            => { feed!(Instruction::Unreachable); }
+            DexInsn::ConstString { .. }
+            | DexInsn::ConstStringJumbo { .. }
+            | DexInsn::ConstClass { .. }
+            | DexInsn::ConstMethodHandle { .. }
+            | DexInsn::ConstMethodType { .. } => {
+                feed!(Instruction::Unreachable);
+            }
 
             // ── Unary int ops ────────────────────────────────────────────────
             DexInsn::NegInt { dst, src } => {
@@ -1837,100 +1951,267 @@ where
 
             // ── Conditional branches (two-register) ─────────────────────────
             DexInsn::IfEq { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32Eq };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32Eq,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfNe { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32Ne };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32Ne,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfLt { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32LtS };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32LtS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfGe { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32GeS };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32GeS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfGt { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32GtS };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32GtS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfLe { a, b, offset } => {
-                let cond = DexCondSnippet { a: *a as u32, b: *b as u32, op: DexCondOp::I32LeS };
+                let cond = DexCondSnippet {
+                    a: *a as u32,
+                    b: *b as u32,
+                    op: DexCondOp::I32LeS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
 
             // ── Conditional branches (register vs zero) ──────────────────────
             DexInsn::IfEqz { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32Eqz };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32Eqz,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfNez { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32Nez };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32Nez,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfLtz { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32LtzS };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32LtzS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfGez { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32GezS };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32GezS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfGtz { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32GtzS };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32GtzS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
             DexInsn::IfLez { reg, offset } => {
-                let cond = DexCondSnippet { a: *reg as u32, b: 0, op: DexCondOp::I32LezS };
+                let cond = DexCondSnippet {
+                    a: *reg as u32,
+                    b: 0,
+                    op: DexCondOp::I32LezS,
+                };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(ctx, total_params, &BTreeMap::new(), Target::Static { func: tgt }, None, pool, Some(&cond))?;
+                self.reactor.ji(
+                    ctx,
+                    total_params,
+                    &BTreeMap::new(),
+                    Target::Static { func: tgt },
+                    None,
+                    pool,
+                    Some(&cond),
+                )?;
             }
 
             // ── Object/array/field operations ───────────────────────────────
-
             DexInsn::ArrayLength { dst, array } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 // SAFETY: obj_model and reactor are distinct fields.
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_array_length(ctx, unsafe { &mut *reactor_ptr })?;
+                self.obj_model
+                    .emit_array_length(ctx, unsafe { &mut *reactor_ptr })?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
 
             DexInsn::NewInstance { dst, ty } => {
                 let type_id = ty.0 as u32;
-                let desc = self.type_descs.get(&type_id).map(|s| s.as_str()).unwrap_or("");
+                let desc = self
+                    .type_descs
+                    .get(&type_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 let class_name = type_desc_to_class_name(desc);
                 let hash = TypeHash::of_class(class_name);
                 let data_size = self.class_sizes.get(&type_id).copied().unwrap_or(0);
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_new_object(ctx, unsafe { &mut *reactor_ptr }, &hash, data_size)?;
+                self.obj_model.emit_new_object(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    &hash,
+                    data_size,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
 
             DexInsn::NewArray { dst, size, ty } => {
-                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("[I");
+                let desc = self
+                    .type_descs
+                    .get(&(ty.0 as u32))
+                    .map(|s| s.as_str())
+                    .unwrap_or("[I");
                 let (elem_hash, dim, elem_bytes) = array_desc_to_info(desc);
                 feed!(Instruction::LocalGet(*size as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_new_array(ctx, unsafe { &mut *reactor_ptr }, &elem_hash, dim, elem_bytes)?;
+                self.obj_model.emit_new_array(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    &elem_hash,
+                    dim,
+                    elem_bytes,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
 
             DexInsn::CheckCast { reg, ty } => {
-                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("");
+                let desc = self
+                    .type_descs
+                    .get(&(ty.0 as u32))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 let (hash, dim) = if desc.starts_with('[') {
                     let (h, d, _) = array_desc_to_info(desc);
                     (h, d)
@@ -1939,11 +2220,21 @@ where
                 };
                 feed!(Instruction::LocalGet(*reg as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_check_cast(ctx, unsafe { &mut *reactor_ptr }, &hash, dim, scratch)?;
+                self.obj_model.emit_check_cast(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    &hash,
+                    dim,
+                    scratch,
+                )?;
             }
 
             DexInsn::InstanceOf { dst, obj, ty } => {
-                let desc = self.type_descs.get(&(ty.0 as u32)).map(|s| s.as_str()).unwrap_or("");
+                let desc = self
+                    .type_descs
+                    .get(&(ty.0 as u32))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 let (hash, dim) = if desc.starts_with('[') {
                     let (h, d, _) = array_desc_to_info(desc);
                     (h, d)
@@ -1952,162 +2243,261 @@ where
                 };
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_instanceof(ctx, unsafe { &mut *reactor_ptr }, &hash, dim, scratch)?;
+                self.obj_model.emit_instanceof(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    &hash,
+                    dim,
+                    scratch,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
 
             // ── iget / iput ──────────────────────────────────────────────────
             // For wide fields (J/D), look them up as I64 and split/combine.
-
             DexInsn::Iget { dst, obj, field } | DexInsn::IgetObject { dst, obj, field } => {
-                let (off, vt) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I32));
+                let (off, vt) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I32));
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
+                self.obj_model
+                    .emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::IgetBoolean { dst, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I8U));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I8U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I8U)?;
+                self.obj_model.emit_iget(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I8U,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::IgetByte { dst, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I8S));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I8S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I8S)?;
+                self.obj_model.emit_iget(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I8S,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::IgetChar { dst, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I16U));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I16U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I16U)?;
+                self.obj_model.emit_iget(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I16U,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::IgetShort { dst, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I16S));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I16S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I16S)?;
+                self.obj_model.emit_iget(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I16S,
+                )?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::IgetWide { dst, obj, field } => {
-                let (off, vt) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I64));
-                let mem_ty = if vt == FieldValType::F64 { FieldValType::F64 } else { FieldValType::I64 };
+                let (off, vt) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I64));
+                let mem_ty = if vt == FieldValType::F64 {
+                    FieldValType::F64
+                } else {
+                    FieldValType::I64
+                };
                 feed!(Instruction::LocalGet(*obj as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
+                self.obj_model
+                    .emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
                 self.emit_split_wide(ctx, *dst, scratch_i64)?;
             }
 
             DexInsn::Iput { src, obj, field } | DexInsn::IputObject { src, obj, field } => {
-                let (off, vt) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I32));
+                let (off, vt) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I32));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
+                self.obj_model
+                    .emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
             }
             DexInsn::IputBoolean { src, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I8U));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I8U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I8U)?;
+                self.obj_model.emit_iput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I8U,
+                )?;
             }
             DexInsn::IputByte { src, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I8S));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I8S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I8S)?;
+                self.obj_model.emit_iput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I8S,
+                )?;
             }
             DexInsn::IputChar { src, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I16U));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I16U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I16U)?;
+                self.obj_model.emit_iput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I16U,
+                )?;
             }
             DexInsn::IputShort { src, obj, field } => {
-                let (off, _) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I16S));
+                let (off, _) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I16S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, FieldValType::I16S)?;
+                self.obj_model.emit_iput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    off,
+                    FieldValType::I16S,
+                )?;
             }
             DexInsn::IputWide { src, obj, field } => {
-                let (off, vt) = self.field_map.get(&(field.0 as u32))
-                    .copied().unwrap_or((0, FieldValType::I64));
-                let mem_ty = if vt == FieldValType::F64 { FieldValType::F64 } else { FieldValType::I64 };
+                let (off, vt) = self
+                    .field_map
+                    .get(&(field.0 as u32))
+                    .copied()
+                    .unwrap_or((0, FieldValType::I64));
+                let mem_ty = if vt == FieldValType::F64 {
+                    FieldValType::F64
+                } else {
+                    FieldValType::I64
+                };
                 feed!(Instruction::LocalGet(*obj as u32));
                 self.emit_wide_to_stack(ctx, *src)?;
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
+                self.obj_model
+                    .emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
             }
 
             // ── aget / aput ──────────────────────────────────────────────────
-
             DexInsn::Aget { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I32)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I32)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetObject { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::Ref)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::Ref)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetBoolean { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8U)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8U)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetByte { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8S)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8S)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetChar { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16U)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16U)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetShort { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16S)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16S)?;
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::AgetWide { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I64)?;
+                self.obj_model
+                    .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I64)?;
                 self.emit_split_wide(ctx, *dst, scratch_i64)?;
             }
 
@@ -2116,49 +2506,91 @@ where
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I32, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I32,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputObject { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::Ref, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::Ref,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputBoolean { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8U, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I8U,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputByte { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8S, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I8S,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputChar { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16U, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I16U,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputShort { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16S, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I16S,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
             DexInsn::AputWide { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 self.emit_wide_to_stack(ctx, *src)?;
                 let reactor_ptr = &mut self.reactor as *mut _;
-                self.obj_model.emit_aput(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I64, scratch, scratch_i64)?;
+                self.obj_model.emit_aput(
+                    ctx,
+                    unsafe { &mut *reactor_ptr },
+                    FieldValType::I64,
+                    scratch,
+                    scratch_i64,
+                )?;
             }
 
             // ── Not yet implemented: invoke, switch, static fields, etc. ────
@@ -2178,7 +2610,8 @@ where
         self.reactor.feed(ctx, &Instruction::LocalGet(v as u32))?;
         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
         // high << 32
-        self.reactor.feed(ctx, &Instruction::LocalGet(v as u32 + 1))?;
+        self.reactor
+            .feed(ctx, &Instruction::LocalGet(v as u32 + 1))?;
         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
         self.reactor.feed(ctx, &Instruction::I64Const(32))?;
         self.reactor.feed(ctx, &Instruction::I64Shl)?;
@@ -2191,16 +2624,19 @@ where
     /// `(dst, dst+1)`.  `scratch_i64` is overwritten with the high half.
     fn emit_split_wide(&mut self, ctx: &mut Context, dst: u8, scratch_i64: u32) -> Result<(), E> {
         // tee scratch_i64 so we can use it twice.
-        self.reactor.feed(ctx, &Instruction::LocalTee(scratch_i64))?;
+        self.reactor
+            .feed(ctx, &Instruction::LocalTee(scratch_i64))?;
         // low 32 bits → dst
         self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
         self.reactor.feed(ctx, &Instruction::LocalSet(dst as u32))?;
         // high 32 bits → dst+1
-        self.reactor.feed(ctx, &Instruction::LocalGet(scratch_i64))?;
+        self.reactor
+            .feed(ctx, &Instruction::LocalGet(scratch_i64))?;
         self.reactor.feed(ctx, &Instruction::I64Const(32))?;
         self.reactor.feed(ctx, &Instruction::I64ShrU)?;
         self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
+        self.reactor
+            .feed(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
         Ok(())
     }
 
@@ -2297,8 +2733,7 @@ where
         &mut self,
         ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(AString, u32)>,
-    ) -> BinaryUnit<F>
-    {
+    ) -> BinaryUnit<F> {
         use wasm_encoder::ValType;
         // DEX: all params are i32 (Dalvik register file).
         let param_types: alloc::vec::Vec<ValType> =

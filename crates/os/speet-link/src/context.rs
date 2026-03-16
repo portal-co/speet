@@ -18,10 +18,10 @@
 //! `F` directly.
 
 use alloc::vec::Vec;
-use wasm_encoder::Instruction;
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor};
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
+use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
+use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor};
 
 // ── ReactorContext ────────────────────────────────────────────────────────────
 
@@ -93,11 +93,7 @@ pub trait ReactorContext<Context, E> {
     /// Fire the jump trap (if any).
     ///
     /// Returns [`TrapAction::Continue`] when no trap is installed.
-    fn on_jump(
-        &mut self,
-        info: &JumpInfo,
-        ctx: &mut Context,
-    ) -> Result<TrapAction, E>;
+    fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E>;
 
     // ── Reactor operations ────────────────────────────────────────────────
 
@@ -150,8 +146,7 @@ where
     pub escape_tag: Option<EscapeTag>,
 }
 
-impl<'a, Context, E, F, P> ReactorContext<Context, E>
-    for ReactorAdapter<'a, Context, E, F, P>
+impl<'a, Context, E, F, P> ReactorContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
     F: InstructionSink<Context, E> + Default,
     P: LocalPoolBackend,
@@ -159,19 +154,37 @@ where
 {
     type FnType = F;
 
-    fn layout(&self) -> &LocalLayout { &self.layout }
-    fn layout_mut(&mut self) -> &mut LocalLayout { &mut self.layout }
-    fn locals_mark(&self) -> Mark { self.locals_mark }
-    fn set_locals_mark(&mut self, mark: Mark) { self.locals_mark = mark; }
+    fn layout(&self) -> &LocalLayout {
+        &self.layout
+    }
+    fn layout_mut(&mut self) -> &mut LocalLayout {
+        &mut self.layout
+    }
+    fn locals_mark(&self) -> Mark {
+        self.locals_mark
+    }
+    fn set_locals_mark(&mut self, mark: Mark) {
+        self.locals_mark = mark;
+    }
 
-    fn base_func_offset(&self) -> u32 { self.reactor.base_func_offset() }
-    fn fn_count(&self) -> usize { self.reactor.fn_count() }
-    fn drain_fns(&mut self) -> Vec<F> { self.reactor.drain_fns() }
+    fn base_func_offset(&self) -> u32 {
+        self.reactor.base_func_offset()
+    }
+    fn fn_count(&self) -> usize {
+        self.reactor.fn_count()
+    }
+    fn drain_fns(&mut self) -> Vec<F> {
+        self.reactor.drain_fns()
+    }
 
     // No traps — no-op.
     fn declare_trap_params(&mut self) {}
     fn declare_trap_locals(&mut self) {}
-    fn on_instruction(&mut self, _info: &InstructionInfo, _ctx: &mut Context) -> Result<TrapAction, E> {
+    fn on_instruction(
+        &mut self,
+        _info: &InstructionInfo,
+        _ctx: &mut Context,
+    ) -> Result<TrapAction, E> {
         Ok(TrapAction::Continue)
     }
     fn on_jump(&mut self, _info: &JumpInfo, _ctx: &mut Context) -> Result<TrapAction, E> {
@@ -191,7 +204,13 @@ where
         self.reactor.seal(ctx, insn)
     }
 
-    fn pool(&self) -> &Pool { &self.pool }
-    fn escape_tag(&self) -> Option<EscapeTag> { self.escape_tag }
-    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) { self.escape_tag = tag; }
+    fn pool(&self) -> &Pool {
+        &self.pool
+    }
+    fn escape_tag(&self) -> Option<EscapeTag> {
+        self.escape_tag
+    }
+    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
+        self.escape_tag = tag;
+    }
 }

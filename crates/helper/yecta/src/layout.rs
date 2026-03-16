@@ -121,7 +121,10 @@ impl LocalLayout {
     /// Build a layout from a slice, returning a `Vec` of slot handles.
     pub fn build_dynamic(groups: &[(u32, ValType)]) -> (Self, Vec<LocalSlot>) {
         let mut layout = Self::empty();
-        let handles = groups.iter().map(|&(count, ty)| layout.append(count, ty)).collect();
+        let handles = groups
+            .iter()
+            .map(|&(count, ty)| layout.append(count, ty))
+            .collect();
         (layout, handles)
     }
 
@@ -159,7 +162,7 @@ impl LocalLayout {
     #[inline]
     pub fn mark(&self) -> Mark {
         Mark {
-            slot_count:   self.slots.len(),
+            slot_count: self.slots.len(),
             total_locals: self.total_locals(),
         }
     }
@@ -198,7 +201,10 @@ impl LocalLayout {
     #[inline]
     pub fn local(&self, slot: LocalSlot, n: u32) -> u32 {
         let (count, _, offset) = self.slots[slot.0];
-        assert!(n < count, "local index {n} out of range for slot (count={count})");
+        assert!(
+            n < count,
+            "local index {n} out of range for slot (count={count})"
+        );
         offset + n
     }
 
@@ -223,7 +229,10 @@ impl LocalLayout {
     /// [`mark`](Self::mark) is called.
     #[inline]
     pub fn total_locals(&self) -> u32 {
-        self.slots.last().map(|&(count, _, offset)| offset + count).unwrap_or(0)
+        self.slots
+            .last()
+            .map(|&(count, _, offset)| offset + count)
+            .unwrap_or(0)
     }
 
     /// Iterate over all `(count, ValType)` pairs in insertion order.
@@ -237,7 +246,9 @@ impl LocalLayout {
     /// `wasm_encoder::Function::new` for declaring the non-param locals of a
     /// wasm function.
     pub fn iter_since<'a>(&'a self, mark: &Mark) -> impl Iterator<Item = (u32, ValType)> + 'a {
-        self.slots[mark.slot_count..].iter().map(|&(count, ty, _)| (count, ty))
+        self.slots[mark.slot_count..]
+            .iter()
+            .map(|&(count, ty, _)| (count, ty))
     }
 
     /// Returns `true` if the layout has no slots.
@@ -250,9 +261,11 @@ impl LocalLayout {
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()
-            .entries(self.slots.iter().map(|&(count, ty, offset)| {
-                (offset..offset + count, ty)
-            }))
+            .entries(
+                self.slots
+                    .iter()
+                    .map(|&(count, ty, offset)| (offset..offset + count, ty)),
+            )
             .finish()
     }
 }

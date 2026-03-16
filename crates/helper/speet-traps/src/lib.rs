@@ -103,9 +103,7 @@ pub mod jump;
 // Flat re-exports for the most commonly used items.
 pub use config::TrapConfig;
 pub use context::{TrapContext, reactor_jump, reactor_jump_if};
-pub use impls::{
-    CfiReturnTrap, ChainedTrap, CounterTrap, NullTrap, RopDetectTrap, TraceLogTrap,
-};
+pub use impls::{CfiReturnTrap, ChainedTrap, CounterTrap, NullTrap, RopDetectTrap, TraceLogTrap};
 pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};
 pub use jump::{JumpInfo, JumpKind, JumpTrap};
 pub use yecta::{LocalLayout, LocalSlot, Mark};

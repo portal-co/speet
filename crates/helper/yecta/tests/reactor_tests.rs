@@ -23,7 +23,9 @@ fn test_simple_function_creation() {
     let mut ctx = ();
 
     // Create a function with 2 i32 locals
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     // Emit some instructions
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
@@ -37,11 +39,15 @@ fn test_multiple_functions() {
     let mut ctx = ();
 
     // Create first function
-    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
+        .unwrap();
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 
     // Create second function
-    reactor.next(&mut ctx, [(1, ValType::I64)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I64)].into_iter(), 0)
+        .unwrap();
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 }
 
@@ -51,7 +57,9 @@ fn test_unconditional_jump() {
     let mut ctx = ();
 
     // Create first function
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
@@ -59,7 +67,9 @@ fn test_unconditional_jump() {
     assert!(reactor.jmp(&mut ctx, FuncIdx(1), 2).is_ok());
 
     // Create target function
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
+        .unwrap();
     assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
 }
 
@@ -72,13 +82,17 @@ fn test_jump_with_params_helper() {
         ty: TypeIdx(0),
     };
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     // Use JumpCallParams helper
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
     assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
+        .unwrap();
     assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
 }
 
@@ -89,7 +103,9 @@ fn test_conditional_operations() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     // Emit a simple conditional structure
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
@@ -118,7 +134,9 @@ fn test_call_with_exception_handling() {
         ty: TypeIdx(1),
     };
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     assert!(
         reactor
@@ -141,7 +159,9 @@ fn test_return_via_exception() {
         ty: TypeIdx(0),
     };
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     // Return via exception (params will be loaded by ret)
     assert!(reactor.ret(&mut ctx, 2, escape_tag).is_ok());
@@ -152,7 +172,9 @@ fn test_seal_function() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
 
-    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
+        .unwrap();
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 
     // Seal with return
@@ -169,18 +191,24 @@ fn test_multiple_jumps() {
         ty: TypeIdx(0),
     };
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
     assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
+        .unwrap();
 
     // Jump from function 1 to function 2
     let params2 = JumpCallParams::jump(FuncIdx(2), 2, pool);
     assert!(reactor.ji_with_params(&mut ctx, params2).is_ok());
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 2).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 2)
+        .unwrap();
     assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
 }
 
@@ -190,7 +218,13 @@ fn test_instruction_feeding() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
 
-    reactor.next(&mut ctx, [(3, ValType::I32), (1, ValType::I64)].into_iter(), 0).unwrap();
+    reactor
+        .next(
+            &mut ctx,
+            [(3, ValType::I32), (1, ValType::I64)].into_iter(),
+            0,
+        )
+        .unwrap();
 
     // Feed various instructions
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
@@ -213,13 +247,17 @@ fn test_base_func_offset_applied() {
         ty: TypeIdx(0),
     };
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
 
     // The offset should be applied when emitting function indices
     let params = JumpCallParams::jump(FuncIdx(0), 2, pool);
     assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
 
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
+        .unwrap();
     assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
 }
 
@@ -239,9 +277,15 @@ fn test_control_flow_distance() {
     let mut ctx = ();
 
     // Create functions with different control flow distances
-    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
-    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 1).unwrap();
-    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 2).unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
+        .unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I32)].into_iter(), 1)
+        .unwrap();
+    reactor
+        .next(&mut ctx, [(1, ValType::I32)].into_iter(), 2)
+        .unwrap();
 
     // All should be created successfully
     assert!(reactor.feed(&mut ctx, &Instruction::Nop).is_ok());
@@ -262,7 +306,9 @@ fn test_call_and_return() {
     };
 
     // Function 0: Calls function 1
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
+        .unwrap();
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
@@ -278,7 +324,9 @@ fn test_call_and_return() {
     );
 
     // Function 1: Returns via exception
-    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor
+        .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
+        .unwrap();
     assert!(reactor.ret(&mut ctx, 2, escape_tag).is_ok());
 }
 

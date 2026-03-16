@@ -1730,7 +1730,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
             let jmp_info = JumpInfo::direct(inst.ip(), target, JumpKind::DirectJump);
-            if self.traps.on_jump(&jmp_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+            if self
+                .traps
+                .on_jump(&jmp_info, ctx, &mut self.reactor, &self.layout)?
+                == TrapAction::Skip
+            {
                 return Ok(Some(()));
             }
         }
@@ -1761,7 +1765,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
             let jcc_info = JumpInfo::direct(inst.ip(), target, JumpKind::ConditionalBranch);
-            if self.traps.on_jump(&jcc_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+            if self
+                .traps
+                .on_jump(&jcc_info, ctx, &mut self.reactor, &self.layout)?
+                == TrapAction::Skip
+            {
                 return Ok(Some(()));
             }
         }
@@ -1856,7 +1864,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let call_info = JumpInfo::direct(inst.ip(), target, JumpKind::Call);
-                if self.traps.on_jump(&call_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&call_info, ctx, &mut self.reactor, &self.layout)?
+                    == TrapAction::Skip
+                {
                     return Ok(Some(()));
                 }
             }
@@ -1959,7 +1971,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let ret_info = JumpInfo::indirect(inst.ip(), 23, JumpKind::Return);
-                if self.traps.on_jump(&ret_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+                if self
+                    .traps
+                    .on_jump(&ret_info, ctx, &mut self.reactor, &self.layout)?
+                    == TrapAction::Skip
+                {
                     return Ok(Some(()));
                 }
             }

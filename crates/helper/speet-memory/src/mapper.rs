@@ -1,8 +1,8 @@
 //! [`CallbackContext`] and [`MapperCallback`] — the generic mapper-callback
 //! interface shared by all architecture recompilers.
 
-use wax_core::build::InstructionSink;
 use wasm_encoder::Instruction;
+use wax_core::build::InstructionSink;
 
 // ── CallbackContext ────────────────────────────────────────────────────────────
 
@@ -35,7 +35,10 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> CallbackContext<'a, Context
     /// Construct a `CallbackContext` wrapping `sink`.
     #[inline]
     pub fn new(sink: &'a mut F) -> Self {
-        Self { sink, _pd: core::marker::PhantomData }
+        Self {
+            sink,
+            _pd: core::marker::PhantomData,
+        }
     }
 
     /// Emit a single wasm instruction via the underlying sink.

@@ -164,8 +164,7 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
 impl<Context, E, F, Fn> JumpTrap<Context, E, F> for Fn
 where
     F: InstructionSink<Context, E>,
-    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E, F>)
-            -> Result<TrapAction, E>,
+    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E, F>) -> Result<TrapAction, E>,
 {
     fn on_jump(
         &mut self,
@@ -183,8 +182,7 @@ where
 /// on the first [`TrapAction::Skip`].
 ///
 /// `declare_params` and `declare_locals` delegate to all elements in order.
-impl<Context, E, F> JumpTrap<Context, E, F>
-    for Vec<Box<dyn JumpTrap<Context, E, F> + '_>>
+impl<Context, E, F> JumpTrap<Context, E, F> for Vec<Box<dyn JumpTrap<Context, E, F> + '_>>
 where
     F: InstructionSink<Context, E>,
 {
@@ -216,8 +214,7 @@ where
 }
 
 /// `Box<dyn JumpTrap<…>>` delegates to the inner value.
-impl<Context, E, F> JumpTrap<Context, E, F>
-    for Box<dyn JumpTrap<Context, E, F> + '_>
+impl<Context, E, F> JumpTrap<Context, E, F> for Box<dyn JumpTrap<Context, E, F> + '_>
 where
     F: InstructionSink<Context, E>,
 {

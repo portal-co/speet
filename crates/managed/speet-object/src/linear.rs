@@ -84,9 +84,15 @@ fn emit_load<C, E>(
     ty: FieldValType,
 ) -> Result<(), E> {
     let offset = (OBJECT_HEADER_SIZE + byte_offset) as u64;
-    let memarg = MemArg { offset, align: 0, memory_index: 0 };
+    let memarg = MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    };
     match ty {
-        FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Load(memarg))?,
+        FieldValType::I32 | FieldValType::Ref => {
+            sink.instruction(ctx, &Instruction::I32Load(memarg))?
+        }
         FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Load(memarg))?,
         FieldValType::F32 => {
             sink.instruction(ctx, &Instruction::F32Load(memarg))?;
@@ -96,8 +102,8 @@ fn emit_load<C, E>(
             sink.instruction(ctx, &Instruction::F64Load(memarg))?;
             sink.instruction(ctx, &Instruction::I64ReinterpretF64)?;
         }
-        FieldValType::I8S  => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
-        FieldValType::I8U  => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
+        FieldValType::I8S => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
+        FieldValType::I8U => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
         FieldValType::I16S => sink.instruction(ctx, &Instruction::I32Load16S(memarg))?,
         FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Load16U(memarg))?,
     }
@@ -111,9 +117,15 @@ fn emit_store<C, E>(
     ty: FieldValType,
 ) -> Result<(), E> {
     let offset = (OBJECT_HEADER_SIZE + byte_offset) as u64;
-    let memarg = MemArg { offset, align: 0, memory_index: 0 };
+    let memarg = MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    };
     match ty {
-        FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Store(memarg))?,
+        FieldValType::I32 | FieldValType::Ref => {
+            sink.instruction(ctx, &Instruction::I32Store(memarg))?
+        }
         FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Store(memarg))?,
         FieldValType::F32 => {
             sink.instruction(ctx, &Instruction::F32ReinterpretI32)?;
@@ -123,8 +135,12 @@ fn emit_store<C, E>(
             sink.instruction(ctx, &Instruction::F64ReinterpretI64)?;
             sink.instruction(ctx, &Instruction::F64Store(memarg))?;
         }
-        FieldValType::I8S | FieldValType::I8U   => sink.instruction(ctx, &Instruction::I32Store8(memarg))?,
-        FieldValType::I16S | FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Store16(memarg))?,
+        FieldValType::I8S | FieldValType::I8U => {
+            sink.instruction(ctx, &Instruction::I32Store8(memarg))?
+        }
+        FieldValType::I16S | FieldValType::I16U => {
+            sink.instruction(ctx, &Instruction::I32Store16(memarg))?
+        }
     }
     Ok(())
 }
@@ -145,11 +161,14 @@ fn emit_hash_compare<C, E>(
     let mut first = true;
     for (i, &expected) in chunks.iter().enumerate() {
         sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
-        sink.instruction(ctx, &Instruction::I32Load(MemArg {
-            offset: (i as u64) * 4,
-            align: 0,
-            memory_index: 0,
-        }))?;
+        sink.instruction(
+            ctx,
+            &Instruction::I32Load(MemArg {
+                offset: (i as u64) * 4,
+                align: 0,
+                memory_index: 0,
+            }),
+        )?;
         sink.instruction(ctx, &Instruction::I32Const(expected))?;
         sink.instruction(ctx, &Instruction::I32Eq)?;
         if !first {
@@ -159,7 +178,14 @@ fn emit_hash_compare<C, E>(
     }
     // Compare stored array_dim against expected.
     sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
-    sink.instruction(ctx, &Instruction::I32Load(MemArg { offset: 32, align: 0, memory_index: 0 }))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Load(MemArg {
+            offset: 32,
+            align: 0,
+            memory_index: 0,
+        }),
+    )?;
     sink.instruction(ctx, &Instruction::I32Const(dim as i32))?;
     sink.instruction(ctx, &Instruction::I32Eq)?;
     sink.instruction(ctx, &Instruction::I32And)?;
@@ -246,9 +272,15 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
         sink.instruction(ctx, &Instruction::I32Add)?;
         sink.instruction(ctx, &Instruction::I32Add)?; // arr_ref + offset
         // Load value — offset=0 since we computed the exact address above.
-        let memarg = MemArg { offset: 0, align: 0, memory_index: 0 };
+        let memarg = MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        };
         match ty {
-            FieldValType::I32 | FieldValType::Ref => sink.instruction(ctx, &Instruction::I32Load(memarg))?,
+            FieldValType::I32 | FieldValType::Ref => {
+                sink.instruction(ctx, &Instruction::I32Load(memarg))?
+            }
             FieldValType::I64 => sink.instruction(ctx, &Instruction::I64Load(memarg))?,
             FieldValType::F32 => {
                 sink.instruction(ctx, &Instruction::F32Load(memarg))?;
@@ -258,8 +290,8 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
                 sink.instruction(ctx, &Instruction::F64Load(memarg))?;
                 sink.instruction(ctx, &Instruction::I64ReinterpretF64)?;
             }
-            FieldValType::I8S  => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
-            FieldValType::I8U  => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
+            FieldValType::I8S => sink.instruction(ctx, &Instruction::I32Load8S(memarg))?,
+            FieldValType::I8U => sink.instruction(ctx, &Instruction::I32Load8U(memarg))?,
             FieldValType::I16S => sink.instruction(ctx, &Instruction::I32Load16S(memarg))?,
             FieldValType::I16U => sink.instruction(ctx, &Instruction::I32Load16U(memarg))?,
         }
@@ -294,7 +326,11 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
         sink.instruction(ctx, &Instruction::I32Add)?;
         sink.instruction(ctx, &Instruction::I32Add)?; // addr
 
-        let memarg = MemArg { offset: 0, align: 0, memory_index: 0 };
+        let memarg = MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        };
         match ty {
             FieldValType::I32 | FieldValType::Ref => {
                 sink.instruction(ctx, &Instruction::LocalGet(scratch_i32))?;
@@ -332,11 +368,14 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
         sink: &mut dyn InstructionSink<C, E>,
     ) -> Result<(), E> {
         // Stack: [arr_ref] → [length: i32]
-        sink.instruction(ctx, &Instruction::I32Load(MemArg {
-            offset: ARRAY_LENGTH_OFFSET as u64,
-            align: 0,
-            memory_index: 0,
-        }))
+        sink.instruction(
+            ctx,
+            &Instruction::I32Load(MemArg {
+                offset: ARRAY_LENGTH_OFFSET as u64,
+                align: 0,
+                memory_index: 0,
+            }),
+        )
     }
 
     fn emit_instanceof(

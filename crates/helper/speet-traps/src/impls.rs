@@ -335,11 +335,11 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
         }
         let target_local = match info.target_local {
             Some(l) => l,
-            None    => return Ok(TrapAction::Continue),
+            None => return Ok(TrapAction::Continue),
         };
         let index_local = trap_ctx.layout().local(self.index_local_slot, 0);
-        let handler     = self.violation_handler;
-        let params      = self.handler_params;
+        let handler = self.violation_handler;
+        let params = self.handler_params;
 
         // Compute bitmap index: (target - guest_base) >> granularity_shift
         trap_ctx.emit(ctx, &Instruction::LocalGet(target_local))?;
@@ -361,11 +361,14 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
         trap_ctx.emit(ctx, &Instruction::LocalGet(index_local))?;
         trap_ctx.emit(ctx, &Instruction::I32Const(self.bitmap_wasm_addr as i32))?;
         trap_ctx.emit(ctx, &Instruction::I32Add)?;
-        trap_ctx.emit(ctx, &Instruction::I32Load8U(wasm_encoder::MemArg {
-            align:        0,
-            offset:       0,
-            memory_index: 0,
-        }))?;
+        trap_ctx.emit(
+            ctx,
+            &Instruction::I32Load8U(wasm_encoder::MemArg {
+                align: 0,
+                offset: 0,
+                memory_index: 0,
+            }),
+        )?;
         trap_ctx.emit(ctx, &Instruction::I32Eqz)?;
         trap_ctx.jump_if(ctx, handler, params)?;
 
@@ -464,7 +467,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Rop
                 trap_ctx.emit(ctx, &Instruction::I32Const(0))?;
                 trap_ctx.emit(ctx, &Instruction::I32LtS)?;
                 let handler = self.violation_handler;
-                let params  = self.handler_params;
+                let params = self.handler_params;
                 trap_ctx.jump_if(ctx, handler, params)?;
             }
             _ => {}
@@ -496,13 +499,13 @@ pub struct TraceLogTrap {
 impl TraceLogTrap {
     fn kind_to_i32(kind: JumpKind) -> i32 {
         match kind {
-            JumpKind::DirectJump        => 0,
+            JumpKind::DirectJump => 0,
             JumpKind::ConditionalBranch => 1,
-            JumpKind::Call              => 2,
-            JumpKind::Return            => 3,
-            JumpKind::IndirectJump      => 4,
-            JumpKind::IndirectCall      => 5,
-            JumpKind::Syscall           => 6,
+            JumpKind::Call => 2,
+            JumpKind::Return => 3,
+            JumpKind::IndirectJump => 4,
+            JumpKind::IndirectCall => 5,
+            JumpKind::Syscall => 6,
         }
     }
 }

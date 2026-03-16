@@ -196,7 +196,11 @@ pub enum Instruction {
     /// `0x24` `filled-new-array {vC..vG}, type@BBBB` (35c)
     FilledNewArray { ty: TypeIdx, args: Args5 },
     /// `0x25` `filled-new-array/range {vCCCC..vNNNN}, type@BBBB` (3rc)
-    FilledNewArrayRange { ty: TypeIdx, first_reg: u16, count: u8 },
+    FilledNewArrayRange {
+        ty: TypeIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0x26` `fill-array-data vAA, +BBBBBBBB` (31t)
     FillArrayData { array: u8, table_offset: i32 },
 
@@ -357,15 +361,35 @@ pub enum Instruction {
 
     // ── Invocations - register-range form (3rc) ──────────────────────────────
     /// `0x74` `invoke-virtual/range {vCCCC..vNNNN}, meth@BBBB`
-    InvokeVirtualRange { method: MethodIdx, first_reg: u16, count: u8 },
+    InvokeVirtualRange {
+        method: MethodIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0x75` `invoke-super/range {vCCCC..vNNNN}, meth@BBBB`
-    InvokeSuperRange { method: MethodIdx, first_reg: u16, count: u8 },
+    InvokeSuperRange {
+        method: MethodIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0x76` `invoke-direct/range {vCCCC..vNNNN}, meth@BBBB`
-    InvokeDirectRange { method: MethodIdx, first_reg: u16, count: u8 },
+    InvokeDirectRange {
+        method: MethodIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0x77` `invoke-static/range {vCCCC..vNNNN}, meth@BBBB`
-    InvokeStaticRange { method: MethodIdx, first_reg: u16, count: u8 },
+    InvokeStaticRange {
+        method: MethodIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0x78` `invoke-interface/range {vCCCC..vNNNN}, meth@BBBB`
-    InvokeInterfaceRange { method: MethodIdx, first_reg: u16, count: u8 },
+    InvokeInterfaceRange {
+        method: MethodIdx,
+        first_reg: u16,
+        count: u8,
+    },
 
     // ── Unary operations (12x) ───────────────────────────────────────────────
     /// `0x7b` `neg-int vA, vB`
@@ -587,13 +611,26 @@ pub enum Instruction {
 
     // ── Polymorphic, custom, handles ─────────────────────────────────────────
     /// `0xfa` `invoke-polymorphic {vC..vG}, meth@BBBB, proto@HHHH` (45cc)
-    InvokePolymorphic { method: MethodIdx, proto: ProtoIdx, args: Args5 },
+    InvokePolymorphic {
+        method: MethodIdx,
+        proto: ProtoIdx,
+        args: Args5,
+    },
     /// `0xfb` `invoke-polymorphic/range {vCCCC..vNNNN}, meth@BBBB, proto@HHHH` (4rcc)
-    InvokePolymorphicRange { method: MethodIdx, proto: ProtoIdx, first_reg: u16, count: u8 },
+    InvokePolymorphicRange {
+        method: MethodIdx,
+        proto: ProtoIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0xfc` `invoke-custom {vC..vG}, call_site@BBBB` (35c)
     InvokeCustom { call_site: CallSiteIdx, args: Args5 },
     /// `0xfd` `invoke-custom/range {vCCCC..vNNNN}, call_site@BBBB` (3rc)
-    InvokeCustomRange { call_site: CallSiteIdx, first_reg: u16, count: u8 },
+    InvokeCustomRange {
+        call_site: CallSiteIdx,
+        first_reg: u16,
+        count: u8,
+    },
     /// `0xfe` `const-method-handle vAA, method_handle@BBBB` (21c)
     ConstMethodHandle { dst: u8, handle: MethodHandleIdx },
     /// `0xff` `const-method-type vAA, proto@BBBB` (21c)
@@ -886,13 +923,19 @@ impl Instruction {
 // ── Low-level format helpers ───────────────────────────────────────────────────
 
 #[inline]
-fn high_byte(u: u16) -> u8 { (u >> 8) as u8 }
+fn high_byte(u: u16) -> u8 {
+    (u >> 8) as u8
+}
 
 #[inline]
-fn nibble_lo(u: u16) -> u8 { ((u >> 8) & 0xf) as u8 }
+fn nibble_lo(u: u16) -> u8 {
+    ((u >> 8) & 0xf) as u8
+}
 
 #[inline]
-fn nibble_hi(u: u16) -> u8 { ((u >> 12) & 0xf) as u8 }
+fn nibble_hi(u: u16) -> u8 {
+    ((u >> 12) & 0xf) as u8
+}
 
 /// Sign-extend a 4-bit value (stored in the low nibble) to `i8`.
 #[inline]
@@ -902,7 +945,9 @@ fn sign4(n: u8) -> i8 {
 }
 
 #[inline]
-fn get(units: &[u16], i: usize) -> Option<u16> { units.get(i).copied() }
+fn get(units: &[u16], i: usize) -> Option<u16> {
+    units.get(i).copied()
+}
 
 /// Combine two consecutive u16 units into a u32 (little-endian: lo first).
 #[inline]
@@ -914,19 +959,22 @@ fn u32_at(units: &[u16], lo: usize, hi: usize) -> Option<u32> {
 /// Returns `(index_raw, Args5)` on success.
 fn decode_35c_args(units: &[u16]) -> Option<(u16, Args5)> {
     let count = nibble_hi(units[0]);
-    let g     = nibble_lo(units[0]);
+    let g = nibble_lo(units[0]);
     let index = get(units, 1)?;
     let third = get(units, 2)?;
-    Some((index, Args5 {
-        count: count.min(5),
-        regs: [
-            (third & 0xf) as u8,
-            ((third >> 4) & 0xf) as u8,
-            ((third >> 8) & 0xf) as u8,
-            ((third >> 12) & 0xf) as u8,
-            g,
-        ],
-    }))
+    Some((
+        index,
+        Args5 {
+            count: count.min(5),
+            regs: [
+                (third & 0xf) as u8,
+                ((third >> 4) & 0xf) as u8,
+                ((third >> 8) & 0xf) as u8,
+                ((third >> 12) & 0xf) as u8,
+                g,
+            ],
+        },
+    ))
 }
 
 /// Decode a 3rc-format range.
@@ -951,19 +999,48 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
 
     let insn: Instruction = match op {
         0x00 => {
-            if (u0 >> 8) != 0 { return None; }
+            if (u0 >> 8) != 0 {
+                return None;
+            }
             Instruction::Nop
         }
 
-        0x01 => Instruction::Move { dst: nibble_lo(u0), src: nibble_hi(u0) },
-        0x02 => Instruction::MoveFrom16 { dst: high_byte(u0), src: get(units, 1)? },
-        0x03 => Instruction::Move16 { dst: get(units, 1)?, src: get(units, 2)? },
-        0x04 => Instruction::MoveWide { dst: nibble_lo(u0), src: nibble_hi(u0) },
-        0x05 => Instruction::MoveWideFrom16 { dst: high_byte(u0), src: get(units, 1)? },
-        0x06 => Instruction::MoveWide16 { dst: get(units, 1)?, src: get(units, 2)? },
-        0x07 => Instruction::MoveObject { dst: nibble_lo(u0), src: nibble_hi(u0) },
-        0x08 => Instruction::MoveObjectFrom16 { dst: high_byte(u0), src: get(units, 1)? },
-        0x09 => Instruction::MoveObject16 { dst: get(units, 1)?, src: get(units, 2)? },
+        0x01 => Instruction::Move {
+            dst: nibble_lo(u0),
+            src: nibble_hi(u0),
+        },
+        0x02 => Instruction::MoveFrom16 {
+            dst: high_byte(u0),
+            src: get(units, 1)?,
+        },
+        0x03 => Instruction::Move16 {
+            dst: get(units, 1)?,
+            src: get(units, 2)?,
+        },
+        0x04 => Instruction::MoveWide {
+            dst: nibble_lo(u0),
+            src: nibble_hi(u0),
+        },
+        0x05 => Instruction::MoveWideFrom16 {
+            dst: high_byte(u0),
+            src: get(units, 1)?,
+        },
+        0x06 => Instruction::MoveWide16 {
+            dst: get(units, 1)?,
+            src: get(units, 2)?,
+        },
+        0x07 => Instruction::MoveObject {
+            dst: nibble_lo(u0),
+            src: nibble_hi(u0),
+        },
+        0x08 => Instruction::MoveObjectFrom16 {
+            dst: high_byte(u0),
+            src: get(units, 1)?,
+        },
+        0x09 => Instruction::MoveObject16 {
+            dst: get(units, 1)?,
+            src: get(units, 2)?,
+        },
         0x0a => Instruction::MoveResult { dst: high_byte(u0) },
         0x0b => Instruction::MoveResultWide { dst: high_byte(u0) },
         0x0c => Instruction::MoveResultObject { dst: high_byte(u0) },
@@ -974,12 +1051,30 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         0x10 => Instruction::ReturnWide { src: high_byte(u0) },
         0x11 => Instruction::ReturnObject { src: high_byte(u0) },
 
-        0x12 => Instruction::Const4 { dst: nibble_lo(u0), value: sign4(nibble_hi(u0)) },
-        0x13 => Instruction::Const16 { dst: high_byte(u0), value: get(units, 1)? as i16 },
-        0x14 => Instruction::Const { dst: high_byte(u0), value: u32_at(units, 1, 2)? as i32 },
-        0x15 => Instruction::ConstHigh16 { dst: high_byte(u0), value: get(units, 1)? as i16 },
-        0x16 => Instruction::ConstWide16 { dst: high_byte(u0), value: get(units, 1)? as i16 },
-        0x17 => Instruction::ConstWide32 { dst: high_byte(u0), value: u32_at(units, 1, 2)? as i32 },
+        0x12 => Instruction::Const4 {
+            dst: nibble_lo(u0),
+            value: sign4(nibble_hi(u0)),
+        },
+        0x13 => Instruction::Const16 {
+            dst: high_byte(u0),
+            value: get(units, 1)? as i16,
+        },
+        0x14 => Instruction::Const {
+            dst: high_byte(u0),
+            value: u32_at(units, 1, 2)? as i32,
+        },
+        0x15 => Instruction::ConstHigh16 {
+            dst: high_byte(u0),
+            value: get(units, 1)? as i16,
+        },
+        0x16 => Instruction::ConstWide16 {
+            dst: high_byte(u0),
+            value: get(units, 1)? as i16,
+        },
+        0x17 => Instruction::ConstWide32 {
+            dst: high_byte(u0),
+            value: u32_at(units, 1, 2)? as i32,
+        },
         0x18 => {
             let w0 = get(units, 1)? as u64;
             let w1 = get(units, 2)? as u64;
@@ -990,74 +1085,156 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
                 value: (w0 | (w1 << 16) | (w2 << 32) | (w3 << 48)) as i64,
             }
         }
-        0x19 => Instruction::ConstWideHigh16 { dst: high_byte(u0), value: get(units, 1)? as i16 },
-        0x1a => Instruction::ConstString { dst: high_byte(u0), string: StringIdx(get(units, 1)?) },
+        0x19 => Instruction::ConstWideHigh16 {
+            dst: high_byte(u0),
+            value: get(units, 1)? as i16,
+        },
+        0x1a => Instruction::ConstString {
+            dst: high_byte(u0),
+            string: StringIdx(get(units, 1)?),
+        },
         0x1b => Instruction::ConstStringJumbo {
             dst: high_byte(u0),
             string: StringIdx32(u32_at(units, 1, 2)?),
         },
-        0x1c => Instruction::ConstClass { dst: high_byte(u0), ty: TypeIdx(get(units, 1)?) },
+        0x1c => Instruction::ConstClass {
+            dst: high_byte(u0),
+            ty: TypeIdx(get(units, 1)?),
+        },
 
         0x1d => Instruction::MonitorEnter { reg: high_byte(u0) },
         0x1e => Instruction::MonitorExit { reg: high_byte(u0) },
 
-        0x1f => Instruction::CheckCast { reg: high_byte(u0), ty: TypeIdx(get(units, 1)?) },
-        0x20 => Instruction::InstanceOf {
-            dst: nibble_lo(u0), obj: nibble_hi(u0), ty: TypeIdx(get(units, 1)?),
+        0x1f => Instruction::CheckCast {
+            reg: high_byte(u0),
+            ty: TypeIdx(get(units, 1)?),
         },
-        0x21 => Instruction::ArrayLength { dst: nibble_lo(u0), array: nibble_hi(u0) },
-        0x22 => Instruction::NewInstance { dst: high_byte(u0), ty: TypeIdx(get(units, 1)?) },
+        0x20 => Instruction::InstanceOf {
+            dst: nibble_lo(u0),
+            obj: nibble_hi(u0),
+            ty: TypeIdx(get(units, 1)?),
+        },
+        0x21 => Instruction::ArrayLength {
+            dst: nibble_lo(u0),
+            array: nibble_hi(u0),
+        },
+        0x22 => Instruction::NewInstance {
+            dst: high_byte(u0),
+            ty: TypeIdx(get(units, 1)?),
+        },
         0x23 => Instruction::NewArray {
-            dst: nibble_lo(u0), size: nibble_hi(u0), ty: TypeIdx(get(units, 1)?),
+            dst: nibble_lo(u0),
+            size: nibble_hi(u0),
+            ty: TypeIdx(get(units, 1)?),
         },
         0x24 => {
             let (idx, args) = decode_35c_args(units)?;
-            Instruction::FilledNewArray { ty: TypeIdx(idx), args }
+            Instruction::FilledNewArray {
+                ty: TypeIdx(idx),
+                args,
+            }
         }
         0x25 => {
             let (count, idx, first) = decode_3rc(units)?;
-            Instruction::FilledNewArrayRange { ty: TypeIdx(idx), first_reg: first, count }
+            Instruction::FilledNewArrayRange {
+                ty: TypeIdx(idx),
+                first_reg: first,
+                count,
+            }
         }
         0x26 => Instruction::FillArrayData {
-            array: high_byte(u0), table_offset: u32_at(units, 1, 2)? as i32,
+            array: high_byte(u0),
+            table_offset: u32_at(units, 1, 2)? as i32,
         },
 
-        0x27 => Instruction::Throw { exception: high_byte(u0) },
-        0x28 => Instruction::Goto { offset: high_byte(u0) as i8 },
-        0x29 => Instruction::Goto16 { offset: get(units, 1)? as i16 },
-        0x2a => Instruction::Goto32 { offset: u32_at(units, 1, 2)? as i32 },
+        0x27 => Instruction::Throw {
+            exception: high_byte(u0),
+        },
+        0x28 => Instruction::Goto {
+            offset: high_byte(u0) as i8,
+        },
+        0x29 => Instruction::Goto16 {
+            offset: get(units, 1)? as i16,
+        },
+        0x2a => Instruction::Goto32 {
+            offset: u32_at(units, 1, 2)? as i32,
+        },
         0x2b => Instruction::PackedSwitch {
-            reg: high_byte(u0), table_offset: u32_at(units, 1, 2)? as i32,
+            reg: high_byte(u0),
+            table_offset: u32_at(units, 1, 2)? as i32,
         },
         0x2c => Instruction::SparseSwitch {
-            reg: high_byte(u0), table_offset: u32_at(units, 1, 2)? as i32,
+            reg: high_byte(u0),
+            table_offset: u32_at(units, 1, 2)? as i32,
         },
 
         0x2d..=0x31 => {
             let u1 = get(units, 1)?;
             let (dst, a, b) = (high_byte(u0), u1 as u8, (u1 >> 8) as u8);
             match op {
-                0x2d => Instruction::CmplFloat  { dst, a, b },
-                0x2e => Instruction::CmpgFloat  { dst, a, b },
+                0x2d => Instruction::CmplFloat { dst, a, b },
+                0x2e => Instruction::CmpgFloat { dst, a, b },
                 0x2f => Instruction::CmplDouble { dst, a, b },
                 0x30 => Instruction::CmpgDouble { dst, a, b },
-                0x31 => Instruction::CmpLong    { dst, a, b },
+                0x31 => Instruction::CmpLong { dst, a, b },
                 _ => unreachable!(),
             }
         }
 
-        0x32 => Instruction::IfEq { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x33 => Instruction::IfNe { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x34 => Instruction::IfLt { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x35 => Instruction::IfGe { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x36 => Instruction::IfGt { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x37 => Instruction::IfLe { a: nibble_lo(u0), b: nibble_hi(u0), offset: get(units, 1)? as i16 },
-        0x38 => Instruction::IfEqz { reg: high_byte(u0), offset: get(units, 1)? as i16 },
-        0x39 => Instruction::IfNez { reg: high_byte(u0), offset: get(units, 1)? as i16 },
-        0x3a => Instruction::IfLtz { reg: high_byte(u0), offset: get(units, 1)? as i16 },
-        0x3b => Instruction::IfGez { reg: high_byte(u0), offset: get(units, 1)? as i16 },
-        0x3c => Instruction::IfGtz { reg: high_byte(u0), offset: get(units, 1)? as i16 },
-        0x3d => Instruction::IfLez { reg: high_byte(u0), offset: get(units, 1)? as i16 },
+        0x32 => Instruction::IfEq {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x33 => Instruction::IfNe {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x34 => Instruction::IfLt {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x35 => Instruction::IfGe {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x36 => Instruction::IfGt {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x37 => Instruction::IfLe {
+            a: nibble_lo(u0),
+            b: nibble_hi(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x38 => Instruction::IfEqz {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x39 => Instruction::IfNez {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x3a => Instruction::IfLtz {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x3b => Instruction::IfGez {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x3c => Instruction::IfGtz {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
+        0x3d => Instruction::IfLez {
+            reg: high_byte(u0),
+            offset: get(units, 1)? as i16,
+        },
 
         0x3e..=0x43 => return None, // unused
 
@@ -1065,20 +1242,76 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let u1 = get(units, 1)?;
             let (r0, array, index) = (high_byte(u0), u1 as u8, (u1 >> 8) as u8);
             match op {
-                0x44 => Instruction::Aget        { dst: r0, array, index },
-                0x45 => Instruction::AgetWide    { dst: r0, array, index },
-                0x46 => Instruction::AgetObject  { dst: r0, array, index },
-                0x47 => Instruction::AgetBoolean { dst: r0, array, index },
-                0x48 => Instruction::AgetByte    { dst: r0, array, index },
-                0x49 => Instruction::AgetChar    { dst: r0, array, index },
-                0x4a => Instruction::AgetShort   { dst: r0, array, index },
-                0x4b => Instruction::Aput        { src: r0, array, index },
-                0x4c => Instruction::AputWide    { src: r0, array, index },
-                0x4d => Instruction::AputObject  { src: r0, array, index },
-                0x4e => Instruction::AputBoolean { src: r0, array, index },
-                0x4f => Instruction::AputByte    { src: r0, array, index },
-                0x50 => Instruction::AputChar    { src: r0, array, index },
-                0x51 => Instruction::AputShort   { src: r0, array, index },
+                0x44 => Instruction::Aget {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x45 => Instruction::AgetWide {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x46 => Instruction::AgetObject {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x47 => Instruction::AgetBoolean {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x48 => Instruction::AgetByte {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x49 => Instruction::AgetChar {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x4a => Instruction::AgetShort {
+                    dst: r0,
+                    array,
+                    index,
+                },
+                0x4b => Instruction::Aput {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x4c => Instruction::AputWide {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x4d => Instruction::AputObject {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x4e => Instruction::AputBoolean {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x4f => Instruction::AputByte {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x50 => Instruction::AputChar {
+                    src: r0,
+                    array,
+                    index,
+                },
+                0x51 => Instruction::AputShort {
+                    src: r0,
+                    array,
+                    index,
+                },
                 _ => unreachable!(),
             }
         }
@@ -1087,20 +1320,76 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let f = FieldIdx(get(units, 1)?);
             let (dst_src, obj) = (nibble_lo(u0), nibble_hi(u0));
             match op {
-                0x52 => Instruction::Iget        { dst: dst_src, obj, field: f },
-                0x53 => Instruction::IgetWide    { dst: dst_src, obj, field: f },
-                0x54 => Instruction::IgetObject  { dst: dst_src, obj, field: f },
-                0x55 => Instruction::IgetBoolean { dst: dst_src, obj, field: f },
-                0x56 => Instruction::IgetByte    { dst: dst_src, obj, field: f },
-                0x57 => Instruction::IgetChar    { dst: dst_src, obj, field: f },
-                0x58 => Instruction::IgetShort   { dst: dst_src, obj, field: f },
-                0x59 => Instruction::Iput        { src: dst_src, obj, field: f },
-                0x5a => Instruction::IputWide    { src: dst_src, obj, field: f },
-                0x5b => Instruction::IputObject  { src: dst_src, obj, field: f },
-                0x5c => Instruction::IputBoolean { src: dst_src, obj, field: f },
-                0x5d => Instruction::IputByte    { src: dst_src, obj, field: f },
-                0x5e => Instruction::IputChar    { src: dst_src, obj, field: f },
-                0x5f => Instruction::IputShort   { src: dst_src, obj, field: f },
+                0x52 => Instruction::Iget {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x53 => Instruction::IgetWide {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x54 => Instruction::IgetObject {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x55 => Instruction::IgetBoolean {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x56 => Instruction::IgetByte {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x57 => Instruction::IgetChar {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x58 => Instruction::IgetShort {
+                    dst: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x59 => Instruction::Iput {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5a => Instruction::IputWide {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5b => Instruction::IputObject {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5c => Instruction::IputBoolean {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5d => Instruction::IputByte {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5e => Instruction::IputChar {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
+                0x5f => Instruction::IputShort {
+                    src: dst_src,
+                    obj,
+                    field: f,
+                },
                 _ => unreachable!(),
             }
         }
@@ -1109,20 +1398,20 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let f = FieldIdx(get(units, 1)?);
             let r = high_byte(u0);
             match op {
-                0x60 => Instruction::Sget        { dst: r, field: f },
-                0x61 => Instruction::SgetWide    { dst: r, field: f },
-                0x62 => Instruction::SgetObject  { dst: r, field: f },
+                0x60 => Instruction::Sget { dst: r, field: f },
+                0x61 => Instruction::SgetWide { dst: r, field: f },
+                0x62 => Instruction::SgetObject { dst: r, field: f },
                 0x63 => Instruction::SgetBoolean { dst: r, field: f },
-                0x64 => Instruction::SgetByte    { dst: r, field: f },
-                0x65 => Instruction::SgetChar    { dst: r, field: f },
-                0x66 => Instruction::SgetShort   { dst: r, field: f },
-                0x67 => Instruction::Sput        { src: r, field: f },
-                0x68 => Instruction::SputWide    { src: r, field: f },
-                0x69 => Instruction::SputObject  { src: r, field: f },
+                0x64 => Instruction::SgetByte { dst: r, field: f },
+                0x65 => Instruction::SgetChar { dst: r, field: f },
+                0x66 => Instruction::SgetShort { dst: r, field: f },
+                0x67 => Instruction::Sput { src: r, field: f },
+                0x68 => Instruction::SputWide { src: r, field: f },
+                0x69 => Instruction::SputObject { src: r, field: f },
                 0x6a => Instruction::SputBoolean { src: r, field: f },
-                0x6b => Instruction::SputByte    { src: r, field: f },
-                0x6c => Instruction::SputChar    { src: r, field: f },
-                0x6d => Instruction::SputShort   { src: r, field: f },
+                0x6b => Instruction::SputByte { src: r, field: f },
+                0x6c => Instruction::SputChar { src: r, field: f },
+                0x6d => Instruction::SputShort { src: r, field: f },
                 _ => unreachable!(),
             }
         }
@@ -1130,11 +1419,26 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         0x6e..=0x72 => {
             let (idx, args) = decode_35c_args(units)?;
             match op {
-                0x6e => Instruction::InvokeVirtual   { method: MethodIdx(idx), args },
-                0x6f => Instruction::InvokeSuper     { method: MethodIdx(idx), args },
-                0x70 => Instruction::InvokeDirect    { method: MethodIdx(idx), args },
-                0x71 => Instruction::InvokeStatic    { method: MethodIdx(idx), args },
-                0x72 => Instruction::InvokeInterface { method: MethodIdx(idx), args },
+                0x6e => Instruction::InvokeVirtual {
+                    method: MethodIdx(idx),
+                    args,
+                },
+                0x6f => Instruction::InvokeSuper {
+                    method: MethodIdx(idx),
+                    args,
+                },
+                0x70 => Instruction::InvokeDirect {
+                    method: MethodIdx(idx),
+                    args,
+                },
+                0x71 => Instruction::InvokeStatic {
+                    method: MethodIdx(idx),
+                    args,
+                },
+                0x72 => Instruction::InvokeInterface {
+                    method: MethodIdx(idx),
+                    args,
+                },
                 _ => unreachable!(),
             }
         }
@@ -1144,11 +1448,31 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         0x74..=0x78 => {
             let (count, idx, first) = decode_3rc(units)?;
             match op {
-                0x74 => Instruction::InvokeVirtualRange   { method: MethodIdx(idx), first_reg: first, count },
-                0x75 => Instruction::InvokeSuperRange     { method: MethodIdx(idx), first_reg: first, count },
-                0x76 => Instruction::InvokeDirectRange    { method: MethodIdx(idx), first_reg: first, count },
-                0x77 => Instruction::InvokeStaticRange    { method: MethodIdx(idx), first_reg: first, count },
-                0x78 => Instruction::InvokeInterfaceRange { method: MethodIdx(idx), first_reg: first, count },
+                0x74 => Instruction::InvokeVirtualRange {
+                    method: MethodIdx(idx),
+                    first_reg: first,
+                    count,
+                },
+                0x75 => Instruction::InvokeSuperRange {
+                    method: MethodIdx(idx),
+                    first_reg: first,
+                    count,
+                },
+                0x76 => Instruction::InvokeDirectRange {
+                    method: MethodIdx(idx),
+                    first_reg: first,
+                    count,
+                },
+                0x77 => Instruction::InvokeStaticRange {
+                    method: MethodIdx(idx),
+                    first_reg: first,
+                    count,
+                },
+                0x78 => Instruction::InvokeInterfaceRange {
+                    method: MethodIdx(idx),
+                    first_reg: first,
+                    count,
+                },
                 _ => unreachable!(),
             }
         }
@@ -1158,27 +1482,27 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         0x7b..=0x8f => {
             let (dst, src) = (nibble_lo(u0), nibble_hi(u0));
             match op {
-                0x7b => Instruction::NegInt      { dst, src },
-                0x7c => Instruction::NotInt      { dst, src },
-                0x7d => Instruction::NegLong     { dst, src },
-                0x7e => Instruction::NotLong     { dst, src },
-                0x7f => Instruction::NegFloat    { dst, src },
-                0x80 => Instruction::NegDouble   { dst, src },
-                0x81 => Instruction::IntToLong   { dst, src },
-                0x82 => Instruction::IntToFloat  { dst, src },
+                0x7b => Instruction::NegInt { dst, src },
+                0x7c => Instruction::NotInt { dst, src },
+                0x7d => Instruction::NegLong { dst, src },
+                0x7e => Instruction::NotLong { dst, src },
+                0x7f => Instruction::NegFloat { dst, src },
+                0x80 => Instruction::NegDouble { dst, src },
+                0x81 => Instruction::IntToLong { dst, src },
+                0x82 => Instruction::IntToFloat { dst, src },
                 0x83 => Instruction::IntToDouble { dst, src },
-                0x84 => Instruction::LongToInt   { dst, src },
+                0x84 => Instruction::LongToInt { dst, src },
                 0x85 => Instruction::LongToFloat { dst, src },
-                0x86 => Instruction::LongToDouble{ dst, src },
-                0x87 => Instruction::FloatToInt  { dst, src },
+                0x86 => Instruction::LongToDouble { dst, src },
+                0x87 => Instruction::FloatToInt { dst, src },
                 0x88 => Instruction::FloatToLong { dst, src },
-                0x89 => Instruction::FloatToDouble{dst, src },
+                0x89 => Instruction::FloatToDouble { dst, src },
                 0x8a => Instruction::DoubleToInt { dst, src },
-                0x8b => Instruction::DoubleToLong{ dst, src },
-                0x8c => Instruction::DoubleToFloat{dst, src },
-                0x8d => Instruction::IntToByte   { dst, src },
-                0x8e => Instruction::IntToChar   { dst, src },
-                0x8f => Instruction::IntToShort  { dst, src },
+                0x8b => Instruction::DoubleToLong { dst, src },
+                0x8c => Instruction::DoubleToFloat { dst, src },
+                0x8d => Instruction::IntToByte { dst, src },
+                0x8e => Instruction::IntToChar { dst, src },
+                0x8f => Instruction::IntToShort { dst, src },
                 _ => unreachable!(),
             }
         }
@@ -1187,33 +1511,33 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let u1 = get(units, 1)?;
             let (dst, a, b) = (high_byte(u0), u1 as u8, (u1 >> 8) as u8);
             match op {
-                0x90 => Instruction::AddInt    { dst, a, b },
-                0x91 => Instruction::SubInt    { dst, a, b },
-                0x92 => Instruction::MulInt    { dst, a, b },
-                0x93 => Instruction::DivInt    { dst, a, b },
-                0x94 => Instruction::RemInt    { dst, a, b },
-                0x95 => Instruction::AndInt    { dst, a, b },
-                0x96 => Instruction::OrInt     { dst, a, b },
-                0x97 => Instruction::XorInt    { dst, a, b },
-                0x98 => Instruction::ShlInt    { dst, a, b },
-                0x99 => Instruction::ShrInt    { dst, a, b },
-                0x9a => Instruction::UshrInt   { dst, a, b },
-                0x9b => Instruction::AddLong   { dst, a, b },
-                0x9c => Instruction::SubLong   { dst, a, b },
-                0x9d => Instruction::MulLong   { dst, a, b },
-                0x9e => Instruction::DivLong   { dst, a, b },
-                0x9f => Instruction::RemLong   { dst, a, b },
-                0xa0 => Instruction::AndLong   { dst, a, b },
-                0xa1 => Instruction::OrLong    { dst, a, b },
-                0xa2 => Instruction::XorLong   { dst, a, b },
-                0xa3 => Instruction::ShlLong   { dst, a, b },
-                0xa4 => Instruction::ShrLong   { dst, a, b },
-                0xa5 => Instruction::UshrLong  { dst, a, b },
-                0xa6 => Instruction::AddFloat  { dst, a, b },
-                0xa7 => Instruction::SubFloat  { dst, a, b },
-                0xa8 => Instruction::MulFloat  { dst, a, b },
-                0xa9 => Instruction::DivFloat  { dst, a, b },
-                0xaa => Instruction::RemFloat  { dst, a, b },
+                0x90 => Instruction::AddInt { dst, a, b },
+                0x91 => Instruction::SubInt { dst, a, b },
+                0x92 => Instruction::MulInt { dst, a, b },
+                0x93 => Instruction::DivInt { dst, a, b },
+                0x94 => Instruction::RemInt { dst, a, b },
+                0x95 => Instruction::AndInt { dst, a, b },
+                0x96 => Instruction::OrInt { dst, a, b },
+                0x97 => Instruction::XorInt { dst, a, b },
+                0x98 => Instruction::ShlInt { dst, a, b },
+                0x99 => Instruction::ShrInt { dst, a, b },
+                0x9a => Instruction::UshrInt { dst, a, b },
+                0x9b => Instruction::AddLong { dst, a, b },
+                0x9c => Instruction::SubLong { dst, a, b },
+                0x9d => Instruction::MulLong { dst, a, b },
+                0x9e => Instruction::DivLong { dst, a, b },
+                0x9f => Instruction::RemLong { dst, a, b },
+                0xa0 => Instruction::AndLong { dst, a, b },
+                0xa1 => Instruction::OrLong { dst, a, b },
+                0xa2 => Instruction::XorLong { dst, a, b },
+                0xa3 => Instruction::ShlLong { dst, a, b },
+                0xa4 => Instruction::ShrLong { dst, a, b },
+                0xa5 => Instruction::UshrLong { dst, a, b },
+                0xa6 => Instruction::AddFloat { dst, a, b },
+                0xa7 => Instruction::SubFloat { dst, a, b },
+                0xa8 => Instruction::MulFloat { dst, a, b },
+                0xa9 => Instruction::DivFloat { dst, a, b },
+                0xaa => Instruction::RemFloat { dst, a, b },
                 0xab => Instruction::AddDouble { dst, a, b },
                 0xac => Instruction::SubDouble { dst, a, b },
                 0xad => Instruction::MulDouble { dst, a, b },
@@ -1226,33 +1550,33 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         0xb0..=0xcf => {
             let (dst, src) = (nibble_lo(u0), nibble_hi(u0));
             match op {
-                0xb0 => Instruction::AddInt2addr    { dst, src },
-                0xb1 => Instruction::SubInt2addr    { dst, src },
-                0xb2 => Instruction::MulInt2addr    { dst, src },
-                0xb3 => Instruction::DivInt2addr    { dst, src },
-                0xb4 => Instruction::RemInt2addr    { dst, src },
-                0xb5 => Instruction::AndInt2addr    { dst, src },
-                0xb6 => Instruction::OrInt2addr     { dst, src },
-                0xb7 => Instruction::XorInt2addr    { dst, src },
-                0xb8 => Instruction::ShlInt2addr    { dst, src },
-                0xb9 => Instruction::ShrInt2addr    { dst, src },
-                0xba => Instruction::UshrInt2addr   { dst, src },
-                0xbb => Instruction::AddLong2addr   { dst, src },
-                0xbc => Instruction::SubLong2addr   { dst, src },
-                0xbd => Instruction::MulLong2addr   { dst, src },
-                0xbe => Instruction::DivLong2addr   { dst, src },
-                0xbf => Instruction::RemLong2addr   { dst, src },
-                0xc0 => Instruction::AndLong2addr   { dst, src },
-                0xc1 => Instruction::OrLong2addr    { dst, src },
-                0xc2 => Instruction::XorLong2addr   { dst, src },
-                0xc3 => Instruction::ShlLong2addr   { dst, src },
-                0xc4 => Instruction::ShrLong2addr   { dst, src },
-                0xc5 => Instruction::UshrLong2addr  { dst, src },
-                0xc6 => Instruction::AddFloat2addr  { dst, src },
-                0xc7 => Instruction::SubFloat2addr  { dst, src },
-                0xc8 => Instruction::MulFloat2addr  { dst, src },
-                0xc9 => Instruction::DivFloat2addr  { dst, src },
-                0xca => Instruction::RemFloat2addr  { dst, src },
+                0xb0 => Instruction::AddInt2addr { dst, src },
+                0xb1 => Instruction::SubInt2addr { dst, src },
+                0xb2 => Instruction::MulInt2addr { dst, src },
+                0xb3 => Instruction::DivInt2addr { dst, src },
+                0xb4 => Instruction::RemInt2addr { dst, src },
+                0xb5 => Instruction::AndInt2addr { dst, src },
+                0xb6 => Instruction::OrInt2addr { dst, src },
+                0xb7 => Instruction::XorInt2addr { dst, src },
+                0xb8 => Instruction::ShlInt2addr { dst, src },
+                0xb9 => Instruction::ShrInt2addr { dst, src },
+                0xba => Instruction::UshrInt2addr { dst, src },
+                0xbb => Instruction::AddLong2addr { dst, src },
+                0xbc => Instruction::SubLong2addr { dst, src },
+                0xbd => Instruction::MulLong2addr { dst, src },
+                0xbe => Instruction::DivLong2addr { dst, src },
+                0xbf => Instruction::RemLong2addr { dst, src },
+                0xc0 => Instruction::AndLong2addr { dst, src },
+                0xc1 => Instruction::OrLong2addr { dst, src },
+                0xc2 => Instruction::XorLong2addr { dst, src },
+                0xc3 => Instruction::ShlLong2addr { dst, src },
+                0xc4 => Instruction::ShrLong2addr { dst, src },
+                0xc5 => Instruction::UshrLong2addr { dst, src },
+                0xc6 => Instruction::AddFloat2addr { dst, src },
+                0xc7 => Instruction::SubFloat2addr { dst, src },
+                0xc8 => Instruction::MulFloat2addr { dst, src },
+                0xc9 => Instruction::DivFloat2addr { dst, src },
+                0xca => Instruction::RemFloat2addr { dst, src },
                 0xcb => Instruction::AddDouble2addr { dst, src },
                 0xcc => Instruction::SubDouble2addr { dst, src },
                 0xcd => Instruction::MulDouble2addr { dst, src },
@@ -1267,12 +1591,12 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let (dst, src) = (nibble_lo(u0), nibble_hi(u0));
             match op {
                 0xd0 => Instruction::AddIntLit16 { dst, src, lit },
-                0xd1 => Instruction::RsubInt     { dst, src, lit },
+                0xd1 => Instruction::RsubInt { dst, src, lit },
                 0xd2 => Instruction::MulIntLit16 { dst, src, lit },
                 0xd3 => Instruction::DivIntLit16 { dst, src, lit },
                 0xd4 => Instruction::RemIntLit16 { dst, src, lit },
                 0xd5 => Instruction::AndIntLit16 { dst, src, lit },
-                0xd6 => Instruction::OrIntLit16  { dst, src, lit },
+                0xd6 => Instruction::OrIntLit16 { dst, src, lit },
                 0xd7 => Instruction::XorIntLit16 { dst, src, lit },
                 _ => unreachable!(),
             }
@@ -1282,16 +1606,16 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
             let u1 = get(units, 1)?;
             let (dst, src, lit) = (high_byte(u0), u1 as u8, (u1 >> 8) as i8);
             match op {
-                0xd8 => Instruction::AddIntLit8  { dst, src, lit },
+                0xd8 => Instruction::AddIntLit8 { dst, src, lit },
                 0xd9 => Instruction::RsubIntLit8 { dst, src, lit },
-                0xda => Instruction::MulIntLit8  { dst, src, lit },
-                0xdb => Instruction::DivIntLit8  { dst, src, lit },
-                0xdc => Instruction::RemIntLit8  { dst, src, lit },
-                0xdd => Instruction::AndIntLit8  { dst, src, lit },
-                0xde => Instruction::OrIntLit8   { dst, src, lit },
-                0xdf => Instruction::XorIntLit8  { dst, src, lit },
-                0xe0 => Instruction::ShlIntLit8  { dst, src, lit },
-                0xe1 => Instruction::ShrIntLit8  { dst, src, lit },
+                0xda => Instruction::MulIntLit8 { dst, src, lit },
+                0xdb => Instruction::DivIntLit8 { dst, src, lit },
+                0xdc => Instruction::RemIntLit8 { dst, src, lit },
+                0xdd => Instruction::AndIntLit8 { dst, src, lit },
+                0xde => Instruction::OrIntLit8 { dst, src, lit },
+                0xdf => Instruction::XorIntLit8 { dst, src, lit },
+                0xe0 => Instruction::ShlIntLit8 { dst, src, lit },
+                0xe1 => Instruction::ShrIntLit8 { dst, src, lit },
                 0xe2 => Instruction::UshrIntLit8 { dst, src, lit },
                 _ => unreachable!(),
             }
@@ -1320,17 +1644,26 @@ pub fn decode(units: &[u16]) -> Option<(Instruction, usize)> {
         }
         0xfc => {
             let (idx, args) = decode_35c_args(units)?;
-            Instruction::InvokeCustom { call_site: CallSiteIdx(idx), args }
+            Instruction::InvokeCustom {
+                call_site: CallSiteIdx(idx),
+                args,
+            }
         }
         0xfd => {
             let (count, idx, first) = decode_3rc(units)?;
-            Instruction::InvokeCustomRange { call_site: CallSiteIdx(idx), first_reg: first, count }
+            Instruction::InvokeCustomRange {
+                call_site: CallSiteIdx(idx),
+                first_reg: first,
+                count,
+            }
         }
         0xfe => Instruction::ConstMethodHandle {
-            dst: high_byte(u0), handle: MethodHandleIdx(get(units, 1)?),
+            dst: high_byte(u0),
+            handle: MethodHandleIdx(get(units, 1)?),
         },
         0xff => Instruction::ConstMethodType {
-            dst: high_byte(u0), proto: ProtoIdx(get(units, 1)?),
+            dst: high_byte(u0),
+            proto: ProtoIdx(get(units, 1)?),
         },
     };
 
@@ -1393,7 +1726,9 @@ pub struct ArrayData {
 /// `units[0]` must have `0x00` as its low byte and a non-zero high byte.
 /// Returns `1` for unknown ident bytes so the instruction walker always advances.
 pub fn pseudo_len(units: &[u16]) -> usize {
-    if units.is_empty() { return 1; }
+    if units.is_empty() {
+        return 1;
+    }
     match units[0] >> 8 {
         0x01 => {
             // packed-switch-data: ident(1) + size(1) + first_key(2) + 2*N targets
@@ -1410,7 +1745,9 @@ pub fn pseudo_len(units: &[u16]) -> usize {
             let w = units.get(1).copied().unwrap_or(1) as usize;
             let n = if units.len() >= 4 {
                 ((units[2] as u32) | ((units[3] as u32) << 16)) as usize
-            } else { 0 };
+            } else {
+                0
+            };
             4 + (n * w + 1) / 2
         }
         _ => 1,
@@ -1425,7 +1762,9 @@ pub fn pseudo_len(units: &[u16]) -> usize {
 pub fn decode_pseudo(units: &[u16]) -> Option<(Pseudo, usize)> {
     let ident = (units.first()? >> 8) as u8;
     let len = pseudo_len(units);
-    if units.len() < len { return None; }
+    if units.len() < len {
+        return None;
+    }
 
     let pseudo = match ident {
         0x01 => {
@@ -1441,7 +1780,7 @@ pub fn decode_pseudo(units: &[u16]) -> Option<(Pseudo, usize)> {
             let n = units[1] as usize;
             let keys_base = 2usize;
             let tgts_base = 2 + 2 * n;
-            let mut keys    = Vec::with_capacity(n);
+            let mut keys = Vec::with_capacity(n);
             let mut targets = Vec::with_capacity(n);
             for i in 0..n {
                 keys.push(u32_at(units, keys_base + i * 2, keys_base + i * 2 + 1)? as i32);
@@ -1451,16 +1790,23 @@ pub fn decode_pseudo(units: &[u16]) -> Option<(Pseudo, usize)> {
         }
         0x03 => {
             let element_width = units[1];
-            let n  = u32_at(units, 2, 3)? as usize;
-            let w  = element_width as usize;
+            let n = u32_at(units, 2, 3)? as usize;
+            let w = element_width as usize;
             let byte_count = n * w;
             let mut data = Vec::with_capacity(byte_count);
             let raw = &units[4..];
             for i in 0..byte_count {
                 let word = raw[i / 2];
-                data.push(if i % 2 == 0 { word as u8 } else { (word >> 8) as u8 });
+                data.push(if i % 2 == 0 {
+                    word as u8
+                } else {
+                    (word >> 8) as u8
+                });
             }
-            Pseudo::ArrayData(ArrayData { element_width, data })
+            Pseudo::ArrayData(ArrayData {
+                element_width,
+                data,
+            })
         }
         _ => return None,
     };
@@ -1497,7 +1843,13 @@ mod tests {
     #[test]
     fn move_from16() {
         let (insn, len) = decode(&[0x4202, 0x1234]).unwrap();
-        assert_eq!(insn, Instruction::MoveFrom16 { dst: 0x42, src: 0x1234 });
+        assert_eq!(
+            insn,
+            Instruction::MoveFrom16 {
+                dst: 0x42,
+                src: 0x1234
+            }
+        );
         assert_eq!(len, 2);
     }
 
@@ -1547,7 +1899,14 @@ mod tests {
     fn if_eq_22t() {
         // if-eq v1, v2, +8: opcode=0x32, A=1, B=2, offset=8
         let (insn, len) = decode(&[0x2132, 0x0008]).unwrap();
-        assert_eq!(insn, Instruction::IfEq { a: 1, b: 2, offset: 8 });
+        assert_eq!(
+            insn,
+            Instruction::IfEq {
+                a: 1,
+                b: 2,
+                offset: 8
+            }
+        );
         assert_eq!(len, 2);
     }
 
@@ -1579,14 +1938,28 @@ mod tests {
         // add-int/lit8 v0, v1, #+7: opcode=0xd8, AA=0, BB=1, CC=7
         // unit[0] = 0x00d8, unit[1] = 0x0701
         let (insn, len) = decode(&[0x00d8, 0x0701]).unwrap();
-        assert_eq!(insn, Instruction::AddIntLit8 { dst: 0, src: 1, lit: 7 });
+        assert_eq!(
+            insn,
+            Instruction::AddIntLit8 {
+                dst: 0,
+                src: 1,
+                lit: 7
+            }
+        );
         assert_eq!(len, 2);
     }
 
     #[test]
     fn iget_22c() {
         let (insn, len) = decode(&[0x2152, 0x0003]).unwrap();
-        assert_eq!(insn, Instruction::Iget { dst: 1, obj: 2, field: FieldIdx(3) });
+        assert_eq!(
+            insn,
+            Instruction::Iget {
+                dst: 1,
+                obj: 2,
+                field: FieldIdx(3)
+            }
+        );
         assert_eq!(len, 2);
     }
 

@@ -51,8 +51,8 @@ use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
+    Target, TypeIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};

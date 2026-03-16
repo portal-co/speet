@@ -33,8 +33,8 @@
 //! * **After**: physical address of the same type is on the stack.
 
 use crate::mapper::{CallbackContext, MapperCallback};
-use wax_core::build::InstructionSink;
 use wasm_encoder::{Instruction, MemArg};
+use wax_core::build::InstructionSink;
 
 // ── PageTableBase ──────────────────────────────────────────────────────────────
 
@@ -172,12 +172,19 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             pt_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
 
             // page_pointer → scratch[0]; page_base_low48 → scratch[1]
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;       // security_index on stack
+            cb.emit(ctx, &Instruction::I64And)?; // security_index on stack
 
             cb.emit(ctx, &Instruction::LocalGet(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
@@ -188,7 +195,14 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             sec_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
             // page_base_top16 = sec_entry >> 16
@@ -214,7 +228,14 @@ where
             cb.emit(ctx, &Instruction::I32Shl)?;
             pt_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::LocalGet(lv))?;
             cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
             cb.emit(ctx, &Instruction::I32And)?;
@@ -261,10 +282,17 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             pt_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;  // page_pointer (i32)
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?; // page_pointer (i32)
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;  // page_pointer as i64
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_pointer as i64
 
             // security_index = page_pointer & 0xFF
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
@@ -274,13 +302,20 @@ where
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(8))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?;  // page_base_low24
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?; // page_base_low24
 
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             sec_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
             cb.emit(ctx, &Instruction::I64Const(24))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
@@ -301,7 +336,14 @@ where
             cb.emit(ctx, &Instruction::I32Shl)?;
             pt_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
 
             // security_index = page_pointer & 0xFF
@@ -317,7 +359,14 @@ where
             cb.emit(ctx, &Instruction::I32Shl)?;
             sec_dir_base.emit_load(ctx, cb, false)?;
             cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I32Const(24))?;
             cb.emit(ctx, &Instruction::I32ShrU)?;
             cb.emit(ctx, &Instruction::I32Const(24))?;
@@ -381,7 +430,14 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             l3_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
 
             // Level 2 lookup
             cb.emit(ctx, &Instruction::LocalGet(lv))?;
@@ -392,7 +448,14 @@ where
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
 
             // Level 1 lookup
             cb.emit(ctx, &Instruction::LocalGet(lv))?;
@@ -403,12 +466,19 @@ where
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
 
             // Security + final address (same as standard mapper)
             cb.emit(ctx, &Instruction::LocalTee(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;       // security_index
+            cb.emit(ctx, &Instruction::I64And)?; // security_index
             cb.emit(ctx, &Instruction::LocalGet(ls0))?;
             cb.emit(ctx, &Instruction::I64Const(16))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
@@ -417,7 +487,14 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             sec_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64Const(48))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
             cb.emit(ctx, &Instruction::I64Const(48))?;
@@ -431,13 +508,8 @@ where
             cb.emit(ctx, &Instruction::I64Add)?;
         } else {
             // 32-bit vaddr/paddr: delegate to the 32-bit single-level mapper
-            let mut inner = standard_page_table_mapper_32(
-                l3_base,
-                sec_dir_base,
-                memory_index,
-                false,
-                locals,
-            );
+            let mut inner =
+                standard_page_table_mapper_32(l3_base, sec_dir_base, memory_index, false, locals);
             inner.call(ctx, cb)?;
         }
         Ok(())
@@ -490,7 +562,14 @@ where
             cb.emit(ctx, &Instruction::I64Shl)?;
             l3_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
             // Level 2
@@ -502,7 +581,14 @@ where
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
 
             // Level 1
@@ -514,23 +600,37 @@ where
             cb.emit(ctx, &Instruction::I64Const(2))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index }))?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;  // page_pointer (i32)
+            cb.emit(
+                ctx,
+                &Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index,
+                }),
+            )?;
+            cb.emit(ctx, &Instruction::LocalTee(ls0))?; // page_pointer (i32)
             cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;  // page_pointer as i64
+            cb.emit(ctx, &Instruction::LocalSet(ls1))?; // page_pointer as i64
 
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;          // security_index
+            cb.emit(ctx, &Instruction::I64And)?; // security_index
             cb.emit(ctx, &Instruction::LocalGet(ls1))?;
             cb.emit(ctx, &Instruction::I64Const(8))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?;  // page_base_low24
+            cb.emit(ctx, &Instruction::LocalSet(ls2))?; // page_base_low24
             cb.emit(ctx, &Instruction::I64Const(3))?;
             cb.emit(ctx, &Instruction::I64Shl)?;
             sec_dir_base.emit_load(ctx, cb, true)?;
             cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(ctx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index }))?;
+            cb.emit(
+                ctx,
+                &Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index,
+                }),
+            )?;
             cb.emit(ctx, &Instruction::I64Const(56))?;
             cb.emit(ctx, &Instruction::I64ShrU)?;
             cb.emit(ctx, &Instruction::I64Const(24))?;
@@ -544,13 +644,8 @@ where
             cb.emit(ctx, &Instruction::I64Add)?;
         } else {
             // 32-bit fallback
-            let mut inner = standard_page_table_mapper_32(
-                l3_base,
-                sec_dir_base,
-                memory_index,
-                false,
-                locals,
-            );
+            let mut inner =
+                standard_page_table_mapper_32(l3_base, sec_dir_base, memory_index, false, locals);
             inner.call(ctx, cb)?;
         }
         Ok(())

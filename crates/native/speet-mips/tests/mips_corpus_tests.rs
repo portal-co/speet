@@ -34,8 +34,8 @@ use wasm_encoder::Function;
 /// Panics on any I/O or parse error — the files are version-controlled and
 /// must always be readable.
 fn load_text_section(elf_path: &Path) -> (Vec<u8>, u64) {
-    let bytes = fs::read(elf_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
+    let bytes =
+        fs::read(elf_path).unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
     let obj = object::File::parse(&*bytes)
         .unwrap_or_else(|e| panic!("failed to parse ELF {}: {e}", elf_path.display()));
     let section = obj
@@ -96,7 +96,11 @@ fn test_corpus_file(elf_path: &Path) {
     );
 
     let count = recompile_mips_text(&text, load_addr as u32);
-    assert!(count > 0, "{}: no instructions translated", elf_path.display());
+    assert!(
+        count > 0,
+        "{}: no instructions translated",
+        elf_path.display()
+    );
 
     println!(
         "  ✓ {} — {count} instructions ({} bytes)",
@@ -156,8 +160,7 @@ fn test_mips_edge_cases() {
 /// Smoke test: recompile all corpus ELF objects in a single pass.
 #[test]
 fn test_mips_full_corpus() {
-    let corpus_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/mips-corpus");
+    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/mips-corpus");
 
     let mut entries: Vec<_> = fs::read_dir(&corpus_dir)
         .expect("reading mips-corpus dir")

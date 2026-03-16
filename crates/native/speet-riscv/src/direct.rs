@@ -1,7 +1,7 @@
 use crate::*;
 use rv_asm::AmoOp;
 use speet_ordering::{
-    emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store, RmwOp, RmwWidth,
+    RmwOp, RmwWidth, emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store,
 };
 
 /// Snippet for setting expected_ra to a constant return address in speculative calls
@@ -941,7 +941,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::DirectJump
                     };
                     let jal_info = JumpInfo::direct(pc as u64, target_pc, jal_kind);
-                    if self.traps.on_jump(&jal_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+                    if self
+                        .traps
+                        .on_jump(&jal_info, ctx, &mut self.reactor, &self.layout)?
+                        == TrapAction::Skip
+                    {
                         return Ok(());
                     }
                     self.jump_to_pc(ctx, target_pc, self.total_params)?;
@@ -974,7 +978,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor.feed(ctx, &Instruction::LocalTee(scratch))?;
                     self.reactor.feed(ctx, &Instruction::Drop)?; // balance the stack
                     let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
-                    if self.traps.on_jump(&jalr_ret_info, ctx, &mut self.reactor, &self.layout)?
+                    if self
+                        .traps
+                        .on_jump(&jalr_ret_info, ctx, &mut self.reactor, &self.layout)?
                         == TrapAction::Skip
                     {
                         return Ok(());
@@ -1094,8 +1100,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         fn emit(
                             &self,
                             ctx: &mut Context,
-                            sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E>
-                                      + '_),
+                            sink: &mut (
+                                     dyn wax_core::build::InstructionOperatorSink<Context, E> + '_
+                                 ),
                         ) -> Result<(), E> {
                             // Compute: ((base + offset) & ~1 - base_pc) / 2
                             // This gives us the function index from the PC
@@ -1199,7 +1206,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::IndirectJump
                     };
                     let jalr_info = JumpInfo::indirect(pc as u64, scratch, jalr_kind);
-                    if self.traps.on_jump(&jalr_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+                    if self
+                        .traps
+                        .on_jump(&jalr_info, ctx, &mut self.reactor, &self.layout)?
+                        == TrapAction::Skip
+                    {
                         return Ok(());
                     }
                     // For indirect jumps, seal with unreachable as we can't statically determine target
@@ -2358,7 +2369,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // single-threaded wasm model these are equivalent to plain loads/stores
             // plus the cmpxchg loop for min/max AMOs; on shared-memory wasm they
             // provide the full multi-threaded guarantees.
-            Inst::LrW { dest, addr, order: _ } => {
+            Inst::LrW {
+                dest,
+                addr,
+                order: _,
+            } => {
                 // LR.W: load-reserved word.  No reservation register in wasm —
                 // treated as an atomic 32-bit load.  AmoOrdering is accepted for
                 // API symmetry; the wasm atomic load is always seq-cst within a
@@ -2369,8 +2384,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor
                         .feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                     // Tee address for alias check in emit_lr.
-                    self.reactor
-                        .feed(ctx, &Instruction::LocalTee(load_addr))?;
+                    self.reactor.feed(ctx, &Instruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         &mut self.reactor,
@@ -3095,7 +3109,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Jump trap: conditional branch.
         let branch_info = JumpInfo::direct(pc as u64, target_pc, JumpKind::ConditionalBranch);
-        if self.traps.on_jump(&branch_info, ctx, &mut self.reactor, &self.layout)? == TrapAction::Skip {
+        if self
+            .traps
+            .on_jump(&branch_info, ctx, &mut self.reactor, &self.layout)?
+            == TrapAction::Skip
+        {
             return Ok(());
         }
 

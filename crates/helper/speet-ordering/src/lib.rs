@@ -774,7 +774,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
     // stack: old, addr, expected, pred
     reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, pred, old
     reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, pred, old, src
-                                                           // select: pred ? old : src  (pred true → keep old = it IS the min/max)
+    // select: pred ? old : src  (pred true → keep old = it IS the min/max)
     reactor.feed(ctx, &Instruction::Select)?; // old, addr, expected, new
 
     // cmpxchg: [addr, expected, replacement] → got

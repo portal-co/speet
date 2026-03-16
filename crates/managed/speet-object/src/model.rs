@@ -219,11 +219,8 @@ pub trait ObjectModel<C, E> {
     ///
     /// Stack before: `[ref]`  
     /// Stack after:  `[length: i32]`
-    fn emit_array_length(
-        &self,
-        ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
-    ) -> Result<(), E>;
+    fn emit_array_length(&self, ctx: &mut C, sink: &mut dyn InstructionSink<C, E>)
+    -> Result<(), E>;
 
     // ── Type checks ───────────────────────────────────────────────────────
 

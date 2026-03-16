@@ -41,8 +41,8 @@ fn load_text_section(elf_path: &Path) -> Option<(Vec<u8>, u64)> {
         );
         return None;
     }
-    let bytes = fs::read(elf_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
+    let bytes =
+        fs::read(elf_path).unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
     let obj = object::File::parse(&*bytes)
         .unwrap_or_else(|e| panic!("failed to parse ELF {}: {e}", elf_path.display()));
     let section = obj
@@ -57,17 +57,12 @@ fn load_text_section(elf_path: &Path) -> Option<(Vec<u8>, u64)> {
 }
 
 fn recompile_riscv_text(text: &[u8], start_addr: u64, xlen: Xlen) -> usize {
-    let mut recompiler =
-        RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
+    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(start_addr);
     let mut ctx = ();
     recompiler
-        .translate_bytes(
-            &mut ctx,
-            text,
-            start_addr as u32,
-            xlen,
-            &mut |a| Function::new(a.collect::<Vec<_>>()),
-        )
+        .translate_bytes(&mut ctx, text, start_addr as u32, xlen, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        })
         .expect("translate_bytes failed")
 }
 
@@ -188,8 +183,7 @@ fn test_rv64i_basic_64bit() {
 /// been initialised.
 #[test]
 fn test_rv_full_corpus() {
-    let corpus_root =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/rv-corpus");
+    let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/rv-corpus");
 
     if !corpus_root.exists() {
         eprintln!("Skipping test_rv_full_corpus: rv-corpus submodule not initialised");

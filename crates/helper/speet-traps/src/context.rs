@@ -72,7 +72,11 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     /// Only [`TrapConfig`](crate::config::TrapConfig) should call this —
     /// traps receive one as a `&mut` argument.
     pub(crate) fn new(sink: &'a mut F, layout: &'a LocalLayout) -> Self {
-        Self { sink, layout, _pd: PhantomData }
+        Self {
+            sink,
+            layout,
+            _pd: PhantomData,
+        }
     }
 
     /// Emit a single wasm instruction into the current function.

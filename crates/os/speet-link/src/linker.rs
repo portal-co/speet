@@ -32,12 +32,10 @@
 //! ```
 
 use alloc::{string::String, vec::Vec};
+use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor,
-};
-use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
+use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor};
 
 use crate::context::ReactorContext;
 use crate::recompiler::Recompile;
@@ -134,8 +132,14 @@ where
             reactor: Reactor::default(),
             traps: TrapConfig::new(),
             layout: LocalLayout::empty(),
-            locals_mark: Mark { slot_count: 0, total_locals: 0 },
-            pool: Pool { table: TableIdx(0), ty: TypeIdx(0) },
+            locals_mark: Mark {
+                slot_count: 0,
+                total_locals: 0,
+            },
+            pool: Pool {
+                table: TableIdx(0),
+                ty: TypeIdx(0),
+            },
             escape_tag: None,
             plugin,
         }
@@ -154,7 +158,11 @@ where
     ///
     /// `entry_points` — `(symbol, absolute_wasm_func_index)` pairs that will
     /// become exports in the final module.
-    pub fn commit<B>(&mut self, rc: &mut (dyn Recompile<Context,E,F,BinaryArgs = B> + '_), entry_points: Vec<(String, u32)>) {
+    pub fn commit<B>(
+        &mut self,
+        rc: &mut (dyn Recompile<Context, E, F, BinaryArgs = B> + '_),
+        entry_points: Vec<(String, u32)>,
+    ) {
         let unit = rc.drain_unit(self, entry_points);
         self.plugin.on_unit(unit);
     }
@@ -179,15 +187,29 @@ where
     type FnType = F;
 
     // Layout
-    fn layout(&self) -> &LocalLayout { &self.layout }
-    fn layout_mut(&mut self) -> &mut LocalLayout { &mut self.layout }
-    fn locals_mark(&self) -> Mark { self.locals_mark }
-    fn set_locals_mark(&mut self, mark: Mark) { self.locals_mark = mark; }
+    fn layout(&self) -> &LocalLayout {
+        &self.layout
+    }
+    fn layout_mut(&mut self) -> &mut LocalLayout {
+        &mut self.layout
+    }
+    fn locals_mark(&self) -> Mark {
+        self.locals_mark
+    }
+    fn set_locals_mark(&mut self, mark: Mark) {
+        self.locals_mark = mark;
+    }
 
     // Reactor state
-    fn base_func_offset(&self) -> u32 { self.reactor.base_func_offset() }
-    fn fn_count(&self) -> usize { self.reactor.fn_count() }
-    fn drain_fns(&mut self) -> Vec<F> { self.reactor.drain_fns() }
+    fn base_func_offset(&self) -> u32 {
+        self.reactor.base_func_offset()
+    }
+    fn fn_count(&self) -> usize {
+        self.reactor.fn_count()
+    }
+    fn drain_fns(&mut self) -> Vec<F> {
+        self.reactor.drain_fns()
+    }
 
     // Trap support
     fn declare_trap_params(&mut self) {
@@ -207,13 +229,10 @@ where
         // borrow-checker limitation on partial borrows through &mut self.
         // This is sound because `on_instruction` does not modify `layout`.
         let layout_ref = unsafe { &*layout };
-        self.traps.on_instruction(info, ctx, &mut self.reactor, layout_ref)
+        self.traps
+            .on_instruction(info, ctx, &mut self.reactor, layout_ref)
     }
-    fn on_jump(
-        &mut self,
-        info: &JumpInfo,
-        ctx: &mut Context,
-    ) -> Result<TrapAction, E> {
+    fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E> {
         let layout = &self.layout as *const LocalLayout;
         let layout_ref = unsafe { &*layout };
         self.traps.on_jump(info, ctx, &mut self.reactor, layout_ref)
@@ -234,7 +253,13 @@ where
     }
 
     // Configuration
-    fn pool(&self) -> &Pool { &self.pool }
-    fn escape_tag(&self) -> Option<EscapeTag> { self.escape_tag }
-    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) { self.escape_tag = tag; }
+    fn pool(&self) -> &Pool {
+        &self.pool
+    }
+    fn escape_tag(&self) -> Option<EscapeTag> {
+        self.escape_tag
+    }
+    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
+        self.escape_tag = tag;
+    }
 }
