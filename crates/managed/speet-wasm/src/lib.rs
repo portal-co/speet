@@ -17,7 +17,7 @@
 //! use speet_link::Linker;
 //! use wasm_encoder::Function;
 //!
-//! let mapper_factory: Box<dyn Fn() -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
+//! let mapper: Box<dyn Fn() -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
 //!     Box::new(|| {
 //!         let mut m = standard_page_table_mapper(
 //!             PageTableBase::Constant(0x1000_0000),
@@ -28,7 +28,7 @@
 //!     });
 //!
 //! let mut frontend = WasmFrontend::new(
-//!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: Some(mapper_factory) }],
+//!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper: Some(mapper) }],
 //!     0, // host_memory
 //!     IndexOffsets { func: 10, global: 0, table: 0 },
 //!     Box::new(|locals| Function::new(locals)),
@@ -44,15 +44,15 @@ extern crate alloc;
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use speet_link::{
-    BinaryUnit, BaseContext, DataSegment, Recompile, context::ReactorContext, unit::FuncType,
+    BaseContext, BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType,
 };
 use speet_memory::{
     AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter, StoreKind,
 };
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use wasm_layout::{LocalLayout, LocalSlot, Mark};
-use wax_core::build::InstructionSink;
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
+use wax_core::build::InstructionSink;
 
 // ── GuestMemoryConfig ──────────────────────────────────────────────────────────
 
@@ -64,12 +64,9 @@ use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, P
 pub struct GuestMemoryConfig<Context, E, F = Function> {
     /// Width of guest addresses for this memory.
     pub addr_width: AddressWidth,
-    /// Optional mapper factory.  Called once per function to produce a
-    /// [`MapperCallback`] that translates virtual → physical addresses.
+    /// Mapper that translates virtual → physical addresses.
     /// The mapper declares its own scratch locals via `declare_locals`.
-    /// `None` = identity (physical address == virtual address).
-    pub mapper_factory:
-        Option<Box<dyn Fn() -> Box<dyn MapperCallback<Context, E, F>>>>,
+    pub mapper: Option<Box<dyn MapperCallback<Context, E, F>>>,
 }
 
 // ── IndexOffsets ──────────────────────────────────────────────────────────────
@@ -247,11 +244,7 @@ where
     /// mapper or the mapper does not specify a chunk size.
     fn chunk_size_for_memory(&self, mem_idx: usize) -> Option<u64> {
         let cfg = self.per_memory.get(mem_idx)?;
-        let factory = cfg.mapper_factory.as_ref()?;
-        // Instantiate a throw-away mapper just to query the chunk size.
-        // `declare_locals` is not needed for chunk_size queries.
-        let mapper = factory();
-        mapper.chunk_size()
+        cfg.mapper.as_ref()?.chunk_size()
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -270,7 +263,7 @@ where
     pub fn translate_module(
         &mut self,
         ctx: &mut Context,
-        base_ctx: &mut dyn BaseContext<Context, E>,
+        base_ctx: &mut (dyn BaseContext<Context, E> + '_),
         bytes: &[u8],
     ) -> Result<(), E> {
         let mut types: Vec<FuncType> = Vec::new();
@@ -328,7 +321,11 @@ where
                 Payload::DataSection(reader) => {
                     for data_result in reader {
                         let data = data_result?;
-                        if let DataKind::Active { memory_index, ref offset_expr } = data.kind {
+                        if let DataKind::Active {
+                            memory_index,
+                            ref offset_expr,
+                        } = data.kind
+                        {
                             let mem_idx = memory_index as usize;
                             if let Some(guest_addr) = eval_const_expr(offset_expr) {
                                 let raw = data.data;
@@ -345,8 +342,8 @@ where
                                                 ((total - offset).min(space_in_page)) as usize;
                                             let seg_idx = self.data_segs.len() as u32;
                                             self.data_segs.push(DataSegment {
-                                                data: raw[offset as usize
-                                                    ..offset as usize + chunk_len]
+                                                data: raw
+                                                    [offset as usize..offset as usize + chunk_len]
                                                     .to_vec(),
                                             });
                                             self.data_init_ops.push(DataInitOp::InitChunk {
@@ -380,10 +377,10 @@ where
 
                 Payload::CodeSectionEntry(body) => {
                     let type_idx = fn_type_indices[code_fn_idx] as usize;
-                    let func_type = types
-                        .get(type_idx)
-                        .cloned()
-                        .unwrap_or_else(|| FuncType { params: Vec::new(), results: Vec::new() });
+                    let func_type = types.get(type_idx).cloned().unwrap_or_else(|| FuncType {
+                        params: Vec::new(),
+                        results: Vec::new(),
+                    });
                     self.translate_fn(ctx, base_ctx, func_type, body)?;
                     code_fn_idx += 1;
                 }
@@ -407,7 +404,7 @@ where
     fn build_data_init_fn(
         &mut self,
         ctx: &mut Context,
-        base_ctx: &mut dyn BaseContext<Context, E>,
+        base_ctx: &mut (dyn BaseContext<Context, E> + '_),
     ) -> Result<(), E> {
         // The data-init function has type (inj...) -> (inj...).
         // We cache its params layout snapshot just like regular functions.
@@ -415,46 +412,50 @@ where
         let inj_clone = self.injected_params.clone();
         let init_fn_type = FuncType::from_val_types(&inj_clone, &inj_clone);
 
-        let (params_snap, params_mark) =
-            match self.fn_type_param_layouts.get(&init_fn_type) {
-                Some(entry) => entry.clone(),
-                None => {
-                    *base_ctx.layout_mut() = LocalLayout::empty();
-                    if n_injected > 0 {
-                        base_ctx.layout_mut().append(n_injected, ValType::I32);
-                    }
-                    base_ctx.declare_trap_params();
-                    let mark = base_ctx.layout().mark();
-                    base_ctx.set_locals_mark(mark);
-                    let snap = base_ctx.layout().clone();
-                    self.fn_type_param_layouts
-                        .insert(init_fn_type, (snap.clone(), mark));
-                    (snap, mark)
+        let (params_snap, params_mark) = match self.fn_type_param_layouts.get(&init_fn_type) {
+            Some(entry) => entry.clone(),
+            None => {
+                *base_ctx.layout_mut() = LocalLayout::empty();
+                if n_injected > 0 {
+                    base_ctx.layout_mut().append(n_injected, ValType::I32);
                 }
-            };
+                base_ctx.declare_trap_params();
+                let mark = base_ctx.layout().mark();
+                base_ctx.set_locals_mark(mark);
+                let snap = base_ctx.layout().clone();
+                self.fn_type_param_layouts
+                    .insert(init_fn_type, (snap.clone(), mark));
+                (snap, mark)
+            }
+        };
 
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
 
-        // Create one mapper instance, call declare_locals to allocate its scratch.
-        // This mapper is reused for all init ops (sequential calls are safe).
-        let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
-            if let Some(cfg) = self.per_memory.get(0) {
-                if let Some(factory) = &cfg.mapper_factory {
-                    let mut m = factory();
-                    m.declare_locals(base_ctx.layout_mut());
-                    Some(m)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+        // // Create one mapper instance, call declare_locals to allocate its scratch.
+        // // This mapper is reused for all init ops (sequential calls are safe).
+        // let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
+        //     if let Some(cfg) = self.per_memory.get(0) {
+        //         if let Some(factory) = &cfg.mapper {
+        //             let mut m = factory();
+        //             m.declare_locals(base_ctx.layout_mut());
+        //             Some(m)
+        //         } else {
+        //             None
+        //         }
+        //     } else {
+        //         None
+        //     };
+
+        for p in self.per_memory.iter_mut() {
+            if let Some(m) = p.mapper.as_deref_mut() {
+                m.declare_locals(base_ctx.layout_mut());
+            }
+        }
 
         base_ctx.declare_trap_locals();
 
-        let out_locals: Vec<(u32, ValType)> =
-            base_ctx.layout().iter_since(&params_mark).collect();
+        let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
         let host_memory = self.host_memory;
@@ -465,9 +466,12 @@ where
             .data_init_ops
             .iter()
             .map(|op| match op {
-                DataInitOp::InitChunk { guest_va, seg_idx, byte_len, memory_idx } => {
-                    (*guest_va, *seg_idx, *byte_len, *memory_idx)
-                }
+                DataInitOp::InitChunk {
+                    guest_va,
+                    seg_idx,
+                    byte_len,
+                    memory_idx,
+                } => (*guest_va, *seg_idx, *byte_len, *memory_idx),
             })
             .collect();
 
@@ -482,13 +486,23 @@ where
             }
 
             // Call mapper if configured.
-            if let Some(m) = mapper_box.as_deref_mut() {
+            if let Some(m) = self
+                .per_memory
+                .get_mut(memory_idx)
+                .and_then(|cfg| cfg.mapper.as_deref_mut())
+            {
                 let mut cb = CallbackContext::new(&mut out);
                 m.call(ctx, &mut cb)?;
             }
 
             // memory.init seg_idx host_memory
-            out.instruction(ctx, &Instruction::MemoryInit { data_index: seg_idx, mem: host_memory })?;
+            out.instruction(
+                ctx,
+                &Instruction::MemoryInit {
+                    data_index: seg_idx,
+                    mem: host_memory,
+                },
+            )?;
             // data.drop seg_idx
             out.instruction(ctx, &Instruction::DataDrop(seg_idx))?;
         }
@@ -511,7 +525,7 @@ where
     fn translate_fn(
         &mut self,
         ctx: &mut Context,
-        base_ctx: &mut dyn BaseContext<Context, E>,
+        base_ctx: &mut (dyn BaseContext<Context, E> + '_),
         func_type: FuncType,
         body: FunctionBody<'_>,
     ) -> Result<(), E> {
@@ -538,23 +552,22 @@ where
         // We cache the (layout snapshot, mark) per unique extended function type
         // so that trap params are only declared once per type.
         let param_count = func_type.params_val_types().count() as u32; // extended count
-        let (params_snap, params_mark) =
-            match self.fn_type_param_layouts.get(&func_type) {
-                Some(entry) => entry.clone(),
-                None => {
-                    *base_ctx.layout_mut() = LocalLayout::empty();
-                    if param_count > 0 {
-                        base_ctx.layout_mut().append(param_count, ValType::I32);
-                    }
-                    base_ctx.declare_trap_params();
-                    let mark = base_ctx.layout().mark();
-                    base_ctx.set_locals_mark(mark);
-                    let snap = base_ctx.layout().clone();
-                    self.fn_type_param_layouts
-                        .insert(func_type.clone(), (snap.clone(), mark));
-                    (snap, mark)
+        let (params_snap, params_mark) = match self.fn_type_param_layouts.get(&func_type) {
+            Some(entry) => entry.clone(),
+            None => {
+                *base_ctx.layout_mut() = LocalLayout::empty();
+                if param_count > 0 {
+                    base_ctx.layout_mut().append(param_count, ValType::I32);
                 }
-            };
+                base_ctx.declare_trap_params();
+                let mark = base_ctx.layout().mark();
+                base_ctx.set_locals_mark(mark);
+                let snap = base_ctx.layout().clone();
+                self.fn_type_param_layouts
+                    .insert(func_type.clone(), (snap.clone(), mark));
+                (snap, mark)
+            }
+        };
 
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
@@ -593,20 +606,25 @@ where
 
         // Mapper and loop scratch locals (only when a mapper is configured).
         // loop_slot is appended first; mapper declares its own locals via declare_locals.
-        let (mut mapper_box, loop_dst_local, loop_src_local, loop_len_local) =
-            if let Some(cfg) = self.per_memory.get(0) {
-                if let Some(factory) = &cfg.mapper_factory {
-                    let loop_slot = base_ctx.layout_mut().append(3, ValType::I32);
-                    let loop_base = base_ctx.layout().base(loop_slot);
-                    let mut m = factory();
-                    m.declare_locals(base_ctx.layout_mut());
-                    (Some(m), loop_base, loop_base + 1, loop_base + 2)
-                } else {
-                    (None, 0, 0, 0)
-                }
-            } else {
-                (None, 0, 0, 0)
+        let mut p = self.per_memory.iter_mut();
+        let mut loop_slot = None;
+        let loop_slot = loop {
+            let Some(p) = p.next() else {
+                break loop_slot; // unused
             };
+            if let Some(m) = p.mapper.as_deref_mut() {
+                m.declare_locals(base_ctx.layout_mut());
+
+                if let None = loop_slot {
+                    loop_slot = Some(base_ctx.layout_mut().append(3, ValType::I32));
+                };
+            }
+        };
+        let loop_base = loop_slot
+            .map(|loop_slot| base_ctx.layout().base(loop_slot))
+            .unwrap_or(0);
+        let (loop_dst_local, loop_src_local, loop_len_local) =
+            (loop_base, loop_base + 1, loop_base + 2);
 
         // Let traps declare their per-function locals.
         base_ctx.declare_trap_locals();
@@ -660,16 +678,12 @@ where
                 }
                 _ => {}
             }
-
-            let mapper_ref: Option<&mut (dyn MapperCallback<Context, E, F> + '_)> =
-                mapper_box.as_mut().map(|b| b.as_mut() as _);
             self.translate_op(
                 ctx,
                 &op,
                 &mut out,
                 base_scratch_idx,
                 addr_width,
-                mapper_ref,
                 loop_dst_local,
                 loop_src_local,
                 loop_len_local,
@@ -692,7 +706,6 @@ where
         out: &mut F,
         base_scratch_idx: u32,
         addr_width: AddressWidth,
-        mut mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
         loop_dst_local: u32,
         loop_src_local: u32,
         loop_len_local: u32,
@@ -708,88 +721,336 @@ where
             // ── Memory loads ──────────────────────────────────────────────
             Operator::I32Load { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I32S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I32S,
+                )?;
             }
             Operator::I64Load { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I64)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I64,
+                )?;
             }
             Operator::F32Load { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::F32)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::F32,
+                )?;
             }
             Operator::F64Load { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::F64)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::F64,
+                )?;
             }
             Operator::I32Load8S { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I8S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I8S,
+                )?;
             }
             Operator::I32Load8U { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I8U)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I8U,
+                )?;
             }
             Operator::I32Load16S { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I16S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I16S,
+                )?;
             }
             Operator::I32Load16U { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I32, memory_index, mapper, LoadKind::I16U)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I32,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I16U,
+                )?;
             }
             Operator::I64Load8S { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I8S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I8S,
+                )?;
             }
             Operator::I64Load8U { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I8U)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I8U,
+                )?;
             }
             Operator::I64Load16S { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I16S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I16S,
+                )?;
             }
             Operator::I64Load16U { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I16U)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I16U,
+                )?;
             }
             Operator::I64Load32S { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I32S)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I32S,
+                )?;
             }
             Operator::I64Load32U { memarg } => {
                 emit_offset(ctx, out, memarg.offset, addr_width)?;
-                emit_load(ctx, out, addr_width, IntWidth::I64, memory_index, mapper, LoadKind::I32U)?;
+                emit_load(
+                    ctx,
+                    out,
+                    addr_width,
+                    IntWidth::I64,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    LoadKind::I32U,
+                )?;
             }
 
             // ── Memory stores ─────────────────────────────────────────────
             Operator::I32Store { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I32, IntWidth::I32, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I32,
+                    IntWidth::I32,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I64Store { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I64, IntWidth::I64, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I64,
+                    IntWidth::I64,
+                    base_scratch_idx,
+                )?;
             }
             Operator::F32Store { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::F32, IntWidth::I32, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::F32,
+                    IntWidth::I32,
+                    base_scratch_idx,
+                )?;
             }
             Operator::F64Store { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::F64, IntWidth::I64, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::F64,
+                    IntWidth::I64,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I32Store8 { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I8, IntWidth::I32, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I8,
+                    IntWidth::I32,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I32Store16 { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I16, IntWidth::I32, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I16,
+                    IntWidth::I32,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I64Store8 { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I8, IntWidth::I64, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I8,
+                    IntWidth::I64,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I64Store16 { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I16, IntWidth::I64, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I16,
+                    IntWidth::I64,
+                    base_scratch_idx,
+                )?;
             }
             Operator::I64Store32 { memarg } => {
-                emit_store(ctx, out, memarg, addr_width, memory_index, mapper, StoreKind::I32, IntWidth::I64, base_scratch_idx)?;
+                emit_store(
+                    ctx,
+                    out,
+                    memarg,
+                    addr_width,
+                    memory_index,
+                    self.per_memory
+                        .get_mut(memarg.memory as usize)
+                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                    StoreKind::I32,
+                    IntWidth::I64,
+                    base_scratch_idx,
+                )?;
             }
 
             // ── Local variable accesses ───────────────────────────────────
@@ -843,7 +1104,10 @@ where
                     out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
                 }
             }
-            Operator::CallIndirect { type_index, table_index } => {
+            Operator::CallIndirect {
+                type_index,
+                table_index,
+            } => {
                 if n_injected > 0 {
                     // Stack top is the table index; save it so we can push
                     // injected params between the args and the table index.
@@ -853,10 +1117,13 @@ where
                     }
                     out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
                 }
-                out.instruction(ctx, &Instruction::CallIndirect {
-                    type_index: *type_index,
-                    table_index: table_index + offsets.table,
-                })?;
+                out.instruction(
+                    ctx,
+                    &Instruction::CallIndirect {
+                        type_index: *type_index,
+                        table_index: table_index + offsets.table,
+                    },
+                )?;
                 for i in (0..n_injected).rev() {
                     out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
                 }
@@ -868,7 +1135,10 @@ where
                 }
                 out.instruction(ctx, &Instruction::ReturnCall(function_index + offsets.func))?;
             }
-            Operator::ReturnCallIndirect { type_index, table_index } => {
+            Operator::ReturnCallIndirect {
+                type_index,
+                table_index,
+            } => {
                 if n_injected > 0 {
                     out.instruction(ctx, &Instruction::LocalSet(call_indirect_scratch))?;
                     for i in 0..n_injected {
@@ -876,10 +1146,13 @@ where
                     }
                     out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
                 }
-                out.instruction(ctx, &Instruction::ReturnCallIndirect {
-                    type_index: *type_index,
-                    table_index: table_index + offsets.table,
-                })?;
+                out.instruction(
+                    ctx,
+                    &Instruction::ReturnCallIndirect {
+                        type_index: *type_index,
+                        table_index: table_index + offsets.table,
+                    },
+                )?;
             }
 
             // ── memory.size → static declared-page count ──────────────────
@@ -900,12 +1173,10 @@ where
             }
 
             // ── memory.copy → per-chunk loop (mapper required) ────────────
-            Operator::MemoryCopy { .. } => {
-                if mapper.is_some() {
+            Operator::MemoryCopy { src_mem, dst_mem } => {
+                if self.per_memory.iter().any(|a| a.mapper.is_some()) {
                     // Stack: [dst_va, src_va, len]
-                    let chunk = self
-                        .chunk_size_for_memory(0)
-                        .unwrap_or(0x10000) as i32;
+                    let chunk = self.chunk_size_for_memory(0).unwrap_or(0x10000) as i32;
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
@@ -917,13 +1188,13 @@ where
                     out.instruction(ctx, &Instruction::BrIf(1))?;
                     // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(m) = mapper.as_deref_mut() {
+                    if let Some(m) = self.per_memory[*dst_mem as usize].mapper.as_deref_mut() {
                         let mut cb = CallbackContext::new(out);
                         m.call(ctx, &mut cb)?;
                     }
                     // physical src
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
-                    if let Some(m) = mapper.as_deref_mut() {
+                    if let Some(m) = self.per_memory[*src_mem as usize].mapper.as_deref_mut() {
                         let mut cb = CallbackContext::new(out);
                         m.call(ctx, &mut cb)?;
                     }
@@ -934,10 +1205,13 @@ where
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32LtU)?;
                     out.instruction(ctx, &Instruction::Select)?;
-                    out.instruction(ctx, &Instruction::MemoryCopy {
-                        src_mem: memory_index,
-                        dst_mem: memory_index,
-                    })?;
+                    out.instruction(
+                        ctx,
+                        &Instruction::MemoryCopy {
+                            src_mem: memory_index,
+                            dst_mem: memory_index,
+                        },
+                    )?;
                     // dst_va += chunk
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
@@ -958,20 +1232,21 @@ where
                     out.instruction(ctx, &Instruction::End)?; // block
                 } else {
                     // No mapper: pass through unchanged.
-                    out.instruction(ctx, &Instruction::MemoryCopy {
-                        src_mem: memory_index,
-                        dst_mem: memory_index,
-                    })?;
+                    out.instruction(
+                        ctx,
+                        &Instruction::MemoryCopy {
+                            src_mem: memory_index,
+                            dst_mem: memory_index,
+                        },
+                    )?;
                 }
             }
 
             // ── memory.fill → per-chunk loop (mapper required) ────────────
-            Operator::MemoryFill { .. } => {
-                if mapper.is_some() {
+            Operator::MemoryFill { mem } => {
+                if self.per_memory.iter().any(|a| a.mapper.is_some()) {
                     // Stack: [dst_va, val, len]
-                    let chunk = self
-                        .chunk_size_for_memory(0)
-                        .unwrap_or(0x10000) as i32;
+                    let chunk = self.chunk_size_for_memory(*mem as usize).unwrap_or(0x10000) as i32;
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?; // val (i32)
                     out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
@@ -982,7 +1257,7 @@ where
                     out.instruction(ctx, &Instruction::BrIf(1))?;
                     // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(m) = mapper.as_deref_mut() {
+                    if let Some(m) = self.per_memory[*mem as usize].mapper.as_deref_mut() {
                         let mut cb = CallbackContext::new(out);
                         m.call(ctx, &mut cb)?;
                     }
@@ -1013,8 +1288,7 @@ where
 
             // ── Pass-through ──────────────────────────────────────────────
             other => {
-                let insn = Instruction::try_from(other.clone())
-                    .unwrap_or(Instruction::Unreachable);
+                let insn = Instruction::try_from(other.clone()).unwrap_or(Instruction::Unreachable);
                 out.instruction(ctx, &insn)?;
             }
         }
@@ -1053,7 +1327,14 @@ where
         let data_init_fn = self.data_init_fn_result.take();
         self.data_init_ops.clear();
         ctx.advance_base_func_offset(n);
-        BinaryUnit { fns, base_func_offset: base, entry_points, func_types, data_segments, data_init_fn }
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types,
+            data_segments,
+            data_init_fn,
+        }
     }
 }
 
@@ -1136,7 +1417,11 @@ fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     }
     out.instruction(ctx, &Instruction::LocalGet(scratch))?;
 
-    let ma = MemArg { offset: 0, align: memarg.align as u32, memory_index };
+    let ma = MemArg {
+        offset: 0,
+        align: memarg.align as u32,
+        memory_index,
+    };
     match kind {
         StoreKind::I8 => match int_width {
             IntWidth::I32 => out.instruction(ctx, &Instruction::I32Store8(ma))?,
@@ -1189,16 +1474,27 @@ fn val_type_from_wasmparser(ty: wasmparser::ValType) -> ValType {
                     ty: wasm_encoder::AbstractHeapType::Func,
                 },
             };
-            ValType::Ref(RefType { nullable: rt.is_nullable(), heap_type })
+            ValType::Ref(RefType {
+                nullable: rt.is_nullable(),
+                heap_type,
+            })
         }
     }
 }
 
 fn func_type_from_wasmparser(ft: &wasmparser::FuncType) -> FuncType {
-    let params: Vec<ValType> =
-        ft.params().iter().copied().map(val_type_from_wasmparser).collect();
-    let results: Vec<ValType> =
-        ft.results().iter().copied().map(val_type_from_wasmparser).collect();
+    let params: Vec<ValType> = ft
+        .params()
+        .iter()
+        .copied()
+        .map(val_type_from_wasmparser)
+        .collect();
+    let results: Vec<ValType> = ft
+        .results()
+        .iter()
+        .copied()
+        .map(val_type_from_wasmparser)
+        .collect();
     FuncType::from_val_types(&params, &results)
 }
 
@@ -1239,7 +1535,11 @@ mod tests {
 
         let mut globals = GlobalSection::new();
         globals.global(
-            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
             &ConstExpr::i32_const(0),
         );
         module.section(&globals);
@@ -1247,10 +1547,18 @@ mod tests {
         let mut codes = CodeSection::new();
         let mut f = Function::new([]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+        f.instruction(&Instruction::I32Load(MemArg {
+            offset: 4,
+            align: 2,
+            memory_index: 0,
+        }));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::I32Const(100));
-        f.instruction(&Instruction::I32Store(MemArg { offset: 8, align: 2, memory_index: 0 }));
+        f.instruction(&Instruction::I32Store(MemArg {
+            offset: 8,
+            align: 2,
+            memory_index: 0,
+        }));
         f.instruction(&Instruction::GlobalGet(0));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::Call(0));
@@ -1260,7 +1568,11 @@ mod tests {
 
         // Data segment: 12 bytes at guest address 0x1000.
         let mut data = DataSection::new();
-        data.active(0, &ConstExpr::i32_const(0x1000), b"hello world!".iter().copied());
+        data.active(
+            0,
+            &ConstExpr::i32_const(0x1000),
+            b"hello world!".iter().copied(),
+        );
         module.section(&data);
 
         module.finish()
@@ -1271,13 +1583,18 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
             IndexOffsets::default(),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
         assert_eq!(frontend.compiled.len(), 1, "expected 1 compiled function");
     }
 
@@ -1286,13 +1603,18 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
             IndexOffsets::default(),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
 
         let infos = frontend.memory_infos();
         assert_eq!(infos.len(), 1);
@@ -1309,13 +1631,18 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
             IndexOffsets::default(),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
         // One passive segment (no chunking without mapper).
         assert_eq!(frontend.data_segs.len(), 1);
         assert_eq!(&frontend.data_segs[0].data, b"hello world!");
@@ -1359,32 +1686,37 @@ mod tests {
         let bytes = module.finish();
 
         // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
-        let mapper_factory: Box<
-            dyn Fn() -> Box<dyn MapperCallback<(), TestError, Function>>,
-        > = Box::new(|| {
-            Box::new(ChunkedMapper {
-                page_size: 0x10000,
-                inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
-            })
+        let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
+            page_size: 0x10000,
+            inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
         });
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper_factory: Some(mapper_factory),
+                mapper: Some(mapper),
             }],
             0,
             IndexOffsets::default(),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
 
-        assert_eq!(frontend.data_segs.len(), 3, "should split into 3 page-sized chunks");
+        assert_eq!(
+            frontend.data_segs.len(),
+            3,
+            "should split into 3 page-sized chunks"
+        );
         assert_eq!(frontend.data_segs[0].data.len(), 65536);
         assert_eq!(frontend.data_segs[1].data.len(), 65536);
         assert_eq!(frontend.data_segs[2].data.len(), 65536);
-        assert!(frontend.data_init_fn_result.is_some(), "init fn should be generated");
+        assert!(
+            frontend.data_init_fn_result.is_some(),
+            "init fn should be generated"
+        );
     }
 
     #[test]
@@ -1394,13 +1726,18 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
             IndexOffsets::default(),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
 
         assert_eq!(linker.base_func_offset(), 0);
         let unit = frontend.drain_unit(&mut linker, alloc::vec![]);
@@ -1417,14 +1754,23 @@ mod tests {
         let bytes = build_test_wasm();
 
         let mut frontend: WasmFrontend<(), TestError, Function> = WasmFrontend::new(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
-            IndexOffsets { func: 5, global: 0, table: 0 },
+            IndexOffsets {
+                func: 5,
+                global: 0,
+                table: 0,
+            },
             Box::new(|locals| Function::new(locals)),
         );
 
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
         assert_eq!(frontend.compiled.len(), 1);
     }
 
@@ -1458,12 +1804,17 @@ mod tests {
         let bytes = module.finish();
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
-            alloc::vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper_factory: None }],
+            alloc::vec![GuestMemoryConfig {
+                addr_width: AddressWidth::W32,
+                mapper: None
+            }],
             0,
             IndexOffsets::default(),
         );
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
         // Just check it compiled successfully (instruction lowering does not panic).
         assert_eq!(frontend.compiled.len(), 1);
     }
@@ -1496,31 +1847,32 @@ mod tests {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32Const(0x10000));
         f.instruction(&Instruction::I32Const(0x1000));
-        f.instruction(&Instruction::MemoryCopy { dst_mem: 0, src_mem: 0 });
+        f.instruction(&Instruction::MemoryCopy {
+            dst_mem: 0,
+            src_mem: 0,
+        });
         f.instruction(&Instruction::End);
         codes.function(&f);
         module.section(&codes);
         let bytes = module.finish();
 
-        let mapper_factory: Box<
-            dyn Fn() -> Box<dyn MapperCallback<(), TestError, Function>>,
-        > = Box::new(|| {
-            Box::new(ChunkedMapper {
-                page_size: 0x10000,
-                inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
-            })
+        let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
+            page_size: 0x10000,
+            inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
         });
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper_factory: Some(mapper_factory),
+                mapper: Some(mapper),
             }],
             0,
             IndexOffsets::default(),
         );
         let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
-        frontend.translate_module(&mut (), &mut linker, &bytes).unwrap();
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
         // Verify the function was produced (the loop lowering did not error).
         assert_eq!(frontend.compiled.len(), 1);
     }
