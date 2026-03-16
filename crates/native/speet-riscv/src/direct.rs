@@ -1,5 +1,5 @@
 use crate::*;
-use rv_asm::{AmoOp, AmoOrdering};
+use rv_asm::AmoOp;
 use speet_ordering::{
     emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store, RmwOp, RmwWidth,
 };
@@ -2358,7 +2358,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // single-threaded wasm model these are equivalent to plain loads/stores
             // plus the cmpxchg loop for min/max AMOs; on shared-memory wasm they
             // provide the full multi-threaded guarantees.
-            Inst::LrW { dest, addr, order } => {
+            Inst::LrW { dest, addr, order: _ } => {
                 // LR.W: load-reserved word.  No reservation register in wasm —
                 // treated as an atomic 32-bit load.  AmoOrdering is accepted for
                 // API symmetry; the wasm atomic load is always seq-cst within a
@@ -2393,7 +2393,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 dest,
                 addr,
                 src,
-                order,
+                order: _,
             } => {
                 // SC.W: store-conditional word.  Always succeeds in single-threaded
                 // wasm — write 0 (success) into `dest`.

@@ -56,7 +56,6 @@ use alloc::vec::Vec;
 use wax_core::build::InstructionSink;
 
 use rv_asm::{FReg, Imm, Inst, IsCompressed, Reg, Xlen};
-use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
 use speet_traps::{
     InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
     insn::{ArchTag, InsnClass},
@@ -64,7 +63,7 @@ use speet_traps::{
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
     TableIdx, TypeIdx,
 };
 

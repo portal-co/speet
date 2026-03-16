@@ -48,10 +48,10 @@ use alloc::collections::BTreeMap;
 use wax_core::build::InstructionSink;
 
 use rabbitizer::{InstrId, Instruction, registers::GprO32};
-use speet_ordering::{emit_fence, emit_load, emit_lr, emit_rmw, emit_sc, emit_store};
+use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
     TableIdx, Target, TypeIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.

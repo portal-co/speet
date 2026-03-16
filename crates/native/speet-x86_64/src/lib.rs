@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{
-    EscapeTag, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx,
+    EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx,
 };
 pub mod direct;
 use speet_traps::{
