@@ -1,6 +1,7 @@
 [workspace]
 members = [
     # Helper crates (yecta reactor + architecture-agnostic building blocks)
+    "crates/helper/wasm-layout",
     "crates/helper/yecta",
     "crates/helper/speet-memory",
     "crates/helper/speet-ordering",
@@ -26,6 +27,7 @@ description = "Fast static recompiler"
 license-file = "COPYING.md"
 
 [workspace.dependencies]
+wasm-layout = { path = "crates/helper/wasm-layout" }
 speet-link = { path = "crates/os/speet-link" }
 wasmparser = { version = "0.240.0", default-features = false }
 wasm-encoder = { version = "0.240.0", default-features = false, features = [

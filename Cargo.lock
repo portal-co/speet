@@ -553,6 +553,7 @@ dependencies = [
  "speet-link",
  "speet-memory",
  "wasm-encoder",
+ "wasm-layout",
  "wasmparser",
  "wax-core",
 ]
@@ -676,6 +677,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-layout"
+version = "0.1.0"
+dependencies = [
+ "wasm-encoder",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.240.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -708,5 +716,6 @@ name = "yecta"
 version = "0.1.0"
 dependencies = [
  "wasm-encoder",
+ "wasm-layout",
  "wax-core",
 ]

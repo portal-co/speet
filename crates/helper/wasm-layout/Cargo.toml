@@ -1,11 +1,9 @@
 [package]
-name = "yecta"
+name = "wasm-layout"
 version = "0.1.0"
 edition = "2024"
 description.workspace = true
 license-file.workspace = true
 
 [dependencies]
-wasm-layout.workspace = true
 wasm-encoder.workspace = true
-wax-core.workspace = true

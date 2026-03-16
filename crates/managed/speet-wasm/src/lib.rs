@@ -44,6 +44,7 @@ use speet_memory::{
     PageMapLocals, StoreKind,
 };
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
+use wasm_layout::{LocalLayout, LocalSlot};
 use wax_core::build::InstructionSink;
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 
@@ -379,14 +380,23 @@ where
     /// Emits `i[32|64].const <va>; [mapper]; i32.const 0; i32.const <len>;
     /// memory.init <seg> <host>; data.drop <seg>` for each chunk, then `End`.
     fn build_data_init_fn(&mut self, ctx: &mut Context) -> Result<(), E> {
-        // Injected params occupy local indices 0..n_injected (implicit params,
-        // not in out_locals).  PageMapLocals scratch starts after them.
+        // Build a LocalLayout for the data-init function.
+        // Injected params are implicit (not in iter_since output); register them
+        // as a placeholder group so that subsequent slots get correct indices.
         let n_injected = self.injected_params.len() as u32;
-        // 4 × i32 locals for PageMapLocals (vaddr + scratch[0..2]).
-        let out_locals: Vec<(u32, ValType)> = alloc::vec![(4, ValType::I32)];
+        let mut layout = LocalLayout::empty();
+        if n_injected > 0 {
+            layout.append(n_injected, ValType::I32); // placeholder; type irrelevant
+        }
+        let params_mark = layout.mark();
+
+        // 4 × i32 locals for PageMapLocals scratch.
+        let map_slot = layout.append(4, ValType::I32);
+        let map_locals = PageMapLocals::consecutive(layout.base(map_slot));
+
+        let out_locals: Vec<(u32, ValType)> = layout.iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
-        let map_locals = PageMapLocals::consecutive(n_injected);
         let host_memory = self.host_memory;
 
         // We need to borrow `self.data_init_ops` but also call `self.per_memory`.
@@ -465,68 +475,79 @@ where
             func_type
         };
 
-        // ── Collect locals ────────────────────────────────────────────────
-        let mut out_locals: Vec<(u32, ValType)> = Vec::new();
-        let mut original_local_count: u32 = 0;
+        // ── Build LocalLayout ────────────────────────────────────────────
+        // Params are implicit in WASM (not in Function::new locals list).
+        // Register them as a single placeholder group so that all subsequent
+        // slot base indices are offset correctly.
+        let param_count = func_type.params_val_types().count() as u32; // extended count
+        let mut layout = LocalLayout::empty();
+        if param_count > 0 {
+            layout.append(param_count, ValType::I32); // placeholder; type irrelevant
+        }
+        let params_mark = layout.mark();
 
+        // Guest declared locals: collect first, then append to layout in order.
         let locals_reader = body.get_locals_reader()?;
+        let mut guest_locals: Vec<(u32, ValType)> = Vec::new();
         for local in locals_reader {
             let (count, wasm_ty) = local?;
-            let vt = val_type_from_wasmparser(wasm_ty);
-            out_locals.push((count, vt));
-            original_local_count += count;
+            guest_locals.push((count, val_type_from_wasmparser(wasm_ty)));
+        }
+        for &(count, ty) in &guest_locals {
+            layout.append(count, ty);
         }
 
-        // Params occupy indices 0..param_count (extended); explicit locals follow.
-        // param_count = orig_param_count + n_injected after type extension.
-        let param_count = func_type.params_val_types().count() as u32;
-        let base_scratch_idx = param_count + original_local_count;
-
         // 4 type-specific scratch locals for store value saving:
-        //   base + 0 → i32, base + 1 → i64, base + 2 → f32, base + 3 → f64
-        out_locals.push((1, ValType::I32));
-        out_locals.push((1, ValType::I64));
-        out_locals.push((1, ValType::F32));
-        out_locals.push((1, ValType::F64));
+        //   slot_i32 → i32 scratch  (offset +0 from base)
+        //   slot_i64 → i64 scratch  (offset +0 from base)
+        //   slot_f32 → f32 scratch  (offset +0 from base)
+        //   slot_f64 → f64 scratch  (offset +0 from base)
+        let slot_i32 = layout.append(1, ValType::I32);
+        let slot_i64 = layout.append(1, ValType::I64);
+        let slot_f32 = layout.append(1, ValType::F32);
+        let slot_f64 = layout.append(1, ValType::F64);
+        // base_scratch_idx is the absolute index of slot_i32 (the first scratch).
+        // emit_store uses base_scratch_idx + {0,1,2,3} for the four scratch types.
+        let base_scratch_idx = layout.base(slot_i32);
+        // Verify the four scratch slots are contiguous (they always are since
+        // each is exactly 1 local, but make it explicit via debug assert).
+        debug_assert_eq!(layout.base(slot_i64), base_scratch_idx + 1);
+        debug_assert_eq!(layout.base(slot_f32), base_scratch_idx + 2);
+        debug_assert_eq!(layout.base(slot_f64), base_scratch_idx + 3);
 
         // Use the primary memory's (index 0) mapper and addr_width for this function.
         let addr_width = self.addr_width_for_memory(0);
 
-        let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
+        // Mapper and loop scratch locals (only when a mapper is configured).
+        let (mut mapper_box, loop_dst_local, loop_src_local, loop_len_local) =
             if let Some(cfg) = self.per_memory.get(0) {
                 if let Some(factory) = &cfg.mapper_factory {
-                    let map_locals = PageMapLocals::consecutive(base_scratch_idx + 4);
-                    out_locals.push((4, ValType::I32));
-                    // loop scratch: $dst_va, $src_va_or_val, $len  (all i32)
-                    out_locals.push((3, ValType::I32));
-                    Some(factory(map_locals))
+                    let map_slot = layout.append(4, ValType::I32);
+                    let loop_slot = layout.append(3, ValType::I32);
+                    let map_locals = PageMapLocals::consecutive(layout.base(map_slot));
+                    (
+                        Some(factory(map_locals)),
+                        layout.base(loop_slot),
+                        layout.base(loop_slot) + 1,
+                        layout.base(loop_slot) + 2,
+                    )
                 } else {
-                    None
+                    (None, 0, 0, 0)
                 }
             } else {
-                None
+                (None, 0, 0, 0)
             };
-
-        // loop-variable locals (only used when mapper present):
-        //   base_scratch_idx + 4..7 = PageMapLocals
-        //   base_scratch_idx + 8    = $loop_dst
-        //   base_scratch_idx + 9    = $loop_src_or_val
-        //   base_scratch_idx + 10   = $loop_len
-        let loop_dst_local = base_scratch_idx + 8;
-        let loop_src_local = base_scratch_idx + 9;
-        let loop_len_local = base_scratch_idx + 10;
 
         // Extra scratch for call_indirect: saves the table index while we push
         // injected params onto the stack.  Only allocated when n_injected > 0.
-        let next_scratch_after_loop =
-            base_scratch_idx + 4 + if mapper_box.is_some() { 7 } else { 0 };
         let call_indirect_scratch = if n_injected > 0 {
-            out_locals.push((1, ValType::I32));
-            next_scratch_after_loop
+            let slot: LocalSlot = layout.append(1, ValType::I32);
+            layout.base(slot)
         } else {
             0 // unused
         };
 
+        let out_locals: Vec<(u32, ValType)> = layout.iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
         let ops_reader = body.get_operators_reader()?;
