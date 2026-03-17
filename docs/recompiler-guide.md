@@ -380,7 +380,7 @@ fn on_instruction(&mut self, info: &InstructionInfo, ctx: &mut Context,
 
 Traps are pluggable hooks that fire during translation to inject monitoring code,
 enforce security policies, or redirect control flow. There are two independent
-hook points.
+hook points and three categories of built-in implementation.
 
 #### `InstructionTrap<Context, E, F>`
 
@@ -431,7 +431,7 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
 - `source_pc: u64` — guest PC of the transferring instruction
 - `target_pc: Option<u64>` — static target (absent for indirect jumps)
 - `target_local: Option<u32>` — WASM local holding the runtime target address
-  (indirect jumps only; inspect this for ROP detection)
+  (indirect jumps only; read this for ROP detection / CFI)
 - `kind: JumpKind` — `DirectJump`, `ConditionalBranch`, `Call`, `Return`,
   `IndirectJump`, `IndirectCall`, `Syscall`
 
@@ -483,14 +483,90 @@ linker.traps.set_instruction_trap(&mut |info, ctx, trap_ctx| {
 });
 ```
 
+#### Categorised built-in implementations
+
+Implementations are split across three modules by purpose:
+
+---
+
+##### `tracing` — observation without enforcement
+
+These traps always return `TrapAction::Continue`. They add instrumentation
+code but never suppress or redirect control flow.
+
+| Type | Trait | Behaviour |
+|------|-------|-----------|
+| `CounterTrap` | `InstructionTrap` | Increments a WASM global `i32` for each instruction whose [`InsnClass`] matches a mask. Pass `InsnClass(u32::MAX)` to count every instruction. |
+| `TraceLogTrap` | `JumpTrap` | Before each jump, calls a WASM import with `(source_pc: i32, target_pc: i32, kind: i32)`. Import type must be `(i32, i32, i32) -> ()`. |
+
+---
+
+##### `security` — static CFI enforcement
+
+These traps enforce a *static policy* compiled from the guest binary's own
+control-flow integrity metadata (DWARF `.eh_frame`, `ENDBR` markers, RISC-V
+compressed-call records, …). They redirect to a violation handler when the
+runtime transfer violates the policy.
+
+| Type | Trait | Behaviour |
+|------|-------|-----------|
+| `CfiReturnTrap` | `JumpTrap` | Checks every `Return` (and optionally `IndirectJump`) against a caller-supplied byte-per-entry bitmap of valid return targets. Out-of-range or zero-byte entries jump to `violation_handler`. Uses one `i32` per-function local for the bitmap index scratch. |
+
+**Bitmap contract:** entry `n` covers guest addresses
+`[bitmap_guest_base + n * (1 << granularity_shift), …)`. A non-zero byte
+means "valid return target". The bitmap must be written to WASM linear memory
+at `bitmap_wasm_addr` before any translated function executes.
+
+---
+
+##### `hardening` — dynamic anti-\*OP defences
+
+These traps enforce *dynamic invariants* that hold for any legitimate execution
+regardless of the binary's metadata. They defend against *-oriented programming
+attacks (ROP, JOP, COP, …) — attacker-controlled gadget chains that exploit
+unintended reuse of translated code.
+
+| Type | Trait | Behaviour |
+|------|-------|-----------|
+| `RopDetectTrap` | `JumpTrap` | Tracks a call/return depth counter as a WASM **parameter** (survives `return_call` chains). On `Call`/`IndirectCall`: `depth += 1`. On `Return`: `depth -= 1`; if `depth < 0` jump to `violation_handler`. Uses one `i32` parameter slot — add it to `total_params`. |
+
+**Why a parameter and not a local?** Yecta's model chains one WASM function per
+guest instruction via `return_call`. Non-parameter locals are reset to zero at
+every function boundary; only parameters survive the chain. A ROP gadget may
+span multiple yecta functions (Call in function N, Return in function N+1), so
+the depth counter must be a parameter to propagate across the chain.
+
+---
+
+##### `impls` — utility / composition primitives
+
+| Type | Trait | Behaviour |
+|------|-------|-----------|
+| `NullTrap` | both | Always returns `Continue`; zero overhead when monomorphised |
+| `ChainedTrap<A, B>` | both | Runs `A` then `B`; `Skip` from `A` short-circuits `B` |
+
+---
+
 #### Composition
 
-- **`ChainedTrap<A, B>`** — zero-cost static pair; `A` fires before `B`.
-- **`Vec<Box<dyn InstructionTrap<…>>>`** — dynamic list; each fires in order,
-  short-circuiting on the first `Skip`.
-- Built-in implementations: `NullTrap`, `CounterTrap` (per-instruction counter),
-  `CfiReturnTrap` (call/return depth counter), `RopDetectTrap` (allowlist of
-  indirect-jump targets), `TraceLogTrap` (log every transfer to a WASM import).
+- **`ChainedTrap<A, B>`** — zero-cost static pair; use for combining two known
+  trap types. `A`'s `skip_snippet` is used if `A` returns `Skip`.
+- **`Vec<Box<dyn InstructionTrap<…>>>`** — dynamic list; each element fires in
+  order, short-circuiting on the first `Skip`.
+
+**Defence-in-depth example** — trace + CFI + ROP detection on a single
+jump-trap slot:
+
+```rust
+let mut trap = ChainedTrap::new(
+    TraceLogTrap { log_func_idx: 0 },
+    ChainedTrap::new(
+        CfiReturnTrap::new(guest_base, bitmap_len, wasm_addr, 2, handler, params),
+        RopDetectTrap::new(handler, params),
+    ),
+);
+linker.traps.set_jump_trap(&mut trap);
+```
 
 ---
 

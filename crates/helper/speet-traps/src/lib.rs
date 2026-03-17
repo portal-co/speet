@@ -23,13 +23,24 @@
 //! jump).  Use cases:
 //!
 //! - **ROP detection**: validate that indirect-jump targets are in a
-//!   pre-approved set ([`impls::RopDetectTrap`]).
-//! - **CFI**: check call/return balance with a shadow-stack counter
-//!   ([`impls::CfiReturnTrap`]).
+//!   pre-approved set ([`hardening::RopDetectTrap`]).
+//! - **CFI**: validate return targets against native CFI metadata
+//!   ([`security::CfiReturnTrap`]).
 //! - **Control-flow tracing**: log every transfer to a wasm import
-//!   ([`impls::TraceLogTrap`]).
+//!   ([`tracing::TraceLogTrap`]).
 //! - **Dynamic binary translation guards**: prevent jumps to translated code
 //!   that hasn't been validated yet.
+//!
+//! ## Categorised implementations
+//!
+//! Trap implementations are organised into three purpose-built modules:
+//!
+//! | Module | Kind | Contents |
+//! |--------|------|---------|
+//! | [`tracing`] | observation | [`CounterTrap`], [`TraceLogTrap`] |
+//! | [`security`] | CFI enforcement | [`CfiReturnTrap`] |
+//! | [`hardening`] | anti-\*OP | [`RopDetectTrap`] |
+//! | [`impls`] | utility | [`NullTrap`], [`ChainedTrap`] |
 //!
 //! ## Usage
 //!
@@ -96,14 +107,20 @@ extern crate alloc;
 
 pub mod config;
 pub mod context;
+pub mod hardening;
 pub mod impls;
 pub mod insn;
 pub mod jump;
+pub mod security;
+pub mod tracing;
 
 // Flat re-exports for the most commonly used items.
 pub use config::TrapConfig;
 pub use context::{TrapContext, reactor_jump, reactor_jump_if};
-pub use impls::{CfiReturnTrap, ChainedTrap, CounterTrap, NullTrap, RopDetectTrap, TraceLogTrap};
+pub use hardening::RopDetectTrap;
+pub use impls::{ChainedTrap, NullTrap};
 pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};
 pub use jump::{JumpInfo, JumpKind, JumpTrap};
+pub use security::CfiReturnTrap;
+pub use tracing::{CounterTrap, TraceLogTrap};
 pub use yecta::{LocalLayout, LocalSlot, Mark};
