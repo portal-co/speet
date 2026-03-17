@@ -44,36 +44,29 @@
 //! | [`builder::MegabinaryBuilder`] | Accumulates units; deduplicates types |
 //! | [`shim::ShimSpec`] / [`shim::emit_shim`] | ABI shim emitter |
 //!
-//! ## End-to-end example
+//! ## End-to-end example (two-pass)
 //!
 //! ```ignore
 //! use speet_link::linker::Linker;
 //! use speet_link::builder::MegabinaryBuilder;
-//! use speet_link::shim::{ShimSpec, emit_shim};
-//! use speet_link::unit::{BinaryUnit, FuncType};
-//! use wasm_encoder::ValType;
+//! use speet_link::schedule::FuncSchedule;
 //!
-//! // Create a linker with the accumulator plugin.
 //! let mut linker = Linker::with_plugin(MegabinaryBuilder::new());
 //!
-//! // Install shared traps (optional).
-//! // linker.traps.set_instruction_trap(&mut my_trap);
+//! // --- Registration phase ---
+//! let mut schedule = FuncSchedule::new();
 //!
-//! // Binary 1: x86-64
-//! let mut x86 = X86Recompiler::new_with_base_rip(0x400000);
-//! x86.setup(&mut linker);
-//! translate_bytes(&bytes1, &mut x86, &mut linker);
-//! linker.commit(&mut x86, vec![("main".into(), linker.base_func_offset())]);
+//! let n_wasm   = WasmFrontend::parse_fn_count(&wasm_bytes)?;
+//! let n_native = rc.count_fns(&native_bytes);
 //!
-//! // Raw shim: cross-arch bridge
-//! let shim_idx = linker.total_fn_count();
-//! let shim = emit_shim(&ShimSpec { callee_func_idx: 0, … });
-//! linker.commit_raw(BinaryUnit {
-//!     fns: vec![shim],
-//!     base_func_offset: shim_idx,
-//!     entry_points: vec![("bridge".into(), shim_idx)],
-//!     func_types: vec![FuncType::from_val_types(&[ValType::I32; 26], &[])],
-//! });
+//! let wasm_slot   = schedule.push(n_wasm,   |ctx_rc, ctx| { /* translate WASM   */ });
+//! let native_slot = schedule.push(n_native, |ctx_rc, ctx| { /* translate native */ });
+//!
+//! // Layout is final — read absolute indices before any translation.
+//! let offsets = IndexOffsets { func: schedule.layout().base(native_slot), .. };
+//!
+//! // --- Emit phase ---
+//! schedule.execute(&mut linker, &mut ctx);
 //!
 //! // Retrieve and assemble the final module.
 //! let out = linker.plugin.finish();
@@ -89,8 +82,10 @@ extern crate alloc;
 
 pub mod builder;
 pub mod context;
+pub mod layout;
 pub mod linker;
 pub mod recompiler;
+pub mod schedule;
 pub mod shim;
 pub mod unit;
 
@@ -100,7 +95,9 @@ mod tests;
 // Flat re-exports for the most commonly used items.
 pub use builder::{MegabinaryBuilder, MegabinaryOutput};
 pub use context::{BaseContext, ReactorContext};
+pub use layout::{FuncLayout, FuncSlot};
 pub use linker::{Linker, LinkerPlugin};
 pub use recompiler::Recompile;
+pub use schedule::FuncSchedule;
 pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};
 pub use unit::{BinaryUnit, DataSegment, FuncType};

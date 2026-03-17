@@ -9,36 +9,38 @@
 //! 3. **Forwards** completed [`BinaryUnit`]s to a pluggable
 //!    [`LinkerPlugin`] (default: `()`, a no-op).
 //!
-//! ## Usage
+//! ## Usage (two-pass via [`FuncSchedule`](crate::schedule::FuncSchedule))
 //!
 //! ```ignore
 //! use speet_link::linker::Linker;
 //! use speet_link::builder::MegabinaryBuilder;
+//! use speet_link::schedule::FuncSchedule;
 //!
 //! let mut linker: Linker<_, _, wasm_encoder::Function> =
 //!     Linker::with_plugin(MegabinaryBuilder::new());
 //!
-//! // Install a trap:
-//! linker.traps.set_instruction_trap(&mut my_trap);
+//! let mut schedule = FuncSchedule::new();
+//! let slot = schedule.push(rc.count_fns(&bytes), |ctx_rc, ctx| {
+//!     rc.setup(ctx_rc);
+//!     translate(&bytes, &mut rc, ctx_rc);
+//!     rc.drain_unit(ctx_rc, entry_points)
+//! });
 //!
-//! // Translate binary 1:
-//! let mut rc = MyRecompiler::new();
-//! rc.setup(&mut linker);
-//! translate(&bytes1, &mut rc, &mut linker);
-//! linker.commit(&mut rc, entry_points_1);
+//! // Read cross-binary offsets from layout before emitting.
+//! let base = schedule.layout().base(slot);
 //!
-//! // Retrieve result:
+//! schedule.execute(&mut linker, &mut ctx);
+//!
 //! let output = linker.plugin.finish();
 //! ```
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor};
 
 use crate::context::{BaseContext, ReactorContext};
-use crate::recompiler::Recompile;
 use crate::unit::BinaryUnit;
 
 // ── LinkerPlugin ──────────────────────────────────────────────────────────────
@@ -51,8 +53,8 @@ use crate::unit::BinaryUnit;
 ///
 /// Use `()` as a no-op plugin when you do not need to inspect individual units.
 pub trait LinkerPlugin<F> {
-    /// Called after each successful [`Linker::commit`] or
-    /// [`Linker::commit_raw`].
+    /// Called once per [`BinaryUnit`] forwarded by
+    /// [`FuncSchedule::execute`](crate::schedule::FuncSchedule::execute).
     fn on_unit(&mut self, unit: BinaryUnit<F>);
 }
 
@@ -145,33 +147,6 @@ where
         }
     }
 
-    // ── Commit helpers ────────────────────────────────────────────────────
-
-    /// Total number of WASM function slots committed so far (including any
-    /// currently being compiled).
-    pub fn total_fn_count(&self) -> u32 {
-        self.reactor.base_func_offset() + self.reactor.fn_count() as u32
-    }
-
-    /// Drain a recompiler's functions, build a [`BinaryUnit`], and forward it
-    /// to the plugin.
-    ///
-    /// `entry_points` — `(symbol, absolute_wasm_func_index)` pairs that will
-    /// become exports in the final module.
-    pub fn commit<B>(
-        &mut self,
-        rc: &mut (dyn Recompile<Context, E, F, BinaryArgs = B> + '_),
-        entry_points: Vec<(String, u32)>,
-    ) {
-        let unit = rc.drain_unit(self, entry_points);
-        self.plugin.on_unit(unit);
-    }
-
-    /// Commit a pre-built unit directly (e.g. an ABI shim) without going
-    /// through a recompiler.
-    pub fn commit_raw(&mut self, unit: BinaryUnit<F>) {
-        self.plugin.on_unit(unit);
-    }
 }
 
 // ── BaseContext impl ──────────────────────────────────────────────────────────

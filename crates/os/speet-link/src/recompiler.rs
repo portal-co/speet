@@ -6,25 +6,33 @@
 //! [`Linker`](crate::linker::Linker), which is passed in as a
 //! `&mut impl ReactorContext`.
 //!
-//! ## Lifecycle
+//! ## Lifecycle (two-pass model)
 //!
 //! ```ignore
-//! // 1. Create and set up the recompiler.
-//! let mut rc = MyRecompiler::new();
-//! rc.setup(&mut linker);   // declares arch params / calls declare_trap_params
+//! // --- Registration phase ---
+//! let mut schedule = FuncSchedule::new();
 //!
-//! // 2. Translate the first binary.
-//! translate(&bytes1, &mut rc, &mut linker);
+//! // 1. Count functions for each binary (lightweight pre-pass).
+//! let n1 = rc.count_fns(&bytes1);
+//! let n2 = rc.count_fns(&bytes2);
 //!
-//! // 3. Commit.
-//! linker.commit(&mut rc, entry_points_1);
+//! // 2. Register emit closures; layout is final after all pushes.
+//! let slot1 = schedule.push(n1, |ctx_rc, ctx| {
+//!     rc.reset_for_next_binary(ctx_rc, args1);
+//!     translate(&bytes1, &mut rc, ctx_rc);
+//!     rc.drain_unit(ctx_rc, entry_points_1)
+//! });
+//! let slot2 = schedule.push(n2, |ctx_rc, ctx| {
+//!     rc.reset_for_next_binary(ctx_rc, args2);
+//!     translate(&bytes2, &mut rc, ctx_rc);
+//!     rc.drain_unit(ctx_rc, entry_points_2)
+//! });
 //!
-//! // 4. Reset for the next binary.
-//! rc.reset_for_next_binary(&mut linker, args_2);
+//! // 3. Read cross-binary offsets from the finalised layout.
+//! let offsets = IndexOffsets { func: schedule.layout().base(slot2), .. };
 //!
-//! // 5. Translate and commit the second binary.
-//! translate(&bytes2, &mut rc, &mut linker);
-//! linker.commit(&mut rc, entry_points_2);
+//! // --- Emit phase ---
+//! schedule.execute(&mut linker, &mut ctx);
 //! ```
 
 use crate::context::ReactorContext;
@@ -61,6 +69,23 @@ pub trait Recompile<Context, E, F> {
         ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         args: Self::BinaryArgs,
     );
+
+    /// Count the WASM functions that would be produced for `bytes`, without
+    /// performing code generation.
+    ///
+    /// This is a lightweight pre-pass (e.g. CFG block count for native arches,
+    /// or a WASM Function-section scan).  The result is passed to
+    /// [`FuncSchedule::push`](crate::schedule::FuncSchedule::push) to
+    /// pre-declare the slot before any translation begins.
+    ///
+    /// The default implementation panics — native-arch recompilers must
+    /// override this with an actual CFG block count.
+    fn count_fns(&self, _bytes: &[u8]) -> u32 {
+        panic!(
+            "count_fns not implemented for {}; override it to use FuncSchedule",
+            core::any::type_name::<Self>(),
+        )
+    }
 
     /// Drain the reactor (via `ctx`) into a [`BinaryUnit`] and return it.
     ///

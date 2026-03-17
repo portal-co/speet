@@ -206,6 +206,23 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
         })
     }
 
+    /// Return the number of functions declared in the WASM Function section of
+    /// `bytes` without performing full translation.
+    ///
+    /// `O(1)` — reads the LEB128 count at the start of the Function section.
+    /// Returns `0` for modules with no Function section.
+    pub fn parse_fn_count(bytes: &[u8]) -> Result<u32, E>
+    where
+        E: From<wasmparser::BinaryReaderError>,
+    {
+        for payload in Parser::new(0).parse_all(bytes) {
+            if let Payload::FunctionSection(reader) = payload? {
+                return Ok(reader.count());
+            }
+        }
+        Ok(0)
+    }
+
     /// Return the address width for guest memory `mem_idx`.
     fn addr_width_for_memory(&self, mem_idx: usize) -> AddressWidth {
         self.per_memory
@@ -1305,6 +1322,15 @@ where
 {
     type BinaryArgs = ();
 
+    fn count_fns(&self, bytes: &[u8]) -> u32 {
+        for payload in Parser::new(0).parse_all(bytes) {
+            if let Ok(Payload::FunctionSection(reader)) = payload {
+                return reader.count();
+            }
+        }
+        0
+    }
+
     fn reset_for_next_binary(
         &mut self,
         _ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
@@ -1875,5 +1901,43 @@ mod tests {
             .unwrap();
         // Verify the function was produced (the loop lowering did not error).
         assert_eq!(frontend.compiled.len(), 1);
+    }
+
+    #[test]
+    fn parse_fn_count_correct() {
+        use wasm_encoder::*;
+
+        // Build a module with 3 functions.
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        funcs.function(0);
+        funcs.function(0);
+        module.section(&funcs);
+
+        let mut code = CodeSection::new();
+        for _ in 0..3 {
+            let mut f = Function::new(vec![]);
+            f.instruction(&Instruction::End);
+            code.function(&f);
+        }
+        module.section(&code);
+
+        let bytes = module.finish();
+        let count =
+            WasmFrontend::<(), TestError, Function>::parse_fn_count(&bytes).unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn parse_fn_count_empty_module() {
+        let bytes = wasm_encoder::Module::new().finish();
+        let count =
+            WasmFrontend::<(), TestError, Function>::parse_fn_count(&bytes).unwrap();
+        assert_eq!(count, 0);
     }
 }

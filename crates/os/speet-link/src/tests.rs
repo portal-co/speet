@@ -11,6 +11,7 @@ mod unit_tests {
 
     use crate::{
         builder::MegabinaryBuilder,
+        layout::{FuncLayout, FuncSlot},
         linker::LinkerPlugin,
         unit::{BinaryUnit, FuncType},
     };
@@ -298,5 +299,115 @@ mod unit_tests {
         assert_eq!(MemWidth::I64S32.result_type(), ValType::I64);
         assert_eq!(MemWidth::F32.result_type(), ValType::F32);
         assert_eq!(MemWidth::F64.result_type(), ValType::F64);
+    }
+
+    // ── FuncLayout ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn func_layout_basics() {
+        let mut layout = FuncLayout::empty();
+        let slot0 = layout.append(3);
+        let slot1 = layout.append(5);
+
+        assert_eq!(layout.base(slot0), 0);
+        assert_eq!(layout.count(slot0), 3);
+        assert_eq!(layout.base(slot1), 3);
+        assert_eq!(layout.count(slot1), 5);
+        assert_eq!(layout.total(), 8);
+    }
+
+    #[test]
+    fn func_layout_single_slot() {
+        let mut layout = FuncLayout::empty();
+        let slot = layout.append(10);
+        assert_eq!(layout.base(slot), 0);
+        assert_eq!(layout.total(), 10);
+    }
+
+    #[test]
+    fn func_layout_three_slots() {
+        let mut layout = FuncLayout::empty();
+        let s0 = layout.append(2);
+        let s1 = layout.append(4);
+        let s2 = layout.append(1);
+        assert_eq!(layout.base(s0), 0);
+        assert_eq!(layout.base(s1), 2);
+        assert_eq!(layout.base(s2), 6);
+        assert_eq!(layout.total(), 7);
+    }
+
+    // ── FuncSchedule ──────────────────────────────────────────────────────────
+
+    use wasm_encoder::Function;
+    use crate::linker::Linker;
+    use crate::schedule::FuncSchedule;
+
+    type SchedErr = core::convert::Infallible;
+
+    /// Build a minimal `BinaryUnit<Function>` with `n` empty WASM functions.
+    fn dummy_unit_fn(n: usize, base: u32) -> BinaryUnit<Function> {
+        let ft = FuncType::from_val_types(&[], &[]);
+        let mut f = Function::new(vec![]);
+        f.instruction(&wasm_encoder::Instruction::End);
+        BinaryUnit {
+            fns: (0..n).map(|_| {
+                let mut fn_ = Function::new(vec![]);
+                fn_.instruction(&wasm_encoder::Instruction::End);
+                fn_
+            }).collect(),
+            base_func_offset: base,
+            entry_points: Vec::new(),
+            func_types: (0..n).map(|_| ft.clone()).collect(),
+            data_segments: Vec::new(),
+            data_init_fn: None,
+        }
+    }
+
+    #[test]
+    fn func_schedule_cross_binary_layout() {
+        let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
+
+        let slot0 = schedule.push(3, |_, _| dummy_unit_fn(3, 0));
+        let slot1 = schedule.push(5, |_, _| dummy_unit_fn(5, 3));
+
+        // Layout is final after pushes.
+        assert_eq!(schedule.layout().base(slot0), 0);
+        assert_eq!(schedule.layout().base(slot1), 3);
+        assert_eq!(schedule.layout().total(), 8);
+    }
+
+    #[test]
+    fn func_schedule_execute_collects_units() {
+        use yecta::LocalPool;
+        let mut linker = Linker::<(), SchedErr, Function, LocalPool, MegabinaryBuilder<Function>>::with_plugin(
+            MegabinaryBuilder::new(),
+        );
+
+        let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
+        schedule.push(2, |_, _| dummy_unit_fn(2, 0));
+        schedule.push(3, |_, _| dummy_unit_fn(3, 2));
+
+        schedule.execute(&mut linker, &mut ());
+
+        let out = linker.plugin.finish();
+        assert_eq!(out.fns.len(), 5);
+    }
+
+    #[test]
+    fn func_schedule_correct_count_succeeds() {
+        let mut linker: Linker<(), SchedErr, Function> = Linker::with_plugin(());
+        let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
+        schedule.push(2, |_, _| dummy_unit_fn(2, 0));
+        schedule.execute(&mut linker, &mut ()); // must not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "declared 2 fns but emit produced 1")]
+    fn func_schedule_wrong_count_panics() {
+        let mut linker: Linker<(), SchedErr, Function> = Linker::with_plugin(());
+        let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
+        // Declare 2 but emit 1 — should panic.
+        schedule.push(2, |_, _| dummy_unit_fn(1, 0));
+        schedule.execute(&mut linker, &mut ());
     }
 }
