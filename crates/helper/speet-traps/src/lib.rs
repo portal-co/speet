@@ -100,6 +100,13 @@
 //!
 //! This crate is `no_std` with `extern crate alloc` for `Vec`, `Box`, and
 //! `String`-free allocations.
+//!
+//! ## See also
+//!
+//! - `docs/trap-hooks.md` — full design: two-phase parameter/local protocol,
+//!   composition strategies, and rationale for each built-in implementation.
+//! - `AGENTS.md` §2, §4 — agent guidance on parameter vs. local choice and
+//!   free-function pattern for Reactor jumps.
 
 #![no_std]
 

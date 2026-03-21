@@ -55,6 +55,13 @@
 //! // In FENCE / SYNC handling:
 //! speet_ordering::emit_fence(ctx, &mut self.reactor, self.mem_order)?;
 //! ```
+//!
+//! ## See also
+//!
+//! - `docs/lazy-store-alias-checking.md` — full design: alias-check `if` blocks,
+//!   `emitted_local` double-store prevention, pool sizing, memory64 notes.
+//! - `AGENTS.md` §3 — agent guidance; explains why lazy deferral and alias checks
+//!   must not be collapsed into eager flushes.
 
 #![no_std]
 
