@@ -7,6 +7,8 @@
 - [ ] Recompile machine code statically
 - [ ] Support multiple architectures
 
+- [ ] Test AI safety and inconsistency dectection
+
 ## Progress
 - [ ] Workspace setup with arch-specific crates
 
