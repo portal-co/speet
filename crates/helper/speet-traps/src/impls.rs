@@ -8,8 +8,6 @@
 //! | [`security`](crate::security) | [`CfiReturnTrap`](crate::CfiReturnTrap) |
 //! | [`hardening`](crate::hardening) | [`RopDetectTrap`](crate::RopDetectTrap) |
 
-use wasm_encoder::Instruction;
-use wax_core::build::InstructionSink;
 use yecta::LocalLayout;
 
 use crate::context::TrapContext;
@@ -26,23 +24,23 @@ use crate::jump::{JumpInfo, JumpTrap};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NullTrap;
 
-impl<Context, E, F: InstructionSink<Context, E>> InstructionTrap<Context, E, F> for NullTrap {
+impl<Context, E> InstructionTrap<Context, E> for NullTrap {
     fn on_instruction(
         &mut self,
         _info: &InstructionInfo,
         _ctx: &mut Context,
-        _trap_ctx: &mut TrapContext<Context, E, F>,
+        _trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         Ok(TrapAction::Continue)
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for NullTrap {
+impl<Context, E> JumpTrap<Context, E> for NullTrap {
     fn on_jump(
         &mut self,
         _info: &JumpInfo,
         _ctx: &mut Context,
-        _trap_ctx: &mut TrapContext<Context, E, F>,
+        _trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         Ok(TrapAction::Continue)
     }
@@ -76,11 +74,10 @@ impl<A, B> ChainedTrap<A, B> {
     }
 }
 
-impl<Context, E, F, A, B> InstructionTrap<Context, E, F> for ChainedTrap<A, B>
+impl<Context, E, A, B> InstructionTrap<Context, E> for ChainedTrap<A, B>
 where
-    F: InstructionSink<Context, E>,
-    A: InstructionTrap<Context, E, F>,
-    B: InstructionTrap<Context, E, F>,
+    A: InstructionTrap<Context, E>,
+    B: InstructionTrap<Context, E>,
 {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         self.a.declare_params(params);
@@ -96,7 +93,7 @@ where
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         if self.a.on_instruction(info, ctx, trap_ctx)? == TrapAction::Skip {
             return Ok(TrapAction::Skip);
@@ -108,18 +105,17 @@ where
         &self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         // Only A's snippet is used since B never ran (see on_instruction).
         self.a.skip_snippet(info, ctx, skip_ctx)
     }
 }
 
-impl<Context, E, F, A, B> JumpTrap<Context, E, F> for ChainedTrap<A, B>
+impl<Context, E, A, B> JumpTrap<Context, E> for ChainedTrap<A, B>
 where
-    F: InstructionSink<Context, E>,
-    A: JumpTrap<Context, E, F>,
-    B: JumpTrap<Context, E, F>,
+    A: JumpTrap<Context, E>,
+    B: JumpTrap<Context, E>,
 {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         self.a.declare_params(params);
@@ -135,7 +131,7 @@ where
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         if self.a.on_jump(info, ctx, trap_ctx)? == TrapAction::Skip {
             return Ok(TrapAction::Skip);
@@ -147,9 +143,8 @@ where
         &self,
         info: &JumpInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         self.a.skip_snippet(info, ctx, skip_ctx)
     }
 }
-

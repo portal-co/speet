@@ -66,8 +66,7 @@
 //! The layout is owned by the arch recompiler and shared (read-only) with
 //! traps through [`TrapContext::layout`].
 
-use wax_core::build::InstructionSink;
-use yecta::LocalLayout;
+use yecta::{EmitSink, LocalAllocator, LocalLayout};
 
 use crate::context::TrapContext;
 use crate::insn::{InstructionInfo, InstructionTrap, TrapAction};
@@ -86,20 +85,18 @@ use crate::jump::{JumpInfo, JumpTrap};
 ///
 /// * `'cb` — lifetime of the borrowed trap implementations.
 /// * `'ctx` — lifetime of any data the callbacks capture.
-pub struct TrapConfig<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
-    insn_trap: Option<&'cb mut (dyn InstructionTrap<Context, E, F> + 'ctx)>,
-    jump_trap: Option<&'cb mut (dyn JumpTrap<Context, E, F> + 'ctx)>,
+pub struct TrapConfig<'cb, 'ctx, Context, E> {
+    insn_trap: Option<&'cb mut (dyn InstructionTrap<Context, E> + 'ctx)>,
+    jump_trap: Option<&'cb mut (dyn JumpTrap<Context, E> + 'ctx)>,
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> Default
-    for TrapConfig<'cb, 'ctx, Context, E, F>
-{
+impl<'cb, 'ctx, Context, E> Default for TrapConfig<'cb, 'ctx, Context, E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx, Context, E, F> {
+impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
     /// Create an empty `TrapConfig` with no traps installed.
     pub fn new() -> Self {
         Self {
@@ -118,7 +115,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx
     /// [`LocalLayout`] both times.
     pub fn set_instruction_trap(
         &mut self,
-        trap: &'cb mut (dyn InstructionTrap<Context, E, F> + 'ctx),
+        trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
     ) {
         self.insn_trap = Some(trap);
     }
@@ -127,7 +124,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx
     ///
     /// See [`set_instruction_trap`](Self::set_instruction_trap) for the
     /// post-install protocol.
-    pub fn set_jump_trap(&mut self, trap: &'cb mut (dyn JumpTrap<Context, E, F> + 'ctx)) {
+    pub fn set_jump_trap(&mut self, trap: &'cb mut (dyn JumpTrap<Context, E> + 'ctx)) {
         self.jump_trap = Some(trap);
     }
 
@@ -188,17 +185,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx
 
     /// Fire the instruction trap (if installed).
     ///
-    /// `layout` is the arch recompiler's unified layout; it is passed to
-    /// [`TrapContext`] so traps can resolve their [`LocalSlot`](yecta::LocalSlot)
-    /// handles.
+    /// `sink` is the emission sink (usually `&mut Reactor<…>` coerced to
+    /// `&mut dyn EmitSink<Context, E>`).  `layout` is the arch recompiler's
+    /// unified layout; both are passed to [`TrapContext`] so traps can emit
+    /// instructions and resolve their [`LocalSlot`](yecta::LocalSlot) handles.
     ///
     /// Returns [`TrapAction::Continue`] when no trap is installed.
     pub fn on_instruction(
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        sink: &mut F,
-        layout: &LocalLayout,
+        sink: &mut dyn EmitSink<Context, E>,
+        layout: &dyn LocalAllocator,
     ) -> Result<TrapAction, E> {
         let trap = match self.insn_trap.as_mut() {
             Some(t) => t,
@@ -218,16 +216,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> TrapConfig<'cb, 'ctx
 
     /// Fire the jump trap (if installed).
     ///
-    /// `layout` is the arch recompiler's unified layout; passed to
-    /// [`TrapContext`] for slot resolution.
+    /// `sink` and `layout` are the same as for [`on_instruction`](Self::on_instruction).
     ///
     /// Returns [`TrapAction::Continue`] when no trap is installed.
     pub fn on_jump(
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        sink: &mut F,
-        layout: &LocalLayout,
+        sink: &mut dyn EmitSink<Context, E>,
+        layout: &dyn LocalAllocator,
     ) -> Result<TrapAction, E> {
         let trap = match self.jump_trap.as_mut() {
             Some(t) => t,

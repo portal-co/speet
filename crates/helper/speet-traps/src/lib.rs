@@ -123,7 +123,7 @@ pub mod tracing;
 
 // Flat re-exports for the most commonly used items.
 pub use config::TrapConfig;
-pub use context::{TrapContext, reactor_jump, reactor_jump_if};
+pub use context::TrapContext;
 pub use hardening::RopDetectTrap;
 pub use impls::{ChainedTrap, NullTrap};
 pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};

@@ -50,7 +50,6 @@
 // wasm *parameter* (not a local) for RopDetectTrap's depth counter.
 
 use wasm_encoder::{Instruction, ValType};
-use wax_core::build::InstructionSink;
 use yecta::{FuncIdx, LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
@@ -127,7 +126,7 @@ impl RopDetectTrap {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for RopDetectTrap {
+impl<Context, E> JumpTrap<Context, E> for RopDetectTrap {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         self.depth_param_slot = params.append(1, ValType::I32);
     }
@@ -136,7 +135,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Rop
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         let depth_local = trap_ctx.layout().local(self.depth_param_slot, 0);
         match info.kind {

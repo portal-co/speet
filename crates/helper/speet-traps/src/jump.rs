@@ -42,8 +42,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 use wasm_encoder::Instruction;
-use wax_core::build::InstructionSink;
-use yecta::{LocalLayout, LocalSlot};
+use yecta::LocalLayout;
 
 use crate::context::TrapContext;
 use crate::insn::TrapAction;
@@ -115,8 +114,9 @@ impl JumpInfo {
 ///
 /// # Type parameters
 ///
-/// Same as [`InstructionTrap`](crate::insn::InstructionTrap).
-pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
+/// * `Context` — the recompiler's user context type.
+/// * `E` — the error type returned by the recompiler's instruction sink.
+pub trait JumpTrap<Context, E> {
     /// Called immediately before a control-flow transfer is emitted.
     ///
     /// Return [`TrapAction::Continue`] to let the jump proceed normally, or
@@ -126,7 +126,7 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
 
     /// Append wasm **parameter** slots to `params`.
@@ -152,7 +152,7 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
         &self,
         info: &JumpInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         let _ = info;
         skip_ctx.emit(ctx, &Instruction::Unreachable)
@@ -161,16 +161,15 @@ pub trait JumpTrap<Context, E, F: InstructionSink<Context, E>> {
 
 // ── Blanket impl for FnMut closures ──────────────────────────────────────────
 
-impl<Context, E, F, Fn> JumpTrap<Context, E, F> for Fn
+impl<Context, E, Fn> JumpTrap<Context, E> for Fn
 where
-    F: InstructionSink<Context, E>,
-    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E, F>) -> Result<TrapAction, E>,
+    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E>) -> Result<TrapAction, E>,
 {
     fn on_jump(
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         self(info, ctx, trap_ctx)
     }
@@ -182,10 +181,7 @@ where
 /// on the first [`TrapAction::Skip`].
 ///
 /// `declare_params` and `declare_locals` delegate to all elements in order.
-impl<Context, E, F> JumpTrap<Context, E, F> for Vec<Box<dyn JumpTrap<Context, E, F> + '_>>
-where
-    F: InstructionSink<Context, E>,
-{
+impl<Context, E> JumpTrap<Context, E> for Vec<Box<dyn JumpTrap<Context, E> + '_>> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         for trap in self.iter_mut() {
             trap.declare_params(params);
@@ -202,7 +198,7 @@ where
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         for trap in self.iter_mut() {
             if trap.on_jump(info, ctx, trap_ctx)? == TrapAction::Skip {
@@ -214,10 +210,7 @@ where
 }
 
 /// `Box<dyn JumpTrap<…>>` delegates to the inner value.
-impl<Context, E, F> JumpTrap<Context, E, F> for Box<dyn JumpTrap<Context, E, F> + '_>
-where
-    F: InstructionSink<Context, E>,
-{
+impl<Context, E> JumpTrap<Context, E> for Box<dyn JumpTrap<Context, E> + '_> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         (**self).declare_params(params);
     }
@@ -230,7 +223,7 @@ where
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         (**self).on_jump(info, ctx, trap_ctx)
     }
@@ -239,7 +232,7 @@ where
         &self,
         info: &JumpInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         (**self).skip_snippet(info, ctx, skip_ctx)
     }

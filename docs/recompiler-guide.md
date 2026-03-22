@@ -464,12 +464,13 @@ Provides three capabilities:
 | Method | What it does |
 |--------|-------------|
 | `emit(ctx, &Instruction)` | Emit a WASM instruction into the current function |
-| `layout() -> &LocalLayout` | Resolve `LocalSlot` handles to absolute indices |
-| `jump(ctx, target, params)` | Emit `return_call target` (Reactor sink only) |
+| `layout() -> &dyn LocalAllocator` | Resolve `LocalSlot` handles to absolute indices |
+| `jump(ctx, target, params)` | Emit `return_call target` via `EmitSink::emit_jmp` |
 | `jump_if(ctx, target, params)` | Emit conditional `return_call target` |
 
-For reactor sinks use the free functions `reactor_jump` and `reactor_jump_if`
-which call `Reactor::jmp` directly for full predecessor-graph bookkeeping.
+`jump` and `jump_if` call `EmitSink::emit_jmp` on the type-erased sink.  For a
+`Reactor` sink this delegates to `Reactor::jmp` with full predecessor-graph
+bookkeeping.
 
 #### Closure shorthand
 

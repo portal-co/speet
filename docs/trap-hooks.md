@@ -34,7 +34,7 @@ crates/arch/speet-traps/
     lib.rs        — crate root, re-exports
     layout.rs     — FunctionLayout, ExtraParams (cross-function parameter protocol)
     locals.rs     — ExtraLocals (per-function non-param locals)
-    context.rs    — TrapContext + reactor_jump / reactor_jump_if
+    context.rs    — TrapContext (holds dyn EmitSink + dyn LocalAllocator)
     insn.rs       — InstructionTrap, InsnClass, InstructionInfo, TrapAction, ArchTag
     jump.rs       — JumpTrap, JumpKind, JumpInfo
     config.rs     — TrapConfig (two-phase protocol implementation)
@@ -141,28 +141,25 @@ pub struct TrapContext<'a, Context, E, F: InstructionSink<Context, E>> {
 
 Methods:
 
-- `emit(ctx, instr)` — forward an instruction to the sink.
-- `locals()` — read-only access to the trap's `ExtraLocals` (non-param, per-function).
-- `extra_params()` — read-only access to the trap's `ExtraParams` (cross-function).
-- `jump(ctx, target, params)` — emit `unreachable` (fallback for non-Reactor sinks).
-- `jump_if(ctx, target, params)` — emit `if { unreachable } end`.
+- `emit(ctx, instr)` — forward an instruction to the underlying `dyn EmitSink`.
+- `layout()` — read-only access to the unified layout (`&dyn LocalAllocator`).
+- `jump(ctx, target, params)` — call `EmitSink::emit_jmp`; for a `Reactor` sink
+  this delegates to `Reactor::jmp` with predecessor-graph bookkeeping.
+- `jump_if(ctx, target, params)` — wraps `emit_jmp` in `if … end`.
 
-Free functions for Reactor sinks (require `F = Reactor<…>`):
-
-- `reactor_jump(trap_ctx, ctx, target, params)` — calls `Reactor::jmp`.
-- `reactor_jump_if(trap_ctx, ctx, target, params)` — wraps in `if { Reactor::jmp } end`.
-
-**Why free functions instead of inherent methods?**  Rust does not support specialisation of inherent `impl` blocks.  The free-function approach compiles on stable Rust.
+`TrapContext` holds `&mut dyn EmitSink<Context, E>` — the concrete sink (usually
+`Reactor<…>`) is erased at the `TrapConfig::on_instruction` / `on_jump` call
+site.  Trap implementations need no `F` type parameter.
 
 ### 3.6 `InstructionTrap` (`insn.rs`)
 
 ```rust
-pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
+pub trait InstructionTrap<Context, E> {
     fn on_instruction(
         &mut self,
         info:     &InstructionInfo,
         ctx:      &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
 
     fn extra_locals(&self)  -> ExtraLocals  { ExtraLocals::none() }
@@ -387,7 +384,7 @@ speet-traps = { path = "../speet-traps" }
 Add to each recompiler:
 
 ```rust
-traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F>>,
+traps: TrapConfig<'cb, 'ctx, Context, E>,
 total_params: u32,   // set by setup(); used in every jmp/ji call
 ```
 

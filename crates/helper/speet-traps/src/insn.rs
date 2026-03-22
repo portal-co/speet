@@ -49,8 +49,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 use wasm_encoder::Instruction;
-use wax_core::build::InstructionSink;
-use yecta::{LocalLayout, LocalSlot};
+use yecta::LocalLayout;
 
 use crate::context::TrapContext;
 
@@ -141,10 +140,7 @@ pub enum TrapAction {
 ///
 /// * `Context` — the recompiler's user context type.
 /// * `E` — the error type returned by the recompiler's instruction sink.
-/// * `F` — the concrete [`InstructionSink`] the recompiler uses (usually
-///   `Reactor<Context, E, OuterF>`).  The trap receives a
-///   [`TrapContext<Context, E, F>`] through which it emits wasm.
-pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
+pub trait InstructionTrap<Context, E> {
     /// Called once per instruction, before the instruction body is emitted.
     ///
     /// Return [`TrapAction::Continue`] to let normal translation proceed, or
@@ -153,7 +149,7 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
 
     /// Append wasm **parameter** slots to `params` and store the returned
@@ -193,7 +189,7 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
         &self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         let _ = info;
         skip_ctx.emit(ctx, &Instruction::Unreachable)
@@ -202,20 +198,19 @@ pub trait InstructionTrap<Context, E, F: InstructionSink<Context, E>> {
 
 // ── Blanket impl for FnMut closures ──────────────────────────────────────────
 
-impl<Context, E, F, Fn> InstructionTrap<Context, E, F> for Fn
+impl<Context, E, Fn> InstructionTrap<Context, E> for Fn
 where
-    F: InstructionSink<Context, E>,
     Fn: FnMut(
         &InstructionInfo,
         &mut Context,
-        &mut TrapContext<Context, E, F>,
+        &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>,
 {
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         self(info, ctx, trap_ctx)
     }
@@ -233,11 +228,7 @@ where
 /// impl delegates both methods to all elements in order, so installing the vec
 /// via [`TrapConfig::set_instruction_trap`] will call `declare_*` on each
 /// element once and append all their slots to the shared layout.
-impl<Context, E, F> InstructionTrap<Context, E, F>
-    for Vec<Box<dyn InstructionTrap<Context, E, F> + '_>>
-where
-    F: InstructionSink<Context, E>,
-{
+impl<Context, E> InstructionTrap<Context, E> for Vec<Box<dyn InstructionTrap<Context, E> + '_>> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         for trap in self.iter_mut() {
             trap.declare_params(params);
@@ -254,7 +245,7 @@ where
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         for trap in self.iter_mut() {
             if trap.on_instruction(info, ctx, trap_ctx)? == TrapAction::Skip {
@@ -266,10 +257,7 @@ where
 }
 
 /// `Box<dyn InstructionTrap<…>>` simply delegates to the inner value.
-impl<Context, E, F> InstructionTrap<Context, E, F> for Box<dyn InstructionTrap<Context, E, F> + '_>
-where
-    F: InstructionSink<Context, E>,
-{
+impl<Context, E> InstructionTrap<Context, E> for Box<dyn InstructionTrap<Context, E> + '_> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         (**self).declare_params(params);
     }
@@ -282,7 +270,7 @@ where
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         (**self).on_instruction(info, ctx, trap_ctx)
     }
@@ -291,7 +279,7 @@ where
         &self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        skip_ctx: &mut TrapContext<Context, E, F>,
+        skip_ctx: &mut TrapContext<Context, E>,
     ) -> Result<(), E> {
         (**self).skip_snippet(info, ctx, skip_ctx)
     }

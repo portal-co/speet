@@ -85,22 +85,21 @@ flush all stores before every load.
 
 ---
 
-## 4. Free functions for Reactor jumps in `TrapContext`
+## 4. `EmitSink` trait for jump emission in `TrapContext`
 
-**Code:** `crates/helper/speet-traps/src/context.rs` (`reactor_jump`,
-`reactor_jump_if`)
+**Code:** `crates/helper/yecta/src/lib.rs` (`EmitSink`),
+`crates/helper/speet-traps/src/context.rs` (`TrapContext`)
 **Doc:** `docs/trap-hooks.md` §3.5
 
-`TrapContext::jump` and `TrapContext::jump_if` emit `unreachable` as a fallback
-for non-Reactor sinks.  To emit a real `return_call` via `Reactor::jmp`, use
-the free functions `reactor_jump` and `reactor_jump_if` instead.
+`TrapContext::jump` and `TrapContext::jump_if` call `EmitSink::emit_jmp` on the
+underlying (type-erased) sink.  When the sink is a `Reactor`, this delegates to
+`Reactor::jmp` with full predecessor-graph bookkeeping.  The trap traits
+(`InstructionTrap`, `JumpTrap`, `TrapConfig`) carry no `F` type parameter;
+`TrapContext` holds `&mut dyn EmitSink<Context, E>` instead.
 
-These are free functions rather than specialised inherent methods because Rust
-stable does not support inherent-method specialisation.  The free-function
-pattern with an `F = Reactor<…>` bound is the correct stable-Rust approach.
-
-Do not attempt to make them inherent methods via a blanket impl — this will
-not compile on stable Rust.
+Do not add `F` back to the trap traits.  The `dyn EmitSink` indirection is
+intentional — it allows traps to be used as `dyn InstructionTrap<Context, E>`
+trait objects without caring about the concrete sink type.
 
 ---
 

@@ -23,7 +23,6 @@
 //! ```
 
 use wasm_encoder::Instruction;
-use wax_core::build::InstructionSink;
 
 use crate::context::TrapContext;
 use crate::insn::{InsnClass, InstructionInfo, InstructionTrap, TrapAction};
@@ -55,12 +54,12 @@ pub struct CounterTrap {
     pub mask: InsnClass,
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> InstructionTrap<Context, E, F> for CounterTrap {
+impl<Context, E> InstructionTrap<Context, E> for CounterTrap {
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         if self.mask == InsnClass::OTHER || info.class.contains(self.mask) {
             trap_ctx.emit(ctx, &Instruction::GlobalGet(self.global_idx))?;
@@ -121,12 +120,12 @@ impl TraceLogTrap {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for TraceLogTrap {
+impl<Context, E> JumpTrap<Context, E> for TraceLogTrap {
     fn on_jump(
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         let target_i32 = info.target_pc.unwrap_or(0) as i32;
         trap_ctx.emit(ctx, &Instruction::I32Const(info.source_pc as i32))?;

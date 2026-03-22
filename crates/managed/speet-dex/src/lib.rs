@@ -572,7 +572,7 @@ pub struct DexRecompiler<
     atomic_opts: AtomicOpts,
 
     /// Pluggable trap hooks.
-    traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
+    traps: TrapConfig<'cb, 'ctx, Context, E>,
 
     /// Total wasm function parameter count (registers + trap params).
     ///
@@ -716,7 +716,7 @@ where
     /// Must be called before [`setup_traps`](Self::setup_traps).
     pub fn set_instruction_trap(
         &mut self,
-        trap: &'cb mut (dyn InstructionTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
     ) {
         self.traps.set_instruction_trap(trap);
     }
@@ -731,7 +731,7 @@ where
     /// Must be called before [`setup_traps`](Self::setup_traps).
     pub fn set_jump_trap(
         &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        trap: &'cb mut (dyn JumpTrap<Context, E> + 'ctx),
     ) {
         self.traps.set_jump_trap(trap);
     }

@@ -85,7 +85,7 @@ where
     /// The reactor that generates WASM functions.
     pub reactor: Reactor<Context, E, F, P>,
     /// Pluggable instruction-level and jump-level trap hooks.
-    pub traps: TrapConfig<'cb, 'ctx, Context, E, Reactor<Context, E, F, P>>,
+    pub traps: TrapConfig<'cb, 'ctx, Context, E>,
     /// Unified layout: arch params + trap params, then per-function locals.
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots (captures `total_params`).
@@ -196,13 +196,12 @@ where
         // are disjoint fields.  We use a raw pointer to work around the
         // borrow-checker limitation on partial borrows through &mut self.
         // This is sound because `on_instruction` does not modify `layout`.
-        let layout_ref = unsafe { &*layout };
-        self.traps
-            .on_instruction(info, ctx, &mut self.reactor, layout_ref)
+        let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
+        self.traps.on_instruction(info, ctx, &mut self.reactor, layout_ref)
     }
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E> {
         let layout = &self.layout as *const LocalLayout;
-        let layout_ref = unsafe { &*layout };
+        let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
         self.traps.on_jump(info, ctx, &mut self.reactor, layout_ref)
     }
 }

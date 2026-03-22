@@ -10,7 +10,7 @@
 //! | Method | What it does |
 //! |--------|-------------|
 //! | [`emit`] | Emit a single wasm instruction into the current function |
-//! | [`layout`] | Read-only access to the unified [`LocalLayout`] (params + locals) |
+//! | [`layout`] | Read-only access to the unified layout (params + locals) |
 //! | [`jump`] | Emit an unconditional jump to a wasm function index |
 //! | [`jump_if`] | Emit a conditional jump (consumes the top `i32` on the stack) |
 //!
@@ -29,18 +29,19 @@
 //! let idx = trap_ctx.layout().local(self.depth_slot, 0);
 //! ```
 //!
-//! Both params and function-locals live in the same [`LocalLayout`] owned by
+//! Both params and function-locals live in the same layout owned by
 //! the arch recompiler: arch params first (at indices 0+), then trap params,
 //! then per-function arch locals, then per-function trap locals.  Because
-//! every group is appended in order, [`LocalLayout::local`] and
-//! [`LocalLayout::base`] return correct **absolute** wasm local indices without
+//! every group is appended in order, [`LocalAllocator::local`] and
+//! [`LocalAllocator::base`] return correct **absolute** wasm local indices without
 //! any additional base-offset arithmetic.
 //!
 //! ## Jump semantics
 //!
-//! `jump` and `jump_if` forward to `Reactor::jmp` when the underlying sink is
-//! a `Reactor`.  For other sinks (e.g. a bare `wasm_encoder::Function`) the
-//! methods emit `unreachable` as a safe fallback.
+//! `jump` and `jump_if` call [`EmitSink::emit_jmp`] on the underlying sink.
+//! For a `Reactor` sink this delegates to `Reactor::jmp`, which records the
+//! target as a successor and emits the full `local.get … return_call` sequence
+//! with predecessor-graph bookkeeping.
 //!
 //! The `params` argument to both jump methods is the number of wasm function
 //! parameters to forward to the target function — the same meaning as in
@@ -48,46 +49,42 @@
 //! recompiler's stored field.
 
 use wasm_encoder::Instruction;
-use wax_core::build::InstructionSink;
-use yecta::{FuncIdx, LocalLayout, LocalPoolBackend};
-
-use core::marker::PhantomData;
+use yecta::{EmitSink, FuncIdx, LocalAllocator};
 
 // ── TrapContext ───────────────────────────────────────────────────────────────
 
 /// The execution environment available to a trap when it fires.
 ///
 /// See the [module documentation](self) for a usage overview.
-pub struct TrapContext<'a, Context, E, F: InstructionSink<Context, E>> {
-    /// The underlying instruction sink — usually a `&mut Reactor<…>`.
-    pub sink: &'a mut F,
+pub struct TrapContext<'a, Context, E> {
+    /// The underlying emission sink — erased to [`EmitSink`] so traps need
+    /// not be generic over the concrete sink type.
+    sink: &'a mut dyn EmitSink<Context, E>,
     /// Unified layout for all params and locals owned by the arch recompiler.
-    layout: &'a LocalLayout,
-    _pd: PhantomData<fn(&mut Context) -> Result<(), E>>,
+    layout: &'a dyn LocalAllocator,
 }
 
-impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E, F> {
+impl<'a, Context, E> TrapContext<'a, Context, E> {
     /// Construct a `TrapContext`.
     ///
     /// Only [`TrapConfig`](crate::config::TrapConfig) should call this —
     /// traps receive one as a `&mut` argument.
-    pub(crate) fn new(sink: &'a mut F, layout: &'a LocalLayout) -> Self {
-        Self {
-            sink,
-            layout,
-            _pd: PhantomData,
-        }
+    pub(crate) fn new(
+        sink: &'a mut dyn EmitSink<Context, E>,
+        layout: &'a dyn LocalAllocator,
+    ) -> Self {
+        Self { sink, layout }
     }
 
     /// Emit a single wasm instruction into the current function.
     #[inline]
     pub fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
-        self.sink.instruction(ctx, instr)
+        self.sink.emit(ctx, instr)
     }
 
     /// Read-only access to the unified **param + locals** layout.
     ///
-    /// Use [`LocalLayout::local`] with a [`LocalSlot`](yecta::LocalSlot)
+    /// Use [`LocalAllocator::local`] with a [`LocalSlot`](yecta::LocalSlot)
     /// obtained during `declare_params` or `declare_locals` to resolve
     /// absolute wasm local indices.
     ///
@@ -95,24 +92,18 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     /// order, the same layout correctly resolves both parameter slots and
     /// per-function local slots without any base-offset adjustment.
     #[inline]
-    pub fn layout(&self) -> &LocalLayout {
+    pub fn layout(&self) -> &dyn LocalAllocator {
         self.layout
     }
-}
 
-// ── Jump support ──────────────────────────────────────────────────────────────
-
-impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E, F> {
     /// Emit an **unconditional jump** to `target`, forwarding `params`
     /// parameters.
     ///
-    /// When `F` is a `Reactor`, this delegates to `Reactor::jmp` which handles
-    /// the full predecessor-graph bookkeeping.  For any other `F`, `unreachable`
-    /// is emitted as a safe fallback.
+    /// Delegates to [`EmitSink::emit_jmp`].  For a `Reactor` sink this calls
+    /// `Reactor::jmp` with full predecessor-graph bookkeeping.
+    #[inline]
     pub fn jump(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.sink.instruction(ctx, &Instruction::Unreachable)?;
-        let _ = (target, params);
-        Ok(())
+        self.sink.emit_jmp(ctx, target, params)
     }
 
     /// Emit a **conditional jump** to `target` if the top `i32` on the wasm
@@ -121,51 +112,13 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> TrapContext<'a, Context, E,
     /// Emits:
     /// ```text
     /// if
-    ///   [unconditional jump to target / unreachable fallback]
+    ///   [unconditional jump to target]
     /// end
     /// ```
     pub fn jump_if(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
         self.sink
-            .instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
-        self.jump(ctx, target, params)?;
-        self.sink.instruction(ctx, &Instruction::End)?;
-        Ok(())
+            .emit(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+        self.sink.emit_jmp(ctx, target, params)?;
+        self.sink.emit(ctx, &Instruction::End)
     }
-}
-
-// ── Specialised helpers for Reactor sinks ─────────────────────────────────────
-
-/// Emit an unconditional jump via `Reactor::jmp` on a `TrapContext` whose
-/// sink is known to be a `Reactor`.
-pub fn reactor_jump<Context, E, F, P: LocalPoolBackend>(
-    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F, P>>,
-    ctx: &mut Context,
-    target: FuncIdx,
-    params: u32,
-) -> Result<(), E>
-where
-    F: wax_core::build::InstructionSink<Context, E>,
-    yecta::Reactor<Context, E, F, P>: InstructionSink<Context, E>,
-{
-    trap_ctx.sink.jmp(ctx, target, params)
-}
-
-/// Emit a conditional jump via a wasm `if` block wrapping `Reactor::jmp`.
-///
-/// Consumes the top `i32` on the stack as the branch condition.
-pub fn reactor_jump_if<Context, E, F, P: LocalPoolBackend>(
-    trap_ctx: &mut TrapContext<Context, E, yecta::Reactor<Context, E, F, P>>,
-    ctx: &mut Context,
-    target: FuncIdx,
-    params: u32,
-) -> Result<(), E>
-where
-    F: wax_core::build::InstructionSink<Context, E>,
-    yecta::Reactor<Context, E, F, P>: InstructionSink<Context, E>,
-{
-    trap_ctx
-        .sink
-        .instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
-    trap_ctx.sink.jmp(ctx, target, params)?;
-    trap_ctx.sink.instruction(ctx, &Instruction::End)
 }

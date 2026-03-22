@@ -263,6 +263,64 @@ impl LocalLayout {
     }
 }
 
+// ── LocalAllocator ────────────────────────────────────────────────────────────
+
+/// Trait for types that allocate and resolve wasm local variable slots.
+///
+/// `LocalLayout` is the canonical implementation.  The trait exists so that
+/// code receiving a layout through a trait object (e.g. [`TrapContext`]) does
+/// not need to name the concrete type.
+///
+/// All methods mirror the corresponding [`LocalLayout`] inherent methods.
+///
+/// [`TrapContext`]: https://docs.rs/speet-traps/latest/speet_traps/context/struct.TrapContext.html
+pub trait LocalAllocator {
+    /// Append a group of `count` locals of type `ty` and return a slot handle.
+    fn append(&mut self, count: u32, ty: ValType) -> LocalSlot;
+
+    /// Return the first absolute wasm local index for `slot`.
+    fn base(&self, slot: LocalSlot) -> u32;
+
+    /// Return the absolute wasm local index for the *n*-th element in `slot`.
+    fn local(&self, slot: LocalSlot, n: u32) -> u32;
+
+    /// Capture the current layout size as a [`Mark`].
+    fn mark(&self) -> Mark;
+
+    /// Truncate the layout back to `mark`.
+    fn rewind(&mut self, mark: &Mark);
+
+    /// Total number of wasm locals declared by this layout.
+    fn total_locals(&self) -> u32;
+}
+
+impl LocalAllocator for LocalLayout {
+    #[inline]
+    fn append(&mut self, count: u32, ty: ValType) -> LocalSlot {
+        self.append(count, ty)
+    }
+    #[inline]
+    fn base(&self, slot: LocalSlot) -> u32 {
+        self.base(slot)
+    }
+    #[inline]
+    fn local(&self, slot: LocalSlot, n: u32) -> u32 {
+        self.local(slot, n)
+    }
+    #[inline]
+    fn mark(&self) -> Mark {
+        self.mark()
+    }
+    #[inline]
+    fn rewind(&mut self, mark: &Mark) {
+        self.rewind(mark)
+    }
+    #[inline]
+    fn total_locals(&self) -> u32 {
+        self.total_locals()
+    }
+}
+
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()

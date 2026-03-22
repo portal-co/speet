@@ -19,7 +19,6 @@
 //! [`ChainedTrap`](crate::ChainedTrap).
 
 use wasm_encoder::{Instruction, ValType};
-use wax_core::build::InstructionSink;
 use yecta::{FuncIdx, LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
@@ -142,7 +141,7 @@ impl CfiReturnTrap {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for CfiReturnTrap {
+impl<Context, E> JumpTrap<Context, E> for CfiReturnTrap {
     fn declare_locals(&mut self, locals: &mut LocalLayout) {
         self.index_local_slot = locals.append(1, ValType::I32);
     }
@@ -151,7 +150,7 @@ impl<Context, E, F: InstructionSink<Context, E>> JumpTrap<Context, E, F> for Cfi
         &mut self,
         info: &JumpInfo,
         ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E, F>,
+        trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         if !matches!(info.kind, JumpKind::Return | JumpKind::IndirectJump) {
             return Ok(TrapAction::Continue);

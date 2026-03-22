@@ -74,7 +74,7 @@
 #![no_std]
 
 pub mod layout;
-pub use layout::{LocalLayout, LocalSlot, Mark};
+pub use layout::{LocalAllocator, LocalLayout, LocalSlot, Mark};
 
 use core::{
     convert::Infallible,
@@ -90,6 +90,47 @@ use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
 use wax_core::build::InstructionSink;
 
 extern crate alloc;
+
+// ── EmitSink ──────────────────────────────────────────────────────────────────
+
+/// Minimal emission interface used by [`speet_traps::TrapContext`].
+///
+/// Abstracting over this trait lets `TrapContext` drop its `F` type parameter:
+/// the concrete sink (usually `Reactor<…>`) is erased to `dyn EmitSink` when
+/// passed through the trap system.
+///
+/// `Reactor<Context, E, F, P>` provides the canonical implementation.  The
+/// `emit_jmp` method delegates to `Reactor::jmp`, preserving full
+/// predecessor-graph bookkeeping.
+///
+/// For test or stub sinks, implement `emit_jmp` to emit `unreachable` as a
+/// safe fallback when no reactor is available.
+pub trait EmitSink<Context, E> {
+    /// Emit a single wasm instruction into the current function.
+    fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E>;
+
+    /// Emit an unconditional tail-call jump to `target`, forwarding `params`
+    /// parameters.
+    ///
+    /// On a `Reactor` sink this calls `Reactor::jmp`, which records `target`
+    /// as a successor and emits the full `local.get … return_call` sequence.
+    fn emit_jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E>;
+}
+
+impl<Context, E, F, P> EmitSink<Context, E> for Reactor<Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    #[inline]
+    fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
+        self.feed(ctx, instr)
+    }
+    #[inline]
+    fn emit_jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+        self.jmp(ctx, target, params)
+    }
+}
 
 /// A trait for local pool backends that can be swapped dynamically.
 ///
