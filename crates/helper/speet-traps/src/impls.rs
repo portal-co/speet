@@ -8,7 +8,7 @@
 //! | [`security`](crate::security) | [`CfiReturnTrap`](crate::CfiReturnTrap) |
 //! | [`hardening`](crate::hardening) | [`RopDetectTrap`](crate::RopDetectTrap) |
 
-use yecta::LocalLayout;
+use yecta::{LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
 use crate::insn::{InstructionInfo, InstructionTrap, TrapAction};
@@ -46,6 +46,8 @@ impl<Context, E> JumpTrap<Context, E> for NullTrap {
     }
 }
 
+impl LocalDeclarator for NullTrap {}
+
 // ── ChainedTrap ───────────────────────────────────────────────────────────────
 
 /// Compose two traps of the same kind: run `A` first, then `B`.
@@ -74,11 +76,7 @@ impl<A, B> ChainedTrap<A, B> {
     }
 }
 
-impl<Context, E, A, B> InstructionTrap<Context, E> for ChainedTrap<A, B>
-where
-    A: InstructionTrap<Context, E>,
-    B: InstructionTrap<Context, E>,
-{
+impl<A: LocalDeclarator, B: LocalDeclarator> LocalDeclarator for ChainedTrap<A, B> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         self.a.declare_params(params);
         self.b.declare_params(params);
@@ -88,7 +86,13 @@ where
         self.a.declare_locals(locals);
         self.b.declare_locals(locals);
     }
+}
 
+impl<Context, E, A, B> InstructionTrap<Context, E> for ChainedTrap<A, B>
+where
+    A: InstructionTrap<Context, E>,
+    B: InstructionTrap<Context, E>,
+{
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,
@@ -117,16 +121,6 @@ where
     A: JumpTrap<Context, E>,
     B: JumpTrap<Context, E>,
 {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
-        self.a.declare_params(params);
-        self.b.declare_params(params);
-    }
-
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {
-        self.a.declare_locals(locals);
-        self.b.declare_locals(locals);
-    }
-
     fn on_jump(
         &mut self,
         info: &JumpInfo,

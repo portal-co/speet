@@ -40,9 +40,9 @@
 //! Any `FnMut(&JumpInfo, &mut Context, &mut TrapContext<…>) -> Result<TrapAction, E>`
 //! closure automatically implements `JumpTrap`.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 use wasm_encoder::Instruction;
-use yecta::LocalLayout;
+use yecta::{LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
 use crate::insn::TrapAction;
@@ -116,7 +116,7 @@ impl JumpInfo {
 ///
 /// * `Context` — the recompiler's user context type.
 /// * `E` — the error type returned by the recompiler's instruction sink.
-pub trait JumpTrap<Context, E> {
+pub trait JumpTrap<Context, E>: LocalDeclarator {
     /// Called immediately before a control-flow transfer is emitted.
     ///
     /// Return [`TrapAction::Continue`] to let the jump proceed normally, or
@@ -128,20 +128,6 @@ pub trait JumpTrap<Context, E> {
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
-
-    /// Append wasm **parameter** slots to `params`.
-    ///
-    /// See [`InstructionTrap::declare_params`] for the full protocol.
-    /// Default: no extra parameters.
-    #[allow(unused_variables)]
-    fn declare_params(&mut self, params: &mut LocalLayout) {}
-
-    /// Append wasm **local** slots to `locals`.
-    ///
-    /// See [`InstructionTrap::declare_locals`] for the full protocol.
-    /// Default: no extra locals.
-    #[allow(unused_variables)]
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
 
     /// Code to emit in place of the suppressed jump when this trap returns
     /// [`TrapAction::Skip`].
@@ -163,7 +149,8 @@ pub trait JumpTrap<Context, E> {
 
 impl<Context, E, Fn> JumpTrap<Context, E> for Fn
 where
-    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E>) -> Result<TrapAction, E>,
+    Fn: FnMut(&JumpInfo, &mut Context, &mut TrapContext<Context, E>) -> Result<TrapAction, E>
+        + LocalDeclarator,
 {
     fn on_jump(
         &mut self,
@@ -175,42 +162,8 @@ where
     }
 }
 
-// ── Vec<Box<dyn JumpTrap>> ────────────────────────────────────────────────────
-
-/// `Vec<Box<dyn JumpTrap<…>>>` runs each element in order, short-circuiting
-/// on the first [`TrapAction::Skip`].
-///
-/// `declare_params` and `declare_locals` delegate to all elements in order.
-impl<Context, E> JumpTrap<Context, E> for Vec<Box<dyn JumpTrap<Context, E> + '_>> {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
-        for trap in self.iter_mut() {
-            trap.declare_params(params);
-        }
-    }
-
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {
-        for trap in self.iter_mut() {
-            trap.declare_locals(locals);
-        }
-    }
-
-    fn on_jump(
-        &mut self,
-        info: &JumpInfo,
-        ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E>,
-    ) -> Result<TrapAction, E> {
-        for trap in self.iter_mut() {
-            if trap.on_jump(info, ctx, trap_ctx)? == TrapAction::Skip {
-                return Ok(TrapAction::Skip);
-            }
-        }
-        Ok(TrapAction::Continue)
-    }
-}
-
 /// `Box<dyn JumpTrap<…>>` delegates to the inner value.
-impl<Context, E> JumpTrap<Context, E> for Box<dyn JumpTrap<Context, E> + '_> {
+impl<Context, E> LocalDeclarator for Box<dyn JumpTrap<Context, E> + '_> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         (**self).declare_params(params);
     }
@@ -218,7 +171,9 @@ impl<Context, E> JumpTrap<Context, E> for Box<dyn JumpTrap<Context, E> + '_> {
     fn declare_locals(&mut self, locals: &mut LocalLayout) {
         (**self).declare_locals(locals);
     }
+}
 
+impl<Context, E> JumpTrap<Context, E> for Box<dyn JumpTrap<Context, E> + '_> {
     fn on_jump(
         &mut self,
         info: &JumpInfo,

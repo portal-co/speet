@@ -47,9 +47,9 @@
 //! closure automatically implements `InstructionTrap`, so one-off traps can
 //! be written inline without declaring a struct.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 use wasm_encoder::Instruction;
-use yecta::LocalLayout;
+use yecta::{LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
 
@@ -140,7 +140,7 @@ pub enum TrapAction {
 ///
 /// * `Context` — the recompiler's user context type.
 /// * `E` — the error type returned by the recompiler's instruction sink.
-pub trait InstructionTrap<Context, E> {
+pub trait InstructionTrap<Context, E>: LocalDeclarator {
     /// Called once per instruction, before the instruction body is emitted.
     ///
     /// Return [`TrapAction::Continue`] to let normal translation proceed, or
@@ -151,33 +151,6 @@ pub trait InstructionTrap<Context, E> {
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
-
-    /// Append wasm **parameter** slots to `params` and store the returned
-    /// [`LocalSlot`] handles for later index resolution.
-    ///
-    /// Parameters (locals `0..total_params-1`) survive `return_call` chains.
-    /// Use them for state that must carry over from one translated-instruction
-    /// wasm function to the next (e.g. a depth counter).
-    ///
-    /// Called **once** at trap-installation time by [`TrapConfig::setup`].
-    /// The default does nothing (no extra parameters).
-    #[allow(unused_variables)]
-    fn declare_params(&mut self, params: &mut LocalLayout) {}
-
-    /// Append wasm **local** slots to `locals` and store the returned
-    /// [`LocalSlot`] handles for later index resolution.
-    ///
-    /// Non-parameter locals are reset to zero at the start of each new wasm
-    /// function.  Use them for state that is only needed within a single
-    /// translated instruction (e.g. a scratch index for a bitmap lookup).
-    ///
-    /// Called **once** at trap-installation time by
-    /// [`TrapConfig::set_instruction_trap`].  The base offset of the locals
-    /// layout is updated per function via [`TrapConfig::set_local_base`].
-    ///
-    /// The default does nothing (no extra locals).
-    #[allow(unused_variables)]
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
 
     /// Wasm instructions to emit in place of the instruction body when this
     /// trap returns [`TrapAction::Skip`].
@@ -204,7 +177,8 @@ where
         &InstructionInfo,
         &mut Context,
         &mut TrapContext<Context, E>,
-    ) -> Result<TrapAction, E>,
+    ) -> Result<TrapAction, E>
+        + LocalDeclarator,
 {
     fn on_instruction(
         &mut self,
@@ -216,48 +190,8 @@ where
     }
 }
 
-// ── Vec<Box<dyn InstructionTrap>> ─────────────────────────────────────────────
-
-/// `Vec<Box<dyn InstructionTrap<…>>>` implements `InstructionTrap` by running
-/// each element in order and short-circuiting on the first `Skip`.
-///
-/// The `skip_snippet` of the first element that returned `Skip` is used.
-///
-/// **Note on `declare_locals` / `declare_params`:** each element's declaration
-/// methods must be called individually before the vec is installed.  The vec
-/// impl delegates both methods to all elements in order, so installing the vec
-/// via [`TrapConfig::set_instruction_trap`] will call `declare_*` on each
-/// element once and append all their slots to the shared layout.
-impl<Context, E> InstructionTrap<Context, E> for Vec<Box<dyn InstructionTrap<Context, E> + '_>> {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
-        for trap in self.iter_mut() {
-            trap.declare_params(params);
-        }
-    }
-
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {
-        for trap in self.iter_mut() {
-            trap.declare_locals(locals);
-        }
-    }
-
-    fn on_instruction(
-        &mut self,
-        info: &InstructionInfo,
-        ctx: &mut Context,
-        trap_ctx: &mut TrapContext<Context, E>,
-    ) -> Result<TrapAction, E> {
-        for trap in self.iter_mut() {
-            if trap.on_instruction(info, ctx, trap_ctx)? == TrapAction::Skip {
-                return Ok(TrapAction::Skip);
-            }
-        }
-        Ok(TrapAction::Continue)
-    }
-}
-
 /// `Box<dyn InstructionTrap<…>>` simply delegates to the inner value.
-impl<Context, E> InstructionTrap<Context, E> for Box<dyn InstructionTrap<Context, E> + '_> {
+impl<Context, E> LocalDeclarator for Box<dyn InstructionTrap<Context, E> + '_> {
     fn declare_params(&mut self, params: &mut LocalLayout) {
         (**self).declare_params(params);
     }
@@ -265,7 +199,9 @@ impl<Context, E> InstructionTrap<Context, E> for Box<dyn InstructionTrap<Context
     fn declare_locals(&mut self, locals: &mut LocalLayout) {
         (**self).declare_locals(locals);
     }
+}
 
+impl<Context, E> InstructionTrap<Context, E> for Box<dyn InstructionTrap<Context, E> + '_> {
     fn on_instruction(
         &mut self,
         info: &InstructionInfo,

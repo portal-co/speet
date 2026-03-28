@@ -29,7 +29,7 @@
 //! * **After**: physical address of the same type is on the stack.
 
 use crate::mapper::{CallbackContext, MapperCallback};
-use yecta::LocalLayout;
+use yecta::{LocalDeclarator, LocalLayout};
 use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 
@@ -147,16 +147,18 @@ pub struct StandardPageTableMapper {
     locals: Option<PageMapLocals>,
 }
 
+impl LocalDeclarator for StandardPageTableMapper {
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+}
+
 impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     for StandardPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
-    }
-
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        let slot = layout.append(4, ValType::I32);
-        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
 
     fn call(
@@ -276,16 +278,18 @@ pub struct StandardPageTableMapper32 {
     locals: Option<PageMapLocals>,
 }
 
+impl LocalDeclarator for StandardPageTableMapper32 {
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+}
+
 impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     for StandardPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
-    }
-
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        let slot = layout.append(4, ValType::I32);
-        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
 
     fn call(
@@ -434,16 +438,18 @@ pub struct MultilevelPageTableMapper {
     locals: Option<PageMapLocals>,
 }
 
+impl LocalDeclarator for MultilevelPageTableMapper {
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+}
+
 impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     for MultilevelPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
-    }
-
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        let slot = layout.append(4, ValType::I32);
-        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
 
     fn call(
@@ -595,16 +601,18 @@ pub struct MultilevelPageTableMapper32 {
     locals: Option<PageMapLocals>,
 }
 
+impl LocalDeclarator for MultilevelPageTableMapper32 {
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        let slot = layout.append(4, ValType::I32);
+        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+    }
+}
+
 impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     for MultilevelPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
-    }
-
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        let slot = layout.append(4, ValType::I32);
-        self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
 
     fn call(

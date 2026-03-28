@@ -321,6 +321,32 @@ impl LocalAllocator for LocalLayout {
     }
 }
 
+// ── LocalDeclarator ───────────────────────────────────────────────────────────
+
+/// Declares wasm parameter and local slots into a [`LocalLayout`].
+///
+/// Implement this trait to reserve [`LocalSlot`] handles during recompiler
+/// setup.  Both methods default to no-ops; only types that need slots must
+/// override them.
+///
+/// # Protocol
+///
+/// * [`declare_params`](Self::declare_params) — called **once** before the
+///   params [`Mark`] is placed.  Slots appended here survive `return_call`
+///   chains (they are wasm function *parameters*).
+/// * [`declare_locals`](Self::declare_locals) — called **once per function**
+///   after the params mark.  Slots appended here are reset to zero at the
+///   start of each new wasm function (scratch locals).
+pub trait LocalDeclarator {
+    /// Append parameter-level slots (persist across `return_call` chains).
+    #[allow(unused_variables)]
+    fn declare_params(&mut self, params: &mut LocalLayout) {}
+
+    /// Append per-function scratch slots (reset each new wasm function).
+    #[allow(unused_variables)]
+    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
+}
+
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()

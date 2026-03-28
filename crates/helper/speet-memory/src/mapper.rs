@@ -1,7 +1,7 @@
 //! [`CallbackContext`] and [`MapperCallback`] — the generic mapper-callback
 //! interface shared by all architecture recompilers.
 
-use yecta::LocalLayout;
+use yecta::{LocalDeclarator, LocalLayout};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 
@@ -70,7 +70,7 @@ impl<'a, Context, E, F: InstructionSink<Context, E>> CallbackContext<'a, Context
 ///
 /// Any `FnMut(&mut Context, &mut CallbackContext<…, F>) -> Result<(), E>`
 /// closure automatically implements `MapperCallback`.
-pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
+pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>>: LocalDeclarator {
     /// Emit the address-translation wasm instructions.
     fn call(
         &mut self,
@@ -86,15 +86,6 @@ pub trait MapperCallback<Context, E, F: InstructionSink<Context, E>> {
     fn chunk_size(&self) -> Option<u64> {
         None
     }
-
-    /// Declare parameter-level locals (persisted across functions; called once
-    /// before the params mark is set).  Default: no-op.
-    fn declare_params(&mut self, _layout: &mut LocalLayout) {}
-
-    /// Declare per-function scratch locals.  Called once per translated
-    /// function after the params mark.  The mapper appends its own groups and
-    /// resolves its `PageMapLocals` internally.  Default: no-op.
-    fn declare_locals(&mut self, _layout: &mut LocalLayout) {}
 }
 
 // ── ChunkedMapper ──────────────────────────────────────────────────────────────
@@ -111,6 +102,18 @@ pub struct ChunkedMapper<M> {
     pub inner: M,
     /// The page granularity advertised by [`MapperCallback::chunk_size`].
     pub page_size: u64,
+}
+
+impl<M: LocalDeclarator> LocalDeclarator for ChunkedMapper<M> {
+    #[inline]
+    fn declare_params(&mut self, layout: &mut LocalLayout) {
+        self.inner.declare_params(layout);
+    }
+
+    #[inline]
+    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+        self.inner.declare_locals(layout);
+    }
 }
 
 impl<Context, E, F, M> MapperCallback<Context, E, F> for ChunkedMapper<M>
@@ -131,22 +134,13 @@ where
     fn chunk_size(&self) -> Option<u64> {
         Some(self.page_size)
     }
-
-    #[inline]
-    fn declare_params(&mut self, layout: &mut LocalLayout) {
-        self.inner.declare_params(layout);
-    }
-
-    #[inline]
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        self.inner.declare_locals(layout);
-    }
 }
 
 /// Blanket impl: any compatible `FnMut` closure is a `MapperCallback`.
 impl<Context, E, F: InstructionSink<Context, E>, T> MapperCallback<Context, E, F> for T
 where
-    T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>,
+    T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>
+        + LocalDeclarator,
 {
     #[inline]
     fn call(

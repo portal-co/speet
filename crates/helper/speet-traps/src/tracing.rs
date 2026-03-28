@@ -23,6 +23,7 @@
 //! ```
 
 use wasm_encoder::Instruction;
+use yecta::LocalDeclarator;
 
 use crate::context::TrapContext;
 use crate::insn::{InsnClass, InstructionInfo, InstructionTrap, TrapAction};
@@ -53,6 +54,8 @@ pub struct CounterTrap {
     /// Use `InsnClass(u32::MAX)` to count every instruction.
     pub mask: InsnClass,
 }
+
+impl LocalDeclarator for CounterTrap {}
 
 impl<Context, E> InstructionTrap<Context, E> for CounterTrap {
     fn on_instruction(
@@ -119,6 +122,8 @@ impl TraceLogTrap {
         }
     }
 }
+
+impl LocalDeclarator for TraceLogTrap {}
 
 impl<Context, E> JumpTrap<Context, E> for TraceLogTrap {
     fn on_jump(

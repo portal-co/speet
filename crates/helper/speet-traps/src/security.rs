@@ -19,7 +19,7 @@
 //! [`ChainedTrap`](crate::ChainedTrap).
 
 use wasm_encoder::{Instruction, ValType};
-use yecta::{FuncIdx, LocalLayout, LocalSlot};
+use yecta::{FuncIdx, LocalDeclarator, LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
 use crate::insn::TrapAction;
@@ -141,11 +141,13 @@ impl CfiReturnTrap {
     }
 }
 
-impl<Context, E> JumpTrap<Context, E> for CfiReturnTrap {
+impl LocalDeclarator for CfiReturnTrap {
     fn declare_locals(&mut self, locals: &mut LocalLayout) {
         self.index_local_slot = locals.append(1, ValType::I32);
     }
+}
 
+impl<Context, E> JumpTrap<Context, E> for CfiReturnTrap {
     fn on_jump(
         &mut self,
         info: &JumpInfo,

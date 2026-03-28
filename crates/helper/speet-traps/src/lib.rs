@@ -130,4 +130,4 @@ pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction}
 pub use jump::{JumpInfo, JumpKind, JumpTrap};
 pub use security::CfiReturnTrap;
 pub use tracing::{CounterTrap, TraceLogTrap};
-pub use yecta::{LocalLayout, LocalSlot, Mark};
+pub use yecta::{LocalDeclarator, LocalLayout, LocalSlot, Mark};

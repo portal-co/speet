@@ -45,6 +45,7 @@ pub mod paging;
 
 pub use layout::{LocalLayout, LocalSlot};
 pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback};
+pub use yecta::LocalDeclarator;
 pub use mem::{AddressWidth, IntWidth, LoadKind, MemoryEmitter, StoreKind};
 pub use paging::{
     MultilevelPageTableMapper, MultilevelPageTableMapper32, PageMapLocals, PageTableBase,
