@@ -125,7 +125,7 @@ where
 {
     #[inline]
     fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
-              let tail_idx = self.lock_global().len() - 1;
+        let tail_idx = self.lock_global().len() - 1;
         self.feed_to(tail_idx, ctx, instr)
     }
     #[inline]
@@ -331,7 +331,7 @@ impl<const N: usize> Default for LocalPool<N> {
 /// this store was already conditionally emitted before a load (1 = emitted,
 /// 0 = not yet).  The unconditional flush path checks this flag to avoid
 /// double-storing.
- #[derive(Clone)]
+#[derive(Clone)]
 pub struct LazyStore {
     /// Local holding the effective address.
     /// Type is `I32` for 32-bit memory (the default), `I64` for memory64.
@@ -569,8 +569,12 @@ pub const DEFAULT_MAX_IFS_PER_FN: usize = 16;
 
 #[derive(Default)]
 struct LockCfg {
-    funcs: BTreeSet<usize>,
+    funcs: BTreeMap<usize, FuncCfg>,
     main: bool,
+}
+
+struct FuncCfg {
+    ro: usize,
 }
 
 /// A reactor manages the generation of WebAssembly functions with control flow.
@@ -740,12 +744,12 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Instructio
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
     fn lock_global(&self) -> impl DerefMut<Target = Vec<Entry<F>>> + '_ {
-        loop{
+        loop {
             let mut guard = self.lock.lock();
             if guard.main {
                 continue;
             }
-            if !guard.funcs.is_empty(){
+            if !guard.funcs.is_empty() {
                 continue;
             }
             guard.main = true;
@@ -767,7 +771,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     unsafe { &mut *self.this.fns.get() }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop for Lock<'_, Context, E, F, P> {
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop
+                for Lock<'_, Context, E, F, P>
+            {
                 fn drop(&mut self) {
                     let mut guard = self.this.lock.lock();
                     guard.main = false;
@@ -776,19 +782,32 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             return Lock { this: self };
         }
     }
-    fn lock_entry(&self, idx: usize) -> impl DerefMut<Target = Entry<F>> + '_ {
+    fn lock_entry(&self, idx: usize, mut ro: bool) -> impl DerefMut<Target = Entry<F>> + '_ {
         loop {
             let mut guard = self.lock.lock();
             if guard.main {
                 continue;
             }
-            if guard.funcs.contains(&idx) {
-                continue;
+            match ro {
+                false => {
+                    if guard.funcs.contains_key(&idx) {
+                        continue;
+                    }
+                    guard.funcs.insert(idx, FuncCfg { ro: 0 });
+                }
+                true => {
+                    let Some(x) = guard.funcs.get_mut(&idx) else {
+                        guard.funcs.insert(idx, FuncCfg { ro: 0 });
+                        ro = false;
+                        continue;
+                    };
+                    x.ro += 1;
+                }
             }
-            guard.funcs.insert(idx);
             struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
                 this: &'a Reactor<Context, E, F, P>,
                 idx: usize,
+                ro: bool,
             }
             impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Deref
                 for Lock<'_, Context, E, F, P>
@@ -804,18 +823,40 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 for Lock<'_, Context, E, F, P>
             {
                 fn deref_mut(&mut self) -> &mut Self::Target {
-                    match unsafe { &mut *self.this.fns.get() } {
-                        g => &mut g[self.idx],
+                    loop {
+                        let mut guard = self.this.lock.lock();
+                        if guard.funcs.get(&self.idx).map_or(false, |cfg| cfg.ro > 0) {
+                            continue;
+                        };
+                        match unsafe { &mut *self.this.fns.get() } {
+                            g => return &mut g[self.idx],
+                        }
                     }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop for Lock<'_, Context, E, F, P> {
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop
+                for Lock<'_, Context, E, F, P>
+            {
                 fn drop(&mut self) {
                     let mut guard = self.this.lock.lock();
-                    guard.funcs.remove(&self.idx);
+                    match self.ro {
+                        false => {
+                            let a = guard.funcs.remove(&self.idx).unwrap();
+                            assert_eq!(a.ro, 0);
+                        }
+                        true => {
+                            if let Some(x) = guard.funcs.get_mut(&self.idx) {
+                                x.ro -= 1;
+                            }
+                        }
+                    }
                 }
             }
-            return Lock { this: self, idx };
+            return Lock {
+                this: self,
+                idx,
+                ro,
+            };
         }
     }
     /// Create a new function with the given locals and control flow distance.
@@ -846,12 +887,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 self.seal_for_split(ctx)?;
             }
         }
-let mut lock = self.lens.lock();
+        let mut lock = self.lens.lock();
         while lock.len() < len as usize + 1 {
             lock.push_back(Default::default());
         }
-        lock
-            .iter_mut()
+        lock.iter_mut()
             .nth(len as usize)
             .unwrap()
             .insert(FuncIdx(self.fns.get_mut().len() as u32));
@@ -948,11 +988,13 @@ let mut lock = self.lens.lock();
     /// populated, so callers that need to mutate `self` afterward must clone
     /// the result first.
     fn transitive_preds_of(&self, idx: usize) -> BTreeSet<FuncIdx> {
-        let mut lock = self.lock_entry(idx);
+        loop{
+        let mut lock = self.lock_entry(idx, false);
         // If already cached, return immediately.
         if lock.transitive_preds.is_some() {
             return lock.transitive_preds.as_ref().unwrap().clone();
         }
+    
 
         // BFS over direct preds to build the transitive set.
         let mut visited: BTreeSet<FuncIdx> = BTreeSet::new();
@@ -965,7 +1007,7 @@ let mut lock = self.lens.lock();
             }
             visited.insert(p);
             let FuncIdx(pi) = p;
-            let mut l = self.lock_entry(pi as usize);
+            let mut l = self.lock_entry(pi as usize, true);
             for &q in &l.preds {
                 if !visited.contains(&q) {
                     stack.push(q);
@@ -973,8 +1015,8 @@ let mut lock = self.lens.lock();
             }
         }
 
-        lock.transitive_preds = Some(visited);
-        lock.transitive_preds.as_ref().unwrap().clone()
+        lock.transitive_preds = Some(visited.clone());
+    }
     }
     /// Add a predecessor edge from pred to succ in the control flow graph.
     ///
@@ -997,7 +1039,7 @@ let mut lock = self.lens.lock();
                     .checked_sub(lock.len())
                     .expect("add_pred: succ_idx should be >= fns.len() in None branch")
                     as u32;
-                    let mut lens = self.lens.lock();
+                let mut lens = self.lens.lock();
                 while lens.len() < len as usize + 1 {
                     lens.push_back(Default::default());
                 }
@@ -1034,10 +1076,8 @@ let mut lock = self.lens.lock();
             let mut lock = self.lock_global();
             let mut plock = self.local_pool.lock();
             // Clone the set so we can mutate fns while iterating.
-            let pred_transitive: BTreeSet<FuncIdx> = lock[pred_idx as usize]
-                .transitive_preds
-                .clone()
-                .unwrap();
+            let pred_transitive: BTreeSet<FuncIdx> =
+                lock[pred_idx as usize].transitive_preds.clone().unwrap();
             let FuncIdx(succ_idx) = succ;
             let wasm_func_idx = succ_idx + self.base_func_offset;
             for k in &pred_transitive {
@@ -1086,7 +1126,7 @@ let mut lock = self.lens.lock();
         let funcs = self.transitive_preds_of(idx).clone();
         let mut plock = self.local_pool.lock();
         for func in funcs {
-            let mut lock = self.lock_entry(func.0 as usize);
+            let mut lock = self.lock_entry(func.0 as usize, false);
             // Drain into a temporary vec to satisfy the borrow checker.
             let stores: Vec<LazyStore> = lock.bundles.drain(..).collect();
             for s in stores {
@@ -1153,7 +1193,7 @@ let mut lock = self.lens.lock();
         }
         let funcs = self.transitive_preds_of(tail_idx).clone();
         for func in funcs {
-            let mut f = self.lock_entry(func.0 as usize);
+            let mut f = self.lock_entry(func.0 as usize, false);
             for s in f.bundles.clone() {
                 // Only alias-check stores in the same address space.
                 if s.addr_type != load_addr_type {
@@ -1397,26 +1437,27 @@ let mut lock = self.lens.lock();
         ctx: &mut Context,
         tail_idx: usize,
     ) -> Result<(), E> {
-        match self.lock_global(){mut lock => {
-        if !lock.is_empty() {
-            let reachable = self.transitive_preds_of(tail_idx).clone();
-            let max_ifs = self.max_ifs_per_fn;
-            let any_saturated = reachable
-                .iter()
-                .any(|&FuncIdx(i)| lock[i as usize].if_stmts >= max_ifs);
-            if any_saturated {
-                drop(lock); // release lock before recursive call to seal_for_split
-                self.seal_for_split(ctx)?;
+        match self.lock_global() {
+            mut lock => {
+                if !lock.is_empty() {
+                    let reachable = self.transitive_preds_of(tail_idx).clone();
+                    let max_ifs = self.max_ifs_per_fn;
+                    let any_saturated = reachable
+                        .iter()
+                        .any(|&FuncIdx(i)| lock[i as usize].if_stmts >= max_ifs);
+                    if any_saturated {
+                        drop(lock); // release lock before recursive call to seal_for_split
+                        self.seal_for_split(ctx)?;
+                    }
+                }
             }
         }
-    }}
         let reachable_funcs = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable_funcs {
-            self.lock_entry(idx as usize).if_stmts += 1;
+            self.lock_entry(idx as usize,false).if_stmts += 1;
         }
         Ok(())
     }
-
 
     /// Emit parameters with fixups applied.
     fn emit_params_with_fixups(
@@ -1629,7 +1670,7 @@ let mut lock = self.lens.lock();
             _ => false,
         };
         if elide {
-        *peephole = None;
+            *peephole = None;
             return Ok(());
         }
 
@@ -1733,7 +1774,7 @@ let mut lock = self.lens.lock();
 
     /// Per-entry instruction dispatch with shadow-stack constant folding.
     fn feed_one(&self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
-        let mut func = self.lock_entry(idx);
+        let mut func = self.lock_entry(idx,false);
         // Skip mode: drop instructions until skip_depth returns to 0.
         if func.skip_depth > 0 {
             match insn {
@@ -1769,7 +1810,7 @@ let mut lock = self.lens.lock();
     /// Try to constant-fold `insn` for entry `idx`.
     /// Returns `true` if the instruction was fully handled (not emitted, not counted).
     /// Returns `false` if the instruction should be emitted normally.
-    fn try_fold_one(& self, entry: &mut Entry<F>, idx: usize, insn: &Instruction<'_>) -> bool {
+    fn try_fold_one(&self, entry: &mut Entry<F>, idx: usize, insn: &Instruction<'_>) -> bool {
         match insn {
             // ── Constant pushes: defer, push Some(v) ──────────────────
             Instruction::I32Const(v) => {
@@ -2114,9 +2155,7 @@ let mut lock = self.lens.lock();
         let start = len.saturating_sub(pops);
 
         // Check if there are any deferred consts to materialize in range.
-        let has_deferred = entry.const_stack[start..len]
-            .iter()
-            .any(|s| s.is_some());
+        let has_deferred = entry.const_stack[start..len].iter().any(|s| s.is_some());
 
         if !has_deferred {
             return Ok(());
@@ -2468,7 +2507,12 @@ let mut lock = self.lens.lock();
     }
 
     /// Flush the shadow stack for entry `idx`, materializing all deferred constants.
-    fn flush_const_stack(&self, ctx: &mut Context, entry: &mut Entry<F>, idx: usize) -> Result<(), E> {
+    fn flush_const_stack(
+        &self,
+        ctx: &mut Context,
+        entry: &mut Entry<F>,
+        idx: usize,
+    ) -> Result<(), E> {
         let stack: Vec<_> = entry.const_stack.drain(..).collect();
         for slot in stack {
             if let Some((v, ty)) = slot {
@@ -2487,11 +2531,7 @@ let mut lock = self.lens.lock();
     }
 
     /// Flush const stacks for all entries reachable from the tail.
-    fn flush_const_stacks_reachable(
-        &self,
-        ctx: &mut Context,
-        tail_idx: usize,
-    ) -> Result<(), E> {
+    fn flush_const_stacks_reachable(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         let mut lock = self.lock_global();
         if lock.is_empty() {
             return Ok(());
@@ -2531,12 +2571,12 @@ let mut lock = self.lens.lock();
     /// `val_type` must be `ValType::I32` or `ValType::I64` matching the value
     /// type consumed by `instruction`.
     pub fn feed_lazy(
-    &self,
+        &self,
         ctx: &mut Context,
         addr_type: ValType,
         val_type: ValType,
         instruction: &Instruction<'static>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         let mut local_pool = self.local_pool.lock();
         // Try to allocate all three locals up front.  If any allocation fails,
@@ -2552,14 +2592,13 @@ let mut lock = self.lens.lock();
                 // is on top, so set it first.
                 let reachable = self.transitive_preds_of(tail_idx).clone();
                 for FuncIdx(idx) in reachable {
-                    let mut func = self.lock_entry(idx as usize);
+                    let mut func = self.lock_entry(idx as usize,false);
                     func.function
                         .instruction(ctx, &Instruction::LocalSet(val_local))?;
                     func.function
                         .instruction(ctx, &Instruction::LocalSet(addr_local))?;
                     // Initialise the emitted flag to 0.
-                    func.function
-                        .instruction(ctx, &Instruction::I32Const(0))?;
+                    func.function.instruction(ctx, &Instruction::I32Const(0))?;
                     func.function
                         .instruction(ctx, &Instruction::LocalSet(emitted_local))?;
                     func.inst_count += 4;
@@ -2594,8 +2633,6 @@ let mut lock = self.lens.lock();
         Ok(())
     }
 
-
-
     /// Seal the current function by emitting a final instruction and closing all if statements.
     /// This terminates the function and removes all predecessor edges.
     pub fn seal_to(
@@ -2607,15 +2644,13 @@ let mut lock = self.lens.lock();
         self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         self.flush_const_stacks_reachable(ctx, tail_idx)?;
-        let ifs = self.lock_entry(tail_idx).if_stmts;
+        let ifs = self.lock_entry(tail_idx,true).if_stmts;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
-            let mut func = self.lock_entry(idx as usize);
-            func.function
-                .instruction(ctx, instruction)?;
+            let mut func = self.lock_entry(idx as usize,false);
+            func.function.instruction(ctx, instruction)?;
             for _ in 0..ifs {
-                func.function
-                    .instruction(ctx, &Instruction::End)?;
+                func.function.instruction(ctx, &Instruction::End)?;
             }
             _ = take(&mut func.preds);
             func.const_stack.clear();
@@ -2631,7 +2666,7 @@ let mut lock = self.lens.lock();
 
     /// Get the total number of nested if statements for a function.
     fn total_ifs(&self, FuncIdx(p_idx): FuncIdx) -> usize {
-        return self.lock_entry(p_idx as usize).if_stmts;
+        return self.lock_entry(p_idx as usize,true).if_stmts;
     }
 
     /// Consume this reactor and return all built functions in order.
