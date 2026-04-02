@@ -128,8 +128,21 @@ where
     }
     #[inline]
     fn emit_jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.jmp(ctx, target, params)
+        let tail_idx = self.fns.len() - 1;
+        self.jmp(tail_idx, ctx, target, params)
     }
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub enum IndirectJumpKind {
+    Table(TableIdx),
+    Ref,
+}
+pub trait IndirectJumpHandler<Context, E> {
+    fn indirect_jump(
+        &self,
+        ctx: &mut Context,
+        target: &mut (dyn InstructionSink<Context, E> + '_),
+    ) -> Result<IndirectJumpKind, E>;
 }
 
 /// A trait for local pool backends that can be swapped dynamically.
@@ -363,9 +376,9 @@ pub struct EscapeTag {
 
 /// Pool configuration for indirect function calls.
 /// Contains a table index and a type index for call_indirect operations.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct Pool {
-    pub table: TableIdx,
+#[derive(Clone, Copy)]
+pub struct Pool<'a, Context, E> {
+    pub handler: &'a (dyn IndirectJumpHandler<Context, E> + 'a),
     pub ty: TypeIdx,
 }
 
@@ -384,7 +397,7 @@ pub struct JumpCallParams<'a, Context, E> {
     /// If Some, emit a call with exception handling; if None, emit a jump.
     pub call: Option<EscapeTag>,
     /// Pool configuration for indirect calls.
-    pub pool: Pool,
+    pub pool: Pool<'a, Context, E>,
     /// If Some, make the jump/call conditional on this snippet.
     pub condition: Option<&'a (dyn Snippet<Context, E> + 'a)>,
 }
@@ -396,7 +409,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// * `func` - The target function index
     /// * `params` - Number of parameters to pass
     /// * `pool` - Pool configuration (can use default values if not doing indirect calls)
-    pub fn jump(func: FuncIdx, params: u32, pool: Pool) -> Self {
+    pub fn jump(func: FuncIdx, params: u32, pool: Pool<'a, Context, E>) -> Self {
         Self {
             params,
             fixups: BTreeMap::new(),
@@ -414,7 +427,12 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// * `params` - Number of parameters to pass
     /// * `escape_tag` - Exception tag for non-local returns
     /// * `pool` - Pool configuration (can use default values if not doing indirect calls)
-    pub fn call(func: FuncIdx, params: u32, escape_tag: EscapeTag, pool: Pool) -> Self {
+    pub fn call(
+        func: FuncIdx,
+        params: u32,
+        escape_tag: EscapeTag,
+        pool: Pool<'a, Context, E>,
+    ) -> Self {
         Self {
             params,
             fixups: BTreeMap::new(),
@@ -436,7 +454,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
         func: FuncIdx,
         params: u32,
         condition: &'a (dyn Snippet<Context, E> + 'a),
-        pool: Pool,
+        pool: Pool<'a, Context, E>,
     ) -> Self {
         Self {
             params,
@@ -454,7 +472,11 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// * `idx` - Snippet that computes the function table index
     /// * `params` - Number of parameters to pass
     /// * `pool` - Pool configuration for the indirect call
-    pub fn indirect_jump(idx: &'a (dyn Snippet<Context, E> + 'a), params: u32, pool: Pool) -> Self {
+    pub fn indirect_jump(
+        idx: &'a (dyn Snippet<Context, E> + 'a),
+        params: u32,
+        pool: Pool<'a, Context, E>,
+    ) -> Self {
         Self {
             params,
             fixups: BTreeMap::new(),
@@ -693,11 +715,15 @@ impl<Context, E> Reactor<Context, E> {
         self.next_with(ctx, Function::new(locals), len)
     }
 }
+pub struct Fed<'a,Context,E,F: InstructionSink<Context, E>,P:LocalPoolBackend>{
+    pub reactor: &'a mut Reactor<Context,E,F,P>,
+    pub tail_idx: usize,
+}
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> InstructionSink<Context, E>
-    for Reactor<Context, E, F, P>
+    for Fed<'_, Context, E, F, P>
 {
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        self.feed(ctx, instruction)
+        self.reactor.feed_to(self.tail_idx, ctx, instruction)
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
@@ -784,7 +810,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         if self.fns.is_empty() {
             return Ok(());
         }
-        self.flush_peephole(ctx)?;
+        let tail_idx = self.fns.len() - 1;
+        self.flush_peephole(tail_idx, ctx)?;
         // Flush const stacks for all reachable entries.
         if !self.fns.is_empty() {
             let tail_idx = self.fns.len() - 1;
@@ -1018,11 +1045,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         ctx: &mut Context,
         load_addr_local: u32,
         load_addr_type: ValType,
+        tail_idx: usize
     ) -> Result<(), E> {
         if self.fns.is_empty() {
             return Ok(());
         }
-        let tail_idx = self.fns.len() - 1;
         let funcs = self.transitive_preds_of(tail_idx).clone();
         for func in funcs {
             let f = &mut self.fns[func.0 as usize];
@@ -1071,19 +1098,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         ctx: &mut Context,
         target: Target<Context, E>,
         tag: EscapeTag,
-        pool: Pool,
+        pool: Pool<'_, Context, E>,
+        tail_idx: usize
     ) -> Result<(), E> {
-        self.flush_peephole(ctx)?;
-        self.flush_bundles(ctx, self.fns.len() - 1)?;
+
+        self.flush_peephole(tail_idx, ctx)?;
+        self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: TypeIdx(ty_idx),
         } = tag;
-        self.feed(
+        self.feed_to(tail_idx,
             ctx,
             &Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)),
         )?;
-        self.feed(
+        self.feed_to(tail_idx,
             ctx,
             &Instruction::TryTable(
                 wasm_encoder::BlockType::FunctionType(ty_idx),
@@ -1100,27 +1129,37 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 func: FuncIdx(func_idx),
             } => {
                 let wasm_func_idx = func_idx + self.base_func_offset;
-                self.feed(ctx, &Instruction::Call(wasm_func_idx))?;
+                self.feed_to(tail_idx, ctx, &Instruction::Call(wasm_func_idx))?;
             }
             Target::Dynamic { idx } => {
-                idx.emit_snippet(ctx, &mut |ctx, a| self.feed(ctx, a))?;
+                idx.emit_snippet(ctx, &mut |ctx, a| self.feed_to(tail_idx, ctx, a))?;
                 let Pool {
                     ty: TypeIdx(pool_ty),
-                    table: TableIdx(pool_table),
+                    handler,
                 } = pool;
-                self.feed(
-                    ctx,
-                    &Instruction::CallIndirect {
-                        type_index: pool_ty,
-                        table_index: pool_table,
-                    },
-                )?;
+                match handler.indirect_jump(ctx, &mut Fed{
+                    reactor: self,
+                    tail_idx,
+                })? {
+                    IndirectJumpKind::Table(TableIdx(pool_table)) => {
+                        self.feed_to(tail_idx, 
+                            ctx,
+                            &Instruction::CallIndirect {
+                                type_index: pool_ty,
+                                table_index: pool_table,
+                            },
+                        )?;
+                    }
+                    IndirectJumpKind::Ref => {
+                        self.feed_to(tail_idx, ctx, &Instruction::CallRef(pool_ty))?;
+                    }
+                }
             }
         }
-        self.feed(ctx, &Instruction::Return)?;
-        self.feed(ctx, &Instruction::End)?;
+        self.feed_to(tail_idx, ctx, &Instruction::Return)?;
+        self.feed_to(tail_idx, ctx, &Instruction::End)?;
 
-        self.feed(ctx, &Instruction::End)?;
+        self.feed_to(tail_idx, ctx, &Instruction::End)?;
         Ok(())
     }
     /// Emit a return via exception throw.
@@ -1129,17 +1168,17 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// # Arguments
     /// * `params` - Number of parameters to pass through the exception
     /// * `tag` - Exception tag to throw
-    pub fn ret(&mut self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
-        self.flush_peephole(ctx)?;
-        self.flush_bundles(ctx, self.fns.len() - 1)?;
+    pub fn ret(&mut self, tail_idx: usize, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.flush_peephole(tail_idx, ctx)?;
+        self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: _,
         } = tag;
         for p in 0..params {
-            self.feed(ctx, &Instruction::LocalGet(p))?;
+            self.feed_to(tail_idx, ctx, &Instruction::LocalGet(p))?;
         }
-        self.feed(ctx, &Instruction::Throw(tag_idx))
+        self.feed_to(tail_idx, ctx, &Instruction::Throw(tag_idx))
     }
     /// Emit a jump or call instruction using a parameter struct.
     ///
@@ -1163,6 +1202,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         &mut self,
         ctx: &mut Context,
         params: JumpCallParams<Context, E>,
+        tail_idx: usize
     ) -> Result<(), E> {
         let JumpCallParams {
             params: param_count,
@@ -1173,7 +1213,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             condition,
         } = params;
 
-        self.ji(ctx, param_count, &fixups, target, call, pool, condition)
+        self.ji(ctx, param_count, &fixups, target, call, pool, condition, tail_idx)
     }
 
     /// Emit a jump or call instruction, optionally conditional.
@@ -1201,23 +1241,24 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
         call: Option<EscapeTag>,
-        pool: Pool,
+        pool: Pool<'_,Context,E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
     ) -> Result<(), E> {
-        self.flush_bundles(ctx, self.fns.len() - 1)?;
+        self.flush_bundles(ctx, tail_idx)?;
         // Track if statements for conditional branches
         if condition.is_some() {
-            self.increment_if_stmts_for_predecessors(ctx)?;
+            self.increment_if_stmts_for_predecessors(ctx, tail_idx)?;
         }
 
         match call {
             Some(escape_tag) => {
                 self.emit_conditional_call(
-                    ctx, params, fixups, target, escape_tag, pool, condition,
+                    ctx, params, fixups, target, escape_tag, pool, condition,tail_idx
                 )?;
             }
             None => {
-                self.emit_conditional_jump(ctx, params, fixups, target, pool, condition)?;
+                self.emit_conditional_jump(ctx, params, fixups, target, pool, condition,tail_idx)?;
             }
         }
         Ok(())
@@ -1230,9 +1271,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// (`seal_for_split`) before the counter is incremented.  This prevents
     /// unbounded `if`-nesting and the O(N²) `End`-instruction explosion that
     /// follows from it.
-    fn increment_if_stmts_for_predecessors(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn increment_if_stmts_for_predecessors(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if !self.fns.is_empty() {
-            let tail_idx = self.fns.len() - 1;
             let reachable = self.transitive_preds_of(tail_idx).clone();
             let max_ifs = self.max_ifs_per_fn;
             let any_saturated = reachable
@@ -1242,7 +1282,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 self.seal_for_split(ctx)?;
             }
         }
-        let reachable_funcs = self.collect_reachable_predecessors();
+        let reachable_funcs = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable_funcs {
             self.fns[idx as usize].if_stmts += 1;
         }
@@ -1269,12 +1309,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
     ) -> Result<(), E> {
         for param_idx in 0..params {
             if let Some(fixup) = fixups.get(&param_idx) {
-                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
+                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
             } else {
-                self.feed(ctx, &Instruction::LocalGet(param_idx))?;
+                self.feed_to(tail_idx, ctx, &Instruction::LocalGet(param_idx))?;
             }
         }
         Ok(())
@@ -1286,12 +1327,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
+
     ) -> Result<(), E> {
         for param_idx in (0..params).rev() {
             if fixups.contains_key(&param_idx) {
-                self.feed(ctx, &Instruction::Drop)?;
+                self.feed_to(tail_idx, ctx, &Instruction::Drop)?;
             } else {
-                self.feed(ctx, &Instruction::LocalSet(param_idx))?;
+                self.feed_to(tail_idx, ctx, &Instruction::LocalSet(param_idx))?;
             }
         }
         Ok(())
@@ -1305,20 +1348,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
         escape_tag: EscapeTag,
-        pool: Pool,
+        pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+            tail_idx: usize
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
-            self.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
         }
 
-        self.emit_params_with_fixups(ctx, params, fixups)?;
-        self.call(ctx, target, escape_tag, pool)?;
-        self.restore_params_after_call(ctx, params, fixups)?;
+        self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
+        self.call(ctx, target, escape_tag, pool, tail_idx)?;
+        self.restore_params_after_call(ctx, params, fixups, tail_idx)?;
 
         if condition.is_some() {
-            self.feed(ctx, &Instruction::Else)?;
+            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
         }
         Ok(())
     }
@@ -1330,13 +1374,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
-        pool: Pool,
+        pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
     ) -> Result<(), E> {
         match target {
-            Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, condition),
+            Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, condition, tail_idx),
             Target::Dynamic { idx } => {
-                self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition)
+                self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition, tail_idx)
             }
         }
     }
@@ -1349,23 +1394,24 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         func: FuncIdx,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
-            self.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
             let FuncIdx(func_idx) = func;
             let wasm_func_idx = func_idx + self.base_func_offset;
-            self.emit_params_with_fixups(ctx, params, fixups)?;
-            self.feed(ctx, &Instruction::ReturnCall(wasm_func_idx))?;
-            self.feed(ctx, &Instruction::Else)?;
+            self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
+            self.feed_to(tail_idx, ctx, &Instruction::ReturnCall(wasm_func_idx))?;
+            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
         } else {
             // Unconditional jump: apply fixups to locals, then jump
             for (local_idx, fixup) in fixups.iter() {
-                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
-                self.feed(ctx, &Instruction::LocalSet(*local_idx))?;
+                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+                self.feed_to(tail_idx, ctx, &Instruction::LocalSet(*local_idx))?;
             }
-            self.jmp(ctx, func, params)?;
+            self.jmp(tail_idx, ctx, func, params)?;
         }
         Ok(())
     }
@@ -1377,38 +1423,37 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         idx: &(dyn Snippet<Context, E> + '_),
-        pool: Pool,
+        pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
-            self.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
         }
 
-        self.emit_params_with_fixups(ctx, params, fixups)?;
-        idx.emit_snippet(ctx, &mut |ctx, instr| self.feed(ctx, instr))?;
+        self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
+        idx.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
 
         let Pool {
             ty: TypeIdx(pool_ty),
-            table: TableIdx(pool_table),
+            handler,
         } = pool;
+        let i = match handler.indirect_jump(ctx, &mut Fed{
+            tail_idx,
+            reactor: self,
+        })? {
+            IndirectJumpKind::Table(TableIdx(pool_table)) => Instruction::ReturnCallIndirect {
+                type_index: pool_ty,
+                table_index: pool_table,
+            },
+            IndirectJumpKind::Ref => Instruction::ReturnCallRef(pool_ty),
+        };
         if condition.is_some() {
-            self.feed(
-                ctx,
-                &Instruction::ReturnCallIndirect {
-                    type_index: pool_ty,
-                    table_index: pool_table,
-                },
-            )?;
-            self.feed(ctx, &Instruction::Else)?;
+            self.feed_to(tail_idx, ctx, &i)?;
+            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
         } else {
-            self.seal(
-                ctx,
-                &Instruction::ReturnCallIndirect {
-                    type_index: pool_ty,
-                    table_index: pool_table,
-                },
-            )?;
+            self.seal_to(tail_idx, ctx, &i)?;
         }
         Ok(())
     }
@@ -1418,20 +1463,27 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// # Arguments
     /// * `target` - The function index to jump to
     /// * `params` - Number of parameters to pass
-    pub fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.flush_peephole(ctx)?;
+    pub fn jmp(&mut self, target_idx: usize, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+        self.flush_peephole(target_idx  , ctx)?;
         // Use the per-entry transitive predecessor cache instead of a BFS.
-        let reachable = self.collect_reachable_predecessors();
+        let reachable = self.transitive_preds_of(target_idx).clone();
         for x in reachable {
             self.add_pred_checked(ctx, target, x, params)?;
         }
         Ok(())
     }
+    pub fn feed(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        let tail_idx = self.fns.len() - 1;
+        self.feed_to(tail_idx, ctx, instruction)
+    }
     /// Feed an instruction to all active functions.
     /// The instruction is added to the current function and all its predecessors.
     /// Applies constant folding via per-entry shadow stacks and a reactor-level
     /// one-slot peephole optimizer.
-    pub fn feed(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+    pub fn feed_to(&mut self, target: usize, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         // Reactor-level peephole: check if (prev, curr) matches an elision pattern.
         let elide = match (&self.peephole, instruction) {
             (Some(Instruction::LocalGet(_)), Instruction::Drop) => true,
@@ -1447,7 +1499,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         // Flush buffered instruction if it didn't combine.
         if self.peephole.is_some() {
             let prev = self.peephole.take().unwrap();
-            let reachable = self.collect_reachable_predecessors();
+            let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
                 self.feed_one(ctx, idx as usize, &prev)?;
             }
@@ -1457,7 +1509,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         if let Some(static_insn) = Self::to_static_insn(instruction) {
             self.peephole = Some(static_insn);
         } else {
-            let reachable = self.collect_reachable_predecessors();
+            let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
                 self.feed_one(ctx, idx as usize, instruction)?;
             }
@@ -1467,9 +1519,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Flush the peephole buffer by broadcasting its held instruction to all reachable entries.
-    fn flush_peephole(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn flush_peephole(&mut self, target: usize, ctx: &mut Context) -> Result<(), E> {
         if let Some(prev) = self.peephole.take() {
-            let reachable = self.collect_reachable_predecessors();
+            let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
                 self.feed_one(ctx, idx as usize, &prev)?;
             }
@@ -1542,18 +1594,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Per-entry instruction dispatch with shadow-stack constant folding.
-    fn feed_one(
-        &mut self,
-        ctx: &mut Context,
-        idx: usize,
-        insn: &Instruction<'_>,
-    ) -> Result<(), E> {
+    fn feed_one(&mut self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         // Skip mode: drop instructions until skip_depth returns to 0.
         if self.fns[idx].skip_depth > 0 {
             match insn {
-                Instruction::If(_)
-                | Instruction::Block(_)
-                | Instruction::Loop(_) => {
+                Instruction::If(_) | Instruction::Block(_) | Instruction::Loop(_) => {
                     self.fns[idx].skip_depth += 1;
                 }
                 Instruction::End => {
@@ -1618,9 +1663,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             | Instruction::I32ShrU => {
                 let len = entry.const_stack.len();
                 if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) =
-                        (entry.const_stack.get(len - 1), entry.const_stack.get(len - 2))
-                    {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        entry.const_stack.get(len - 1),
+                        entry.const_stack.get(len - 2),
+                    ) {
                         let a = *a as i32;
                         let b = *b as i32;
                         let result: i32 = match insn {
@@ -1632,9 +1678,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                             Instruction::I32Xor => a ^ b,
                             Instruction::I32Shl => a.wrapping_shl(b as u32 & 31),
                             Instruction::I32ShrS => a.wrapping_shr(b as u32 & 31),
-                            Instruction::I32ShrU => {
-                                ((a as u32).wrapping_shr(b as u32 & 31)) as i32
-                            }
+                            Instruction::I32ShrU => ((a as u32).wrapping_shr(b as u32 & 31)) as i32,
                             _ => unreachable!(),
                         };
                         entry.const_stack.truncate(len - 2);
@@ -1656,9 +1700,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             | Instruction::I64ShrU => {
                 let len = entry.const_stack.len();
                 if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) =
-                        (entry.const_stack.get(len - 1), entry.const_stack.get(len - 2))
-                    {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        entry.const_stack.get(len - 1),
+                        entry.const_stack.get(len - 2),
+                    ) {
                         let a = *a as i64;
                         let b = *b as i64;
                         let result: i64 = match insn {
@@ -1670,9 +1715,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                             Instruction::I64Xor => a ^ b,
                             Instruction::I64Shl => a.wrapping_shl(b as u32 & 63),
                             Instruction::I64ShrS => a.wrapping_shr(b as u32 & 63),
-                            Instruction::I64ShrU => {
-                                ((a as u64).wrapping_shr(b as u32 & 63)) as i64
-                            }
+                            Instruction::I64ShrU => ((a as u64).wrapping_shr(b as u32 & 63)) as i64,
                             _ => unreachable!(),
                         };
                         entry.const_stack.truncate(len - 2);
@@ -1695,9 +1738,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             | Instruction::I32GeU => {
                 let len = entry.const_stack.len();
                 if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) =
-                        (entry.const_stack.get(len - 1), entry.const_stack.get(len - 2))
-                    {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        entry.const_stack.get(len - 1),
+                        entry.const_stack.get(len - 2),
+                    ) {
                         let a = *a as i32;
                         let b = *b as i32;
                         let au = a as u32;
@@ -1735,9 +1779,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             | Instruction::I64GeU => {
                 let len = entry.const_stack.len();
                 if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) =
-                        (entry.const_stack.get(len - 1), entry.const_stack.get(len - 2))
-                    {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        entry.const_stack.get(len - 1),
+                        entry.const_stack.get(len - 2),
+                    ) {
                         let a = *a as i64;
                         let b = *b as i64;
                         let au = a as u64;
@@ -1786,21 +1831,27 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             Instruction::I32WrapI64 => {
                 if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
                     entry.const_stack.pop();
-                    entry.const_stack.push(Some((v as i32 as u64, ValType::I32)));
+                    entry
+                        .const_stack
+                        .push(Some((v as i32 as u64, ValType::I32)));
                     return true;
                 }
             }
             Instruction::I64ExtendI32S => {
                 if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
                     entry.const_stack.pop();
-                    entry.const_stack.push(Some((v as i32 as i64 as u64, ValType::I64)));
+                    entry
+                        .const_stack
+                        .push(Some((v as i32 as i64 as u64, ValType::I64)));
                     return true;
                 }
             }
             Instruction::I64ExtendI32U => {
                 if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
                     entry.const_stack.pop();
-                    entry.const_stack.push(Some((v as u32 as u64, ValType::I64)));
+                    entry
+                        .const_stack
+                        .push(Some((v as u32 as u64, ValType::I64)));
                     return true;
                 }
             }
@@ -1957,54 +2008,112 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// This is a conservative estimate; unknown instructions return 0 (no materialization).
     fn stack_pops(insn: &Instruction<'_>) -> usize {
         match insn {
-            Instruction::I32Const(_) | Instruction::I64Const(_)
-            | Instruction::F32Const(_) | Instruction::F64Const(_) => 0,
+            Instruction::I32Const(_)
+            | Instruction::I64Const(_)
+            | Instruction::F32Const(_)
+            | Instruction::F64Const(_) => 0,
 
             // Unary ops
-            Instruction::I32Eqz | Instruction::I64Eqz
-            | Instruction::I32Clz | Instruction::I32Ctz | Instruction::I32Popcnt
-            | Instruction::I64Clz | Instruction::I64Ctz | Instruction::I64Popcnt
-            | Instruction::I32WrapI64 | Instruction::I64ExtendI32S | Instruction::I64ExtendI32U
-            | Instruction::I32Extend8S | Instruction::I32Extend16S
-            | Instruction::I64Extend8S | Instruction::I64Extend16S | Instruction::I64Extend32S
-            | Instruction::F32Abs | Instruction::F32Neg | Instruction::F32Sqrt
-            | Instruction::F64Abs | Instruction::F64Neg | Instruction::F64Sqrt => 1,
+            Instruction::I32Eqz
+            | Instruction::I64Eqz
+            | Instruction::I32Clz
+            | Instruction::I32Ctz
+            | Instruction::I32Popcnt
+            | Instruction::I64Clz
+            | Instruction::I64Ctz
+            | Instruction::I64Popcnt
+            | Instruction::I32WrapI64
+            | Instruction::I64ExtendI32S
+            | Instruction::I64ExtendI32U
+            | Instruction::I32Extend8S
+            | Instruction::I32Extend16S
+            | Instruction::I64Extend8S
+            | Instruction::I64Extend16S
+            | Instruction::I64Extend32S
+            | Instruction::F32Abs
+            | Instruction::F32Neg
+            | Instruction::F32Sqrt
+            | Instruction::F64Abs
+            | Instruction::F64Neg
+            | Instruction::F64Sqrt => 1,
 
             // Binary ops
-            Instruction::I32Add | Instruction::I32Sub | Instruction::I32Mul
-            | Instruction::I32DivS | Instruction::I32DivU
-            | Instruction::I32RemS | Instruction::I32RemU
-            | Instruction::I32And | Instruction::I32Or | Instruction::I32Xor
-            | Instruction::I32Shl | Instruction::I32ShrS | Instruction::I32ShrU
-            | Instruction::I32Rotl | Instruction::I32Rotr
-            | Instruction::I64Add | Instruction::I64Sub | Instruction::I64Mul
-            | Instruction::I64DivS | Instruction::I64DivU
-            | Instruction::I64RemS | Instruction::I64RemU
-            | Instruction::I64And | Instruction::I64Or | Instruction::I64Xor
-            | Instruction::I64Shl | Instruction::I64ShrS | Instruction::I64ShrU
-            | Instruction::I64Rotl | Instruction::I64Rotr
-            | Instruction::I32Eq | Instruction::I32Ne
-            | Instruction::I32LtS | Instruction::I32LtU
-            | Instruction::I32GtS | Instruction::I32GtU
-            | Instruction::I32LeS | Instruction::I32LeU
-            | Instruction::I32GeS | Instruction::I32GeU
-            | Instruction::I64Eq | Instruction::I64Ne
-            | Instruction::I64LtS | Instruction::I64LtU
-            | Instruction::I64GtS | Instruction::I64GtU
-            | Instruction::I64LeS | Instruction::I64LeU
-            | Instruction::I64GeS | Instruction::I64GeU
-            | Instruction::F32Eq | Instruction::F32Ne
-            | Instruction::F32Lt | Instruction::F32Gt
-            | Instruction::F32Le | Instruction::F32Ge
-            | Instruction::F64Eq | Instruction::F64Ne
-            | Instruction::F64Lt | Instruction::F64Gt
-            | Instruction::F64Le | Instruction::F64Ge
-            | Instruction::F32Add | Instruction::F32Sub
-            | Instruction::F32Mul | Instruction::F32Div
-            | Instruction::F32Min | Instruction::F32Max | Instruction::F32Copysign
-            | Instruction::F64Add | Instruction::F64Sub
-            | Instruction::F64Mul | Instruction::F64Div
-            | Instruction::F64Min | Instruction::F64Max | Instruction::F64Copysign => 2,
+            Instruction::I32Add
+            | Instruction::I32Sub
+            | Instruction::I32Mul
+            | Instruction::I32DivS
+            | Instruction::I32DivU
+            | Instruction::I32RemS
+            | Instruction::I32RemU
+            | Instruction::I32And
+            | Instruction::I32Or
+            | Instruction::I32Xor
+            | Instruction::I32Shl
+            | Instruction::I32ShrS
+            | Instruction::I32ShrU
+            | Instruction::I32Rotl
+            | Instruction::I32Rotr
+            | Instruction::I64Add
+            | Instruction::I64Sub
+            | Instruction::I64Mul
+            | Instruction::I64DivS
+            | Instruction::I64DivU
+            | Instruction::I64RemS
+            | Instruction::I64RemU
+            | Instruction::I64And
+            | Instruction::I64Or
+            | Instruction::I64Xor
+            | Instruction::I64Shl
+            | Instruction::I64ShrS
+            | Instruction::I64ShrU
+            | Instruction::I64Rotl
+            | Instruction::I64Rotr
+            | Instruction::I32Eq
+            | Instruction::I32Ne
+            | Instruction::I32LtS
+            | Instruction::I32LtU
+            | Instruction::I32GtS
+            | Instruction::I32GtU
+            | Instruction::I32LeS
+            | Instruction::I32LeU
+            | Instruction::I32GeS
+            | Instruction::I32GeU
+            | Instruction::I64Eq
+            | Instruction::I64Ne
+            | Instruction::I64LtS
+            | Instruction::I64LtU
+            | Instruction::I64GtS
+            | Instruction::I64GtU
+            | Instruction::I64LeS
+            | Instruction::I64LeU
+            | Instruction::I64GeS
+            | Instruction::I64GeU
+            | Instruction::F32Eq
+            | Instruction::F32Ne
+            | Instruction::F32Lt
+            | Instruction::F32Gt
+            | Instruction::F32Le
+            | Instruction::F32Ge
+            | Instruction::F64Eq
+            | Instruction::F64Ne
+            | Instruction::F64Lt
+            | Instruction::F64Gt
+            | Instruction::F64Le
+            | Instruction::F64Ge
+            | Instruction::F32Add
+            | Instruction::F32Sub
+            | Instruction::F32Mul
+            | Instruction::F32Div
+            | Instruction::F32Min
+            | Instruction::F32Max
+            | Instruction::F32Copysign
+            | Instruction::F64Add
+            | Instruction::F64Sub
+            | Instruction::F64Mul
+            | Instruction::F64Div
+            | Instruction::F64Min
+            | Instruction::F64Max
+            | Instruction::F64Copysign => 2,
 
             Instruction::Drop => 1,
             Instruction::Select => 3,
@@ -2023,19 +2132,30 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             Instruction::Return | Instruction::Unreachable => 0,
 
             // Loads: consume address
-            Instruction::I32Load(_) | Instruction::I64Load(_)
-            | Instruction::F32Load(_) | Instruction::F64Load(_)
-            | Instruction::I32Load8S(_) | Instruction::I32Load8U(_)
-            | Instruction::I32Load16S(_) | Instruction::I32Load16U(_)
-            | Instruction::I64Load8S(_) | Instruction::I64Load8U(_)
-            | Instruction::I64Load16S(_) | Instruction::I64Load16U(_)
-            | Instruction::I64Load32S(_) | Instruction::I64Load32U(_) => 1,
+            Instruction::I32Load(_)
+            | Instruction::I64Load(_)
+            | Instruction::F32Load(_)
+            | Instruction::F64Load(_)
+            | Instruction::I32Load8S(_)
+            | Instruction::I32Load8U(_)
+            | Instruction::I32Load16S(_)
+            | Instruction::I32Load16U(_)
+            | Instruction::I64Load8S(_)
+            | Instruction::I64Load8U(_)
+            | Instruction::I64Load16S(_)
+            | Instruction::I64Load16U(_)
+            | Instruction::I64Load32S(_)
+            | Instruction::I64Load32U(_) => 1,
 
             // Stores: consume addr + value
-            Instruction::I32Store(_) | Instruction::I64Store(_)
-            | Instruction::F32Store(_) | Instruction::F64Store(_)
-            | Instruction::I32Store8(_) | Instruction::I32Store16(_)
-            | Instruction::I64Store8(_) | Instruction::I64Store16(_)
+            Instruction::I32Store(_)
+            | Instruction::I64Store(_)
+            | Instruction::F32Store(_)
+            | Instruction::F64Store(_)
+            | Instruction::I32Store8(_)
+            | Instruction::I32Store16(_)
+            | Instruction::I64Store8(_)
+            | Instruction::I64Store16(_)
             | Instruction::I64Store32(_) => 2,
 
             _ => 0,
@@ -2045,54 +2165,112 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// Returns how many values the instruction pushes onto the WASM stack.
     fn stack_pushes(insn: &Instruction<'_>) -> usize {
         match insn {
-            Instruction::I32Const(_) | Instruction::I64Const(_)
-            | Instruction::F32Const(_) | Instruction::F64Const(_) => 1,
+            Instruction::I32Const(_)
+            | Instruction::I64Const(_)
+            | Instruction::F32Const(_)
+            | Instruction::F64Const(_) => 1,
 
             // Unary ops: consume 1, push 1
-            Instruction::I32Eqz | Instruction::I64Eqz
-            | Instruction::I32Clz | Instruction::I32Ctz | Instruction::I32Popcnt
-            | Instruction::I64Clz | Instruction::I64Ctz | Instruction::I64Popcnt
-            | Instruction::I32WrapI64 | Instruction::I64ExtendI32S | Instruction::I64ExtendI32U
-            | Instruction::I32Extend8S | Instruction::I32Extend16S
-            | Instruction::I64Extend8S | Instruction::I64Extend16S | Instruction::I64Extend32S
-            | Instruction::F32Abs | Instruction::F32Neg | Instruction::F32Sqrt
-            | Instruction::F64Abs | Instruction::F64Neg | Instruction::F64Sqrt => 1,
+            Instruction::I32Eqz
+            | Instruction::I64Eqz
+            | Instruction::I32Clz
+            | Instruction::I32Ctz
+            | Instruction::I32Popcnt
+            | Instruction::I64Clz
+            | Instruction::I64Ctz
+            | Instruction::I64Popcnt
+            | Instruction::I32WrapI64
+            | Instruction::I64ExtendI32S
+            | Instruction::I64ExtendI32U
+            | Instruction::I32Extend8S
+            | Instruction::I32Extend16S
+            | Instruction::I64Extend8S
+            | Instruction::I64Extend16S
+            | Instruction::I64Extend32S
+            | Instruction::F32Abs
+            | Instruction::F32Neg
+            | Instruction::F32Sqrt
+            | Instruction::F64Abs
+            | Instruction::F64Neg
+            | Instruction::F64Sqrt => 1,
 
             // Binary ops: consume 2, push 1
-            Instruction::I32Add | Instruction::I32Sub | Instruction::I32Mul
-            | Instruction::I32DivS | Instruction::I32DivU
-            | Instruction::I32RemS | Instruction::I32RemU
-            | Instruction::I32And | Instruction::I32Or | Instruction::I32Xor
-            | Instruction::I32Shl | Instruction::I32ShrS | Instruction::I32ShrU
-            | Instruction::I32Rotl | Instruction::I32Rotr
-            | Instruction::I64Add | Instruction::I64Sub | Instruction::I64Mul
-            | Instruction::I64DivS | Instruction::I64DivU
-            | Instruction::I64RemS | Instruction::I64RemU
-            | Instruction::I64And | Instruction::I64Or | Instruction::I64Xor
-            | Instruction::I64Shl | Instruction::I64ShrS | Instruction::I64ShrU
-            | Instruction::I64Rotl | Instruction::I64Rotr
-            | Instruction::I32Eq | Instruction::I32Ne
-            | Instruction::I32LtS | Instruction::I32LtU
-            | Instruction::I32GtS | Instruction::I32GtU
-            | Instruction::I32LeS | Instruction::I32LeU
-            | Instruction::I32GeS | Instruction::I32GeU
-            | Instruction::I64Eq | Instruction::I64Ne
-            | Instruction::I64LtS | Instruction::I64LtU
-            | Instruction::I64GtS | Instruction::I64GtU
-            | Instruction::I64LeS | Instruction::I64LeU
-            | Instruction::I64GeS | Instruction::I64GeU
-            | Instruction::F32Add | Instruction::F32Sub
-            | Instruction::F32Mul | Instruction::F32Div
-            | Instruction::F32Min | Instruction::F32Max | Instruction::F32Copysign
-            | Instruction::F64Add | Instruction::F64Sub
-            | Instruction::F64Mul | Instruction::F64Div
-            | Instruction::F64Min | Instruction::F64Max | Instruction::F64Copysign
-            | Instruction::F32Eq | Instruction::F32Ne
-            | Instruction::F32Lt | Instruction::F32Gt
-            | Instruction::F32Le | Instruction::F32Ge
-            | Instruction::F64Eq | Instruction::F64Ne
-            | Instruction::F64Lt | Instruction::F64Gt
-            | Instruction::F64Le | Instruction::F64Ge => 1,
+            Instruction::I32Add
+            | Instruction::I32Sub
+            | Instruction::I32Mul
+            | Instruction::I32DivS
+            | Instruction::I32DivU
+            | Instruction::I32RemS
+            | Instruction::I32RemU
+            | Instruction::I32And
+            | Instruction::I32Or
+            | Instruction::I32Xor
+            | Instruction::I32Shl
+            | Instruction::I32ShrS
+            | Instruction::I32ShrU
+            | Instruction::I32Rotl
+            | Instruction::I32Rotr
+            | Instruction::I64Add
+            | Instruction::I64Sub
+            | Instruction::I64Mul
+            | Instruction::I64DivS
+            | Instruction::I64DivU
+            | Instruction::I64RemS
+            | Instruction::I64RemU
+            | Instruction::I64And
+            | Instruction::I64Or
+            | Instruction::I64Xor
+            | Instruction::I64Shl
+            | Instruction::I64ShrS
+            | Instruction::I64ShrU
+            | Instruction::I64Rotl
+            | Instruction::I64Rotr
+            | Instruction::I32Eq
+            | Instruction::I32Ne
+            | Instruction::I32LtS
+            | Instruction::I32LtU
+            | Instruction::I32GtS
+            | Instruction::I32GtU
+            | Instruction::I32LeS
+            | Instruction::I32LeU
+            | Instruction::I32GeS
+            | Instruction::I32GeU
+            | Instruction::I64Eq
+            | Instruction::I64Ne
+            | Instruction::I64LtS
+            | Instruction::I64LtU
+            | Instruction::I64GtS
+            | Instruction::I64GtU
+            | Instruction::I64LeS
+            | Instruction::I64LeU
+            | Instruction::I64GeS
+            | Instruction::I64GeU
+            | Instruction::F32Add
+            | Instruction::F32Sub
+            | Instruction::F32Mul
+            | Instruction::F32Div
+            | Instruction::F32Min
+            | Instruction::F32Max
+            | Instruction::F32Copysign
+            | Instruction::F64Add
+            | Instruction::F64Sub
+            | Instruction::F64Mul
+            | Instruction::F64Div
+            | Instruction::F64Min
+            | Instruction::F64Max
+            | Instruction::F64Copysign
+            | Instruction::F32Eq
+            | Instruction::F32Ne
+            | Instruction::F32Lt
+            | Instruction::F32Gt
+            | Instruction::F32Le
+            | Instruction::F32Ge
+            | Instruction::F64Eq
+            | Instruction::F64Ne
+            | Instruction::F64Lt
+            | Instruction::F64Gt
+            | Instruction::F64Le
+            | Instruction::F64Ge => 1,
 
             Instruction::Drop => 0,
             Instruction::Select => 1,
@@ -2109,18 +2287,29 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             Instruction::End | Instruction::Else | Instruction::Nop => 0,
             Instruction::Return | Instruction::Unreachable => 0,
 
-            Instruction::I32Load(_) | Instruction::I64Load(_)
-            | Instruction::F32Load(_) | Instruction::F64Load(_)
-            | Instruction::I32Load8S(_) | Instruction::I32Load8U(_)
-            | Instruction::I32Load16S(_) | Instruction::I32Load16U(_)
-            | Instruction::I64Load8S(_) | Instruction::I64Load8U(_)
-            | Instruction::I64Load16S(_) | Instruction::I64Load16U(_)
-            | Instruction::I64Load32S(_) | Instruction::I64Load32U(_) => 1,
+            Instruction::I32Load(_)
+            | Instruction::I64Load(_)
+            | Instruction::F32Load(_)
+            | Instruction::F64Load(_)
+            | Instruction::I32Load8S(_)
+            | Instruction::I32Load8U(_)
+            | Instruction::I32Load16S(_)
+            | Instruction::I32Load16U(_)
+            | Instruction::I64Load8S(_)
+            | Instruction::I64Load8U(_)
+            | Instruction::I64Load16S(_)
+            | Instruction::I64Load16U(_)
+            | Instruction::I64Load32S(_)
+            | Instruction::I64Load32U(_) => 1,
 
-            Instruction::I32Store(_) | Instruction::I64Store(_)
-            | Instruction::F32Store(_) | Instruction::F64Store(_)
-            | Instruction::I32Store8(_) | Instruction::I32Store16(_)
-            | Instruction::I64Store8(_) | Instruction::I64Store16(_)
+            Instruction::I32Store(_)
+            | Instruction::I64Store(_)
+            | Instruction::F32Store(_)
+            | Instruction::F64Store(_)
+            | Instruction::I32Store8(_)
+            | Instruction::I32Store16(_)
+            | Instruction::I64Store8(_)
+            | Instruction::I64Store16(_)
             | Instruction::I64Store32(_) => 0,
 
             _ => 0,
@@ -2159,11 +2348,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Flush const stacks for all entries reachable from the tail.
-    fn flush_const_stacks_reachable(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn flush_const_stacks_reachable(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.fns.is_empty() {
             return Ok(());
         }
-        let tail_idx = self.fns.len() - 1;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable {
             self.flush_const_stack(ctx, idx as usize)?;
@@ -2270,16 +2458,23 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         self.flush_bundles(ctx, tail_idx)
     }
 
-    /// Seal the current function by emitting a final instruction and closing all if statements.
-    /// This terminates the function and removes all predecessor edges.
-    pub fn seal(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+pub fn seal(&mut self, ctx: &mut Context, i: &Instruction<'_>) -> Result<(), E> {
         if self.fns.is_empty() {
             return Ok(());
         }
-        self.flush_peephole(ctx)?;
         let tail_idx = self.fns.len() - 1;
+        self.seal_to(tail_idx, ctx, &i)
+    }
+
+    /// Seal the current function by emitting a final instruction and closing all if statements.
+    /// This terminates the function and removes all predecessor edges.
+    pub fn seal_to(&mut self, tail_idx: usize, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+        if self.fns.is_empty() {
+            return Ok(());
+        }
+        self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
-        self.flush_const_stacks_reachable(ctx)?;
+        self.flush_const_stacks_reachable(ctx, tail_idx)?;
         let ifs = self.fns[tail_idx].if_stmts;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
