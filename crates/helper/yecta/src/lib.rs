@@ -80,6 +80,7 @@ use core::{
     convert::Infallible,
     marker::PhantomData,
     mem::{take, transmute},
+    ops::{Deref, DerefMut},
 };
 
 use alloc::{
@@ -124,11 +125,12 @@ where
 {
     #[inline]
     fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
-        self.feed(ctx, instr)
+              let tail_idx = self.lock_global().len() - 1;
+        self.feed_to(tail_idx, ctx, instr)
     }
     #[inline]
     fn emit_jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        let tail_idx = self.fns.len() - 1;
+        let tail_idx = self.lock_global().len() - 1;
         self.jmp(tail_idx, ctx, target, params)
     }
 }
@@ -329,6 +331,7 @@ impl<const N: usize> Default for LocalPool<N> {
 /// this store was already conditionally emitted before a load (1 = emitted,
 /// 0 = not yet).  The unconditional flush path checks this flag to avoid
 /// double-storing.
+ #[derive(Clone)]
 pub struct LazyStore {
     /// Local holding the effective address.
     /// Type is `I32` for 32-bit memory (the default), `I64` for memory64.
@@ -564,6 +567,12 @@ pub const DEFAULT_MAX_INSTS_PER_FN: usize = 256;
 /// generated function before a conditional branch forces a split.
 pub const DEFAULT_MAX_IFS_PER_FN: usize = 16;
 
+#[derive(Default)]
+struct LockCfg {
+    funcs: BTreeSet<usize>,
+    main: bool,
+}
+
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
 pub struct Reactor<Context, E = Infallible, F = Function, P = LocalPool>
@@ -571,8 +580,9 @@ where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
 {
-    fns: Vec<Entry<F>>,
-    lens: VecDeque<BTreeSet<FuncIdx>>,
+    lock: spin::Mutex<LockCfg>,
+    fns: core::cell::UnsafeCell<Vec<Entry<F>>>,
+    lens: spin::Mutex<VecDeque<BTreeSet<FuncIdx>>>,
     phantom: PhantomData<(Context, E)>,
     /// Base offset added to all emitted function indices.
     /// Used when imports or helper functions precede the generated functions in the module.
@@ -583,8 +593,8 @@ where
     max_ifs_per_fn: usize,
     /// Pool of recyclable local indices used to save/restore deferred store
     /// operands around alias-check `if` guards in lazy emission.
-    pub local_pool: P,
-    peephole: Option<Instruction<'static>>,
+    pub local_pool: spin::Mutex<P>,
+    peephole: spin::Mutex<Option<Instruction<'static>>>,
 }
 impl<Context, E, F, P> Default for Reactor<Context, E, F, P>
 where
@@ -599,8 +609,9 @@ where
             base_func_offset: 0,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
-            local_pool: P::default(),
-            peephole: None,
+            local_pool: spin::Mutex::new(P::default()),
+            peephole: spin::Mutex::new(None),
+            lock: Default::default(),
         }
     }
 }
@@ -629,8 +640,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             base_func_offset,
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
-            local_pool: P::default(),
-            peephole: None,
+            local_pool: spin::Mutex::new(P::default()),
+            peephole: spin::Mutex::new(None),
+            lock: Default::default(),
         }
     }
 
@@ -715,8 +727,8 @@ impl<Context, E> Reactor<Context, E> {
         self.next_with(ctx, Function::new(locals), len)
     }
 }
-pub struct Fed<'a,Context,E,F: InstructionSink<Context, E>,P:LocalPoolBackend>{
-    pub reactor: &'a mut Reactor<Context,E,F,P>,
+pub struct Fed<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
+    pub reactor: &'a Reactor<Context, E, F, P>,
     pub tail_idx: usize,
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> InstructionSink<Context, E>
@@ -727,6 +739,85 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Instructio
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
+    fn lock_global(&self) -> impl DerefMut<Target = Vec<Entry<F>>> + '_ {
+        loop{
+            let mut guard = self.lock.lock();
+            if guard.main {
+                continue;
+            }
+            if !guard.funcs.is_empty(){
+                continue;
+            }
+            guard.main = true;
+            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
+                this: &'a Reactor<Context, E, F, P>,
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Deref
+                for Lock<'_, Context, E, F, P>
+            {
+                type Target = Vec<Entry<F>>;
+                fn deref(&self) -> &Self::Target {
+                    unsafe { &*self.this.fns.get() }
+                }
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> DerefMut
+                for Lock<'_, Context, E, F, P>
+            {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    unsafe { &mut *self.this.fns.get() }
+                }
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop for Lock<'_, Context, E, F, P> {
+                fn drop(&mut self) {
+                    let mut guard = self.this.lock.lock();
+                    guard.main = false;
+                }
+            }
+            return Lock { this: self };
+        }
+    }
+    fn lock_entry(&self, idx: usize) -> impl DerefMut<Target = Entry<F>> + '_ {
+        loop {
+            let mut guard = self.lock.lock();
+            if guard.main {
+                continue;
+            }
+            if guard.funcs.contains(&idx) {
+                continue;
+            }
+            guard.funcs.insert(idx);
+            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
+                this: &'a Reactor<Context, E, F, P>,
+                idx: usize,
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Deref
+                for Lock<'_, Context, E, F, P>
+            {
+                type Target = Entry<F>;
+                fn deref(&self) -> &Self::Target {
+                    match unsafe { &*self.this.fns.get() } {
+                        g => &g[self.idx],
+                    }
+                }
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> DerefMut
+                for Lock<'_, Context, E, F, P>
+            {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    match unsafe { &mut *self.this.fns.get() } {
+                        g => &mut g[self.idx],
+                    }
+                }
+            }
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop for Lock<'_, Context, E, F, P> {
+                fn drop(&mut self) {
+                    let mut guard = self.this.lock.lock();
+                    guard.funcs.remove(&self.idx);
+                }
+            }
+            return Lock { this: self, idx };
+        }
+    }
     /// Create a new function with the given locals and control flow distance.
     ///
     /// If any function in the current reachable predecessor set has reached the
@@ -742,41 +833,40 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         // Check every function that would receive instructions from the new
         // tail (i.e. the current tail's transitive predecessor set).  If any
         // has hit a limit, seal the whole group before opening a new function.
-        if !self.fns.is_empty() {
-            let tail_idx = self.fns.len() - 1;
+        if !self.fns.get_mut().is_empty() {
+            let tail_idx = self.fns.get_mut().len() - 1;
             let reachable = self.transitive_preds_of(tail_idx).clone();
             let max_insts = self.max_insts_per_fn;
             let max_ifs = self.max_ifs_per_fn;
             let saturated = reachable.iter().any(|&FuncIdx(i)| {
-                self.fns[i as usize].inst_count >= max_insts
-                    || self.fns[i as usize].if_stmts >= max_ifs
+                self.fns.get_mut()[i as usize].inst_count >= max_insts
+                    || self.fns.get_mut()[i as usize].if_stmts >= max_ifs
             });
             if saturated {
                 self.seal_for_split(ctx)?;
             }
         }
-
-        while self.lens.len() < len as usize + 1 {
-            self.lens.push_back(Default::default());
+let mut lock = self.lens.lock();
+        while lock.len() < len as usize + 1 {
+            lock.push_back(Default::default());
         }
-        self.lens
+        lock
             .iter_mut()
             .nth(len as usize)
             .unwrap()
-            .insert(FuncIdx(self.fns.len() as u32));
+            .insert(FuncIdx(self.fns.get_mut().len() as u32));
 
         // Build the direct predecessor set for the new entry from the lens queue.
         // Filter out self-references (the new entry's own index in lens[0] for len=0).
-        let new_idx = FuncIdx(self.fns.len() as u32);
-        let direct_preds: BTreeSet<FuncIdx> = self
-            .lens
+        let new_idx = FuncIdx(self.fns.get_mut().len() as u32);
+        let direct_preds: BTreeSet<FuncIdx> = lock
             .pop_front()
             .into_iter()
             .flatten()
             .filter(|&p| p != new_idx)
             .collect();
 
-        self.fns.push(Entry {
+        self.fns.get_mut().push(Entry {
             function: f,
             preds: direct_preds,
             if_stmts: 0,
@@ -806,45 +896,48 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// open `if` blocks on every reachable function, then drains all
     /// predecessor edges and invalidates every affected entry's transitive
     /// cache so the next function starts with a clean slate.
-    fn seal_for_split(&mut self, ctx: &mut Context) -> Result<(), E> {
-        if self.fns.is_empty() {
+    fn seal_for_split(&self, ctx: &mut Context) -> Result<(), E> {
+        let mut lock = self.lock_global();
+        if lock.is_empty() {
             return Ok(());
         }
-        let tail_idx = self.fns.len() - 1;
+        let tail_idx = lock.len() - 1;
+        drop(lock);
         self.flush_peephole(tail_idx, ctx)?;
+        lock = self.lock_global();
         // Flush const stacks for all reachable entries.
-        if !self.fns.is_empty() {
-            let tail_idx = self.fns.len() - 1;
+        if !lock.is_empty() {
+            let tail_idx = lock.len() - 1;
             let reachable_for_flush = self.transitive_preds_of(tail_idx).clone();
             for FuncIdx(fi) in reachable_for_flush {
-                self.flush_const_stack(ctx, fi as usize)?;
+                self.flush_const_stack(ctx, &mut lock[fi as usize], fi as usize)?;
             }
         }
-        let tail_idx = self.fns.len() - 1;
-        let ifs = self.fns[tail_idx].if_stmts;
+        let tail_idx = lock.len() - 1;
+        let ifs = lock[tail_idx].if_stmts;
         let reachable: BTreeSet<FuncIdx> = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
-            self.fns[idx as usize]
+            lock[idx as usize]
                 .function
                 .instruction(ctx, &Instruction::Unreachable)?;
             for _ in 0..ifs {
-                self.fns[idx as usize]
+                lock[idx as usize]
                     .function
                     .instruction(ctx, &Instruction::End)?;
             }
-            _ = take(&mut self.fns[idx as usize].preds);
-            self.fns[idx as usize].const_stack.clear();
-            self.fns[idx as usize].locals_const.clear();
-            self.fns[idx as usize].locals_virtual.clear();
-            self.fns[idx as usize].skip_depth = 0;
-            self.fns[idx as usize].block_frames.clear();
+            _ = take(&mut lock[idx as usize].preds);
+            lock[idx as usize].const_stack.clear();
+            lock[idx as usize].locals_const.clear();
+            lock[idx as usize].locals_virtual.clear();
+            lock[idx as usize].skip_depth = 0;
+            lock[idx as usize].block_frames.clear();
             // Invalidate transitive cache after severing preds.
-            self.fns[idx as usize].transitive_preds = None;
+            lock[idx as usize].transitive_preds = None;
         }
         // Clear any pending future-function predecessor assignments in the
         // lens queue — they reference entries from before the split and are
         // no longer valid.
-        self.lens.clear();
+        self.lens.lock().clear();
         Ok(())
     }
 
@@ -854,41 +947,44 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// The returned reference borrows `self` immutably after the cache is
     /// populated, so callers that need to mutate `self` afterward must clone
     /// the result first.
-    fn transitive_preds_of(&mut self, idx: usize) -> &BTreeSet<FuncIdx> {
+    fn transitive_preds_of(&self, idx: usize) -> BTreeSet<FuncIdx> {
+        let mut lock = self.lock_entry(idx);
         // If already cached, return immediately.
-        if self.fns[idx].transitive_preds.is_some() {
-            return self.fns[idx].transitive_preds.as_ref().unwrap();
+        if lock.transitive_preds.is_some() {
+            return lock.transitive_preds.as_ref().unwrap().clone();
         }
 
         // BFS over direct preds to build the transitive set.
         let mut visited: BTreeSet<FuncIdx> = BTreeSet::new();
         visited.insert(FuncIdx(idx as u32));
 
-        let mut stack: Vec<FuncIdx> = self.fns[idx].preds.iter().cloned().collect();
+        let mut stack: Vec<FuncIdx> = lock.preds.iter().cloned().collect();
         while let Some(p) = stack.pop() {
             if visited.contains(&p) {
                 continue;
             }
             visited.insert(p);
             let FuncIdx(pi) = p;
-            for &q in &self.fns[pi as usize].preds {
+            let mut l = self.lock_entry(pi as usize);
+            for &q in &l.preds {
                 if !visited.contains(&q) {
                     stack.push(q);
                 }
             }
         }
 
-        self.fns[idx].transitive_preds = Some(visited);
-        self.fns[idx].transitive_preds.as_ref().unwrap()
+        lock.transitive_preds = Some(visited);
+        lock.transitive_preds.as_ref().unwrap().clone()
     }
     /// Add a predecessor edge from pred to succ in the control flow graph.
     ///
     /// Invalidates the transitive predecessor cache for `succ` and for every
     /// live entry that has `succ` in its cached transitive set (since those
     /// entries can now reach `pred` transitively too).
-    fn add_pred(&mut self, succ: FuncIdx, pred: FuncIdx) {
+    fn add_pred(&self, succ: FuncIdx, pred: FuncIdx) {
         let FuncIdx(succ_idx) = succ;
-        match self.fns.get_mut(succ_idx as usize) {
+        let mut lock = self.lock_global();
+        match lock.get_mut(succ_idx as usize) {
             Some(a) => {
                 a.preds.insert(pred);
                 // Invalidate this entry's cache — it has a new predecessor.
@@ -898,13 +994,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 // succ_idx is beyond the current fns vector — store in lens
                 // for when that entry is created by next_with.
                 let len = (succ_idx as usize)
-                    .checked_sub(self.fns.len())
+                    .checked_sub(lock.len())
                     .expect("add_pred: succ_idx should be >= fns.len() in None branch")
                     as u32;
-                while self.lens.len() < len as usize + 1 {
-                    self.lens.push_back(Default::default());
+                    let mut lens = self.lens.lock();
+                while lens.len() < len as usize + 1 {
+                    lens.push_back(Default::default());
                 }
-                self.lens.iter_mut().nth(len as usize).unwrap().insert(pred);
+                lens.iter_mut().nth(len as usize).unwrap().insert(pred);
                 // No live entry to invalidate; done.
                 return;
             }
@@ -912,10 +1009,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         // Invalidate the cache of every live entry whose cached transitive set
         // included succ — those sets are now stale because they're missing the
         // new predecessors reachable through succ.
-        for i in 0..self.fns.len() {
-            if let Some(ref tp) = self.fns[i].transitive_preds {
+        for i in 0..lock.len() {
+            if let Some(ref tp) = lock[i].transitive_preds {
                 if tp.contains(&succ) {
-                    self.fns[i].transitive_preds = None;
+                    lock[i].transitive_preds = None;
                 }
             }
         }
@@ -923,7 +1020,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// Add a predecessor edge with cycle detection.
     /// If a cycle is detected, converts to return calls instead.
     fn add_pred_checked(
-        &mut self,
+        &self,
         ctx: &mut Context,
         succ: FuncIdx,
         pred: FuncIdx,
@@ -934,8 +1031,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         // Use the per-entry transitive predecessor cache for the cycle check.
         let cycle = self.transitive_preds_of(pred_idx as usize).contains(&succ);
         if cycle {
+            let mut lock = self.lock_global();
+            let mut plock = self.local_pool.lock();
             // Clone the set so we can mutate fns while iterating.
-            let pred_transitive: BTreeSet<FuncIdx> = self.fns[pred_idx as usize]
+            let pred_transitive: BTreeSet<FuncIdx> = lock[pred_idx as usize]
                 .transitive_preds
                 .clone()
                 .unwrap();
@@ -943,7 +1042,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             let wasm_func_idx = succ_idx + self.base_func_offset;
             for k in &pred_transitive {
                 let FuncIdx(k_idx) = *k;
-                let f = &mut self.fns[k_idx as usize];
+                let f = &mut lock[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
                 // Drain deferred stores: emit the flag-guarded unconditional flush.
@@ -964,9 +1063,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     f.function.instruction(ctx, &s.instr)?;
                     f.function.instruction(ctx, &Instruction::End)?;
                     // Return locals to the pool.
-                    self.local_pool.free(s.addr_local, s.addr_type);
-                    self.local_pool.free(s.val_local, s.val_type);
-                    self.local_pool.free(s.emitted_local, ValType::I32);
+                    plock.free(s.addr_local, s.addr_type);
+                    plock.free(s.val_local, s.val_type);
+                    plock.free(s.emitted_local, ValType::I32);
                 }
                 for p in 0..params {
                     f.function.instruction(ctx, &Instruction::LocalGet(p))?;
@@ -983,13 +1082,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         Ok(())
     }
 
-    fn flush_bundles(&mut self, ctx: &mut Context, idx: usize) -> Result<(), E> {
+    pub fn flush_bundles(&self, ctx: &mut Context, idx: usize) -> Result<(), E> {
         let funcs = self.transitive_preds_of(idx).clone();
+        let mut plock = self.local_pool.lock();
         for func in funcs {
+            let mut lock = self.lock_entry(func.0 as usize);
             // Drain into a temporary vec to satisfy the borrow checker.
-            let stores: Vec<LazyStore> = self.fns[func.0 as usize].bundles.drain(..).collect();
+            let stores: Vec<LazyStore> = lock.bundles.drain(..).collect();
             for s in stores {
-                let f = &mut self.fns[func.0 as usize];
+                let f = &mut *lock;
                 // Emit only if not already conditionally emitted before a load.
                 f.function
                     .instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
@@ -1003,9 +1104,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 f.function.instruction(ctx, &s.instr)?;
                 f.function.instruction(ctx, &Instruction::End)?;
                 // Return locals to the shared pool.
-                self.local_pool.free(s.addr_local, s.addr_type);
-                self.local_pool.free(s.val_local, s.val_type);
-                self.local_pool.free(s.emitted_local, ValType::I32);
+                plock.free(s.addr_local, s.addr_type);
+                plock.free(s.val_local, s.val_type);
+                plock.free(s.emitted_local, ValType::I32);
             }
         }
         Ok(())
@@ -1041,19 +1142,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// All pending bundles remain in the queue; the unconditional flush will
     /// drain them and free their locals.
     pub fn flush_bundles_for_load(
-        &mut self,
+        &self,
         ctx: &mut Context,
         load_addr_local: u32,
         load_addr_type: ValType,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
-        if self.fns.is_empty() {
+        if self.lock_global().is_empty() {
             return Ok(());
         }
         let funcs = self.transitive_preds_of(tail_idx).clone();
         for func in funcs {
-            let f = &mut self.fns[func.0 as usize];
-            for s in &*f.bundles {
+            let mut f = self.lock_entry(func.0 as usize);
+            for s in f.bundles.clone() {
                 // Only alias-check stores in the same address space.
                 if s.addr_type != load_addr_type {
                     continue;
@@ -1094,25 +1195,26 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// * `tag` - Exception tag configuration for escape handling
     /// * `pool` - Pool configuration for indirect calls
     pub fn call(
-        &mut self,
+        &self,
         ctx: &mut Context,
         target: Target<Context, E>,
         tag: EscapeTag,
         pool: Pool<'_, Context, E>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
-
         self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: TypeIdx(ty_idx),
         } = tag;
-        self.feed_to(tail_idx,
+        self.feed_to(
+            tail_idx,
             ctx,
             &Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)),
         )?;
-        self.feed_to(tail_idx,
+        self.feed_to(
+            tail_idx,
             ctx,
             &Instruction::TryTable(
                 wasm_encoder::BlockType::FunctionType(ty_idx),
@@ -1137,12 +1239,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     ty: TypeIdx(pool_ty),
                     handler,
                 } = pool;
-                match handler.indirect_jump(ctx, &mut Fed{
-                    reactor: self,
-                    tail_idx,
-                })? {
+                match handler.indirect_jump(
+                    ctx,
+                    &mut Fed {
+                        reactor: self,
+                        tail_idx,
+                    },
+                )? {
                     IndirectJumpKind::Table(TableIdx(pool_table)) => {
-                        self.feed_to(tail_idx, 
+                        self.feed_to(
+                            tail_idx,
                             ctx,
                             &Instruction::CallIndirect {
                                 type_index: pool_ty,
@@ -1168,7 +1274,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// # Arguments
     /// * `params` - Number of parameters to pass through the exception
     /// * `tag` - Exception tag to throw
-    pub fn ret(&mut self, tail_idx: usize, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+    pub fn ret(
+        &self,
+        tail_idx: usize,
+        ctx: &mut Context,
+        params: u32,
+        tag: EscapeTag,
+    ) -> Result<(), E> {
         self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
@@ -1199,10 +1311,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// reactor.ji_with_params(params);
     /// ```
     pub fn ji_with_params(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: JumpCallParams<Context, E>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         let JumpCallParams {
             params: param_count,
@@ -1213,7 +1325,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             condition,
         } = params;
 
-        self.ji(ctx, param_count, &fixups, target, call, pool, condition, tail_idx)
+        self.ji(
+            ctx,
+            param_count,
+            &fixups,
+            target,
+            call,
+            pool,
+            condition,
+            tail_idx,
+        )
     }
 
     /// Emit a jump or call instruction, optionally conditional.
@@ -1235,15 +1356,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// * `pool` - Pool configuration for indirect calls
     /// * `condition` - If Some, make the jump/call conditional on this snippet
     pub fn ji(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
         call: Option<EscapeTag>,
-        pool: Pool<'_,Context,E>,
+        pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         self.flush_bundles(ctx, tail_idx)?;
         // Track if statements for conditional branches
@@ -1254,11 +1375,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         match call {
             Some(escape_tag) => {
                 self.emit_conditional_call(
-                    ctx, params, fixups, target, escape_tag, pool, condition,tail_idx
+                    ctx, params, fixups, target, escape_tag, pool, condition, tail_idx,
                 )?;
             }
             None => {
-                self.emit_conditional_jump(ctx, params, fixups, target, pool, condition,tail_idx)?;
+                self.emit_conditional_jump(ctx, params, fixups, target, pool, condition, tail_idx)?;
             }
         }
         Ok(())
@@ -1271,45 +1392,39 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// (`seal_for_split`) before the counter is incremented.  This prevents
     /// unbounded `if`-nesting and the O(N²) `End`-instruction explosion that
     /// follows from it.
-    fn increment_if_stmts_for_predecessors(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        if !self.fns.is_empty() {
+    fn increment_if_stmts_for_predecessors(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        match self.lock_global(){mut lock => {
+        if !lock.is_empty() {
             let reachable = self.transitive_preds_of(tail_idx).clone();
             let max_ifs = self.max_ifs_per_fn;
             let any_saturated = reachable
                 .iter()
-                .any(|&FuncIdx(i)| self.fns[i as usize].if_stmts >= max_ifs);
+                .any(|&FuncIdx(i)| lock[i as usize].if_stmts >= max_ifs);
             if any_saturated {
+                drop(lock); // release lock before recursive call to seal_for_split
                 self.seal_for_split(ctx)?;
             }
         }
+    }}
         let reachable_funcs = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable_funcs {
-            self.fns[idx as usize].if_stmts += 1;
+            self.lock_entry(idx as usize).if_stmts += 1;
         }
         Ok(())
     }
 
-    /// Return the set of all functions reachable from the current tail by
-    /// following predecessor edges transitively, including the tail itself.
-    ///
-    /// The result is computed lazily and cached in the tail entry's
-    /// `transitive_preds` field.  Subsequent calls are O(1) until any
-    /// predecessor edge changes (which sets the cache to `None`).
-    fn collect_reachable_predecessors(&mut self) -> BTreeSet<FuncIdx> {
-        if self.fns.is_empty() {
-            return BTreeSet::new();
-        }
-        let tail = self.fns.len() - 1;
-        self.transitive_preds_of(tail).clone()
-    }
 
     /// Emit parameters with fixups applied.
     fn emit_params_with_fixups(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         for param_idx in 0..params {
             if let Some(fixup) = fixups.get(&param_idx) {
@@ -1323,12 +1438,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
     /// Restore parameters after a call, dropping fixed-up values and restoring original locals.
     fn restore_params_after_call(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
-
+        tail_idx: usize,
     ) -> Result<(), E> {
         for param_idx in (0..params).rev() {
             if fixups.contains_key(&param_idx) {
@@ -1342,7 +1456,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
     /// Emit a conditional call with exception handling.
     fn emit_conditional_call(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
@@ -1350,11 +1464,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         escape_tag: EscapeTag,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
-            tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            self.feed_to(
+                tail_idx,
+                ctx,
+                &Instruction::If(wasm_encoder::BlockType::Empty),
+            )?;
         }
 
         self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
@@ -1369,17 +1487,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
     /// Emit a conditional jump (no exception handling).
     fn emit_conditional_jump(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         match target {
-            Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, condition, tail_idx),
+            Target::Static { func } => {
+                self.emit_static_jump(ctx, params, fixups, func, condition, tail_idx)
+            }
             Target::Dynamic { idx } => {
                 self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition, tail_idx)
             }
@@ -1388,17 +1508,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
     /// Emit a static (direct) jump to a known function.
     fn emit_static_jump(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         func: FuncIdx,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            self.feed_to(
+                tail_idx,
+                ctx,
+                &Instruction::If(wasm_encoder::BlockType::Empty),
+            )?;
 
             let FuncIdx(func_idx) = func;
             let wasm_func_idx = func_idx + self.base_func_offset;
@@ -1418,18 +1542,22 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
     /// Emit a dynamic (indirect) jump through a table.
     fn emit_dynamic_jump(
-        &mut self,
+        &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         idx: &(dyn Snippet<Context, E> + '_),
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize
+        tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            self.feed_to(tail_idx, ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            self.feed_to(
+                tail_idx,
+                ctx,
+                &Instruction::If(wasm_encoder::BlockType::Empty),
+            )?;
         }
 
         self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
@@ -1439,10 +1567,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             ty: TypeIdx(pool_ty),
             handler,
         } = pool;
-        let i = match handler.indirect_jump(ctx, &mut Fed{
-            tail_idx,
-            reactor: self,
-        })? {
+        let i = match handler.indirect_jump(
+            ctx,
+            &mut Fed {
+                tail_idx,
+                reactor: self,
+            },
+        )? {
             IndirectJumpKind::Table(TableIdx(pool_table)) => Instruction::ReturnCallIndirect {
                 type_index: pool_ty,
                 table_index: pool_table,
@@ -1463,8 +1594,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// # Arguments
     /// * `target` - The function index to jump to
     /// * `params` - Number of parameters to pass
-    pub fn jmp(&mut self, target_idx: usize, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.flush_peephole(target_idx  , ctx)?;
+    pub fn jmp(
+        &self,
+        target_idx: usize,
+        ctx: &mut Context,
+        target: FuncIdx,
+        params: u32,
+    ) -> Result<(), E> {
+        self.flush_peephole(target_idx, ctx)?;
         // Use the per-entry transitive predecessor cache instead of a BFS.
         let reachable = self.transitive_preds_of(target_idx).clone();
         for x in reachable {
@@ -1472,33 +1609,33 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         }
         Ok(())
     }
-    pub fn feed(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        if self.fns.is_empty() {
-            return Ok(());
-        }
-        let tail_idx = self.fns.len() - 1;
-        self.feed_to(tail_idx, ctx, instruction)
-    }
+
     /// Feed an instruction to all active functions.
     /// The instruction is added to the current function and all its predecessors.
     /// Applies constant folding via per-entry shadow stacks and a reactor-level
     /// one-slot peephole optimizer.
-    pub fn feed_to(&mut self, target: usize, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+    pub fn feed_to(
+        &self,
+        target: usize,
+        ctx: &mut Context,
+        instruction: &Instruction<'_>,
+    ) -> Result<(), E> {
+        let mut peephole = self.peephole.lock();
         // Reactor-level peephole: check if (prev, curr) matches an elision pattern.
-        let elide = match (&self.peephole, instruction) {
+        let elide = match (&*peephole, instruction) {
             (Some(Instruction::LocalGet(_)), Instruction::Drop) => true,
             (Some(Instruction::I32Const(0)), Instruction::I32Add) => true,
             (Some(Instruction::I32Const(1)), Instruction::I32Mul) => true,
             _ => false,
         };
         if elide {
-            self.peephole = None;
+        *peephole = None;
             return Ok(());
         }
 
         // Flush buffered instruction if it didn't combine.
-        if self.peephole.is_some() {
-            let prev = self.peephole.take().unwrap();
+        if peephole.is_some() {
+            let prev = peephole.take().unwrap();
             let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
                 self.feed_one(ctx, idx as usize, &prev)?;
@@ -1507,7 +1644,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
 
         // Try to buffer current instruction in peephole (only static variants).
         if let Some(static_insn) = Self::to_static_insn(instruction) {
-            self.peephole = Some(static_insn);
+            *peephole = Some(static_insn);
         } else {
             let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
@@ -1519,8 +1656,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Flush the peephole buffer by broadcasting its held instruction to all reachable entries.
-    fn flush_peephole(&mut self, target: usize, ctx: &mut Context) -> Result<(), E> {
-        if let Some(prev) = self.peephole.take() {
+    fn flush_peephole(&self, target: usize, ctx: &mut Context) -> Result<(), E> {
+        let mut peephole = self.peephole.lock();
+        if let Some(prev) = peephole.take() {
             let reachable = self.transitive_preds_of(target).clone();
             for FuncIdx(idx) in reachable {
                 self.feed_one(ctx, idx as usize, &prev)?;
@@ -1594,15 +1732,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Per-entry instruction dispatch with shadow-stack constant folding.
-    fn feed_one(&mut self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+    fn feed_one(&self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+        let mut func = self.lock_entry(idx);
         // Skip mode: drop instructions until skip_depth returns to 0.
-        if self.fns[idx].skip_depth > 0 {
+        if func.skip_depth > 0 {
             match insn {
                 Instruction::If(_) | Instruction::Block(_) | Instruction::Loop(_) => {
-                    self.fns[idx].skip_depth += 1;
+                    func.skip_depth += 1;
                 }
                 Instruction::End => {
-                    self.fns[idx].skip_depth -= 1;
+                    func.skip_depth -= 1;
                 }
                 _ => {}
             }
@@ -1610,19 +1749,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         }
 
         // Try constant folding.
-        if self.try_fold_one(idx, insn) {
+        if self.try_fold_one(&mut func, idx, insn) {
             return Ok(());
         }
 
         // Materialize any deferred constants the instruction needs.
-        self.materialize_for(ctx, idx, insn)?;
+        self.materialize_for(ctx, &mut func, idx, insn)?;
 
         // Emit the instruction.
-        self.fns[idx].function.instruction(ctx, insn)?;
-        self.fns[idx].inst_count += 1;
+        func.function.instruction(ctx, insn)?;
+        func.inst_count += 1;
 
         // Update shadow stack for stack-pushing / stack-popping instructions.
-        Self::update_shadow_stack(&mut self.fns[idx], insn);
+        Self::update_shadow_stack(&mut func, insn);
 
         Ok(())
     }
@@ -1630,8 +1769,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// Try to constant-fold `insn` for entry `idx`.
     /// Returns `true` if the instruction was fully handled (not emitted, not counted).
     /// Returns `false` if the instruction should be emitted normally.
-    fn try_fold_one(&mut self, idx: usize, insn: &Instruction<'_>) -> bool {
-        let entry = &mut self.fns[idx];
+    fn try_fold_one(& self, entry: &mut Entry<F>, idx: usize, insn: &Instruction<'_>) -> bool {
         match insn {
             // ── Constant pushes: defer, push Some(v) ──────────────────
             Instruction::I32Const(v) => {
@@ -1961,8 +2099,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// For instructions whose stack signature is not specifically known, flushes the entire
     /// shadow stack to be safe.
     fn materialize_for(
-        &mut self,
+        &self,
         ctx: &mut Context,
+        entry: &mut Entry<F>,
         idx: usize,
         insn: &Instruction<'_>,
     ) -> Result<(), E> {
@@ -1971,11 +2110,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             return Ok(());
         }
 
-        let len = self.fns[idx].const_stack.len();
+        let len = entry.const_stack.len();
         let start = len.saturating_sub(pops);
 
         // Check if there are any deferred consts to materialize in range.
-        let has_deferred = self.fns[idx].const_stack[start..len]
+        let has_deferred = entry.const_stack[start..len]
             .iter()
             .any(|s| s.is_some());
 
@@ -1990,15 +2129,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         // We can only emit in stack order. If there's a None below a Some, we have
         // a gap. In that case, we can only materialize from the top contiguous Some group.
         for i in start..len {
-            if let Some((v, ty)) = self.fns[idx].const_stack[i] {
+            if let Some((v, ty)) = entry.const_stack[i] {
                 let insn = match ty {
                     ValType::I32 => Instruction::I32Const(v as i32),
                     ValType::I64 => Instruction::I64Const(v as i64),
                     _ => Instruction::I64Const(v as i64),
                 };
-                self.fns[idx].function.instruction(ctx, &insn)?;
-                self.fns[idx].inst_count += 1;
-                self.fns[idx].const_stack[i] = None; // now emitted to WASM stack
+                entry.function.instruction(ctx, &insn)?;
+                entry.inst_count += 1;
+                entry.const_stack[i] = None; // now emitted to WASM stack
             }
         }
         Ok(())
@@ -2329,8 +2468,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     }
 
     /// Flush the shadow stack for entry `idx`, materializing all deferred constants.
-    fn flush_const_stack(&mut self, ctx: &mut Context, idx: usize) -> Result<(), E> {
-        let stack: Vec<_> = self.fns[idx].const_stack.drain(..).collect();
+    fn flush_const_stack(&self, ctx: &mut Context, entry: &mut Entry<F>, idx: usize) -> Result<(), E> {
+        let stack: Vec<_> = entry.const_stack.drain(..).collect();
         for slot in stack {
             if let Some((v, ty)) = slot {
                 let insn = match ty {
@@ -2338,23 +2477,30 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     ValType::I64 => Instruction::I64Const(v as i64),
                     _ => Instruction::I64Const(v as i64),
                 };
-                self.fns[idx].function.instruction(ctx, &insn)?;
-                self.fns[idx].inst_count += 1;
+                entry.function.instruction(ctx, &insn)?;
+                entry.inst_count += 1;
             }
         }
-        self.fns[idx].locals_const.clear();
-        self.fns[idx].locals_virtual.clear();
+        entry.locals_const.clear();
+        entry.locals_virtual.clear();
         Ok(())
     }
 
     /// Flush const stacks for all entries reachable from the tail.
-    fn flush_const_stacks_reachable(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        if self.fns.is_empty() {
+    fn flush_const_stacks_reachable(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        let mut lock = self.lock_global();
+        if lock.is_empty() {
             return Ok(());
         }
+        drop(lock);
         let reachable = self.transitive_preds_of(tail_idx).clone();
+        lock = self.lock_global();
         for FuncIdx(idx) in reachable {
-            self.flush_const_stack(ctx, idx as usize)?;
+            self.flush_const_stack(ctx, &mut lock[idx as usize], idx as usize)?;
         }
         Ok(())
     }
@@ -2385,40 +2531,39 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// `val_type` must be `ValType::I32` or `ValType::I64` matching the value
     /// type consumed by `instruction`.
     pub fn feed_lazy(
-        &mut self,
+    &self,
         ctx: &mut Context,
         addr_type: ValType,
         val_type: ValType,
         instruction: &Instruction<'static>,
+        tail_idx: usize
     ) -> Result<(), E> {
+        let mut local_pool = self.local_pool.lock();
         // Try to allocate all three locals up front.  If any allocation fails,
         // fall back to eager emission.  We allocate emitted_local last so that
         // partial allocation doesn't waste pool entries on a failed attempt.
-        let addr_opt = self.local_pool.alloc(addr_type);
-        let val_opt = self.local_pool.alloc(val_type);
-        let flag_opt = self.local_pool.alloc(ValType::I32);
+        let addr_opt = local_pool.alloc(addr_type);
+        let val_opt = local_pool.alloc(val_type);
+        let flag_opt = local_pool.alloc(ValType::I32);
 
         match (addr_opt, val_opt, flag_opt) {
             (Some(addr_local), Some(val_local), Some(emitted_local)) => {
                 // Consume [addr, value] from the stack into locals.  The value
                 // is on top, so set it first.
-                let reachable = self.collect_reachable_predecessors();
+                let reachable = self.transitive_preds_of(tail_idx).clone();
                 for FuncIdx(idx) in reachable {
-                    self.fns[idx as usize]
-                        .function
+                    let mut func = self.lock_entry(idx as usize);
+                    func.function
                         .instruction(ctx, &Instruction::LocalSet(val_local))?;
-                    self.fns[idx as usize]
-                        .function
+                    func.function
                         .instruction(ctx, &Instruction::LocalSet(addr_local))?;
                     // Initialise the emitted flag to 0.
-                    self.fns[idx as usize]
-                        .function
+                    func.function
                         .instruction(ctx, &Instruction::I32Const(0))?;
-                    self.fns[idx as usize]
-                        .function
+                    func.function
                         .instruction(ctx, &Instruction::LocalSet(emitted_local))?;
-                    self.fns[idx as usize].inst_count += 4;
-                    self.fns[idx as usize].bundles.push(LazyStore {
+                    func.inst_count += 4;
+                    func.bundles.push(LazyStore {
                         addr_local,
                         addr_type,
                         val_local,
@@ -2431,76 +2576,62 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             (addr_opt, val_opt, flag_opt) => {
                 // Return any successfully allocated locals before bailing.
                 if let Some(l) = flag_opt {
-                    self.local_pool.free(l, ValType::I32);
+                    local_pool.free(l, ValType::I32);
                 }
                 if let Some(l) = val_opt {
-                    self.local_pool.free(l, val_type);
+                    local_pool.free(l, val_type);
                 }
                 if let Some(l) = addr_opt {
-                    self.local_pool.free(l, addr_type);
+                    local_pool.free(l, addr_type);
                 }
                 // Flush existing bundles so those locals are freed.
-                let tail = self.fns.len().saturating_sub(1);
+                let tail = self.lock_global().len().saturating_sub(1);
                 self.flush_bundles(ctx, tail)?;
                 // Emit this store eagerly — the stack still has [addr, value].
-                self.feed(ctx, instruction)?;
+                self.feed_to(tail_idx, ctx, instruction)?;
             }
         }
         Ok(())
     }
 
-    /// Perform a barrier on all lazily fed instructions, ensuring they are emitted before any subsequent instructions.
-    pub fn barrier(&mut self, ctx: &mut Context) -> Result<(), E> {
-        if self.fns.is_empty() {
-            return Ok(());
-        }
-        let tail_idx = self.fns.len() - 1;
-        self.flush_bundles(ctx, tail_idx)
-    }
 
-pub fn seal(&mut self, ctx: &mut Context, i: &Instruction<'_>) -> Result<(), E> {
-        if self.fns.is_empty() {
-            return Ok(());
-        }
-        let tail_idx = self.fns.len() - 1;
-        self.seal_to(tail_idx, ctx, &i)
-    }
 
     /// Seal the current function by emitting a final instruction and closing all if statements.
     /// This terminates the function and removes all predecessor edges.
-    pub fn seal_to(&mut self, tail_idx: usize, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        if self.fns.is_empty() {
-            return Ok(());
-        }
+    pub fn seal_to(
+        &self,
+        tail_idx: usize,
+        ctx: &mut Context,
+        instruction: &Instruction<'_>,
+    ) -> Result<(), E> {
         self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         self.flush_const_stacks_reachable(ctx, tail_idx)?;
-        let ifs = self.fns[tail_idx].if_stmts;
+        let ifs = self.lock_entry(tail_idx).if_stmts;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
-            self.fns[idx as usize]
-                .function
+            let mut func = self.lock_entry(idx as usize);
+            func.function
                 .instruction(ctx, instruction)?;
             for _ in 0..ifs {
-                self.fns[idx as usize]
-                    .function
+                func.function
                     .instruction(ctx, &Instruction::End)?;
             }
-            _ = take(&mut self.fns[idx as usize].preds);
-            self.fns[idx as usize].const_stack.clear();
-            self.fns[idx as usize].locals_const.clear();
-            self.fns[idx as usize].locals_virtual.clear();
-            self.fns[idx as usize].skip_depth = 0;
-            self.fns[idx as usize].block_frames.clear();
+            _ = take(&mut func.preds);
+            func.const_stack.clear();
+            func.locals_const.clear();
+            func.locals_virtual.clear();
+            func.skip_depth = 0;
+            func.block_frames.clear();
             // Invalidate transitive cache after severing preds.
-            self.fns[idx as usize].transitive_preds = None;
+            func.transitive_preds = None;
         }
         Ok(())
     }
 
     /// Get the total number of nested if statements for a function.
     fn total_ifs(&self, FuncIdx(p_idx): FuncIdx) -> usize {
-        return self.fns[p_idx as usize].if_stmts;
+        return self.lock_entry(p_idx as usize).if_stmts;
     }
 
     /// Consume this reactor and return all built functions in order.
@@ -2508,13 +2639,13 @@ pub fn seal(&mut self, ctx: &mut Context, i: &Instruction<'_>) -> Result<(), E> 
     /// Call this after all instructions have been emitted and `seal` has been
     /// called on each function group.  The returned vector may be passed
     /// directly to a `wasm_encoder::CodeSection`.
-    pub fn into_fns(self) -> Vec<F> {
-        self.fns.into_iter().map(|e| e.function).collect()
+    pub fn into_fns(mut self) -> Vec<F> {
+        self.fns.get_mut().drain(..).map(|e| e.function).collect()
     }
 
     /// Return the number of functions currently held in this reactor.
     pub fn fn_count(&self) -> usize {
-        self.fns.len()
+        self.lock_global().len()
     }
 
     /// Non-consuming variant of [`into_fns`](Self::into_fns).
@@ -2530,11 +2661,11 @@ pub fn seal(&mut self, ctx: &mut Context, i: &Instruction<'_>) -> Result<(), E> 
     /// let fns_b = reactor.drain_fns();   // reactor offset by fns_a.len() + fns_b.len()
     /// ```
     pub fn drain_fns(&mut self) -> Vec<F> {
-        let count = self.fns.len() as u32;
-        let result = self.fns.drain(..).map(|e| e.function).collect();
+        let count = self.lock_global().len() as u32;
+        let result = self.lock_global().drain(..).map(|e| e.function).collect();
         self.base_func_offset += count;
-        self.lens.clear();
-        self.peephole = None;
+        self.lens.get_mut().clear();
+        *self.peephole.get_mut() = None;
         result
     }
 }
