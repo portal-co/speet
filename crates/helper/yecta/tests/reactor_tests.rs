@@ -4,7 +4,7 @@
 //! which manages WebAssembly function generation with complex control flow.
 
 use wasm_encoder::{Function, Instruction, ValType};
-use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, TableIdx, TagIdx, Target, TypeIdx};
+use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, StaticPool, TableIdx, TagIdx, Target, TypeIdx};
 
 #[test]
 fn test_reactor_creation() {
@@ -64,7 +64,7 @@ fn test_unconditional_jump() {
     assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
     // Jump to function 1 with 2 parameters
-    assert!(reactor.jmp(&mut ctx, FuncIdx(1), 2).is_ok());
+    assert!(reactor.jmp_tail(&mut ctx, FuncIdx(1), 2).is_ok());
 
     // Create target function
     reactor
@@ -77,10 +77,10 @@ fn test_unconditional_jump() {
 fn test_jump_with_params_helper() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = Pool {
+    let pool = StaticPool {
         table: TableIdx(0),
         ty: TypeIdx(0),
-    };
+    }.as_pool();
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
@@ -88,7 +88,7 @@ fn test_jump_with_params_helper() {
 
     // Use JumpCallParams helper
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
-    assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
@@ -125,10 +125,10 @@ fn test_conditional_operations() {
 fn test_call_with_exception_handling() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = Pool {
+    let pool = StaticPool {
         table: TableIdx(0),
         ty: TypeIdx(1),
-    };
+    }.as_pool();
     let escape_tag = EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(1),
@@ -140,7 +140,7 @@ fn test_call_with_exception_handling() {
 
     assert!(
         reactor
-            .call(
+            .call_tail(
                 &mut ctx,
                 Target::Static { func: FuncIdx(1) },
                 escape_tag,
@@ -164,7 +164,7 @@ fn test_return_via_exception() {
         .unwrap();
 
     // Return via exception (params will be loaded by ret)
-    assert!(reactor.ret(&mut ctx, 2, escape_tag).is_ok());
+    assert!(reactor.ret_tail(&mut ctx, 2, escape_tag).is_ok());
 }
 
 #[test]
@@ -186,17 +186,17 @@ fn test_multiple_jumps() {
     // Test creating multiple jumps between functions
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = Pool {
+    let pool = StaticPool {
         table: TableIdx(0),
         ty: TypeIdx(0),
-    };
+    }.as_pool();
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
         .unwrap();
 
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
-    assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
@@ -204,7 +204,7 @@ fn test_multiple_jumps() {
 
     // Jump from function 1 to function 2
     let params2 = JumpCallParams::jump(FuncIdx(2), 2, pool);
-    assert!(reactor.ji_with_params(&mut ctx, params2).is_ok());
+    assert!(reactor.ji_with_params_tail(&mut ctx, params2).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 2)
@@ -242,10 +242,10 @@ fn test_instruction_feeding() {
 fn test_base_func_offset_applied() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::with_base_func_offset(100);
     let mut ctx = ();
-    let pool = Pool {
+    let pool = StaticPool {
         table: TableIdx(0),
         ty: TypeIdx(0),
-    };
+    }.as_pool();
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
@@ -253,7 +253,7 @@ fn test_base_func_offset_applied() {
 
     // The offset should be applied when emitting function indices
     let params = JumpCallParams::jump(FuncIdx(0), 2, pool);
-    assert!(reactor.ji_with_params(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
@@ -296,10 +296,10 @@ fn test_call_and_return() {
     // Test call with exception handling and return
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = Pool {
+    let pool = StaticPool {
         table: TableIdx(0),
         ty: TypeIdx(1),
-    };
+    }.as_pool();
     let escape_tag = EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(1),
@@ -314,7 +314,7 @@ fn test_call_and_return() {
 
     assert!(
         reactor
-            .call(
+            .call_tail(
                 &mut ctx,
                 Target::Static { func: FuncIdx(1) },
                 escape_tag,
@@ -327,7 +327,7 @@ fn test_call_and_return() {
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
         .unwrap();
-    assert!(reactor.ret(&mut ctx, 2, escape_tag).is_ok());
+    assert!(reactor.ret_tail(&mut ctx, 2, escape_tag).is_ok());
 }
 
 /// `drain_fns` — compile N functions, drain, compile M more; assert offsets

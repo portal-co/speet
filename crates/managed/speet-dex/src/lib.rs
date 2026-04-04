@@ -48,8 +48,8 @@ use wax_core::build::{InstructionOperatorSource, InstructionSink, InstructionSou
 use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
-    Target, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, StaticPool,
+    TableIdx, Target, TypeIdx,
 };
 
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -560,7 +560,7 @@ pub struct DexRecompiler<
     M = NoObjectModel,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: Pool,
+    pool: StaticPool,
     escape_tag: Option<EscapeTag>,
 
     /// Flattened method and code-unit data.
@@ -617,7 +617,7 @@ where
         let max_regs = flat.max_registers();
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: Pool {
+            pool: StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -676,7 +676,7 @@ where
         let (field_map, class_sizes, type_descs) = build_class_maps(input)?;
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: Pool {
+            pool: StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -852,6 +852,7 @@ where
 
         // Each instruction becomes one wasm function.
         self.init_function(ctx, flat_idx, 1, f)?;
+        let tail_idx = self.reactor.fn_count() - 1;
 
         let code_base = method.base as usize;
         let code_end = code_base + method.code_units as usize;
@@ -897,7 +898,7 @@ where
             }
         }
 
-        self.translate_body(ctx, flat_idx, &insn)?;
+        self.translate_body(ctx, flat_idx, &insn, tail_idx)?;
         Ok(())
     }
 
@@ -986,12 +987,13 @@ where
         ctx: &mut Context,
         flat_idx: u64,
         insn: &DexInsn,
+        tail_idx: usize,
     ) -> Result<(), E> {
         // Precompute scratch indices before any reactor borrows.
         let scratch = self.layout.base(self.scratch_slot);
         let scratch_i64 = self.layout.base(self.scratch_i64_slot);
         let total_params = self.total_params;
-        let pool = self.pool;
+        let pool = self.pool.as_pool();
         let bfo = self.reactor.base_func_offset();
         let escape_tag = self.escape_tag;
 
@@ -1071,7 +1073,7 @@ where
             | DexInsn::ReturnWide { .. }
             | DexInsn::ReturnObject { .. } => {
                 if let Some(tag) = escape_tag {
-                    self.reactor.ret(ctx, total_params, tag)?;
+                    self.reactor.ret(tail_idx, ctx, total_params, tag)?;;
                 } else {
                     feed!(Instruction::Unreachable);
                 }
@@ -1938,15 +1940,15 @@ where
             // ── Unconditional branches ───────────────────────────────────────
             DexInsn::Goto { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(ctx, tgt, total_params)?;
+                self.reactor.jmp_tail(ctx, tgt, total_params)?;
             }
             DexInsn::Goto16 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(ctx, tgt, total_params)?;
+                self.reactor.jmp_tail(ctx, tgt, total_params)?;
             }
             DexInsn::Goto32 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(ctx, tgt, total_params)?;
+                self.reactor.jmp_tail(ctx, tgt, total_params)?;
             }
 
             // ── Conditional branches (two-register) ─────────────────────────
@@ -1965,6 +1967,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfNe { a, b, offset } => {
@@ -1982,6 +1985,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfLt { a, b, offset } => {
@@ -1999,6 +2003,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfGe { a, b, offset } => {
@@ -2016,6 +2021,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfGt { a, b, offset } => {
@@ -2033,6 +2039,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfLe { a, b, offset } => {
@@ -2050,6 +2057,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
 
@@ -2069,6 +2077,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfNez { reg, offset } => {
@@ -2086,6 +2095,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfLtz { reg, offset } => {
@@ -2103,6 +2113,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfGez { reg, offset } => {
@@ -2120,6 +2131,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfGtz { reg, offset } => {
@@ -2137,6 +2149,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
             DexInsn::IfLez { reg, offset } => {
@@ -2154,6 +2167,7 @@ where
                     None,
                     pool,
                     Some(&cond),
+                    tail_idx,
                 )?;
             }
 

@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use rv_asm::{Imm, Inst, IsCompressed, Reg};
 use speet_riscv::RiscVRecompiler;
 use wasm_encoder::Function;
-use yecta::{LocalPool, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{LocalPool, StaticPool, Reactor, TableIdx, TypeIdx};
 
 fn main() {
     println!("RISC-V HINT Instruction Tracking Demo");
@@ -16,7 +16,7 @@ fn main() {
 
     // Create a recompiler with HINT tracking enabled
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        Pool {
+        StaticPool {
             table: TableIdx(0),
             ty: TypeIdx(0),
         },

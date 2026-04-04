@@ -54,6 +54,8 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Expe
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     RiscVRecompiler<'cb, 'ctx, Context, E, F>
+where
+    Reactor<Context, E, F>: InstructionSink<Context, E>,
 {
     /// Helper to translate load instructions
     pub(crate) fn translate_load(
@@ -63,6 +65,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         offset: Imm,
         dest: Reg,
         op: LoadOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         if dest.0 == 0 {
             return Ok(()); // x0 is hardwired to zero
@@ -111,6 +114,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -124,6 +128,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     // If RV64 but not memory64, extend to i64
                     if self.enable_rv64 {
@@ -144,6 +149,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -157,6 +163,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
@@ -176,6 +183,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -189,6 +197,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
@@ -208,6 +217,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -221,6 +231,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
@@ -240,6 +251,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -253,6 +265,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
@@ -273,6 +286,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -286,6 +300,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
                 }
@@ -303,6 +318,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -320,6 +336,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         offset: Imm,
         src: Reg,
         op: StoreOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
@@ -369,6 +386,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -382,6 +400,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -398,6 +417,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -411,6 +431,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -427,6 +448,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -440,6 +462,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -456,6 +479,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -471,6 +495,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         offset: Imm,
         dest: FReg,
         op: FLoadOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         // Compute address: base + offset
         self.reactor
@@ -503,6 +528,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 2,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
                 self.reactor.feed(ctx, &Instruction::F64PromoteF32)?;
             }
@@ -518,6 +544,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -535,6 +562,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         offset: Imm,
         src: FReg,
         op: FStoreOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
@@ -568,6 +596,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 2,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
             FStoreOp::F64 => {
@@ -582,6 +611,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -806,6 +836,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Initialize function for this instruction
         self.init_function(ctx, pc, inst_len, 8, f)?;
+        let tail_idx = self.reactor.fn_count() - 1;
         // Update PC
         self.reactor.feed(ctx, &Instruction::I32Const(pc as i32))?;
         self.reactor
@@ -910,13 +941,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         target_func,
                         self.total_params,
                         escape_tag,
-                        self.pool,
+                        self.pool.as_pool(),
                     )
                     .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
                     // Emit the speculative call using yecta's ji_with_params API
                     // This wraps the call in a try-catch block and uses fixups mechanism
-                    self.reactor.ji_with_params(ctx, params)?;
+                    self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
                     // After the call returns (via exception catch), execution continues here
                     // No manual validation needed - the ret() in the callee threw the state
@@ -1015,7 +1046,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     self.reactor.feed(ctx, &Instruction::Else)?;
 
                     // Non-ABI-compliant return - throw escape tag with all register state
-                    self.reactor.ret(ctx, self.total_params, escape_tag)?;
+                    self.reactor.ret(tail_idx, ctx, self.total_params, escape_tag)?;;
 
                     self.reactor.feed(ctx, &Instruction::End)?;
                     return Ok(());
@@ -1158,12 +1189,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             idx: &target_snippet,
                         },
                         call: Some(escape_tag),
-                        pool: self.pool,
+                        pool: self.pool.as_pool(),
                         condition: None,
                     };
 
                     // Emit the speculative call using yecta's ji_with_params API
-                    self.reactor.ji_with_params(ctx, params)?;
+                    self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
                     // After the call returns (via exception catch), execution continues here
                     return Ok(());
@@ -1225,32 +1256,32 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // signed offsets in multiples of 2 bytes. The offset is sign-extended and added to the address
             // of the branch instruction to give the target address."
             Inst::Beq { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Eq)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Eq, tail_idx)?;
                 return Ok(()); // Branch handles control flow
             }
 
             Inst::Bne { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Ne)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Ne, tail_idx)?;
                 return Ok(());
             }
 
             Inst::Blt { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtS)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtS, tail_idx)?;
                 return Ok(());
             }
 
             Inst::Bge { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeS)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeS, tail_idx)?;
                 return Ok(());
             }
 
             Inst::Bltu { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtU)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtU, tail_idx)?;
                 return Ok(());
             }
 
             Inst::Bgeu { offset, src1, src2 } => {
-                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeU)?;
+                self.translate_branch(ctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeU, tail_idx)?;
                 return Ok(());
             }
 
@@ -1259,36 +1290,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // "Load and store instructions transfer a value between the registers and memory.
             // Loads are encoded in the I-type format and stores are S-type."
             Inst::Lb { offset, dest, base } => {
-                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I8, tail_idx)?;
             }
 
             Inst::Lh { offset, dest, base } => {
-                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I16, tail_idx)?;
             }
 
             Inst::Lw { offset, dest, base } => {
-                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I32)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::I32, tail_idx)?;
             }
 
             Inst::Lbu { offset, dest, base } => {
-                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U8)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U8, tail_idx)?;
             }
 
             Inst::Lhu { offset, dest, base } => {
-                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U16)?;
+                self.translate_load(ctx, *base, *offset, *dest, LoadOp::U16, tail_idx)?;
             }
 
             // Store Instructions
             Inst::Sb { offset, src, base } => {
-                self.translate_store(ctx, *base, *offset, *src, StoreOp::I8)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I8, tail_idx)?;
             }
 
             Inst::Sh { offset, src, base } => {
-                self.translate_store(ctx, *base, *offset, *src, StoreOp::I16)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I16, tail_idx)?;
             }
 
             Inst::Sw { offset, src, base } => {
-                self.translate_store(ctx, *base, *offset, *src, StoreOp::I32)?;
+                self.translate_store(ctx, *base, *offset, *src, StoreOp::I32, tail_idx)?;
             }
 
             // Integer Computational Instructions
@@ -1748,11 +1779,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // "This chapter describes the standard instruction-set extension for single-precision
             // floating-point, which is named 'F'"
             Inst::Flw { offset, dest, base } => {
-                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F32)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F32, tail_idx)?;
             }
 
             Inst::Fsw { offset, src, base } => {
-                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F32)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F32, tail_idx)?;
             }
 
             Inst::FaddS {
@@ -1827,11 +1858,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             // Floating-Point Double-Precision (D Extension)
             Inst::Fld { offset, dest, base } => {
-                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F64)?;
+                self.translate_fload(ctx, *base, *offset, *dest, FLoadOp::F64, tail_idx)?;
             }
 
             Inst::Fsd { offset, src, base } => {
-                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F64)?;
+                self.translate_fstore(ctx, *base, *offset, *src, FStoreOp::F64, tail_idx)?;
             }
 
             Inst::FaddD {
@@ -2393,7 +2424,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         load_addr,
                         addr_type,
                         MemOrder::Strong,
-                    )?;
+                        tail_idx,
+                    )?;;
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit loaded value to i64.
                         self.reactor.feed(ctx, &Instruction::I64ExtendI32S)?;
@@ -2428,7 +2460,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     RmwWidth::W32,
                     self.atomic_opts,
                     self.mem_order,
-                )?;
+                    tail_idx,
+                )?;;
                 if dest.0 != 0 {
                     // SC always succeeds: write 0 into dest.
                     let zero = if self.enable_rv64 {
@@ -2474,7 +2507,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // These are RV64-specific. When RV64 is disabled, we emit unreachable.
             Inst::Lwu { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::U32)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::U32, tail_idx)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -2482,7 +2515,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             Inst::Ld { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::I64)?;
+                    self.translate_load(ctx, *base, *offset, *dest, LoadOp::I64, tail_idx)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -2490,7 +2523,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             Inst::Sd { offset, base, src } => {
                 if self.enable_rv64 {
-                    self.translate_store(ctx, *base, *offset, *src, StoreOp::I64)?;
+                    self.translate_store(ctx, *base, *offset, *src, StoreOp::I64, tail_idx)?;
                 } else {
                     self.reactor.feed(ctx, &Instruction::Unreachable)?;
                 }
@@ -2958,6 +2991,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     addr_local,
                     src_local,
                     scratch,
+                    tail_idx,
                 )?;
 
                 if dest.0 != 0 {
@@ -3007,6 +3041,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         pc: u32,
         _inst_len: u32,
         op: BranchOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         let target_pc = if self.enable_rv64 {
             // RV64: Use 64-bit PC arithmetic
@@ -3128,8 +3163,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             &BTreeMap::new(),  // fixups: none needed
             target,            // target: branch target
             None,              // call: not an escape call
-            self.pool,         // pool: for indirect calls
+            self.pool.as_pool(),  // pool: for indirect calls
             Some(&condition),  // condition: branch condition
+            tail_idx,
         )?;
 
         Ok(())

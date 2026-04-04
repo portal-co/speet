@@ -1681,6 +1681,13 @@ mod tests {
         // 3 × 64 KiB at 0x10000 with a ChunkedMapper → 3 passive segments + init fn.
         use speet_memory::ChunkedMapper;
         use wasm_encoder::*;
+        use wasm_layout::LocalDeclarator;
+        // No-op mapper closure wrapper that satisfies LocalDeclarator.
+        struct NoopMapper;
+        impl LocalDeclarator for NoopMapper {}
+        impl MapperCallback<(), TestError, Function> for NoopMapper {
+            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>) -> Result<(), TestError> { Ok(()) }
+        }
 
         let mut module = Module::new();
         let mut types = TypeSection::new();
@@ -1714,7 +1721,7 @@ mod tests {
         // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
         let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
             page_size: 0x10000,
-            inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
+            inner: NoopMapper,
         });
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
@@ -1850,6 +1857,13 @@ mod tests {
         // memory.copy with a mapper should emit a block/loop, not a single instruction.
         use speet_memory::ChunkedMapper;
         use wasm_encoder::*;
+        use wasm_layout::LocalDeclarator;
+        // No-op mapper closure wrapper that satisfies LocalDeclarator.
+        struct NoopMapper;
+        impl LocalDeclarator for NoopMapper {}
+        impl MapperCallback<(), TestError, Function> for NoopMapper {
+            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>) -> Result<(), TestError> { Ok(()) }
+        }
 
         let mut module = Module::new();
         let mut types = TypeSection::new();
@@ -1884,7 +1898,7 @@ mod tests {
 
         let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
             page_size: 0x10000,
-            inner: |_ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>| Ok(()),
+            inner: NoopMapper,
         });
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(

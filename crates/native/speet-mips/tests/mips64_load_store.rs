@@ -1,14 +1,14 @@
 use rabbitizer::{InstrCategory, Instruction};
 use speet_mips::MipsRecompiler;
 use wasm_encoder::Function;
-use yecta::Pool;
+use yecta::StaticPool;
 
 // MIPS64 load/store translation smoke test
 #[test]
 fn test_mips64_load_store() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: yecta::TableIdx(0),
                 ty: yecta::TypeIdx(0),
             },

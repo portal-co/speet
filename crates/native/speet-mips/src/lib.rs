@@ -51,8 +51,8 @@ use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
-    Target, TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, StaticPool,
+    TableIdx, Target, TypeIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -220,7 +220,7 @@ pub struct MipsRecompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: Pool,
+    pool: StaticPool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
@@ -278,7 +278,7 @@ where
     /// * `base_pc` - Base PC address to offset function indices
     /// * `enable_mips64` - Whether to enable MIPS64 instruction support
     pub fn new_with_full_config(
-        pool: Pool,
+        pool: StaticPool,
         escape_tag: Option<EscapeTag>,
         base_pc: u32,
         enable_mips64: bool,
@@ -322,7 +322,7 @@ where
     /// * `base_func_offset` - Offset added to emitted function indices for imports/helpers
     /// * `enable_mips64` - Whether to enable MIPS64 instruction support
     pub fn new_with_all_config(
-        pool: Pool,
+        pool: StaticPool,
         escape_tag: Option<EscapeTag>,
         base_pc: u32,
         base_func_offset: u32,
@@ -374,7 +374,7 @@ where
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
-    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self
+    pub fn new_with_config(pool: StaticPool, escape_tag: Option<EscapeTag>, base_pc: u32) -> Self
     where
         P: Default,
     {
@@ -388,7 +388,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -406,7 +406,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -640,11 +640,9 @@ where
         let pool_i32_start = self.layout.base(self.pool_i32_slot);
         let pool_i64_start = self.layout.base(self.pool_i64_slot);
         self.reactor
-            .local_pool
-            .seed_i32(pool_i32_start, Self::N_POOL_I32);
+            .with_local_pool(|p| p.seed_i32(pool_i32_start, Self::N_POOL_I32));
         self.reactor
-            .local_pool
-            .seed_i64(pool_i64_start, Self::N_POOL_I64);
+            .with_local_pool(|p| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
         // Declare only non-param locals to the function (params are already in the type).
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), 1)?;
@@ -798,7 +796,7 @@ where
     /// Perform a jump to a target PC using yecta's jump API
     fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u32, params: u32) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(ctx, target_func, params)
+        self.reactor.jmp_tail(ctx, target_func, params)
     }
 
     /// Helper to translate branch instructions using yecta's ji API with custom condition
@@ -810,6 +808,7 @@ where
         offset: i32,
         pc: u32,
         op: BranchOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         // Calculate target PC: PC + 4 + (offset << 2)
         let target_pc = (pc as i32 + 4 + (offset << 2)) as u32;
@@ -927,8 +926,9 @@ where
             &BTreeMap::new(),  // fixups: none needed
             target,            // target: branch target
             None,              // call: not an escape call
-            self.pool,         // pool: for indirect calls
+            self.pool.as_pool(),  // pool: for indirect calls
             Some(&condition),  // condition: branch condition
+            tail_idx,
         )?;
 
         Ok(())
@@ -952,6 +952,7 @@ where
 
         // Initialize function for this instruction
         self.init_function(ctx, pc, 8, f)?;
+        let tail_idx = self.reactor.fn_count() - 1;
 
         // Update PC
         self.reactor
@@ -1256,7 +1257,7 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, Some(rt), offset, pc, BranchOp::Eq)?;
+                self.translate_branch(ctx, rs, Some(rt), offset, pc, BranchOp::Eq, tail_idx)?;
             }
 
             InstrId::cpu_bne => {
@@ -1264,35 +1265,35 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, Some(rt), offset, pc, BranchOp::Ne)?;
+                self.translate_branch(ctx, rs, Some(rt), offset, pc, BranchOp::Ne, tail_idx)?;
             }
 
             InstrId::cpu_blez => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::LeZ)?;
+                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::LeZ, tail_idx)?;
             }
 
             InstrId::cpu_bgtz => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::GtZ)?;
+                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::GtZ, tail_idx)?;
             }
 
             InstrId::cpu_bltz => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::LtZ)?;
+                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::LtZ, tail_idx)?;
             }
 
             InstrId::cpu_bgez => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let offset = instruction.get_immediate() as i32;
 
-                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::GeZ)?;
+                self.translate_branch(ctx, rs, None, offset, pc, BranchOp::GeZ, tail_idx)?;
             }
 
             // Load Byte (LB) - signed
@@ -1327,6 +1328,7 @@ where
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     // extend to i64 if needed
                     if self.enable_mips64 {
@@ -1369,6 +1371,7 @@ where
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
@@ -1410,6 +1413,7 @@ where
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
@@ -1451,6 +1455,7 @@ where
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32U)?;
@@ -1492,6 +1497,7 @@ where
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     self.reactor
@@ -1507,6 +1513,7 @@ where
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -1543,6 +1550,7 @@ where
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     self.reactor
@@ -1558,6 +1566,7 @@ where
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -1596,6 +1605,7 @@ where
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
@@ -1639,6 +1649,7 @@ where
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     self.reactor
@@ -1654,6 +1665,7 @@ where
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -1695,6 +1707,7 @@ where
                             align: 3,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
@@ -1737,6 +1750,7 @@ where
                             align: 3,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -1818,9 +1832,9 @@ where
                     base_pc: self.base_pc,
                 };
                 let params =
-                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
-                self.reactor.ji_with_params(ctx, params)?;
-                return Ok(());
+                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool.as_pool());
+                self.reactor.ji_with_params(ctx, params, tail_idx)?
+;                return Ok(());
             }
 
             InstrId::cpu_jalr => {
@@ -1859,8 +1873,8 @@ where
                     base_pc: self.base_pc,
                 };
                 let params =
-                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
-                self.reactor.ji_with_params(ctx, params)?;
+                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool.as_pool());
+                self.reactor.ji_with_params(ctx, params, tail_idx)?;
                 return Ok(());
             }
 
@@ -1944,7 +1958,8 @@ where
                         load_addr,
                         ValType::I32,
                         speet_ordering::MemOrder::Strong,
-                    )?;
+                        tail_idx,
+                    )?;;
 
                     if self.enable_mips64 {
                         self.reactor.feed(ctx, &WasmInstruction::I64ExtendI32S)?;
@@ -1987,7 +2002,8 @@ where
                     RmwWidth::W32,
                     self.atomic_opts,
                     self.mem_order,
-                )?;
+                    tail_idx,
+                )?;;
 
                 // SC always succeeds: write 1 into rt
                 if rt != GprO32::zero {
@@ -2032,7 +2048,8 @@ where
                         load_addr,
                         ValType::I32,
                         speet_ordering::MemOrder::Strong,
-                    )?;
+                        tail_idx,
+                    )?;;
 
                     self.reactor
                         .feed(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
@@ -2067,6 +2084,7 @@ where
                         RmwWidth::W64,
                         self.atomic_opts,
                         self.mem_order,
+                        tail_idx,
                     )?;
 
                     // SCD always succeeds: write 1 into rt

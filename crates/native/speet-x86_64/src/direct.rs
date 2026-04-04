@@ -458,6 +458,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             let inst_rip = dec.ip() - inst_len as u64; // decoder advanced
 
             self.init_function(ctx, inst_rip, inst_len, 4, f)?;
+            let tail_idx = self.reactor.fn_count() - 1;
             // store rip into local 16
             self.reactor
                 .feed(ctx, &Instruction::I32Const(inst_rip as i32))?;
@@ -1724,7 +1725,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         let target_func_idx = self.rip_to_func_idx(target);
-        let _pool = self.pool;
+        let _pool = self.pool.as_pool::<Context, E>();
 
         // Unconditional jump (direct)
         {
@@ -1738,7 +1739,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 return Ok(Some(()));
             }
         }
-        self.reactor.jmp(ctx, target_func_idx, self.total_params)?;
+        self.reactor.jmp_tail(ctx, target_func_idx, self.total_params)?;
 
         Ok(Some(()))
     }
@@ -1749,6 +1750,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         inst: &IxInst,
         condition_type: ConditionType,
     ) -> Result<Option<()>, E> {
+        let tail_idx = self.reactor.fn_count() - 1;
         let target = match inst.op0_kind() {
             OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
                 let offset = inst.near_branch64() as i64;
@@ -1759,7 +1761,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         let target_func_idx = self.rip_to_func_idx(target);
-        let pool = self.pool;
+        let pool = self.pool.as_pool();
 
         // Conditional branch.
         {
@@ -1776,13 +1778,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         let condition = ConditionSnippet { condition_type };
         let params =
             JumpCallParams::conditional_jump(target_func_idx, self.total_params, &condition, pool);
-        self.reactor.ji_with_params(ctx, params)?;
+        self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
         Ok(Some(()))
     }
 
     /// Handle CALL instruction - push return address and jump to target
     fn handle_call(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        let tail_idx = self.reactor.fn_count() - 1;
         // Calculate return address (instruction pointer after this call)
         let return_addr = inst.next_ip();
 
@@ -1833,12 +1836,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             // Step 3: Use fixups to set expected_ra (local 25) only for this call
             let params =
-                yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
+                yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool.as_pool())
                     .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
             // Step 4: Emit the speculative call using yecta's ji_with_params API
             // This wraps the call in a try-catch block and uses fixups mechanism
-            self.reactor.ji_with_params(ctx, params)?;
+            self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
             // After the call returns (via exception catch), execution continues here
             // No manual validation needed - the ret() in the callee threw the state
@@ -1872,7 +1875,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     return Ok(Some(()));
                 }
             }
-            self.reactor.jmp(ctx, target_func_idx, self.total_params)?;
+            self.reactor.jmp_tail(ctx, target_func_idx, self.total_params)?;
 
             Ok(Some(()))
         }
@@ -1880,6 +1883,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
     /// Handle RET instruction - pop return address and jump to it
     fn handle_ret(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+        let tail_idx = self.reactor.fn_count() - 1;
         // Handle optional immediate operand (for stack cleanup)
         let stack_cleanup = if inst.op_count() > 0 {
             match inst.op0_kind() {
@@ -1933,7 +1937,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             self.reactor.feed(ctx, &Instruction::Else)?;
 
             // Non-ABI-compliant return: throw escape tag with all register/stack state
-            self.reactor.ret(ctx, self.total_params, escape_tag)?;
+            self.reactor.ret(tail_idx, ctx, self.total_params, escape_tag)?;
 
             self.reactor.feed(ctx, &Instruction::End)?;
             return Ok(Some(()));
@@ -1982,9 +1986,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             let params = yecta::JumpCallParams::indirect_jump(
                 &return_addr_snippet,
                 self.total_params,
-                self.pool,
+                self.pool.as_pool(),
             );
-            self.reactor.ji_with_params(ctx, params)?;
+            self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
             Ok(Some(()))
         }

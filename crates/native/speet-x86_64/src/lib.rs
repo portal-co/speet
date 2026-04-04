@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, StaticPool, TableIdx, TypeIdx};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
@@ -66,7 +66,7 @@ pub struct X86Recompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: Pool,
+    pool: StaticPool,
     escape_tag: Option<EscapeTag>,
     base_rip: u64,
     hints: Vec<u8>,
@@ -110,7 +110,7 @@ where
     pub fn new_with_base_rip(base_rip: u64) -> Self {
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: Pool {
+            pool: StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },

@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor};
+use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, StaticPool};
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
 
@@ -138,7 +138,7 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
     // ── Configuration ─────────────────────────────────────────────────────
 
     /// The indirect-call pool configuration.
-    fn pool(&self) -> &Pool;
+    fn pool(&self) -> StaticPool;
 
     /// The escape tag used for exception-based control flow, if any.
     fn escape_tag(&self) -> Option<EscapeTag>;
@@ -166,7 +166,7 @@ where
     /// Mark placed after all parameter slots.
     pub locals_mark: Mark,
     /// Indirect-call pool configuration.
-    pub pool: Pool,
+    pub pool: StaticPool,
     /// Optional escape tag.
     pub escape_tag: Option<EscapeTag>,
 }
@@ -232,7 +232,7 @@ where
         self.reactor.feed(ctx, insn)
     }
     fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.reactor.jmp(ctx, target, params)
+        self.reactor.jmp_tail(ctx, target, params)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
         self.reactor.next_with(ctx, f, len)
@@ -241,8 +241,8 @@ where
         self.reactor.seal(ctx, insn)
     }
 
-    fn pool(&self) -> &Pool {
-        &self.pool
+    fn pool(&self) -> StaticPool {
+        self.pool
     }
     fn escape_tag(&self) -> Option<EscapeTag> {
         self.escape_tag

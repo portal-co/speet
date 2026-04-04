@@ -63,8 +63,8 @@ use speet_traps::{
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, TableIdx,
-    TypeIdx,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, StaticPool,
+    TableIdx, TypeIdx,
 };
 
 // Re-export the shared memory/mapper abstractions so existing users do not
@@ -250,7 +250,7 @@ pub struct RiscVRecompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: Pool,
+    pool: StaticPool,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     /// For RV64, this is a 64-bit address
@@ -331,7 +331,7 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_full_config(
-        pool: Pool,
+        pool: StaticPool,
         escape_tag: Option<EscapeTag>,
         base_pc: u64,
         track_hints: bool,
@@ -384,7 +384,7 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_all_config(
-        pool: Pool,
+        pool: StaticPool,
         escape_tag: Option<EscapeTag>,
         base_pc: u64,
         base_func_offset: u32,
@@ -458,7 +458,7 @@ where
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
-    pub fn new_with_config(pool: Pool, escape_tag: Option<EscapeTag>, base_pc: u64) -> Self
+    pub fn new_with_config(pool: StaticPool, escape_tag: Option<EscapeTag>, base_pc: u64) -> Self
     where
         P: Default,
     {
@@ -472,7 +472,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -490,7 +490,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -922,17 +922,14 @@ where
         match addr_type {
             ValType::I32 => self
                 .reactor
-                .local_pool
-                .seed_i32(pool_addr_start, Self::N_POOL_ADDR),
+                .with_local_pool(|p| p.seed_i32(pool_addr_start, Self::N_POOL_ADDR)),
             ValType::I64 => self
                 .reactor
-                .local_pool
-                .seed_i64(pool_addr_start, Self::N_POOL_ADDR),
+                .with_local_pool(|p| p.seed_i64(pool_addr_start, Self::N_POOL_ADDR)),
             _ => {}
         }
         self.reactor
-            .local_pool
-            .seed_i64(pool_i64_start, Self::N_POOL_I64);
+            .with_local_pool(|p| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
         // Declare only non-param locals to the function (params are already in the type).
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), 2)?;
@@ -1107,7 +1104,7 @@ where
     /// Perform a jump to a target PC using yecta's jump API
     fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u64, params: u32) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(ctx, target_func, params)
+        self.reactor.jmp_tail(ctx, target_func, params)
     }
 
     /// Classify a decoded RISC-V instruction into [`InsnClass`] flags.
@@ -1687,7 +1684,7 @@ mod tests {
         // Test HINT tracking when explicitly enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -1739,7 +1736,7 @@ mod tests {
         // Test that regular ADDI instructions are not tracked as HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -1796,7 +1793,7 @@ mod tests {
         // Test clearing collected HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -1877,7 +1874,7 @@ mod tests {
         // Test the actual pattern used in rv-corpus test files
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -1921,7 +1918,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                Pool {
+                StaticPool {
                     table: TableIdx(0),
                     ty: TypeIdx(0),
                 },
@@ -1992,7 +1989,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                Pool {
+                StaticPool {
                     table: TableIdx(0),
                     ty: TypeIdx(0),
                 },
@@ -2054,7 +2051,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                Pool {
+                StaticPool {
                     table: TableIdx(0),
                     ty: TypeIdx(0),
                 },
@@ -2543,7 +2540,7 @@ mod tests {
     fn test_rv64_instructions() {
         // Test RV64 instructions when RV64 is enabled
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -2668,7 +2665,7 @@ mod tests {
         // Test RV64 with memory64 enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -2712,7 +2709,7 @@ mod tests {
         // Test RV64 multiply-high instructions (Mulh, Mulhu, Mulhsu)
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -2955,7 +2952,7 @@ mod tests {
 
         // Create with offset using new_with_all_config
         let recompiler2 = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_all_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -3019,7 +3016,7 @@ mod tests {
     fn test_jal_with_speculative_calls_enabled() {
         // Test JAL instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -3053,7 +3050,7 @@ mod tests {
         // Test JAL with dest != x1 (not an ABI-compliant call)
         // Should NOT use speculative calls even when enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -3085,7 +3082,7 @@ mod tests {
     fn test_jalr_with_speculative_calls_enabled() {
         // Test JALR instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -3144,7 +3141,7 @@ mod tests {
         // Test ABI-compliant return: jalr x0, ra, 0
         // This should be detected as a return and use ret() to throw the escape tag
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -3178,7 +3175,7 @@ mod tests {
     fn test_non_abi_return_with_speculative_calls() {
         // Test non-ABI return patterns that should NOT use ret()
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            Pool {
+            StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },

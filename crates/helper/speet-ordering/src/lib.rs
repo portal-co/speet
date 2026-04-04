@@ -213,6 +213,7 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBacken
     atomic: AtomicOpts,
     addr_type: ValType,
     instr: Instruction<'static>,
+    tail_idx: usize,
 ) -> Result<(), E> {
     let instr = if atomic.use_atomic_insns {
         atomic_store_equiv(&instr)
@@ -223,7 +224,7 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBacken
         MemOrder::Strong => reactor.feed(ctx, &instr),
         MemOrder::Relaxed => {
             match store_val_type(&instr) {
-                Some(vt) => reactor.feed_lazy(ctx, addr_type, vt, &instr),
+                Some(vt) => reactor.feed_lazy(ctx, addr_type, vt, &instr, tail_idx),
                 // Float stores are always eager — no pool support for f32/f64.
                 None => reactor.feed(ctx, &instr),
             }
@@ -261,6 +262,7 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend
     addr_type: ValType,
     atomic: AtomicOpts,
     instr: Instruction<'static>,
+    tail_idx: usize,
 ) -> Result<(), E> {
     let instr = if atomic.use_atomic_insns {
         atomic_load_equiv(&instr)
@@ -268,7 +270,7 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend
         instr
     };
     // Flush any pending stores that might alias this load's address.
-    reactor.flush_bundles_for_load(ctx, addr_local, addr_type)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -363,6 +365,7 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     addr_local: u32,
     addr_type: ValType,
     _order: MemOrder,
+    tail_idx: usize,
 ) -> Result<(), E> {
     let m = rmw_memarg(width);
     let instr = if atomic.use_atomic_insns {
@@ -377,7 +380,7 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
         }
     };
     // Flush any pending stores that might alias this load.
-    reactor.flush_bundles_for_load(ctx, addr_local, addr_type)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)?;
     reactor.feed(ctx, &instr)
 }
 
@@ -404,6 +407,7 @@ pub fn emit_sc<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     width: RmwWidth,
     atomic: AtomicOpts,
     order: MemOrder,
+    tail_idx: usize,
 ) -> Result<(), E> {
     let m = rmw_memarg(width);
     if atomic.use_atomic_insns {
@@ -418,7 +422,7 @@ pub fn emit_sc<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
             RmwWidth::W32 => Instruction::I32Store(m),
             RmwWidth::W64 => Instruction::I64Store(m),
         };
-        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, instr)
+        emit_store(ctx, reactor, order, AtomicOpts::NONE, ValType::I32, instr, tail_idx)
     }
 }
 
@@ -457,6 +461,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
     addr_local: u32,
     src_local: u32,
     scratch_local: u32,
+    tail_idx: usize,
 ) -> Result<(), E> {
     let m = rmw_memarg(width);
 
@@ -527,7 +532,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
-        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
+        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
         reactor.feed(ctx, &load_instr)?; // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
@@ -567,6 +572,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
             AtomicOpts::NONE,
             ValType::I32,
             store_instr,
+            tail_idx,
         )?;
         // Stack: old
         return Ok(());
@@ -695,7 +701,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
-        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
+        reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
         reactor.feed(ctx, &load_instr)?; // old
         reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
@@ -731,6 +737,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
             AtomicOpts::NONE,
             ValType::I32,
             store_instr,
+            tail_idx,
         )?;
         // stack: old
         return Ok(());
@@ -754,7 +761,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
         RmwWidth::W64 => Instruction::I64AtomicLoad(m),
     };
     // Flush any deferred stores that alias the RMW address before reading.
-    reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32)?;
+    reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
     reactor.feed(ctx, &load_instr)?;
     reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
 

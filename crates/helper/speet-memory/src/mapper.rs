@@ -137,6 +137,8 @@ where
 }
 
 /// Blanket impl: any compatible `FnMut` closure is a `MapperCallback`.
+/// Closures do not need to declare wasm locals, so `LocalDeclarator` is
+/// provided automatically via the no-op default implementations.
 impl<Context, E, F: InstructionSink<Context, E>, T> MapperCallback<Context, E, F> for T
 where
     T: FnMut(&mut Context, &mut CallbackContext<Context, E, F>) -> Result<(), E>

@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor};
+use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, StaticPool};
 
 use crate::context::{BaseContext, ReactorContext};
 use crate::unit::BinaryUnit;
@@ -91,7 +91,7 @@ where
     /// Mark placed after all parameter slots (captures `total_params`).
     pub locals_mark: Mark,
     /// Indirect-call pool configuration.
-    pub pool: Pool,
+    pub pool: StaticPool,
     /// Optional escape tag for exception-based control flow.
     pub escape_tag: Option<EscapeTag>,
     /// Downstream handler for completed [`BinaryUnit`]s.
@@ -138,7 +138,7 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
-            pool: Pool {
+            pool: StaticPool {
                 table: TableIdx(0),
                 ty: TypeIdx(0),
             },
@@ -229,7 +229,7 @@ where
         self.reactor.feed(ctx, insn)
     }
     fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.reactor.jmp(ctx, target, params)
+        self.reactor.jmp_tail(ctx, target, params)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
         self.reactor.next_with(ctx, f, len)
@@ -238,8 +238,8 @@ where
         self.reactor.seal(ctx, insn)
     }
 
-    fn pool(&self) -> &Pool {
-        &self.pool
+    fn pool(&self) -> StaticPool {
+        self.pool
     }
     fn escape_tag(&self) -> Option<EscapeTag> {
         self.escape_tag
