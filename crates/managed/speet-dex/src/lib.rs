@@ -48,7 +48,7 @@ use wax_core::build::{InstructionOperatorSource, InstructionSink, InstructionSou
 use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, StaticPool,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
     TableIdx, Target, TypeIdx,
 };
 
@@ -560,7 +560,9 @@ pub struct DexRecompiler<
     M = NoObjectModel,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: StaticPool,
+    pool_table: TableIdx,
+
+    pool_ty: TypeIdx,
     escape_tag: Option<EscapeTag>,
 
     /// Flattened method and code-unit data.
@@ -617,10 +619,8 @@ where
         let max_regs = flat.max_registers();
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            pool_table: TableIdx(0),
+            pool_ty: TypeIdx(0),
             escape_tag: None,
             flat,
             mem_order: MemOrder::Strong,
@@ -676,10 +676,8 @@ where
         let (field_map, class_sizes, type_descs) = build_class_maps(input)?;
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            pool_table: TableIdx(0),
+            pool_ty: TypeIdx(0),
             escape_tag: None,
             flat,
             mem_order: MemOrder::Strong,
@@ -862,7 +860,7 @@ where
             Some(pair) => pair,
             None => {
                 // Reserved opcode or pseudo-instruction marker — emit unreachable.
-                self.reactor.feed(ctx, &Instruction::Unreachable)?;
+                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
                 return Ok(());
             }
         };
@@ -993,7 +991,7 @@ where
         let scratch = self.layout.base(self.scratch_slot);
         let scratch_i64 = self.layout.base(self.scratch_i64_slot);
         let total_params = self.total_params;
-        let pool = self.pool.as_pool();
+        let pool = Pool { handler: &self.pool_table, ty: self.pool_ty };
         let bfo = self.reactor.base_func_offset();
         let escape_tag = self.escape_tag;
 
@@ -1003,7 +1001,7 @@ where
 
         macro_rules! feed {
             ($insn:expr) => {
-                self.reactor.feed(ctx, &$insn)?
+                self.reactor.tail().instruction(ctx, &$insn)?
             };
         }
 
@@ -1940,15 +1938,15 @@ where
             // ── Unconditional branches ───────────────────────────────────────
             DexInsn::Goto { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp_tail(ctx, tgt, total_params)?;
+                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
             }
             DexInsn::Goto16 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp_tail(ctx, tgt, total_params)?;
+                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
             }
             DexInsn::Goto32 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp_tail(ctx, tgt, total_params)?;
+                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
             }
 
             // ── Conditional branches (two-register) ─────────────────────────
@@ -2621,16 +2619,15 @@ where
     /// The low register `v` contributes the low 32 bits; `v+1` the high 32 bits.
     fn emit_wide_to_stack(&mut self, ctx: &mut Context, v: u8) -> Result<(), E> {
         // low
-        self.reactor.feed(ctx, &Instruction::LocalGet(v as u32))?;
-        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(v as u32))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
         // high << 32
-        self.reactor
-            .feed(ctx, &Instruction::LocalGet(v as u32 + 1))?;
-        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64Shl)?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(v as u32 + 1))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(32))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
         // low | (high << 32)
-        self.reactor.feed(ctx, &Instruction::I64Or)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
         Ok(())
     }
 
@@ -2638,19 +2635,16 @@ where
     /// `(dst, dst+1)`.  `scratch_i64` is overwritten with the high half.
     fn emit_split_wide(&mut self, ctx: &mut Context, dst: u8, scratch_i64: u32) -> Result<(), E> {
         // tee scratch_i64 so we can use it twice.
-        self.reactor
-            .feed(ctx, &Instruction::LocalTee(scratch_i64))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch_i64))?;
         // low 32 bits → dst
-        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.feed(ctx, &Instruction::LocalSet(dst as u32))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst as u32))?;
         // high 32 bits → dst+1
-        self.reactor
-            .feed(ctx, &Instruction::LocalGet(scratch_i64))?;
-        self.reactor.feed(ctx, &Instruction::I64Const(32))?;
-        self.reactor.feed(ctx, &Instruction::I64ShrU)?;
-        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_i64))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(32))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
         Ok(())
     }
 

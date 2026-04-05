@@ -63,7 +63,7 @@ use speet_traps::{
 use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsigned};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor, StaticPool,
+    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
     TableIdx, TypeIdx,
 };
 
@@ -250,7 +250,9 @@ pub struct RiscVRecompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: StaticPool,
+    pool_table: TableIdx,
+
+    pool_ty: TypeIdx,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     /// For RV64, this is a 64-bit address
@@ -331,8 +333,10 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_full_config(
-        pool: StaticPool,
-        escape_tag: Option<EscapeTag>,
+        pool_table: TableIdx,
+
+        pool_ty: TypeIdx,
+    escape_tag: Option<EscapeTag>,
         base_pc: u64,
         track_hints: bool,
         enable_rv64: bool,
@@ -343,7 +347,8 @@ where
     {
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool,
+            pool_table,
+            pool_ty,
             escape_tag,
             base_pc,
             track_hints,
@@ -384,8 +389,10 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_all_config(
-        pool: StaticPool,
-        escape_tag: Option<EscapeTag>,
+        pool_table: TableIdx,
+
+        pool_ty: TypeIdx,
+    escape_tag: Option<EscapeTag>,
         base_pc: u64,
         base_func_offset: u32,
         track_hints: bool,
@@ -397,7 +404,8 @@ where
     {
         let mut recomp = Self {
             reactor: Reactor::with_base_func_offset(base_func_offset),
-            pool,
+            pool_table,
+            pool_ty,
             escape_tag,
             base_pc,
             track_hints,
@@ -458,11 +466,13 @@ where
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
-    pub fn new_with_config(pool: StaticPool, escape_tag: Option<EscapeTag>, base_pc: u64) -> Self
+    pub fn new_with_config(pool_table: TableIdx,
+    pool_ty: TypeIdx,
+    escape_tag: Option<EscapeTag>, base_pc: u64) -> Self
     where
         P: Default,
     {
-        Self::new_with_full_config(pool, escape_tag, base_pc, false, false, false)
+        Self::new_with_full_config(pool_table, pool_ty, escape_tag, base_pc, false, false, false)
     }
 
     /// Create a new RISC-V recompiler with default configuration
@@ -472,10 +482,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0,
         )
@@ -490,10 +497,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             base_pc,
         )
@@ -1004,107 +1008,107 @@ where
     fn emit_imm(&mut self, ctx: &mut Context, imm: Imm) -> Result<(), E> {
         if self.enable_rv64 {
             // Sign-extend the 32-bit immediate to 64 bits
-            self.reactor
-                .feed(ctx, &Instruction::I64Const(imm.as_i32() as i64))
+            self.reactor.tail().instruction(ctx, &Instruction::I64Const(imm.as_i32() as i64))
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Const(imm.as_i32()))
+            self.reactor.tail().instruction(ctx, &Instruction::I32Const(imm.as_i32()))
         }
     }
 
     /// Emit an integer constant (i32 or i64 depending on RV64 mode)
     fn emit_int_const(&mut self, ctx: &mut Context, value: i32) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Const(value as i64))
+            self.reactor.tail().instruction(ctx, &Instruction::I64Const(value as i64))
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Const(value))
+            self.reactor.tail().instruction(ctx, &Instruction::I32Const(value))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on RV64 mode)
     fn emit_add(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Add)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Add)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Add)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on RV64 mode)
     fn emit_sub(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Sub)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Sub)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Sub)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on RV64 mode)
     fn emit_mul(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Mul)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Mul)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Mul)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on RV64 mode)
     fn emit_and(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64And)
+            self.reactor.tail().instruction(ctx, &Instruction::I64And)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32And)
+            self.reactor.tail().instruction(ctx, &Instruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on RV64 mode)
     fn emit_or(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Or)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Or)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Or)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on RV64 mode)
     fn emit_xor(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Xor)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Xor)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Xor)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on RV64 mode)
     fn emit_shl(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64Shl)
+            self.reactor.tail().instruction(ctx, &Instruction::I64Shl)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32Shl)
+            self.reactor.tail().instruction(ctx, &Instruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on RV64 mode)
     fn emit_shr_u(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64ShrU)
+            self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32ShrU)
+            self.reactor.tail().instruction(ctx, &Instruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on RV64 mode)
     fn emit_shr_s(&mut self, ctx: &mut Context) -> Result<(), E> {
         if self.enable_rv64 {
-            self.reactor.feed(ctx, &Instruction::I64ShrS)
+            self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)
         } else {
-            self.reactor.feed(ctx, &Instruction::I32ShrS)
+            self.reactor.tail().instruction(ctx, &Instruction::I32ShrS)
         }
     }
 
     /// Perform a jump to a target PC using yecta's jump API
     fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u64, params: u32) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp_tail(ctx, target_func, params)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.jmp(tail_idx, ctx, target_func, params)
     }
 
     /// Classify a decoded RISC-V instruction into [`InsnClass`] flags.
@@ -1218,12 +1222,11 @@ where
     /// For F32 values in F64 registers: set upper 32 bits to all 1s
     fn nan_box_f32(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Convert F32 to I32, then to I64, OR with 0xFFFFFFFF00000000, reinterpret as F64
-        self.reactor.feed(ctx, &Instruction::I32ReinterpretF32)?;
-        self.reactor.feed(ctx, &Instruction::I64ExtendI32U)?;
-        self.reactor
-            .feed(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
-        self.reactor.feed(ctx, &Instruction::I64Or)?;
-        self.reactor.feed(ctx, &Instruction::F64ReinterpretI64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32ReinterpretF32)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+        self.reactor.tail().instruction(ctx, &Instruction::F64ReinterpretI64)?;
         Ok(())
     }
 
@@ -1232,9 +1235,9 @@ where
     /// Extract the F32 value from the lower 32 bits of the NaN-boxed F64 value
     fn unbox_f32(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Reinterpret F64 as I64, wrap to I32 (takes lower 32 bits), reinterpret as F32
-        self.reactor.feed(ctx, &Instruction::I64ReinterpretF64)?;
-        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.feed(ctx, &Instruction::F32ReinterpretI32)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64ReinterpretF64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::F32ReinterpretI32)?;
         Ok(())
     }
 
@@ -1258,7 +1261,7 @@ where
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed(src1, src2, temps);
         for instr in instrs {
-            self.reactor.feed(ctx, &instr)?;
+            self.reactor.tail().instruction(ctx, &instr)?;
         }
         Ok(())
     }
@@ -1268,7 +1271,7 @@ where
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_unsigned(src1, src2, temps);
         for instr in instrs {
-            self.reactor.feed(ctx, &instr)?;
+            self.reactor.tail().instruction(ctx, &instr)?;
         }
         Ok(())
     }
@@ -1283,14 +1286,15 @@ where
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed_unsigned(src1, src2, temps);
         for instr in instrs {
-            self.reactor.feed(ctx, &instr)?;
+            self.reactor.tail().instruction(ctx, &instr)?;
         }
         Ok(())
     }
 
     /// Finalize the function
     pub fn seal(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.seal(ctx, &Instruction::Unreachable)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.seal_to(tail_idx, ctx, &Instruction::Unreachable)
     }
 
     /// Get the reactor (consumes self)
@@ -1684,10 +1688,7 @@ mod tests {
         // Test HINT tracking when explicitly enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             true,  // track_hints
@@ -1736,10 +1737,7 @@ mod tests {
         // Test that regular ADDI instructions are not tracked as HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             true,  // track_hints
@@ -1793,10 +1791,7 @@ mod tests {
         // Test clearing collected HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             true,  // track_hints
@@ -1874,10 +1869,7 @@ mod tests {
         // Test the actual pattern used in rv-corpus test files
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             true,  // track_hints
@@ -1918,10 +1910,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                StaticPool {
-                    table: TableIdx(0),
-                    ty: TypeIdx(0),
-                },
+                TableIdx(0), TypeIdx(0),
                 None,
                 0x1000,
                 true,  // track_hints
@@ -1989,10 +1978,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                StaticPool {
-                    table: TableIdx(0),
-                    ty: TypeIdx(0),
-                },
+                TableIdx(0), TypeIdx(0),
                 None,
                 0x1000,
                 true,  // track_hints
@@ -2051,10 +2037,7 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                StaticPool {
-                    table: TableIdx(0),
-                    ty: TypeIdx(0),
-                },
+                TableIdx(0), TypeIdx(0),
                 None,
                 0x1000,
                 true,  // track_hints
@@ -2540,10 +2523,7 @@ mod tests {
     fn test_rv64_instructions() {
         // Test RV64 instructions when RV64 is enabled
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             false, // track_hints
@@ -2665,10 +2645,7 @@ mod tests {
         // Test RV64 with memory64 enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             false, // track_hints
@@ -2709,10 +2686,7 @@ mod tests {
         // Test RV64 multiply-high instructions (Mulh, Mulhu, Mulhsu)
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             false, // track_hints
@@ -2952,10 +2926,7 @@ mod tests {
 
         // Create with offset using new_with_all_config
         let recompiler2 = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_all_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             25, // base_func_offset
@@ -3016,10 +2987,7 @@ mod tests {
     fn test_jal_with_speculative_calls_enabled() {
         // Test JAL instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             Some(EscapeTag {
                 tag: TagIdx(0),
                 ty: TypeIdx(0),
@@ -3050,10 +3018,7 @@ mod tests {
         // Test JAL with dest != x1 (not an ABI-compliant call)
         // Should NOT use speculative calls even when enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             Some(EscapeTag {
                 tag: TagIdx(0),
                 ty: TypeIdx(0),
@@ -3082,10 +3047,7 @@ mod tests {
     fn test_jalr_with_speculative_calls_enabled() {
         // Test JALR instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             Some(EscapeTag {
                 tag: TagIdx(0),
                 ty: TypeIdx(0),
@@ -3141,10 +3103,7 @@ mod tests {
         // Test ABI-compliant return: jalr x0, ra, 0
         // This should be detected as a return and use ret() to throw the escape tag
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             Some(EscapeTag {
                 tag: TagIdx(0),
                 ty: TypeIdx(0),
@@ -3175,10 +3134,7 @@ mod tests {
     fn test_non_abi_return_with_speculative_calls() {
         // Test non-ABI return patterns that should NOT use ret()
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             Some(EscapeTag {
                 tag: TagIdx(0),
                 ty: TypeIdx(0),

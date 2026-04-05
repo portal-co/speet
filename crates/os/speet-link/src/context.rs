@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, StaticPool};
+use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
 
@@ -137,8 +137,14 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
 
     // ── Configuration ─────────────────────────────────────────────────────
 
-    /// The indirect-call pool configuration.
-    fn pool(&self) -> StaticPool;
+    /// The indirect-call pool configuration: `(table_index, type_index)`.
+    ///
+    /// Call sites that need a [`Pool`] should construct one inline:
+    /// ```ignore
+    /// let (table, ty) = ctx.pool();
+    /// let pool = Pool { handler: &table, ty };
+    /// ```
+    fn pool(&self) -> (TableIdx, TypeIdx);
 
     /// The escape tag used for exception-based control flow, if any.
     fn escape_tag(&self) -> Option<EscapeTag>;
@@ -165,8 +171,10 @@ where
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots.
     pub locals_mark: Mark,
-    /// Indirect-call pool configuration.
-    pub pool: StaticPool,
+    /// Indirect-call pool table index.
+    pub pool_table: TableIdx,
+    /// Indirect-call pool type index.
+    pub pool_ty: TypeIdx,
     /// Optional escape tag.
     pub escape_tag: Option<EscapeTag>,
 }
@@ -229,20 +237,23 @@ where
     }
 
     fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.feed(ctx, insn)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, insn)
     }
     fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.reactor.jmp_tail(ctx, target, params)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.jmp(tail_idx, ctx, target, params)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
         self.reactor.next_with(ctx, f, len)
     }
     fn seal_fn(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.seal(ctx, insn)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.seal_to(tail_idx, ctx, insn)
     }
 
-    fn pool(&self) -> StaticPool {
-        self.pool
+    fn pool(&self) -> (TableIdx, TypeIdx) {
+        (self.pool_table, self.pool_ty)
     }
     fn escape_tag(&self) -> Option<EscapeTag> {
         self.escape_tag

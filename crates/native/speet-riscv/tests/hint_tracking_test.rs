@@ -9,7 +9,7 @@ use speet_riscv::RiscVRecompiler;
 use std::path::Path;
 use std::{convert::Infallible, fs};
 use wasm_encoder::Function;
-use yecta::{StaticPool, TableIdx, TypeIdx};
+use yecta::{TableIdx, TypeIdx};
 
 /// Helper function to extract the .text section from an ELF file
 fn extract_text_section(elf_path: &Path) -> Result<(Vec<u8>, u64), Box<dyn std::error::Error>> {
@@ -45,10 +45,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
 
     // Create recompiler with HINT tracking enabled
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        StaticPool {
-            table: TableIdx(0),
-            ty: TypeIdx(0),
-        },
+        TableIdx(0), TypeIdx(0),
         None,
         start_addr as u64,
         true,  // Enable HINT tracking
@@ -146,10 +143,7 @@ fn test_hint_tracking_performance() {
         RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
     let mut recompiler_with_hints =
         RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            TableIdx(0), TypeIdx(0),
             None,
             0x1000,
             true,

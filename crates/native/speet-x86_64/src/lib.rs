@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, StaticPool, TableIdx, TypeIdx};
+use yecta::{EscapeTag, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
@@ -66,7 +66,9 @@ pub struct X86Recompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool: StaticPool,
+    pool_table: TableIdx,
+
+    pool_ty: TypeIdx,
     escape_tag: Option<EscapeTag>,
     base_rip: u64,
     hints: Vec<u8>,
@@ -110,10 +112,8 @@ where
     pub fn new_with_base_rip(base_rip: u64) -> Self {
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool: StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            pool_table: TableIdx(0),
+            pool_ty: TypeIdx(0),
             escape_tag: None,
             base_rip,
             hints: Vec::new(),
@@ -162,35 +162,35 @@ where
     }
 
     fn emit_i64_const(&mut self, ctx: &mut Context, value: i64) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Const(value))
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(value))
     }
 
     fn emit_i64_add(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Add)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Add)
     }
     fn emit_i64_sub(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Sub)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Sub)
     }
     fn emit_i64_mul(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Mul)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Mul)
     }
     fn emit_i64_and(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64And)
+        self.reactor.tail().instruction(ctx, &Instruction::I64And)
     }
     fn emit_i64_or(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Or)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Or)
     }
     fn emit_i64_xor(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Xor)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Xor)
     }
     fn emit_i64_shl(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64Shl)
+        self.reactor.tail().instruction(ctx, &Instruction::I64Shl)
     }
     fn emit_i64_shr_u(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64ShrU)
+        self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)
     }
     fn emit_i64_shr_s(&mut self, ctx: &mut Context) -> Result<(), E> {
-        self.reactor.feed(ctx, &Instruction::I64ShrS)
+        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)
     }
 
     // Condition flag helpers
@@ -345,56 +345,45 @@ where
     }
 
     fn set_zf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
-        self.reactor
-            .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
     fn set_sf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
-        self.reactor
-            .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
     fn set_cf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
-        self.reactor
-            .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
     fn set_of(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
-        self.reactor
-            .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
     fn set_pf(&mut self, ctx: &mut Context, value: bool) -> Result<(), E> {
-        self.reactor
-            .feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
     fn compute_parity(&mut self, ctx: &mut Context) -> Result<(), E> {
         // Assume value is on stack (i64)
         // Extract lowest byte: value & 0xFF
-        self.reactor.feed(ctx, &Instruction::I64Const(0xFF))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
         // Count bits: use popcnt if available, otherwise simulate
         // For simplicity, we'll implement a basic parity check
         // This is a simplified version - real parity counts all bits in lowest byte
-        self.reactor.feed(ctx, &Instruction::I32WrapI64)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
         // Simple parity: check if number of 1s is even
         // For now, just set to 0 (even parity) - this is a simplification
-        self.reactor.feed(ctx, &Instruction::Drop)?;
-        self.reactor.feed(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
-        self.reactor
-            .feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.reactor.tail().instruction(ctx, &Instruction::Drop)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to set flags after arithmetic operation
@@ -453,102 +442,80 @@ where
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match (size_bits, signed) {
-            (8, true) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load8S(MemArg {
+            (8, true) => self.reactor.tail().instruction(ctx, &Instruction::I64Load8S(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            (8, false) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load8U(MemArg {
+            (8, false) => self.reactor.tail().instruction(ctx, &Instruction::I64Load8U(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            (16, true) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load16S(MemArg {
+            (16, true) => self.reactor.tail().instruction(ctx, &Instruction::I64Load16S(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            (16, false) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load16U(MemArg {
+            (16, false) => self.reactor.tail().instruction(ctx, &Instruction::I64Load16U(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            (32, true) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load32S(MemArg {
+            (32, true) => self.reactor.tail().instruction(ctx, &Instruction::I64Load32S(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            (32, false) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load32U(MemArg {
+            (32, false) => self.reactor.tail().instruction(ctx, &Instruction::I64Load32U(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            (64, _) => self.reactor.feed(
-                ctx,
-                &Instruction::I64Load(MemArg {
+            (64, _) => self.reactor.tail().instruction(ctx, &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
                 }),
             ),
-            _ => self.reactor.feed(ctx, &Instruction::Unreachable),
+            _ => self.reactor.tail().instruction(ctx, &Instruction::Unreachable),
         }
     }
 
     fn emit_memory_store(&mut self, ctx: &mut Context, size_bits: u32) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match size_bits {
-            8 => self.reactor.feed(
-                ctx,
-                &Instruction::I64Store8(MemArg {
+            8 => self.reactor.tail().instruction(ctx, &Instruction::I64Store8(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            16 => self.reactor.feed(
-                ctx,
-                &Instruction::I64Store16(MemArg {
+            16 => self.reactor.tail().instruction(ctx, &Instruction::I64Store16(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            32 => self.reactor.feed(
-                ctx,
-                &Instruction::I64Store32(MemArg {
+            32 => self.reactor.tail().instruction(ctx, &Instruction::I64Store32(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            64 => self.reactor.feed(
-                ctx,
-                &Instruction::I64Store(MemArg {
+            64 => self.reactor.tail().instruction(ctx, &Instruction::I64Store(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
                 }),
             ),
-            _ => self.reactor.feed(ctx, &Instruction::Unreachable),
+            _ => self.reactor.tail().instruction(ctx, &Instruction::Unreachable),
         }
     }
 
@@ -561,21 +528,20 @@ where
     ) -> Result<(), E> {
         // shift right by bit_offset then mask size_bits
         if bit_offset > 0 {
-            self.reactor
-                .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            self.reactor.feed(ctx, &Instruction::I64ShrU)?;
+            self.reactor.tail().instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
         }
         match size_bits {
             64 => { /* no mask */ }
             32 => { /* locals model 32-bit values as zero-extended into 64, so no mask needed for reads */
             }
             16 => {
-                self.reactor.feed(ctx, &Instruction::I64Const(0xFFFF))?;
-                self.reactor.feed(ctx, &Instruction::I64And)?;
+                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
             }
             8 => {
-                self.reactor.feed(ctx, &Instruction::I64Const(0xFF))?;
-                self.reactor.feed(ctx, &Instruction::I64And)?;
+                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
+                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
             }
             _ => {}
         }
@@ -599,29 +565,28 @@ where
         // local.set(local, combined)
 
         // local.get(local)
-        self.reactor.feed(ctx, &Instruction::LocalGet(local))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(local))?;
         // store original in temp (we rely on temp locals being available after local 16). We'll use LocalSet(17) and LocalGet(17).
-        self.reactor.feed(ctx, &Instruction::LocalSet(17))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(17))?;
         // compute mask = (1<<size_bits)-1
         let mask: i64 = if size_bits == 64 {
             -1i64
         } else {
             ((1u128 << size_bits) - 1) as i64
         };
-        self.reactor.feed(ctx, &Instruction::I64Const(mask))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(mask))?;
         // shift mask left by bit_offset
         if bit_offset > 0 {
-            self.reactor
-                .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            self.reactor.feed(ctx, &Instruction::I64Shl)?;
+            self.reactor.tail().instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
         }
         // invert mask -> ~mask
-        self.reactor.feed(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
-        self.reactor.feed(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
+        self.reactor.tail().instruction(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
                                                        // get original
-        self.reactor.feed(ctx, &Instruction::LocalGet(17))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(17))?;
         // cleared = original & ~mask
-        self.reactor.feed(ctx, &Instruction::I64And)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
         // now compute new_shifted: we assume new_value is currently on top of stack
         // mask = (1<<size_bits)-1 (again)
         let small_mask: i64 = if size_bits == 64 {
@@ -629,17 +594,16 @@ where
         } else {
             ((1u128 << size_bits) - 1) as i64
         };
-        self.reactor.feed(ctx, &Instruction::I64Const(small_mask))?;
-        self.reactor.feed(ctx, &Instruction::I64And)?; // new_value & small_mask
+        self.reactor.tail().instruction(ctx, &Instruction::I64Const(small_mask))?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64And)?; // new_value & small_mask
         if bit_offset > 0 {
-            self.reactor
-                .feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            self.reactor.feed(ctx, &Instruction::I64Shl)?; // << bit_offset
+            self.reactor.tail().instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?; // << bit_offset
         }
         // combined = cleared | new_shifted
-        self.reactor.feed(ctx, &Instruction::I64Or)?;
+        self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
         // store back into local
-        self.reactor.feed(ctx, &Instruction::LocalSet(local))?;
+        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(local))?;
         Ok(())
     }
 }

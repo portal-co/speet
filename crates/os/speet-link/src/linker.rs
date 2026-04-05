@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, StaticPool};
+use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 
 use crate::context::{BaseContext, ReactorContext};
 use crate::unit::BinaryUnit;
@@ -90,8 +90,10 @@ where
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots (captures `total_params`).
     pub locals_mark: Mark,
-    /// Indirect-call pool configuration.
-    pub pool: StaticPool,
+    /// Indirect-call pool table index.
+    pub pool_table: TableIdx,
+    /// Indirect-call pool type index.
+    pub pool_ty: TypeIdx,
     /// Optional escape tag for exception-based control flow.
     pub escape_tag: Option<EscapeTag>,
     /// Downstream handler for completed [`BinaryUnit`]s.
@@ -138,10 +140,8 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
-            pool: StaticPool {
-                table: TableIdx(0),
-                ty: TypeIdx(0),
-            },
+            pool_table: TableIdx(0),
+            pool_ty: TypeIdx(0),
             escape_tag: None,
             plugin,
         }
@@ -226,20 +226,23 @@ where
     }
 
     fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.feed(ctx, insn)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, insn)
     }
     fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.reactor.jmp_tail(ctx, target, params)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.jmp(tail_idx, ctx, target, params)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
         self.reactor.next_with(ctx, f, len)
     }
     fn seal_fn(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.seal(ctx, insn)
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.seal_to(tail_idx, ctx, insn)
     }
 
-    fn pool(&self) -> StaticPool {
-        self.pool
+    fn pool(&self) -> (TableIdx, TypeIdx) {
+        (self.pool_table, self.pool_ty)
     }
     fn escape_tag(&self) -> Option<EscapeTag> {
         self.escape_tag

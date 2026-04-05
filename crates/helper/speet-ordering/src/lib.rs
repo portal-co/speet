@@ -67,7 +67,7 @@
 
 use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
-use yecta::{LocalPoolBackend, Reactor};
+use yecta::{Fed, LocalPoolBackend, Reactor};
 
 // ── MemOrder ──────────────────────────────────────────────────────────────────
 
@@ -221,12 +221,12 @@ pub fn emit_store<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBacken
         instr
     };
     match order {
-        MemOrder::Strong => reactor.feed(ctx, &instr),
+        MemOrder::Strong => reactor.tail().instruction(ctx, &instr),
         MemOrder::Relaxed => {
             match store_val_type(&instr) {
                 Some(vt) => reactor.feed_lazy(ctx, addr_type, vt, &instr, tail_idx),
                 // Float stores are always eager — no pool support for f32/f64.
-                None => reactor.feed(ctx, &instr),
+                None => reactor.tail().instruction(ctx, &instr),
             }
         }
     }
@@ -271,7 +271,7 @@ pub fn emit_load<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend
     };
     // Flush any pending stores that might alias this load's address.
     reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)?;
-    reactor.feed(ctx, &instr)
+    reactor.tail().instruction(ctx, &instr)
 }
 
 // ── Atomic RMW helpers ────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ pub fn emit_lr<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
     };
     // Flush any pending stores that might alias this load.
     reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)?;
-    reactor.feed(ctx, &instr)
+    reactor.tail().instruction(ctx, &instr)
 }
 
 /// Emit an **atomic store-conditional** (`SC.W` / `SC.D`).
@@ -415,7 +415,7 @@ pub fn emit_sc<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>(
             RmwWidth::W32 => Instruction::I32AtomicStore(m),
             RmwWidth::W64 => Instruction::I64AtomicStore(m),
         };
-        reactor.feed(ctx, &instr)
+        reactor.tail().instruction(ctx, &instr)
     } else {
         // Plain store — eligible for feed_lazy under MemOrder::Relaxed.
         let instr = match width {
@@ -508,7 +508,7 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
 
     if let Some(instr) = direct_atomic {
         // Single wasm atomic RMW; consumes [addr, src], leaves [old].
-        return reactor.feed(ctx, &instr);
+        return reactor.tail().instruction(ctx, &instr);
     }
 
     // ── Non-atomic direct ops: load / scalar-op / store ───────────────────
@@ -523,38 +523,38 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
 
     if is_direct_nonatomic {
         // Entry stack: [addr, src] — consumed here; values also in locals.
-        reactor.feed(ctx, &Instruction::Drop)?; // drop src (reload from local)
-        reactor.feed(ctx, &Instruction::Drop)?; // drop addr (reload from local)
+        reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop src (reload from local)
+        reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop addr (reload from local)
 
         // Load old value.
-        reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?;
         let load_instr = match width {
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
         reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
-        reactor.feed(ctx, &load_instr)?; // old
-        reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
+        reactor.tail().instruction(ctx, &load_instr)?; // old
+        reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
         if op == RmwOp::Swap {
             // new = src; drop old from compute stack, keep it as result below.
             // Stack: old.  We need [addr, src] for the store.
-            reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
-            reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, src
+            reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
+            reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, src
         } else {
             // Compute new = op(old, src).  Stack: old.
-            reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
-            reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
-            reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
+            reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
+            reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
+            reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
             match (width, op) {
-                (RmwWidth::W32, RmwOp::Add) => reactor.feed(ctx, &Instruction::I32Add)?,
-                (RmwWidth::W64, RmwOp::Add) => reactor.feed(ctx, &Instruction::I64Add)?,
-                (RmwWidth::W32, RmwOp::Xor) => reactor.feed(ctx, &Instruction::I32Xor)?,
-                (RmwWidth::W64, RmwOp::Xor) => reactor.feed(ctx, &Instruction::I64Xor)?,
-                (RmwWidth::W32, RmwOp::And) => reactor.feed(ctx, &Instruction::I32And)?,
-                (RmwWidth::W64, RmwOp::And) => reactor.feed(ctx, &Instruction::I64And)?,
-                (RmwWidth::W32, RmwOp::Or) => reactor.feed(ctx, &Instruction::I32Or)?,
-                (RmwWidth::W64, RmwOp::Or) => reactor.feed(ctx, &Instruction::I64Or)?,
+                (RmwWidth::W32, RmwOp::Add) => reactor.tail().instruction(ctx, &Instruction::I32Add)?,
+                (RmwWidth::W64, RmwOp::Add) => reactor.tail().instruction(ctx, &Instruction::I64Add)?,
+                (RmwWidth::W32, RmwOp::Xor) => reactor.tail().instruction(ctx, &Instruction::I32Xor)?,
+                (RmwWidth::W64, RmwOp::Xor) => reactor.tail().instruction(ctx, &Instruction::I64Xor)?,
+                (RmwWidth::W32, RmwOp::And) => reactor.tail().instruction(ctx, &Instruction::I32And)?,
+                (RmwWidth::W64, RmwOp::And) => reactor.tail().instruction(ctx, &Instruction::I64And)?,
+                (RmwWidth::W32, RmwOp::Or) => reactor.tail().instruction(ctx, &Instruction::I32Or)?,
+                (RmwWidth::W64, RmwOp::Or) => reactor.tail().instruction(ctx, &Instruction::I64Or)?,
                 _ => unreachable!(),
             }
             // Stack: old, addr, new
@@ -692,38 +692,38 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
         // load-compute-store.  Correct for single-threaded wasm.
         //
         // Entry stack: [addr, src] — drop both, reload from locals.
-        reactor.feed(ctx, &Instruction::Drop)?; // drop src
-        reactor.feed(ctx, &Instruction::Drop)?; // drop addr
+        reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop src
+        reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop addr
 
         // old = load(addr)
-        reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?;
         let load_instr = match width {
             RmwWidth::W32 => Instruction::I32Load(m),
             RmwWidth::W64 => Instruction::I64Load(m),
         };
         reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
-        reactor.feed(ctx, &load_instr)?; // old
-        reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
+        reactor.tail().instruction(ctx, &load_instr)?; // old
+        reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch_local))?; // stash old; old on stack
 
         // Compute new = op(old, src) via select.
-        reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr (for store)
-        reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
-        reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?; // old, addr (for store)
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, old
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, old, src
         match (width, op) {
-            (RmwWidth::W32, RmwOp::Min) => reactor.feed(ctx, &Instruction::I32LtS)?,
-            (RmwWidth::W64, RmwOp::Min) => reactor.feed(ctx, &Instruction::I64LtS)?,
-            (RmwWidth::W32, RmwOp::Max) => reactor.feed(ctx, &Instruction::I32GtS)?,
-            (RmwWidth::W64, RmwOp::Max) => reactor.feed(ctx, &Instruction::I64GtS)?,
-            (RmwWidth::W32, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I32LtU)?,
-            (RmwWidth::W64, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I64LtU)?,
-            (RmwWidth::W32, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I32GtU)?,
-            (RmwWidth::W64, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I64GtU)?,
+            (RmwWidth::W32, RmwOp::Min) => reactor.tail().instruction(ctx, &Instruction::I32LtS)?,
+            (RmwWidth::W64, RmwOp::Min) => reactor.tail().instruction(ctx, &Instruction::I64LtS)?,
+            (RmwWidth::W32, RmwOp::Max) => reactor.tail().instruction(ctx, &Instruction::I32GtS)?,
+            (RmwWidth::W64, RmwOp::Max) => reactor.tail().instruction(ctx, &Instruction::I64GtS)?,
+            (RmwWidth::W32, RmwOp::Minu) => reactor.tail().instruction(ctx, &Instruction::I32LtU)?,
+            (RmwWidth::W64, RmwOp::Minu) => reactor.tail().instruction(ctx, &Instruction::I64LtU)?,
+            (RmwWidth::W32, RmwOp::Maxu) => reactor.tail().instruction(ctx, &Instruction::I32GtU)?,
+            (RmwWidth::W64, RmwOp::Maxu) => reactor.tail().instruction(ctx, &Instruction::I64GtU)?,
             _ => unreachable!(),
         }
         // stack: old, addr, pred
-        reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, pred, old
-        reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, pred, old, src
-        reactor.feed(ctx, &Instruction::Select)?; // old, addr, new
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, pred, old
+        reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, pred, old, src
+        reactor.tail().instruction(ctx, &Instruction::Select)?; // old, addr, new
 
         // store new at addr; respects MemOrder.
         let store_instr = match width {
@@ -748,74 +748,74 @@ pub fn emit_rmw<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend>
     // See the long comment above for the full encoding rationale.
     //
     // Consume the entry [addr, src] stack — both values live in locals.
-    reactor.feed(ctx, &Instruction::Drop)?; // drop src from entry stack
-    reactor.feed(ctx, &Instruction::Drop)?; // drop addr from entry stack
+    reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop src from entry stack
+    reactor.tail().instruction(ctx, &Instruction::Drop)?; // drop addr from entry stack
 
-    reactor.feed(ctx, &Instruction::Block(block_ty))?;
-    reactor.feed(ctx, &Instruction::Loop(BlockType::Empty))?;
+    reactor.tail().instruction(ctx, &Instruction::Block(block_ty))?;
+    reactor.tail().instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
 
     // Load old atomically.
-    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?;
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?;
     let load_instr = match width {
         RmwWidth::W32 => Instruction::I32AtomicLoad(m),
         RmwWidth::W64 => Instruction::I64AtomicLoad(m),
     };
     // Flush any deferred stores that alias the RMW address before reading.
     reactor.flush_bundles_for_load(ctx, addr_local, ValType::I32, tail_idx)?;
-    reactor.feed(ctx, &load_instr)?;
-    reactor.feed(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
+    reactor.tail().instruction(ctx, &load_instr)?;
+    reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch_local))?; // old stashed; old on stack
 
     // Push addr, expected for cmpxchg
-    reactor.feed(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?; // old, addr
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected
 
     // Compute new = op(old, src) as replacement
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, old
-    reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, old, src
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, old
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, old, src
 
     // Emit the comparison operator; consumes [old, src], leaves [pred]
     match (width, op) {
-        (RmwWidth::W32, RmwOp::Min) => reactor.feed(ctx, &Instruction::I32LtS)?,
-        (RmwWidth::W64, RmwOp::Min) => reactor.feed(ctx, &Instruction::I64LtS)?,
-        (RmwWidth::W32, RmwOp::Max) => reactor.feed(ctx, &Instruction::I32GtS)?,
-        (RmwWidth::W64, RmwOp::Max) => reactor.feed(ctx, &Instruction::I64GtS)?,
-        (RmwWidth::W32, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I32LtU)?,
-        (RmwWidth::W64, RmwOp::Minu) => reactor.feed(ctx, &Instruction::I64LtU)?,
-        (RmwWidth::W32, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I32GtU)?,
-        (RmwWidth::W64, RmwOp::Maxu) => reactor.feed(ctx, &Instruction::I64GtU)?,
+        (RmwWidth::W32, RmwOp::Min) => reactor.tail().instruction(ctx, &Instruction::I32LtS)?,
+        (RmwWidth::W64, RmwOp::Min) => reactor.tail().instruction(ctx, &Instruction::I64LtS)?,
+        (RmwWidth::W32, RmwOp::Max) => reactor.tail().instruction(ctx, &Instruction::I32GtS)?,
+        (RmwWidth::W64, RmwOp::Max) => reactor.tail().instruction(ctx, &Instruction::I64GtS)?,
+        (RmwWidth::W32, RmwOp::Minu) => reactor.tail().instruction(ctx, &Instruction::I32LtU)?,
+        (RmwWidth::W64, RmwOp::Minu) => reactor.tail().instruction(ctx, &Instruction::I64LtU)?,
+        (RmwWidth::W32, RmwOp::Maxu) => reactor.tail().instruction(ctx, &Instruction::I32GtU)?,
+        (RmwWidth::W64, RmwOp::Maxu) => reactor.tail().instruction(ctx, &Instruction::I64GtU)?,
         _ => unreachable!(),
     }
     // stack: old, addr, expected, pred
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, pred, old
-    reactor.feed(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, pred, old, src
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, addr, expected, pred, old
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?; // old, addr, expected, pred, old, src
     // select: pred ? old : src  (pred true → keep old = it IS the min/max)
-    reactor.feed(ctx, &Instruction::Select)?; // old, addr, expected, new
+    reactor.tail().instruction(ctx, &Instruction::Select)?; // old, addr, expected, new
 
     // cmpxchg: [addr, expected, replacement] → got
     let cmpxchg_instr = match width {
         RmwWidth::W32 => Instruction::I32AtomicRmwCmpxchg(m),
         RmwWidth::W64 => Instruction::I64AtomicRmwCmpxchg(m),
     };
-    reactor.feed(ctx, &cmpxchg_instr)?; // old, got
+    reactor.tail().instruction(ctx, &cmpxchg_instr)?; // old, got
 
     // Check CAS result: got == old?
-    reactor.feed(ctx, &Instruction::LocalGet(scratch_local))?; // old, got, expected
+    reactor.tail().instruction(ctx, &Instruction::LocalGet(scratch_local))?; // old, got, expected
     let eq_instr = match width {
         RmwWidth::W32 => Instruction::I32Eq,
         RmwWidth::W64 => Instruction::I64Eq,
     };
-    reactor.feed(ctx, &eq_instr)?; // old, same?
+    reactor.tail().instruction(ctx, &eq_instr)?; // old, same?
 
     // br_if 1 ($exit): if CAS succeeded, break carrying `old` (depth 1 = block)
-    reactor.feed(ctx, &Instruction::BrIf(1))?;
+    reactor.tail().instruction(ctx, &Instruction::BrIf(1))?;
 
     // CAS failed: drop stale `old`, retry
-    reactor.feed(ctx, &Instruction::Drop)?;
-    reactor.feed(ctx, &Instruction::Br(0))?;
+    reactor.tail().instruction(ctx, &Instruction::Drop)?;
+    reactor.tail().instruction(ctx, &Instruction::Br(0))?;
 
-    reactor.feed(ctx, &Instruction::End)?; // end loop
-    reactor.feed(ctx, &Instruction::Unreachable)?; // unreachable: loop exits only via br_if
-    reactor.feed(ctx, &Instruction::End)?; // end block; result = old
+    reactor.tail().instruction(ctx, &Instruction::End)?; // end loop
+    reactor.tail().instruction(ctx, &Instruction::Unreachable)?; // unreachable: loop exits only via br_if
+    reactor.tail().instruction(ctx, &Instruction::End)?; // end block; result = old
 
     Ok(())
 }
@@ -838,8 +838,9 @@ pub fn emit_fence<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBacken
     ctx: &mut Context,
     reactor: &mut Reactor<Context, E, F, P>,
     _order: MemOrder,
+    tail_idx: usize,
 ) -> Result<(), E> {
     // Both Strong and Relaxed flush the bundle buffer.  Under Strong this is
     // always a no-op (empty buffer); under Relaxed it commits pending stores.
-    reactor.barrier(ctx)
+    reactor.flush_bundles(ctx, tail_idx)
 }

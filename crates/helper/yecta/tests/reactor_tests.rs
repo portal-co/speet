@@ -4,7 +4,8 @@
 //! which manages WebAssembly function generation with complex control flow.
 
 use wasm_encoder::{Function, Instruction, ValType};
-use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, StaticPool, TableIdx, TagIdx, Target, TypeIdx};
+use wax_core::build::InstructionSink;
+use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, TableIdx, TagIdx, Target, TypeIdx};
 
 #[test]
 fn test_reactor_creation() {
@@ -28,9 +29,9 @@ fn test_simple_function_creation() {
         .unwrap();
 
     // Emit some instructions
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::I32Const(42)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::I32Add).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::I32Const(42)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::I32Add).is_ok());
 }
 
 #[test]
@@ -42,13 +43,13 @@ fn test_multiple_functions() {
     reactor
         .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
         .unwrap();
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 
     // Create second function
     reactor
         .next(&mut ctx, [(1, ValType::I64)].into_iter(), 0)
         .unwrap();
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 }
 
 #[test]
@@ -60,27 +61,24 @@ fn test_unconditional_jump() {
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
         .unwrap();
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
     // Jump to function 1 with 2 parameters
-    assert!(reactor.jmp_tail(&mut ctx, FuncIdx(1), 2).is_ok());
+    assert!(reactor.jmp(reactor.fn_count()-1, &mut ctx, FuncIdx(1), 2).is_ok());
 
     // Create target function
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
         .unwrap();
-    assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
 #[test]
 fn test_jump_with_params_helper() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = StaticPool {
-        table: TableIdx(0),
-        ty: TypeIdx(0),
-    }.as_pool();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
@@ -88,12 +86,12 @@ fn test_jump_with_params_helper() {
 
     // Use JumpCallParams helper
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
-    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count()-1).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
         .unwrap();
-    assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
 #[test]
@@ -108,27 +106,23 @@ fn test_conditional_operations() {
         .unwrap();
 
     // Emit a simple conditional structure
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
     assert!(
-        reactor
-            .feed(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
+        reactor.tail().instruction(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
             .is_ok()
     );
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::Drop).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::End).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::Drop).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::End).is_ok());
 
-    assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
 #[test]
 fn test_call_with_exception_handling() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = StaticPool {
-        table: TableIdx(0),
-        ty: TypeIdx(1),
-    }.as_pool();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
     let escape_tag = EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(1),
@@ -139,13 +133,7 @@ fn test_call_with_exception_handling() {
         .unwrap();
 
     assert!(
-        reactor
-            .call_tail(
-                &mut ctx,
-                Target::Static { func: FuncIdx(1) },
-                escape_tag,
-                pool
-            )
+        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, reactor.fn_count()-1)
             .is_ok()
     );
 }
@@ -164,7 +152,7 @@ fn test_return_via_exception() {
         .unwrap();
 
     // Return via exception (params will be loaded by ret)
-    assert!(reactor.ret_tail(&mut ctx, 2, escape_tag).is_ok());
+    assert!(reactor.ret(reactor.fn_count()-1, &mut ctx, 2, escape_tag).is_ok());
 }
 
 #[test]
@@ -175,10 +163,10 @@ fn test_seal_function() {
     reactor
         .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
         .unwrap();
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
 
     // Seal with return
-    assert!(reactor.seal(&mut ctx, &Instruction::Return).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Return).is_ok());
 }
 
 #[test]
@@ -186,17 +174,14 @@ fn test_multiple_jumps() {
     // Test creating multiple jumps between functions
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = StaticPool {
-        table: TableIdx(0),
-        ty: TypeIdx(0),
-    }.as_pool();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
         .unwrap();
 
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
-    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count()-1).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
@@ -204,12 +189,12 @@ fn test_multiple_jumps() {
 
     // Jump from function 1 to function 2
     let params2 = JumpCallParams::jump(FuncIdx(2), 2, pool);
-    assert!(reactor.ji_with_params_tail(&mut ctx, params2).is_ok());
+    assert!(reactor.ji_with_params(&mut ctx, params2, reactor.fn_count()-1).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 2)
         .unwrap();
-    assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
 #[test]
@@ -227,25 +212,22 @@ fn test_instruction_feeding() {
         .unwrap();
 
     // Feed various instructions
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::I32Add).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalSet(2)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(3)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::I64Const(42)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::I64Eq).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::I32Add).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalSet(2)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(3)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::I64Const(42)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::I64Eq).is_ok());
 
-    assert!(reactor.seal(&mut ctx, &Instruction::Return).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Return).is_ok());
 }
 
 #[test]
 fn test_base_func_offset_applied() {
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::with_base_func_offset(100);
     let mut ctx = ();
-    let pool = StaticPool {
-        table: TableIdx(0),
-        ty: TypeIdx(0),
-    }.as_pool();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
@@ -253,12 +235,12 @@ fn test_base_func_offset_applied() {
 
     // The offset should be applied when emitting function indices
     let params = JumpCallParams::jump(FuncIdx(0), 2, pool);
-    assert!(reactor.ji_with_params_tail(&mut ctx, params).is_ok());
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count()-1).is_ok());
 
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
         .unwrap();
-    assert!(reactor.seal(&mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
 #[test]
@@ -288,7 +270,7 @@ fn test_control_flow_distance() {
         .unwrap();
 
     // All should be created successfully
-    assert!(reactor.feed(&mut ctx, &Instruction::Nop).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::Nop).is_ok());
 }
 
 #[test]
@@ -296,10 +278,7 @@ fn test_call_and_return() {
     // Test call with exception handling and return
     let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
     let mut ctx = ();
-    let pool = StaticPool {
-        table: TableIdx(0),
-        ty: TypeIdx(1),
-    }.as_pool();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
     let escape_tag = EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(1),
@@ -309,17 +288,11 @@ fn test_call_and_return() {
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 0)
         .unwrap();
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(0)).is_ok());
-    assert!(reactor.feed(&mut ctx, &Instruction::LocalGet(1)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).is_ok());
+    assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
     assert!(
-        reactor
-            .call_tail(
-                &mut ctx,
-                Target::Static { func: FuncIdx(1) },
-                escape_tag,
-                pool
-            )
+        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, reactor.fn_count()-1)
             .is_ok()
     );
 
@@ -327,7 +300,7 @@ fn test_call_and_return() {
     reactor
         .next(&mut ctx, [(2, ValType::I32)].into_iter(), 1)
         .unwrap();
-    assert!(reactor.ret_tail(&mut ctx, 2, escape_tag).is_ok());
+    assert!(reactor.ret(reactor.fn_count()-1, &mut ctx, 2, escape_tag).is_ok());
 }
 
 /// `drain_fns` — compile N functions, drain, compile M more; assert offsets
@@ -340,7 +313,7 @@ fn test_drain_fns() {
     // Phase 1: compile 3 functions.
     for _ in 0..3 {
         reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
-        reactor.feed(&mut ctx, &Instruction::Unreachable).unwrap();
+        reactor.tail().instruction(&mut ctx, &Instruction::Unreachable).unwrap();
     }
     assert_eq!(reactor.fn_count(), 3);
     assert_eq!(reactor.base_func_offset(), 0);
@@ -355,7 +328,7 @@ fn test_drain_fns() {
     // Phase 2: compile 2 more functions.
     for _ in 0..2 {
         reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
-        reactor.feed(&mut ctx, &Instruction::Unreachable).unwrap();
+        reactor.tail().instruction(&mut ctx, &Instruction::Unreachable).unwrap();
     }
     assert_eq!(reactor.fn_count(), 2);
 
@@ -376,8 +349,8 @@ fn test_const_drop_elision() {
 
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
 
-    reactor.feed(&mut ctx, &Instruction::I32Const(42)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::Drop).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(42)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Drop).unwrap();
 
     // Both instructions should have been elided.
     // inst_count should be 0: no real instructions emitted.
@@ -390,10 +363,10 @@ fn test_const_drop_elision() {
     // Verify via inst_count tracking.
     let mut reactor2 = Reactor::<(), std::convert::Infallible, Function>::default();
     reactor2.next(&mut ctx, [].into_iter(), 0).unwrap();
-    reactor2.feed(&mut ctx, &Instruction::I32Const(42)).unwrap();
-    reactor2.feed(&mut ctx, &Instruction::Drop).unwrap();
+    reactor2.tail().instruction(&mut ctx, &Instruction::I32Const(42)).unwrap();
+    reactor2.tail().instruction(&mut ctx, &Instruction::Drop).unwrap();
     // Seal so the peephole is flushed and any remaining shadow items are materialized.
-    reactor2.seal(&mut ctx, &Instruction::Unreachable).unwrap();
+    reactor2.seal_to(0, &mut ctx, &Instruction::Unreachable).unwrap();
     // inst_count for entry 0 was 0 during the const/drop sequence;
     // the Unreachable from seal is emitted directly via function.instruction, not through
     // feed, so the count stays at 0 for the const+drop pair.
@@ -409,13 +382,13 @@ fn test_const_binop_fold() {
 
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
 
-    reactor.feed(&mut ctx, &Instruction::I32Const(3)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Const(4)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Add).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(3)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(4)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Add).unwrap();
     // At this point, the shadow stack should hold Some(7); no WASM emitted yet.
 
     // Seal flushes the shadow stack, emitting I32Const(7) then Return.
-    reactor.seal(&mut ctx, &Instruction::Return).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Return).unwrap();
 
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);
@@ -430,11 +403,11 @@ fn test_inst_count_after_fold() {
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
 
     for i in 0..10i32 {
-        reactor.feed(&mut ctx, &Instruction::I32Const(i)).unwrap();
-        reactor.feed(&mut ctx, &Instruction::Drop).unwrap();
+        reactor.tail().instruction(&mut ctx, &Instruction::I32Const(i)).unwrap();
+        reactor.tail().instruction(&mut ctx, &Instruction::Drop).unwrap();
     }
 
-    reactor.seal(&mut ctx, &Instruction::Unreachable).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
     let _fns = reactor.into_fns();
     // If we get here without panic, the elision didn't corrupt state.
 }
@@ -447,9 +420,9 @@ fn test_fold_flush_on_seal() {
     let mut ctx = ();
 
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Const(1)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(1)).unwrap();
     // seal flushes the shadow stack and emits Return.
-    reactor.seal(&mut ctx, &Instruction::Return).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Return).unwrap();
 
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);
@@ -465,18 +438,17 @@ fn test_const_if_taken() {
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
 
     // Always-taken condition.
-    reactor.feed(&mut ctx, &Instruction::I32Const(1)).unwrap();
-    reactor
-        .feed(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(1)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
         .unwrap();
 
     // Body instruction — should be emitted.
-    reactor.feed(&mut ctx, &Instruction::Nop).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Nop).unwrap();
 
     // End — should close the taken-if without emitting End.
-    reactor.feed(&mut ctx, &Instruction::End).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap();
 
-    reactor.seal(&mut ctx, &Instruction::Unreachable).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
 
     // Since the if was a taken-if, if_stmts should NOT have been incremented.
     // We can't inspect if_stmts directly since it's private, but we verify
@@ -496,20 +468,19 @@ fn test_const_if_skipped() {
     reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
 
     // Never-taken condition.
-    reactor.feed(&mut ctx, &Instruction::I32Const(0)).unwrap();
-    reactor
-        .feed(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::If(wasm_encoder::BlockType::Empty))
         .unwrap();
 
     // Body — should be skipped.
-    reactor.feed(&mut ctx, &Instruction::Nop).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Const(42)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::Drop).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Nop).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(42)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Drop).unwrap();
 
     // End — closes the skipped if.
-    reactor.feed(&mut ctx, &Instruction::End).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap();
 
-    reactor.seal(&mut ctx, &Instruction::Unreachable).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
 
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);
@@ -528,14 +499,14 @@ fn test_local_const_tracking() {
         .next(&mut ctx, [(1, ValType::I32)].into_iter(), 0)
         .unwrap();
 
-    reactor.feed(&mut ctx, &Instruction::I32Const(7)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::LocalSet(0)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::LocalGet(0)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Const(3)).unwrap();
-    reactor.feed(&mut ctx, &Instruction::I32Add).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(7)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::LocalSet(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(3)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Add).unwrap();
 
     // Shadow stack should have Some(10). Seal flushes it as i32.const 10.
-    reactor.seal(&mut ctx, &Instruction::Return).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Return).unwrap();
 
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);

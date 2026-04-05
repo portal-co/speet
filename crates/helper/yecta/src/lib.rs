@@ -358,8 +358,35 @@ pub struct FuncIdx(pub u32);
 pub struct TagIdx(pub u32);
 
 /// Index of a WebAssembly table in the module.
+///
+/// `TableIdx` also implements [`IndirectJumpHandler`], so it can be used
+/// directly as the `handler` field of a [`Pool`].  The implementation emits
+/// no additional instructions and returns
+/// [`IndirectJumpKind::Table(self)`](IndirectJumpKind::Table), telling the
+/// reactor to use a `call_indirect` / `return_call_indirect` against this
+/// table index.
+///
+/// This means a plain `TableIdx` is sufficient for any recompiler that uses
+/// a standard wasm table for indirect dispatch:
+///
+/// ```ignore
+/// static TABLE: TableIdx = TableIdx(0);
+/// let pool = Pool { handler: &TABLE, ty: TypeIdx(4) };
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct TableIdx(pub u32);
+
+impl<Context, E> IndirectJumpHandler<Context, E> for TableIdx {
+    /// No auxiliary instructions needed — the table index is carried in
+    /// the returned [`IndirectJumpKind::Table`].
+    fn indirect_jump(
+        &self,
+        _ctx: &mut Context,
+        _target: &mut (dyn InstructionSink<Context, E> + '_),
+    ) -> Result<IndirectJumpKind, E> {
+        Ok(IndirectJumpKind::Table(*self))
+    }
+}
 
 /// Index of a WebAssembly type (function signature) in the module.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -377,13 +404,38 @@ pub struct EscapeTag {
     pub ty: TypeIdx,
 }
 
-// ── NoopHandler / StaticPool ──────────────────────────────────────────────────
-
-/// A no-op [`IndirectJumpHandler`] used by [`StaticPool::as_pool`].
+/// Pool configuration for indirect function calls.
 ///
-/// Emits `Unreachable` and returns `IndirectJumpKind::Ref` as a safe sentinel.
-/// Should never be reached at runtime because `StaticPool` is only used when
-/// indirect jumps are not actually needed for the binary being compiled.
+/// Carries the [`TypeIdx`] of the `call_indirect` / `return_call_indirect`
+/// type signature and a reference to an [`IndirectJumpHandler`] that decides
+/// at code-generation time how to dispatch: table lookup, `call_ref`, or any
+/// custom scheme.
+///
+/// The common case — a plain wasm table — uses [`TableIdx`] directly as the
+/// handler, since [`TableIdx`] implements [`IndirectJumpHandler`]:
+///
+/// ```ignore
+/// // Store the table index somewhere with a lifetime at least as long as
+/// // the Pool borrow.  A `static` is convenient:
+/// static TABLE: TableIdx = TableIdx(0);
+/// let pool = Pool { handler: &TABLE, ty: TypeIdx(4) };
+/// ```
+///
+/// Custom dispatch logic (e.g. a call-ref scheme, a dispatcher function, or
+/// a CET-hardened table) is supported by implementing [`IndirectJumpHandler`]
+/// on any type and storing a reference to it here.
+#[derive(Clone, Copy)]
+pub struct Pool<'a, Context, E> {
+    pub handler: &'a (dyn IndirectJumpHandler<Context, E> + 'a),
+    pub ty: TypeIdx,
+}
+
+/// A no-op [`IndirectJumpHandler`] that emits `unreachable` and returns
+/// `IndirectJumpKind::Ref`.
+///
+/// Useful when indirect jumps should never be reached at runtime but the
+/// type system requires a valid handler.  For the common table-dispatch
+/// case, prefer using [`TableIdx`] directly as the handler instead.
 pub struct NoopHandler;
 
 impl<Context, E> IndirectJumpHandler<Context, E> for NoopHandler {
@@ -395,43 +447,6 @@ impl<Context, E> IndirectJumpHandler<Context, E> for NoopHandler {
         target.instruction(ctx, &Instruction::Unreachable)?;
         Ok(IndirectJumpKind::Ref)
     }
-}
-
-/// Lifetime-free pool configuration that can be stored in structs without
-/// introducing lifetime parameters.
-///
-/// Use [`as_pool`](StaticPool::as_pool) to borrow a [`Pool`] reference backed
-/// by the static [`NoopHandler`] when constructing a full [`Pool`] is needed
-/// for a call site that does not perform actual indirect jumps.
-///
-/// For binaries that *do* use indirect calls, construct [`Pool`] directly with
-/// the appropriate handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StaticPool {
-    pub table: TableIdx,
-    pub ty: TypeIdx,
-}
-
-impl StaticPool {
-    /// Borrow a [`Pool`] backed by the static [`NoopHandler`].
-    ///
-    /// The returned `Pool` borrows the static `NoopHandler` for a lifetime
-    /// tied to `&self`, so `Context` and `E` need not be `'static`.
-    pub fn as_pool<Context, E>(&self) -> Pool<'_, Context, E> {
-        static NOOP: NoopHandler = NoopHandler;
-        Pool {
-            handler: &NOOP as &(dyn IndirectJumpHandler<Context, E>),
-            ty: self.ty,
-        }
-    }
-}
-
-/// Pool configuration for indirect function calls.
-/// Contains a table index and a type index for call_indirect operations.
-#[derive(Clone, Copy)]
-pub struct Pool<'a, Context, E> {
-    pub handler: &'a (dyn IndirectJumpHandler<Context, E> + 'a),
-    pub ty: TypeIdx,
 }
 
 /// Parameters for the `ji` (jump/call instruction) operation.
@@ -801,7 +816,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Instructio
     /// directly to APIs that require `F: InstructionSink`, such as
     /// `speet_memory::CallbackContext::new`.
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        self.feed(ctx, instruction)
+        let tail_idx = self
+            .fns
+            .get_mut()
+            .len()
+            .checked_sub(1)
+            .expect("Reactor::instruction (InstructionSink) called on empty reactor");
+        self.feed_to(tail_idx, ctx, instruction)
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
@@ -1013,26 +1034,25 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     /// predecessor edges and invalidates every affected entry's transitive
     /// cache so the next function starts with a clean slate.
     fn seal_for_split(&self, ctx: &mut Context) -> Result<(), E> {
-        let mut lock = self.lock_global();
-        if lock.is_empty() {
-            return Ok(());
-        }
-        let tail_idx = lock.len() - 1;
-        drop(lock);
-        self.flush_peephole(tail_idx, ctx)?;
-        lock = self.lock_global();
-        // Flush const stacks for all reachable entries.
-        // Use the locked variant — we already hold lock_global.
-        if !lock.is_empty() {
-            let tail_idx = lock.len() - 1;
-            let reachable_for_flush = Self::transitive_preds_of_locked(&lock, tail_idx);
-            for FuncIdx(fi) in reachable_for_flush {
-                self.flush_const_stack(ctx, &mut lock[fi as usize], fi as usize)?;
+        // Step 1: read the tail index under a brief global lock, then drop it.
+        let tail_idx = {
+            let lock = self.lock_global();
+            if lock.is_empty() {
+                return Ok(());
             }
-        }
-        let tail_idx = lock.len() - 1;
+            lock.len() - 1
+        };
+        // Step 2: flush peephole — no lock held.
+        self.flush_peephole(tail_idx, ctx)?;
+        // Step 3: compute the reachable set via per-entry locks (no global lock).
+        let reachable = self.transitive_preds_of(tail_idx);
+        // Step 4: acquire the global lock once and operate on all reachable entries.
+        let mut lock = self.lock_global();
         let ifs = lock[tail_idx].if_stmts;
-        let reachable: BTreeSet<FuncIdx> = Self::transitive_preds_of_locked(&lock, tail_idx);
+        // Flush const stacks (needs mut entry access through the global lock).
+        for &FuncIdx(fi) in &reachable {
+            self.flush_const_stack(ctx, &mut lock[fi as usize], fi as usize)?;
+        }
         for &FuncIdx(idx) in &reachable {
             lock[idx as usize]
                 .function
@@ -1051,9 +1071,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             // Invalidate transitive cache after severing preds.
             lock[idx as usize].transitive_preds = None;
         }
-        // Clear any pending future-function predecessor assignments in the
-        // lens queue — they reference entries from before the split and are
-        // no longer valid.
+        // Clear stale predecessor assignments in the lens queue.
         self.lens.lock().clear();
         Ok(())
     }
@@ -1095,38 +1113,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         }
     }
 
-    /// Same as [`transitive_preds_of`] but operates on an already-locked slice
-    /// of entries, avoiding any `lock_entry` / `lock_global` acquisition.
-    ///
-    /// Use this variant inside functions that already hold `lock_global` (where
-    /// calling `lock_entry` would deadlock because `main=true` blocks it).
-    /// The result is **not** cached back into the entries, so it is always
-    /// freshly computed from the live predecessor sets in the slice.
-    fn transitive_preds_of_locked(fns: &[Entry<F>], idx: usize) -> BTreeSet<FuncIdx> {
-        // Return the cached value if it is still valid.
-        if let Some(cached) = &fns[idx].transitive_preds {
-            return cached.clone();
-        }
-        // Fresh BFS over direct preds.
-        let mut visited: BTreeSet<FuncIdx> = BTreeSet::new();
-        visited.insert(FuncIdx(idx as u32));
-        let mut stack: Vec<FuncIdx> = fns[idx].preds.iter().cloned().collect();
-        while let Some(p) = stack.pop() {
-            if visited.contains(&p) {
-                continue;
-            }
-            visited.insert(p);
-            let FuncIdx(pi) = p;
-            if let Some(entry) = fns.get(pi as usize) {
-                for &q in &entry.preds {
-                    if !visited.contains(&q) {
-                        stack.push(q);
-                    }
-                }
-            }
-        }
-        visited
-    }
     /// Add a predecessor edge from pred to succ in the control flow graph.
     ///
     /// Invalidates the transitive predecessor cache for `succ` and for every
@@ -1546,25 +1532,23 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         ctx: &mut Context,
         tail_idx: usize,
     ) -> Result<(), E> {
-        // Check for saturation while holding the global lock so we can inspect
-        // if_stmts without per-entry locks (which would deadlock with lock_global).
-        let saturated = {
-            let lock = self.lock_global();
-            if lock.is_empty() {
-                false
-            } else {
-                let reachable = Self::transitive_preds_of_locked(&lock, tail_idx);
-                let max_ifs = self.max_ifs_per_fn;
-                reachable
-                    .iter()
-                    .any(|&FuncIdx(i)| lock[i as usize].if_stmts >= max_ifs)
-            }
-        }; // lock_global dropped here
+        // Compute the reachable set via per-entry locks (no global lock held).
+        let reachable = self.transitive_preds_of(tail_idx);
+        // Check saturation: read if_stmts for each reachable entry.
+        let max_ifs = self.max_ifs_per_fn;
+        let saturated = reachable
+            .iter()
+            .any(|&FuncIdx(i)| self.lock_entry(i as usize, true).if_stmts >= max_ifs);
         if saturated {
             self.seal_for_split(ctx)?;
+            // Reachable set changed after split; recompute and increment.
+            let reachable2 = self.transitive_preds_of(tail_idx);
+            for FuncIdx(idx) in reachable2 {
+                self.lock_entry(idx as usize, false).if_stmts += 1;
+            }
+            return Ok(());
         }
-        let reachable_funcs = self.transitive_preds_of(tail_idx).clone();
-        for FuncIdx(idx) in reachable_funcs {
+        for FuncIdx(idx) in reachable {
             self.lock_entry(idx as usize, false).if_stmts += 1;
         }
         Ok(())
@@ -2815,83 +2799,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         result
     }
 
-    // ── Single-target convenience wrappers ─────────────────────────────────────
-    //
-    // These wrappers determine `tail_idx` from the current length of `fns`
-    // (via a `lock_global` acquire) and delegate to the explicit-index
-    // methods.  They restore the pre-parallel API ergonomics for callers
-    // that drive the reactor single-threadedly and do not need to emit into
-    // multiple entries concurrently.
-    //
-    // They are NOT safe to call from two threads at the same time because
-    // the tail index is resolved inside a `lock_global` acquire, which
-    // excludes all per-entry locks.  For parallel emission, capture a
-    // dedicated `tail_idx` per thread and use `feed_to` / `jmp` / `seal_to`
-    // directly.
-
-    /// Emit `instr` into the current tail function.
-    ///
-    /// Convenience wrapper around [`feed_to`](Self::feed_to) that resolves
-    /// the tail index automatically.  Single-threaded only.
-    pub fn feed(&self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::feed called on empty reactor");
-        self.feed_to(tail_idx, ctx, instr)
-    }
-
-    /// Seal the current tail function with a terminal instruction.
-    ///
-    /// Convenience wrapper around [`seal_to`](Self::seal_to) that resolves
-    /// the tail index automatically.  Single-threaded only.
-    pub fn seal(&self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::seal called on empty reactor");
-        self.seal_to(tail_idx, ctx, instr)
-    }
-
-    /// Emit an unconditional jump from the current tail function.
-    ///
-    /// Convenience wrapper around [`jmp`](Self::jmp) (the explicit-index
-    /// form) that resolves the tail index automatically.  Single-threaded
-    /// only.
-    pub fn jmp_tail(
-        &self,
-        ctx: &mut Context,
-        target: FuncIdx,
-        params: u32,
-    ) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::jmp_tail called on empty reactor");
-        self.jmp(tail_idx, ctx, target, params)
-    }
-
-    /// Flush all deferred lazy stores for the current tail function.
-    ///
-    /// This is the `barrier()` / `FENCE` / `SYNC` implementation for the
-    /// single-target path.  Under [`MemOrder::Strong`] the buffer is always
-    /// empty so this is a no-op; under [`MemOrder::Relaxed`] it commits any
-    /// pending stores in program order before the next instruction.
-    ///
-    /// Convenience wrapper around [`flush_bundles`](Self::flush_bundles).
-    /// Single-threaded only.
-    pub fn barrier(&self, ctx: &mut Context) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::barrier called on empty reactor");
-        self.flush_bundles(ctx, tail_idx)
-    }
-
     /// Run a closure with mutable access to the local-pool backend.
     ///
     /// Acquires the internal `spin::Mutex<P>` for the duration of the
@@ -2906,59 +2813,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
         f(&mut *self.local_pool.lock())
     }
 
-    /// Emit a return via exception throw from the current tail function.
+    /// Borrow the current tail function as a [`Fed`] sink.
     ///
-    /// Convenience wrapper around [`ret`](Self::ret) that resolves
-    /// the tail index automatically.  Single-threaded only.
-    pub fn ret_tail(
-        &self,
-        ctx: &mut Context,
-        params: u32,
-        tag: EscapeTag,
-    ) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::ret_tail called on empty reactor");
-        self.ret(tail_idx, ctx, params, tag)
-    }
-
-    /// Emit a call instruction with exception handling from the current tail
-    /// function.
+    /// The `tail_idx` is computed from the current function count, so this
+    /// method is only correct when called in a context where exactly one
+    /// function is being actively built (the sequential single-instruction
+    /// translation loop).  For parallel emission, construct [`Fed`] directly
+    /// with the appropriate `tail_idx`.
     ///
-    /// Convenience wrapper around [`call`](Self::call) that resolves
-    /// the tail index automatically.  Single-threaded only.
-    pub fn call_tail(
-        &self,
-        ctx: &mut Context,
-        target: Target<'_, Context, E>,
-        tag: EscapeTag,
-        pool: Pool<'_, Context, E>,
-    ) -> Result<(), E> {
+    /// # Panics
+    /// Panics if the reactor contains no functions yet.
+    pub fn tail(&self) -> Fed<'_, Context, E, F, P> {
         let tail_idx = self
-            .lock_global()
-            .len()
+            .fn_count()
             .checked_sub(1)
-            .expect("Reactor::call_tail called on empty reactor");
-        self.call(ctx, target, tag, pool, tail_idx)
-    }
-
-    /// Emit a jump-or-call instruction using a [`JumpCallParams`] from the
-    /// current tail function.
-    ///
-    /// Convenience wrapper around [`ji_with_params`](Self::ji_with_params)
-    /// that resolves the tail index automatically.  Single-threaded only.
-    pub fn ji_with_params_tail(
-        &self,
-        ctx: &mut Context,
-        params: JumpCallParams<'_, Context, E>,
-    ) -> Result<(), E> {
-        let tail_idx = self
-            .lock_global()
-            .len()
-            .checked_sub(1)
-            .expect("Reactor::ji_with_params_tail called on empty reactor");
-        self.ji_with_params(ctx, params, tail_idx)
+            .expect("Reactor::tail called on empty reactor");
+        Fed { reactor: self, tail_idx }
     }
 }

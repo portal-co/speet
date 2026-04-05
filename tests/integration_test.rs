@@ -15,10 +15,10 @@ fn test_yecta_integration() -> bool {
     use yecta::{FuncIdx, Reactor};
     
     let mut reactor = Reactor::<std::convert::Infallible, Function>::default();
-    reactor.next([(1, ValType::I32)].into_iter(), 0);
+    reactor.next(&mut (), [(1, ValType::I32)].into_iter(), 0).unwrap();
     
     // Emit a simple instruction
-    reactor.feed(&Instruction::LocalGet(0)).is_ok()
+    reactor.tail().instruction(&mut (), &Instruction::LocalGet(0)).is_ok()
 }
 
 fn test_riscv_integration() -> bool {
@@ -87,26 +87,25 @@ fn test_yecta_and_riscv_together() {
 #[test]
 fn test_control_flow_with_yecta() {
     // Test that yecta's control flow management works correctly
-    use yecta::{FuncIdx, JumpCallParams, Pool, Reactor, TableIdx, TypeIdx};
+    use yecta::{FuncIdx, JumpCallParams, Reactor, TableIdx, TypeIdx};
+    use wax_core::build::InstructionSink;
     
     let mut reactor = Reactor::<std::convert::Infallible, Function>::default();
-    let pool = Pool {
-        table: TableIdx(0),
-        ty: TypeIdx(0),
-    };
+    static _T: yecta::TableIdx = yecta::TableIdx(0);
+    let pool = yecta::Pool { handler: &_T, ty: yecta::TypeIdx(0) };
     
     // Create entry function
-    reactor.next([(2, ValType::I32)].into_iter(), 0);
-    reactor.feed(&Instruction::LocalGet(0)).unwrap();
-    reactor.feed(&Instruction::LocalGet(1)).unwrap();
+    reactor.next(&mut (), [(2, ValType::I32)].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut (), &Instruction::LocalGet(0)).unwrap();
+    reactor.tail().instruction(&mut (), &Instruction::LocalGet(1)).unwrap();
     
     // Jump to another function
     let params = JumpCallParams::jump(FuncIdx(1), 2, pool);
-    reactor.ji_with_params(params).unwrap();
+    reactor.ji_with_params(&mut (), params, reactor.fn_count()-1).unwrap();
     
     // Create target function
-    reactor.next([(2, ValType::I32)].into_iter(), 1);
-    reactor.seal(&Instruction::Unreachable).unwrap();
+    reactor.next(&mut (), [(2, ValType::I32)].into_iter(), 1).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut (), &Instruction::Unreachable).unwrap();
 }
 
 #[test]
