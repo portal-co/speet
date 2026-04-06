@@ -7,8 +7,7 @@ use wasm_encoder::Function;
 fn test_mips64_load_store() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_full_config(
-            yecta::TableIdx(0),
-            yecta::TypeIdx(0),
+            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
             None,
             0,
             true, // enable mips64

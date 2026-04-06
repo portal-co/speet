@@ -51,7 +51,7 @@ use rabbitizer::{InstrId, Instruction, registers::GprO32};
 use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
-    EscapeTag, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
+    EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
     TableIdx, Target, TypeIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
@@ -220,9 +220,7 @@ pub struct MipsRecompiler<
     P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
     reactor: Reactor<Context, E, F, P>,
-    pool_table: TableIdx,
-
-    pool_ty: TypeIdx,
+    pool: Pool<'cb, Context, E>,
     escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     base_pc: u32,
@@ -280,9 +278,7 @@ where
     /// * `base_pc` - Base PC address to offset function indices
     /// * `enable_mips64` - Whether to enable MIPS64 instruction support
     pub fn new_with_full_config(
-        pool_table: TableIdx,
-
-        pool_ty: TypeIdx,
+        pool: Pool<'cb, Context, E>,
     escape_tag: Option<EscapeTag>,
         base_pc: u32,
         enable_mips64: bool,
@@ -292,8 +288,7 @@ where
     {
         let mut recomp = Self {
             reactor: Reactor::default(),
-            pool_table,
-            pool_ty,
+            pool,
             escape_tag,
             base_pc,
             syscall_callback: None,
@@ -327,9 +322,7 @@ where
     /// * `base_func_offset` - Offset added to emitted function indices for imports/helpers
     /// * `enable_mips64` - Whether to enable MIPS64 instruction support
     pub fn new_with_all_config(
-        pool_table: TableIdx,
-
-        pool_ty: TypeIdx,
+        pool: Pool<'cb, Context, E>,
     escape_tag: Option<EscapeTag>,
         base_pc: u32,
         base_func_offset: u32,
@@ -340,8 +333,7 @@ where
     {
         let mut recomp = Self {
             reactor: Reactor::with_base_func_offset(base_func_offset),
-            pool_table,
-            pool_ty,
+            pool,
             escape_tag,
             base_pc,
             syscall_callback: None,
@@ -382,13 +374,12 @@ where
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices
-    pub fn new_with_config(pool_table: TableIdx,
-    pool_ty: TypeIdx,
+    pub fn new_with_config(pool: Pool<'cb, Context, E>,
     escape_tag: Option<EscapeTag>, base_pc: u32) -> Self
     where
         P: Default,
     {
-        Self::new_with_full_config(pool_table, pool_ty, escape_tag, base_pc, false)
+        Self::new_with_full_config(pool, escape_tag, base_pc, false)
     }
 
     /// Create a new MIPS recompiler with default configuration
@@ -398,7 +389,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            TableIdx(0), TypeIdx(0),
+            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
             None,
             0,
         )
@@ -413,7 +404,7 @@ where
         P: Default,
     {
         Self::new_with_config(
-            TableIdx(0), TypeIdx(0),
+            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
             None,
             base_pc,
         )
@@ -696,108 +687,107 @@ where
     }
 
     /// Emit an integer constant (i32 or i64 depending on MIPS64 mode)
-    fn emit_int_const(&mut self, ctx: &mut Context, value: i32) -> Result<(), E> {
+    fn emit_int_const(&mut self, ctx: &mut Context, value: i32, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Const(value as i64))
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Const(value as i64))
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(value))
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(value))
         }
     }
 
     /// Emit an unsigned integer constant (i32 or i64 depending on MIPS64 mode)
-    fn emit_uint_const(&mut self, ctx: &mut Context, value: u32) -> Result<(), E> {
+    fn emit_uint_const(&mut self, ctx: &mut Context, value: u32, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Const(value as i64))
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Const(value as i64))
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(value as i32))
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(value as i32))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on MIPS64 mode)
-    fn emit_add(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_add(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Add)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Add)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Add)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on MIPS64 mode)
-    fn emit_sub(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_sub(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Sub)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Sub)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Sub)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on MIPS64 mode)
-    fn emit_mul(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_mul(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Mul)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Mul)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Mul)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on MIPS64 mode)
-    fn emit_and(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_and(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64And)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64And)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32And)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on MIPS64 mode)
-    fn emit_or(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_or(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Or)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Or)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Or)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on MIPS64 mode)
-    fn emit_xor(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_xor(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Xor)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Xor)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Xor)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on MIPS64 mode)
-    fn emit_shl(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_shl(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64Shl)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Shl)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32Shl)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on MIPS64 mode)
-    fn emit_shr_u(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_shr_u(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64ShrU)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ShrU)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32ShrU)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on MIPS64 mode)
-    fn emit_shr_s(&mut self, ctx: &mut Context) -> Result<(), E> {
+    fn emit_shr_s(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         if self.enable_mips64 {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I64ShrS)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ShrS)
         } else {
-            self.reactor.tail().instruction(ctx, &WasmInstruction::I32ShrS)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32ShrS)
         }
     }
 
     /// Perform a jump to a target PC using yecta's jump API
-    fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u32, params: u32) -> Result<(), E> {
+    fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u32, params: u32, tail_idx: usize) -> Result<(), E> {
         let target_func = self.pc_to_func_idx(target_pc);
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.jmp(tail_idx, ctx, target_func, params)
     }
 
@@ -928,7 +918,7 @@ where
             &BTreeMap::new(),  // fixups: none needed
             target,            // target: branch target
             None,              // call: not an escape call
-            Pool { handler: &self.pool_table, ty: self.pool_ty },  // pool: for indirect calls
+            self.pool,  // pool: for indirect calls
             Some(&condition),  // condition: branch condition
             tail_idx,
         )?;
@@ -957,8 +947,8 @@ where
         let tail_idx = self.reactor.fn_count() - 1;
 
         // Update PC
-        self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(pc as i32))?;
-        self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::pc_local()))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(pc as i32))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::pc_local()))?;
 
         // Fire instruction trap (if installed).
         let insn_info = InstructionInfo {
@@ -986,10 +976,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -999,10 +989,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1012,10 +1002,10 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1025,10 +1015,10 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1038,10 +1028,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_sub(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_sub(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1051,10 +1041,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_sub(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_sub(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1065,10 +1055,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_and(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_and(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1078,10 +1068,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_or(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_or(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1091,10 +1081,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_xor(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_xor(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1104,12 +1094,12 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.emit_or(ctx)?;
-                    self.emit_int_const(ctx, -1)?;
-                    self.emit_xor(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_or(ctx, tail_idx)?;
+                    self.emit_int_const(ctx, -1, tail_idx)?;
+                    self.emit_xor(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1119,10 +1109,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
-                    self.emit_and(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
+                    self.emit_and(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1132,10 +1122,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
-                    self.emit_or(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
+                    self.emit_or(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1145,10 +1135,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
-                    self.emit_xor(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm as i32))?;
+                    self.emit_xor(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1159,10 +1149,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
-                    self.emit_shl(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
+                    self.emit_shl(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1172,10 +1162,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
-                    self.emit_shr_u(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
+                    self.emit_shr_u(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1185,10 +1175,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
-                    self.emit_shr_s(ctx)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(sa as i32))?;
+                    self.emit_shr_s(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
             }
 
@@ -1198,8 +1188,8 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const((imm << 16) as i32))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const((imm << 16) as i32))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1255,9 +1245,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1266,7 +1256,7 @@ where
 
                     // load byte (signed) -> i32
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1282,9 +1272,9 @@ where
                     )?;
                     // extend to i64 if needed
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1295,9 +1285,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1306,7 +1296,7 @@ where
 
                     // load byte unsigned -> i32
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1321,9 +1311,9 @@ where
                         tail_idx,
                     )?;
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1334,9 +1324,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1345,7 +1335,7 @@ where
 
                     // load halfword signed -> i32
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1360,9 +1350,9 @@ where
                         tail_idx,
                     )?;
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1373,9 +1363,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1384,7 +1374,7 @@ where
 
                     // load halfword unsigned -> i32
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1399,9 +1389,9 @@ where
                         tail_idx,
                     )?;
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1411,9 +1401,9 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                self.emit_add(ctx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                self.emit_add(ctx, tail_idx)?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
                     let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1422,8 +1412,8 @@ where
 
                 // value to store: wrap to i32 then store 8 bits
                 if self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1438,7 +1428,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1461,9 +1451,9 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                self.emit_add(ctx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                self.emit_add(ctx, tail_idx)?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
                     let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1472,8 +1462,8 @@ where
 
                 // value to store: wrap to i32 then store 16 bits
                 if self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1488,7 +1478,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1513,9 +1503,9 @@ where
 
                 if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -1525,7 +1515,7 @@ where
 
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1540,9 +1530,9 @@ where
                         tail_idx,
                     )?;
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1553,9 +1543,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 // compute effective address: base + imm
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                self.emit_add(ctx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                self.emit_add(ctx, tail_idx)?;
 
                 // invoke mapper callback if present (virtual -> physical)
                 if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -1565,8 +1555,8 @@ where
 
                 // value to store: if MIPS64 wrap to i32 then store 32-bit
                 if self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1581,7 +1571,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1606,12 +1596,12 @@ where
 
                 if !self.enable_mips64 {
                     // LD is only valid when MIPS64 support is enabled
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 } else if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -1621,7 +1611,7 @@ where
 
                     // perform 64-bit memory load
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_load(
                         ctx,
                         &mut self.reactor,
@@ -1635,7 +1625,7 @@ where
                         }),
                         tail_idx,
                     )?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1647,12 +1637,12 @@ where
 
                 if !self.enable_mips64 {
                     // SD is only valid when MIPS64 support is enabled
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 } else {
                     // compute effective address: base + imm
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
                     if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -1661,7 +1651,7 @@ where
                     }
 
                     // store 64-bit value directly
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                     emit_store(
                         ctx,
                         &mut self.reactor,
@@ -1693,7 +1683,7 @@ where
                 {
                     return Ok(());
                 }
-                self.jump_to_pc(ctx, target_pc, self.total_params)?;
+                self.jump_to_pc(ctx, target_pc, self.total_params, tail_idx)?;
                 return Ok(());
             }
 
@@ -1703,8 +1693,8 @@ where
 
                 // Save return address in $ra ($31)
                 let return_addr = pc + 8; // JAL has a delay slot
-                self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)),
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)),
                 )?;
 
                 let jal_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::Call);
@@ -1716,7 +1706,7 @@ where
                 {
                     return Ok(());
                 }
-                self.jump_to_pc(ctx, target_pc, self.total_params)?;
+                self.jump_to_pc(ctx, target_pc, self.total_params, tail_idx)?;
                 return Ok(());
             }
 
@@ -1725,9 +1715,9 @@ where
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local();
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(scratch))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::Drop)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(scratch))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Drop)?;
 
                 // JR $ra = return; other JR = indirect jump
                 let jr_kind = if rs == GprO32::ra {
@@ -1750,7 +1740,7 @@ where
                     base_pc: self.base_pc,
                 };
                 let params =
-                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, Pool { handler: &self.pool_table, ty: self.pool_ty });
+                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
                 self.reactor.ji_with_params(ctx, params, tail_idx)?
 ;                return Ok(());
             }
@@ -1762,15 +1752,15 @@ where
                 // Save return address
                 let return_addr = pc + 8; // JALR has a delay slot
                 if rd != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(return_addr as i32))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
                 }
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local();
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(scratch))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::Drop)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(scratch))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Drop)?;
 
                 let jalr_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::IndirectCall);
                 let layout_ptr = &self.layout as *const LocalLayout;
@@ -1787,7 +1777,7 @@ where
                     base_pc: self.base_pc,
                 };
                 let params =
-                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, Pool { handler: &self.pool_table, ty: self.pool_ty });
+                    yecta::JumpCallParams::indirect_jump(&snippet, self.total_params, self.pool);
                 self.reactor.ji_with_params(ctx, params, tail_idx)?;
                 return Ok(());
             }
@@ -1805,7 +1795,7 @@ where
                     callback.call(&syscall_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: system call - implementation specific
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 }
             }
 
@@ -1819,7 +1809,7 @@ where
                     callback.call(&break_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 }
             }
 
@@ -1851,9 +1841,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1861,7 +1851,7 @@ where
                     }
 
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         &mut self.reactor,
@@ -1874,9 +1864,9 @@ where
                     )?;;
 
                     if self.enable_mips64 {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1887,9 +1877,9 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 // Compute effective address
-                self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                self.emit_add(ctx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                self.emit_add(ctx, tail_idx)?;
 
                 if let Some(mapper) = self.mapper_callback.as_mut() {
                     let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1898,10 +1888,10 @@ where
 
                 // Value to store: rt (truncated to i32 if MIPS64)
                 if self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32WrapI64)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
                 }
 
                 emit_sc(
@@ -1920,8 +1910,8 @@ where
                     } else {
                         WasmInstruction::I32Const(1)
                     };
-                    self.reactor.tail().instruction(ctx, &one)?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &one)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1932,11 +1922,11 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if !self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 } else if rt != GprO32::zero {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
@@ -1944,7 +1934,7 @@ where
                     }
 
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         &mut self.reactor,
@@ -1956,7 +1946,7 @@ where
                         tail_idx,
                     )?;;
 
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                 }
             }
 
@@ -1967,18 +1957,18 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if !self.enable_mips64 {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::I32Const(imm))?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I32Const(imm))?;
+                    self.emit_add(ctx, tail_idx)?;
 
                     if let Some(mapper) = self.mapper_callback.as_mut() {
                         let mut callback_ctx = CallbackContext::new(&mut self.reactor);
                         mapper.call(ctx, &mut callback_ctx)?;
                     }
 
-                    self.reactor.tail().instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
 
                     emit_sc(
                         ctx,
@@ -1991,8 +1981,8 @@ where
 
                     // SCD always succeeds: write 1 into rt
                     if rt != GprO32::zero {
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::I64Const(1))?;
-                        self.reactor.tail().instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::I64Const(1))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
                     }
                 }
             }
@@ -2000,7 +1990,7 @@ where
             // Unsupported or unimplemented instructions
             _ => {
                 // Emit unreachable for unsupported instructions
-                self.reactor.tail().instruction(ctx, &WasmInstruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
             }
         }
 

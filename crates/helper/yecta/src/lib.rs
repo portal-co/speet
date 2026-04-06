@@ -424,11 +424,18 @@ pub struct EscapeTag {
 /// Custom dispatch logic (e.g. a call-ref scheme, a dispatcher function, or
 /// a CET-hardened table) is supported by implementing [`IndirectJumpHandler`]
 /// on any type and storing a reference to it here.
-#[derive(Clone, Copy)]
+#[allow(missing_copy_implementations)]
 pub struct Pool<'a, Context, E> {
     pub handler: &'a (dyn IndirectJumpHandler<Context, E> + 'a),
     pub ty: TypeIdx,
 }
+
+impl<'a, Context, E> Clone for Pool<'a, Context, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, Context, E> Copy for Pool<'a, Context, E> {}
 
 /// A no-op [`IndirectJumpHandler`] that emits `unreachable` and returns
 /// `IndirectJumpKind::Ref`.

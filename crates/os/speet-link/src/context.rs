@@ -123,28 +123,26 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
     // ── Reactor operations ────────────────────────────────────────────────
 
     /// Emit a single WASM instruction into the current function.
-    fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
+    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
 
     /// Emit an unconditional tail-call jump to `target`, forwarding `params`
     /// parameters.
-    fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E>;
+    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E>;
 
     /// Start a new function in the reactor using `next_with`.
     fn next_with(&mut self, ctx: &mut Context, f: Self::FnType, len: u32) -> Result<(), E>;
 
     /// Seal the current function group with a terminal instruction.
-    fn seal_fn(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
+    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
 
     // ── Configuration ─────────────────────────────────────────────────────
 
-    /// The indirect-call pool configuration: `(table_index, type_index)`.
+    /// The indirect-call pool configuration.
     ///
-    /// Call sites that need a [`Pool`] should construct one inline:
-    /// ```ignore
-    /// let (table, ty) = ctx.pool();
-    /// let pool = Pool { handler: &table, ty };
-    /// ```
-    fn pool(&self) -> (TableIdx, TypeIdx);
+    /// Returns a [`Pool`] whose handler lifetime is tied to `&self`.  The
+    /// stored handler must outlive the context, so the returned `Pool` is
+    /// valid for the duration of the borrow.
+    fn pool(&self) -> Pool<'_, Context, E>;
 
     /// The escape tag used for exception-based control flow, if any.
     fn escape_tag(&self) -> Option<EscapeTag>;
@@ -171,10 +169,8 @@ where
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots.
     pub locals_mark: Mark,
-    /// Indirect-call pool table index.
-    pub pool_table: TableIdx,
-    /// Indirect-call pool type index.
-    pub pool_ty: TypeIdx,
+    /// Indirect-call pool handler and type.
+    pub pool: Pool<'a, Context, E>,
     /// Optional escape tag.
     pub escape_tag: Option<EscapeTag>,
 }
@@ -236,24 +232,24 @@ where
         self.reactor.drain_fns()
     }
 
-    fn feed(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         let tail_idx = self.reactor.fn_count().saturating_sub(1);
         Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, insn)
     }
-    fn jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
         let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.jmp(tail_idx, ctx, target, params)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
         self.reactor.next_with(ctx, f, len)
     }
-    fn seal_fn(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.seal_to(tail_idx, ctx, insn)
     }
 
-    fn pool(&self) -> (TableIdx, TypeIdx) {
-        (self.pool_table, self.pool_ty)
+    fn pool(&self) -> Pool<'_, Context, E> {
+        self.pool
     }
     fn escape_tag(&self) -> Option<EscapeTag> {
         self.escape_tag

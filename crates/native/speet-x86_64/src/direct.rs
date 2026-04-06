@@ -3,7 +3,7 @@ use crate::*;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use wax_core::build::InstructionSource;
-use yecta::{FuncIdx, JumpCallParams};
+use yecta::{FuncIdx, JumpCallParams, Fed};
 
 use iced_x86::{Decoder, DecoderOptions, Instruction as IxInst, Mnemonic, OpKind, Register};
 
@@ -460,8 +460,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             self.init_function(ctx, inst_rip, inst_len, 4, f)?;
             let tail_idx = self.reactor.fn_count() - 1;
             // store rip into local 16
-            self.reactor.tail().instruction(ctx, &Instruction::I32Const(inst_rip as i32))?;
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(16))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(inst_rip as i32))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(16))?;
 
             // Fire instruction trap (if installed).
             {
@@ -503,229 +503,205 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             }
                             _ => 64,
                         };
-                        self.handle_memory_rmw(ctx, &inst, size_bits, |this, ctx| {
-                            this.emit_i64_add(ctx)
+                        self.handle_memory_rmw(ctx, &inst, size_bits, tail_idx, |this, ctx, tail_idx| {
+                            this.emit_i64_add(ctx, tail_idx)
                         })
                     } else {
-                        self.handle_binary(
-                            ctx,
-                            &inst,
-                            |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                        self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                                 match src {
                                     Operand::Imm(i) => {
-                                        this.emit_i64_const(ctx, i)?;
+                                        this.emit_i64_const(ctx, i, tail_idx)?;
                                     }
                                     Operand::Reg(r) => {
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                                     }
                                     Operand::RegWithSize(r, sz, bit) => {
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                        this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                        this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                                     }
                                 }
-                                this.emit_i64_add(ctx)?;
+                                this.emit_i64_add(ctx, tail_idx)?;
                                 if dst_size == 64 && dst_bit_offset == 0 {
-                                    this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                 } else if dst_size == 32 {
-                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                    this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                    this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                 } else {
-                                    this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                                    this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                                 }
                             },
                         )
                     }
                 }
-                Mnemonic::Imul => self.handle_binary(
-                    ctx,
-                    &inst,
-                    |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                Mnemonic::Imul => self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
-                                this.emit_i64_const(ctx, i)?;
+                                this.emit_i64_const(ctx, i, tail_idx)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                             }
                         }
-                        this.emit_i64_mul(ctx)?;
+                        this.emit_i64_mul(ctx, tail_idx)?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                         }
                     },
                 ),
-                Mnemonic::And => self.handle_binary(
-                    ctx,
-                    &inst,
-                    |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                Mnemonic::And => self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
-                                this.emit_i64_const(ctx, i)?;
+                                this.emit_i64_const(ctx, i, tail_idx)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                             }
                         }
-                        this.emit_i64_and(ctx)?;
+                        this.emit_i64_and(ctx, tail_idx)?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                         }
                     },
                 ),
-                Mnemonic::Or => self.handle_binary(
-                    ctx,
-                    &inst,
-                    |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                Mnemonic::Or => self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
-                                this.emit_i64_const(ctx, i)?;
+                                this.emit_i64_const(ctx, i, tail_idx)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                             }
                         }
-                        this.emit_i64_or(ctx)?;
+                        this.emit_i64_or(ctx, tail_idx)?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                         }
                     },
                 ),
-                Mnemonic::Xor => self.handle_binary(
-                    ctx,
-                    &inst,
-                    |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                Mnemonic::Xor => self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
-                                this.emit_i64_const(ctx, i)?;
+                                this.emit_i64_const(ctx, i, tail_idx)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                             }
                         }
-                        this.emit_i64_xor(ctx)?;
+                        this.emit_i64_xor(ctx, tail_idx)?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                         }
                     },
                 ),
-                Mnemonic::Shl => self.handle_binary(
-                    ctx,
-                    &inst,
-                    |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                        this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                Mnemonic::Shl => self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                         match src {
                             Operand::Imm(i) => {
-                                this.emit_i64_const(ctx, i)?;
+                                this.emit_i64_const(ctx, i, tail_idx)?;
                             }
                             Operand::Reg(r) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                             }
                             Operand::RegWithSize(r, sz, bit) => {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                             }
                         }
-                        this.emit_i64_shl(ctx)?;
+                        this.emit_i64_shl(ctx, tail_idx)?;
                         if dst_size == 64 && dst_bit_offset == 0 {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else if dst_size == 32 {
-                            this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                         }
                     },
                 ),
                 Mnemonic::Shr | Mnemonic::Sar => {
-                    self.handle_binary(
-                        ctx,
-                        &inst,
-                        |this, ctx, src, dst, dst_size, dst_bit_offset| {
-                            this.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst))?;
+                    self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
+                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst))?;
                             match src {
                                 Operand::Imm(i) => {
-                                    this.emit_i64_const(ctx, i)?;
+                                    this.emit_i64_const(ctx, i, tail_idx)?;
                                 }
                                 Operand::Reg(r) => {
-                                    this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                                 }
                                 Operand::RegWithSize(r, sz, bit) => {
-                                    this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                    this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                    this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                                 }
                             }
                             // choose arithmetic vs logical based on mnemonic
                             // if mnemonic was Sar use arithmetic (shr_s), otherwise Shr uses logical (shr_u)
                             if inst.mnemonic() == iced_x86::Mnemonic::Sar {
-                                this.emit_i64_shr_s(ctx)?;
+                                this.emit_i64_shr_s(ctx, tail_idx)?;
                             } else {
-                                this.emit_i64_shr_u(ctx)?;
+                                this.emit_i64_shr_u(ctx, tail_idx)?;
                             }
                             if dst_size == 64 && dst_bit_offset == 0 {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else if dst_size == 32 {
-                                this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                             }
                         },
                     )
                 }
                 // MOV: moves between regs/mem/imm
                 Mnemonic::Mov => {
-                    self.handle_binary(
-                        ctx,
-                        &inst,
-                        |this, ctx, src, dst, dst_size, dst_bit_offset| {
+                    self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
                             match inst.op1_kind() {
                                 OpKind::Immediate8
                                 | OpKind::Immediate16
@@ -733,72 +709,72 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                 | OpKind::Immediate64
                                 | OpKind::Immediate8to32 => {
                                     if let Operand::Imm(i) = src {
-                                        this.emit_i64_const(ctx, i)?;
+                                        this.emit_i64_const(ctx, i, tail_idx)?;
                                     }
                                     if dst_size == 64 && dst_bit_offset == 0 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else if dst_size == 32 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else {
                                         this.emit_subreg_write_rmw(
                                             ctx,
                                             dst,
                                             dst_size,
                                             dst_bit_offset,
-                                        )
+                                        tail_idx)
                                     }
                                 }
                                 OpKind::Register => {
                                     match src {
                                         Operand::Reg(r) => {
-                                            this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                                         }
                                         Operand::RegWithSize(r, sz, bit) => {
-                                            this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
-                                            this.emit_mask_shift_for_read(ctx, sz, bit)?;
+                                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
+                                            this.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                                         }
                                         _ => {
-                                            return this.reactor.tail().instruction(ctx, &Instruction::Unreachable)
+                                            return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
                                         }
                                     }
                                     if dst_size == 64 && dst_bit_offset == 0 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else if dst_size == 32 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else {
                                         this.emit_subreg_write_rmw(
                                             ctx,
                                             dst,
                                             dst_size,
                                             dst_bit_offset,
-                                        )
+                                        tail_idx)
                                     }
                                 }
                                 OpKind::Memory => {
                                     // load from memory into dst
-                                    this.emit_memory_address(ctx, &inst)?;
+                                    this.emit_memory_address(ctx, &inst, tail_idx)?;
                                     // load according to destination size (zero-extend)
-                                    this.emit_memory_load(ctx, dst_size, false)?;
+                                    this.emit_memory_load(ctx, dst_size, false, tail_idx)?;
                                     if dst_size == 64 && dst_bit_offset == 0 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else if dst_size == 32 {
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                        this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                        Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                                     } else {
                                         this.emit_subreg_write_rmw(
                                             ctx,
                                             dst,
                                             dst_size,
                                             dst_bit_offset,
-                                        )
+                                        tail_idx)
                                     }
                                 }
-                                _ => return this.reactor.tail().instruction(ctx, &Instruction::Unreachable),
+                                _ => return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
                             }
                         },
                     )
@@ -811,8 +787,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     } else if let Some((dst_local, _dst_size, _z, _bit)) =
                         Self::resolve_reg(inst.op0_register())
                     {
-                        self.emit_memory_address(ctx, &inst)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst_local))?;
+                        self.emit_memory_address(ctx, &inst, tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst_local))?;
                         Ok(Some(()))
                     } else {
                         Ok(None)
@@ -820,47 +796,44 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 }
                 // MOVSX: sign-extend from smaller reg/mem into reg
                 Mnemonic::Movsx => {
-                    self.handle_binary(
-                        ctx,
-                        &inst,
-                        |this, ctx, src, dst, dst_size, dst_bit_offset| {
+                    self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
                             match inst.op1_kind() {
                                 OpKind::Register => {
                                     match src {
                                         Operand::RegWithSize(r_local, r_size, r_bit) => {
-                                            this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r_local))?;
+                                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r_local))?;
                                             if r_bit > 0 {
-                                                this.emit_mask_shift_for_read(ctx, r_size, r_bit)?;
+                                                this.emit_mask_shift_for_read(ctx, r_size, r_bit, tail_idx)?;
                                             }
                                             match r_size {
                                                 8 => {
                                                     // sign-extend 8-bit: (v << 56) >> 56 (arith)
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(56))?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(56))?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(56))?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(56))?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
                                                 }
                                                 16 => {
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(48))?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(48))?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(48))?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(48))?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
                                                 }
                                                 32 => {
                                                     // use i64.extend_i32_s if available via instruction
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                                                 }
                                                 64 => { /* already 64-bit */ }
                                                 _ => {}
                                             }
                                         }
                                         _ => {
-                                            return this.reactor.tail().instruction(ctx, &Instruction::Unreachable)
+                                            return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
                                         }
                                     }
                                 }
                                 OpKind::Memory => {
-                                    this.emit_memory_address(ctx, &inst)?;
+                                    this.emit_memory_address(ctx, &inst, tail_idx)?;
                                     // memory signed load of operand size; determine size from inst.memory_size if available
                                     // fallback to 64
                                     // For now assume 8/16/32/64 based on op1_operand size: use inst.memory_size().size() if possible
@@ -872,45 +845,42 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                         iced_x86::MemorySize::UInt64 => 64,
                                         _ => 64,
                                     };
-                                    this.emit_memory_load(ctx, mem_size_bits, true)?;
+                                    this.emit_memory_load(ctx, mem_size_bits, true, tail_idx)?;
                                 }
-                                _ => return this.reactor.tail().instruction(ctx, &Instruction::Unreachable),
+                                _ => return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
                             }
                             if dst_size == 64 && dst_bit_offset == 0 {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else if dst_size == 32 {
-                                this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                             }
                         },
                     )
                 }
                 // MOVZX: zero-extend from smaller reg/mem into reg
                 Mnemonic::Movzx => {
-                    self.handle_binary(
-                        ctx,
-                        &inst,
-                        |this, ctx, src, dst, dst_size, dst_bit_offset| {
+                    self.handle_binary(ctx, &inst, tail_idx, |this, ctx, src, dst, dst_size, dst_bit_offset, tail_idx| {
                             match inst.op1_kind() {
                                 OpKind::Register => {
                                     match src {
                                         Operand::RegWithSize(r_local, r_size, r_bit) => {
-                                            this.reactor.tail().instruction(ctx, &Instruction::LocalGet(r_local))?;
+                                            Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r_local))?;
                                             if r_bit > 0 {
-                                                this.emit_mask_shift_for_read(ctx, r_size, r_bit)?;
+                                                this.emit_mask_shift_for_read(ctx, r_size, r_bit, tail_idx)?;
                                             }
                                             match r_size {
                                                 8 => {
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                                                 }
                                                 16 => {
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF),
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF),
                                                     )?;
-                                                    this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                                                    Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                                                 }
                                                 32 => { /* already zero-extended */ }
                                                 64 => { /* already 64 */ }
@@ -918,12 +888,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                             }
                                         }
                                         _ => {
-                                            return this.reactor.tail().instruction(ctx, &Instruction::Unreachable)
+                                            return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
                                         }
                                     }
                                 }
                                 OpKind::Memory => {
-                                    this.emit_memory_address(ctx, &inst)?;
+                                    this.emit_memory_address(ctx, &inst, tail_idx)?;
                                     let mem_size_bits = match inst.memory_size() {
                                         iced_x86::MemorySize::UInt8 => 8,
                                         iced_x86::MemorySize::UInt16 => 16,
@@ -931,18 +901,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                         iced_x86::MemorySize::UInt64 => 64,
                                         _ => 64,
                                     };
-                                    this.emit_memory_load(ctx, mem_size_bits, false)?;
+                                    this.emit_memory_load(ctx, mem_size_bits, false, tail_idx)?;
                                 }
-                                _ => return this.reactor.tail().instruction(ctx, &Instruction::Unreachable),
+                                _ => return Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
                             }
                             if dst_size == 64 && dst_bit_offset == 0 {
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else if dst_size == 32 {
-                                this.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                this.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                                this.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst))
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                                Fed { reactor: &this.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_write_rmw(ctx, dst, dst_size, dst_bit_offset, tail_idx)
                             }
                         },
                     )
@@ -959,12 +929,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             Self::resolve_reg(inst.op1_register()),
                         ) {
                             // temp in local 17
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst_local))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(17))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst_local))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(17))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(src_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(17))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(src_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(17))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(src_local))?;
                             Ok(Some(()))
                         } else {
                             Ok(None)
@@ -977,22 +947,22 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             Self::resolve_reg(inst.op0_register())
                         {
                             // compute addr
-                            self.emit_memory_address(ctx, &inst)?;
+                            self.emit_memory_address(ctx, &inst, tail_idx)?;
                             // load old value with register size
-                            self.emit_memory_load(ctx, _dst_size, false)?;
+                            self.emit_memory_load(ctx, _dst_size, false, tail_idx)?;
                             // store old value to temp
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(17))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(17))?;
                             // store register value to memory
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst_local))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Store(wasm_encoder::MemArg {
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Store(wasm_encoder::MemArg {
                                     offset: 0,
                                     align: 3,
                                     memory_index: 0,
                                 }),
                             )?;
                             // set reg to loaded
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(17))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(dst_local))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(17))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst_local))?;
                             Ok(Some(()))
                         } else {
                             Ok(None)
@@ -1001,43 +971,43 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         Ok(None)
                     }
                 }
-                Mnemonic::Test => self.handle_test(ctx, &inst),
-                Mnemonic::Cmp => self.handle_cmp(ctx, &inst),
-                Mnemonic::Jmp => self.handle_jmp(ctx, &inst),
-                Mnemonic::Je => self.handle_conditional_jump(ctx, &inst, ConditionType::ZF),
-                Mnemonic::Jne => self.handle_conditional_jump(ctx, &inst, ConditionType::NZF),
-                Mnemonic::Jl => self.handle_conditional_jump(ctx, &inst, ConditionType::SF_NE_OF),
+                Mnemonic::Test => self.handle_test(ctx, &inst, tail_idx),
+                Mnemonic::Cmp => self.handle_cmp(ctx, &inst, tail_idx),
+                Mnemonic::Jmp => self.handle_jmp(ctx, &inst, tail_idx),
+                Mnemonic::Je => self.handle_conditional_jump(ctx, &inst, ConditionType::ZF, tail_idx),
+                Mnemonic::Jne => self.handle_conditional_jump(ctx, &inst, ConditionType::NZF, tail_idx),
+                Mnemonic::Jl => self.handle_conditional_jump(ctx, &inst, ConditionType::SF_NE_OF, tail_idx),
                 Mnemonic::Jle => {
-                    self.handle_conditional_jump(ctx, &inst, ConditionType::ZF_OR_SF_NE_OF)
+                    self.handle_conditional_jump(ctx, &inst, ConditionType::ZF_OR_SF_NE_OF, tail_idx)
                 }
                 Mnemonic::Jg => {
-                    self.handle_conditional_jump(ctx, &inst, ConditionType::NZF_AND_SF_EQ_OF)
+                    self.handle_conditional_jump(ctx, &inst, ConditionType::NZF_AND_SF_EQ_OF, tail_idx)
                 }
-                Mnemonic::Jge => self.handle_conditional_jump(ctx, &inst, ConditionType::SF_EQ_OF),
-                Mnemonic::Jb => self.handle_conditional_jump(ctx, &inst, ConditionType::CF),
-                Mnemonic::Jbe => self.handle_conditional_jump(ctx, &inst, ConditionType::CF_OR_ZF),
+                Mnemonic::Jge => self.handle_conditional_jump(ctx, &inst, ConditionType::SF_EQ_OF, tail_idx),
+                Mnemonic::Jb => self.handle_conditional_jump(ctx, &inst, ConditionType::CF, tail_idx),
+                Mnemonic::Jbe => self.handle_conditional_jump(ctx, &inst, ConditionType::CF_OR_ZF, tail_idx),
                 Mnemonic::Ja => {
-                    self.handle_conditional_jump(ctx, &inst, ConditionType::NCF_AND_NZF)
+                    self.handle_conditional_jump(ctx, &inst, ConditionType::NCF_AND_NZF, tail_idx)
                 }
-                Mnemonic::Jae => self.handle_conditional_jump(ctx, &inst, ConditionType::NCF),
-                Mnemonic::Js => self.handle_conditional_jump(ctx, &inst, ConditionType::SF),
-                Mnemonic::Jns => self.handle_conditional_jump(ctx, &inst, ConditionType::NSF),
-                Mnemonic::Jo => self.handle_conditional_jump(ctx, &inst, ConditionType::OF),
-                Mnemonic::Jno => self.handle_conditional_jump(ctx, &inst, ConditionType::NOF),
-                Mnemonic::Jp => self.handle_conditional_jump(ctx, &inst, ConditionType::PF),
-                Mnemonic::Jnp => self.handle_conditional_jump(ctx, &inst, ConditionType::NPF),
+                Mnemonic::Jae => self.handle_conditional_jump(ctx, &inst, ConditionType::NCF, tail_idx),
+                Mnemonic::Js => self.handle_conditional_jump(ctx, &inst, ConditionType::SF, tail_idx),
+                Mnemonic::Jns => self.handle_conditional_jump(ctx, &inst, ConditionType::NSF, tail_idx),
+                Mnemonic::Jo => self.handle_conditional_jump(ctx, &inst, ConditionType::OF, tail_idx),
+                Mnemonic::Jno => self.handle_conditional_jump(ctx, &inst, ConditionType::NOF, tail_idx),
+                Mnemonic::Jp => self.handle_conditional_jump(ctx, &inst, ConditionType::PF, tail_idx),
+                Mnemonic::Jnp => self.handle_conditional_jump(ctx, &inst, ConditionType::NPF, tail_idx),
 
                 // Call instruction
-                Mnemonic::Call => self.handle_call(ctx, &inst),
+                Mnemonic::Call => self.handle_call(ctx, &inst, tail_idx),
 
                 // Return instruction
-                Mnemonic::Ret => self.handle_ret(ctx, &inst),
+                Mnemonic::Ret => self.handle_ret(ctx, &inst, tail_idx),
 
                 // Push instruction
-                Mnemonic::Push => self.handle_push(ctx, &inst),
+                Mnemonic::Push => self.handle_push(ctx, &inst, tail_idx),
 
                 // Pop instruction
-                Mnemonic::Pop => self.handle_pop(ctx, &inst),
+                Mnemonic::Pop => self.handle_pop(ctx, &inst, tail_idx),
 
                 Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
                     // PUSHF variants: push flags with operand-size 16/32/64
@@ -1051,58 +1021,58 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     };
 
                     // decrement RSP by rsp_sub
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(rsp_sub))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Sub)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(rsp_sub))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?;
 
                     // address (RSP) on stack
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
 
                     // build flags value on stack (i64 accumulator)
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?; // acc = 0
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?; // acc = 0
                                                                         // CF -> bit 0
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::CF_LOCAL))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::CF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
                     // PF -> bit 2
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::PF_LOCAL))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(2))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::PF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(2))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
                     // ZF -> bit 6
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(6))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(6))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
                     // SF -> bit 7
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::SF_LOCAL))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(7))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(7))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
                     // OF -> bit 11
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::OF_LOCAL))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(11))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Shl)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(11))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
 
                     // mask down if needed
                     if size_bits == 16 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                     } else if size_bits == 32 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                     }
 
                     // store flags at [RSP]
-                    self.emit_memory_store(ctx, size_bits)?;
+                    self.emit_memory_store(ctx, size_bits, tail_idx)?;
                     Ok(Some(()))
                 }
 
@@ -1117,58 +1087,58 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     };
 
                     // load value from [RSP] with appropriate size
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-                    self.emit_memory_load(ctx, size_bits, false)?; // pushes i64 value (zero-extended)
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+                    self.emit_memory_load(ctx, size_bits, false, tail_idx)?; // pushes i64 value (zero-extended)
                                                                    // store popped value into temp local 22
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(22))?;
 
                     // increment RSP by rsp_add
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(rsp_add))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(rsp_add))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?;
 
                     // Now extract bits from local 22 into flag locals. For sizes <64, the value is zero-extended.
                     // extract CF (bit 0)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(1))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(1))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))?;
                     // extract PF (bit 2)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(2))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(1))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(2))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(1))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
                     // extract ZF (bit 6)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(6))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(1))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(6))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(1))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
                     // extract SF (bit 7)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(7))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(1))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(7))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(1))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
                     // extract OF (bit 11)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(11))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(1))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(11))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(1))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))?;
 
                     Ok(Some(()))
                 }
@@ -1178,7 +1148,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             // If handler returned None (undecidable operands), emit unreachable
             if undecidable_option.is_none() {
-                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
             }
 
             // Rewind decoder to the byte after the current instruction RIP
@@ -1194,16 +1164,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         ctx: &mut Context,
         inst: &IxInst,
         size_bits: u32,
+        tail_idx: usize,
         mut operation: Op,
     ) -> Result<Option<()>, E>
     where
-        Op: FnMut(&mut Self, &mut Context) -> Result<(), E>,
+        Op: FnMut(&mut Self, &mut Context, usize) -> Result<(), E>,
     {
         use iced_x86::OpKind;
 
         // Load current value from memory
-        self.emit_memory_address(ctx, &inst)?;
-        self.emit_memory_load(ctx, size_bits, false)?;
+        self.emit_memory_address(ctx, &inst, tail_idx)?;
+        self.emit_memory_load(ctx, size_bits, false, tail_idx)?;
 
         // Get source value based on operand kind
         match inst.op1_kind() {
@@ -1213,23 +1184,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             | OpKind::Immediate64
             | OpKind::Immediate8to32 => {
                 let imm = inst.immediate64() as i64;
-                self.emit_i64_const(ctx, imm)?;
+                self.emit_i64_const(ctx, imm, tail_idx)?;
             }
             OpKind::Register => {
                 if let Some((r_local, r_size, _rz, bit)) = Self::resolve_reg(inst.op1_register()) {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r_local))?;
                     if bit > 0 {
-                        self.emit_mask_shift_for_read(ctx, r_size, bit)?;
+                        self.emit_mask_shift_for_read(ctx, r_size, bit, tail_idx)?;
                     }
                     // Apply mask for sub-registers
                     match r_size {
                         8 => {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                         }
                         16 => {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                         }
                         32 => { /* already zero-extended */ }
                         64 => { /* full */ }
@@ -1243,17 +1214,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         }
 
         // Perform the operation (stack now has: old_value, src_value)
-        operation(self, ctx)?;
+        operation(self, ctx, tail_idx)?;
 
         // Store result back to memory
-        self.emit_memory_address(ctx, &inst)?;
-        self.emit_memory_store(ctx, size_bits)?;
+        self.emit_memory_address(ctx, &inst, tail_idx)?;
+        self.emit_memory_store(ctx, size_bits, tail_idx)?;
 
         Ok(Some(()))
     }
 
     // Helper: emit memory effective address for the instruction's memory operand
-    fn emit_memory_address(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<(), E> {
+    fn emit_memory_address(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<(), E> {
         use iced_x86::Register;
         // Build address: base + index*scale + displacement
         let base = inst.memory_base();
@@ -1265,55 +1236,55 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         let mut have_value = false;
         if base != Register::None {
             if let Some((local, _sz, _z, bit)) = Self::resolve_reg(base) {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(local))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(local))?;
                 if bit > 0 {
                     // shift right by bit to align subregister
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(bit as i64))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(bit as i64))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
                 }
                 have_value = true;
             } else {
-                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 return Ok(());
             }
         }
         if index != Register::None {
             if let Some((idx_local, _sz, _z, bit)) = Self::resolve_reg(index) {
                 if have_value {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(idx_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(idx_local))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(idx_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(idx_local))?;
                     have_value = true;
                 }
                 if bit > 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(bit as i64))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(bit as i64))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
                 }
                 // multiply by scale
                 if scale != 1 {
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(scale as i64))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Mul)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(scale as i64))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)?;
                 }
                 if base != Register::None {
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
                 }
             } else {
-                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 return Ok(());
             }
         }
         if disp != 0 {
             if have_value {
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(disp as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(disp as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
             } else {
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(disp as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(disp as i64))?;
                 have_value = true;
             }
         }
         // If nothing contributed, push zero
         if !have_value {
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?;
         }
         Ok(())
     }
@@ -1322,10 +1293,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         &mut self,
         ctx: &mut Context,
         inst: &IxInst,
+        tail_idx: usize,
         mut cb: T,
     ) -> Result<Option<()>, E>
     where
-        T: FnMut(&mut Self, &mut Context, Operand, u32, u32, u32) -> Result<(), E>,
+        T: FnMut(&mut Self, &mut Context, Operand, u32, u32, u32, usize) -> Result<(), E>,
     {
         // Try to extract dest register and src (imm or reg)
         use iced_x86::OpKind;
@@ -1343,9 +1315,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 | OpKind::Immediate64
                 | OpKind::Immediate8to32 => {
                     // emit address then immediate then store sized by immediate kind
-                    self.emit_memory_address(ctx, &inst)?;
+                    self.emit_memory_address(ctx, &inst, tail_idx)?;
                     let imm = inst.immediate64() as i64;
-                    self.emit_i64_const(ctx, imm)?;
+                    self.emit_i64_const(ctx, imm, tail_idx)?;
                     let size_bits = match op1 {
                         OpKind::Immediate8 => 8,
                         OpKind::Immediate16 => 16,
@@ -1354,7 +1326,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         OpKind::Immediate64 => 64,
                         _ => 64,
                     };
-                    self.emit_memory_store(ctx, size_bits)?;
+                    self.emit_memory_store(ctx, size_bits, tail_idx)?;
                     return Ok(Some(()));
                 }
                 OpKind::Register => {
@@ -1362,21 +1334,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         Self::resolve_reg(inst.op1_register())
                     {
                         // compute address
-                        self.emit_memory_address(ctx, &inst)?;
+                        self.emit_memory_address(ctx, &inst, tail_idx)?;
                         // get source value and narrow if sub-register
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r_local))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r_local))?;
                         if bit > 0 {
-                            self.emit_mask_shift_for_read(ctx, r_size, bit)?;
+                            self.emit_mask_shift_for_read(ctx, r_size, bit, tail_idx)?;
                         }
                         // narrow by mask if needed
                         match r_size {
                             8 => {
-                                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-                                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+                                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                             }
                             16 => {
-                                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF))?;
-                                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+                                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                             }
                             32 => { /* lower 32 bits are already zero-extended in locals for 32-bit regs */
                             }
@@ -1384,7 +1356,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             _ => {}
                         }
                         // store to memory using source size
-                        self.emit_memory_store(ctx, r_size)?;
+                        self.emit_memory_store(ctx, r_size, tail_idx)?;
                         return Ok(Some(()));
                     } else {
                         return Ok(None);
@@ -1430,7 +1402,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         match src {
             Operand::Imm(_i) => {
                 // immediate -> callback will emit and set dest
-                cb(self, ctx, src, dst_local, dst_size, dst_bit_offset)?;
+                cb(self, ctx, src, dst_local, dst_size, dst_bit_offset, tail_idx)?;
                 // if dst is an 8/16-bit subregister we need to perform RMW; the callback should leave the new value on stack then we do RMW
                 // but since our callbacks currently perform LocalSet(dst_local) directly for full-register writes, we need to adjust pattern:
             }
@@ -1442,17 +1414,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     dst_local,
                     dst_size,
                     dst_bit_offset,
+                    tail_idx,
                 )?;
             }
             _ => {
-                cb(self, ctx, src, dst_local, dst_size, dst_bit_offset)?;
+                cb(self, ctx, src, dst_local, dst_size, dst_bit_offset, tail_idx)?;
             }
         }
 
         Ok(Some(()))
     }
 
-    fn handle_test(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_test(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // TEST performs bitwise AND and sets flags, but doesn't store result
         let src = match inst.op1_kind() {
             OpKind::Immediate8
@@ -1485,68 +1458,68 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         let (dst_local, dst_size, _dst_zero_ext32, dst_bit_offset) = dst_info.unwrap();
 
         // Get dst value
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst_local))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst_local))?;
         if dst_bit_offset > 0 {
-            self.emit_mask_shift_for_read(ctx, dst_size, dst_bit_offset)?;
+            self.emit_mask_shift_for_read(ctx, dst_size, dst_bit_offset, tail_idx)?;
         }
 
         // Get src value
         match src {
             Operand::Imm(i) => {
-                self.emit_i64_const(ctx, i)?;
+                self.emit_i64_const(ctx, i, tail_idx)?;
             }
             Operand::Reg(r) => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
             }
             Operand::RegWithSize(r, sz, bit) => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                 if bit > 0 {
-                    self.emit_mask_shift_for_read(ctx, sz, bit)?;
+                    self.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                 }
             }
         }
 
         // Perform AND
-        self.emit_i64_and(ctx)?;
+        self.emit_i64_and(ctx, tail_idx)?;
 
         // Store result temporarily and set flags
-        self.reactor.tail().instruction(ctx, &Instruction::LocalTee(22))?; // temp = result, result still on stack
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(22))?; // temp = result, result still on stack
 
         // ZF: result == 0
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Eq)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Eq)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
 
         // SF: result < 0
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(1))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(1))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
 
         // CF and OF are always cleared for TEST
-        self.set_cf(ctx, false)?;
-        self.set_of(ctx, false)?;
+        self.set_cf(ctx, false, tail_idx)?;
+        self.set_of(ctx, false, tail_idx)?;
 
         // PF: parity of lowest byte
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
         // Simple parity check - count bits (simplified)
-        self.reactor.tail().instruction(ctx, &Instruction::I32Popcnt)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(1))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?; // 1 if odd parity, 0 if even
-        self.reactor.tail().instruction(ctx, &Instruction::I32Eqz)?; // 1 if even parity, 0 if odd
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Popcnt)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(1))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?; // 1 if odd parity, 0 if even
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Eqz)?; // 1 if even parity, 0 if odd
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
 
         Ok(Some(()))
     }
 
-    fn handle_cmp(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_cmp(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // CMP performs subtraction and sets flags, but doesn't store result
         let src = match inst.op1_kind() {
             OpKind::Immediate8
@@ -1580,95 +1553,95 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         let (dst_local, dst_size, _dst_zero_ext32, dst_bit_offset) = dst_info.unwrap();
 
         // Get dst value
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(dst_local))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(dst_local))?;
         if dst_bit_offset > 0 {
-            self.emit_mask_shift_for_read(ctx, dst_size, dst_bit_offset)?;
+            self.emit_mask_shift_for_read(ctx, dst_size, dst_bit_offset, tail_idx)?;
         }
 
         // Get src value
         match src {
             Operand::Imm(i) => {
-                self.emit_i64_const(ctx, i)?;
+                self.emit_i64_const(ctx, i, tail_idx)?;
             }
             Operand::Reg(r) => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
             }
             Operand::RegWithSize(r, sz, bit) => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(r))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(r))?;
                 if bit > 0 {
-                    self.emit_mask_shift_for_read(ctx, sz, bit)?;
+                    self.emit_mask_shift_for_read(ctx, sz, bit, tail_idx)?;
                 }
             }
         }
 
         // Store operands for flag computation
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(23))?; // src
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(22))?; // dst
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(23))?; // src
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(22))?; // dst
 
         // Compute result = dst - src
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(23))?;
-        self.emit_i64_sub(ctx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(23))?;
+        self.emit_i64_sub(ctx, tail_idx)?;
 
         // Store result and set flags
-        self.reactor.tail().instruction(ctx, &Instruction::LocalTee(24))?; // result
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(24))?; // result
 
         // ZF: result == 0
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Eq)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Eq)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
 
         // SF: result < 0
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(24))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(1))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(24))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(1))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))?;
 
         // CF: for subtraction, CF if dst < src (unsigned)
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(23))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64LtU)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(23))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64LtU)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))?;
 
         // OF: overflow for subtraction
         // Overflow occurs when operands have different signs and result has different sign from dst
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?; // dst
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(23))?; // src
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Xor)?; // 1 if different signs
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(22))?; // dst
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(24))?; // result
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(63))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Xor)?; // 1 if dst and result have different signs
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?; // OF set
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?; // dst
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(23))?; // src
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Xor)?; // 1 if different signs
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(22))?; // dst
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(24))?; // result
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(63))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Xor)?; // 1 if dst and result have different signs
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?; // OF set
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))?;
 
         // PF: parity of lowest byte
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(24))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Popcnt)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(1))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Eqz)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(24))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Popcnt)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(1))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Eqz)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))?;
 
         Ok(Some(()))
     }
 
-    fn handle_jmp(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_jmp(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // JMP target
         let target = match inst.op0_kind() {
             OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
@@ -1680,9 +1653,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         let target_func_idx = self.rip_to_func_idx(target);
-        let _pool = Pool::<Context, E> { handler: &self.pool_table, ty: self.pool_ty };
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
-
+        let _pool = self.pool;
         // Unconditional jump (direct)
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
@@ -1705,8 +1676,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         ctx: &mut Context,
         inst: &IxInst,
         condition_type: ConditionType,
+        tail_idx: usize,
     ) -> Result<Option<()>, E> {
-        let tail_idx = self.reactor.fn_count() - 1;
         let target = match inst.op0_kind() {
             OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => {
                 let offset = inst.near_branch64() as i64;
@@ -1717,7 +1688,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         let target_func_idx = self.rip_to_func_idx(target);
-        let pool = Pool { handler: &self.pool_table, ty: self.pool_ty };
+        let pool = self.pool;
 
         // Conditional branch.
         {
@@ -1740,8 +1711,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Handle CALL instruction - push return address and jump to target
-    fn handle_call(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
-        let tail_idx = self.reactor.fn_count() - 1;
+    fn handle_call(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // Calculate return address (instruction pointer after this call)
         let return_addr = inst.next_ip();
 
@@ -1776,22 +1746,22 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             // Step 1: Push return address onto stack (normal x86_64 behavior)
             // Decrement RSP by 8 (64-bit address)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(8))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Sub)?;
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(8))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
             // Store return address at [RSP]
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
-            self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
+            self.emit_memory_store(ctx, 64, tail_idx)?; // Store 64-bit address
 
             // Step 2: Create expected_ra snippet for fixups
             let expected_ra_snippet = ExpectedRaSnippet { return_addr };
 
             // Step 3: Use fixups to set expected_ra (local 25) only for this call
             let params =
-                yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, Pool { handler: &self.pool_table, ty: self.pool_ty })
+                yecta::JumpCallParams::call(target_func, self.total_params, escape_tag, self.pool)
                     .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
             // Step 4: Emit the speculative call using yecta's ji_with_params API
@@ -1806,15 +1776,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             // Step 1: Push return address onto stack
             // Decrement RSP by 8 (64-bit address)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(8))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Sub)?;
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(8))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
             // Store return address at [RSP]
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
-            self.emit_memory_store(ctx, 64)?; // Store 64-bit address
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?; // Return address
+            self.emit_memory_store(ctx, 64, tail_idx)?; // Store 64-bit address
 
             // Step 2: Jump to target function (non-speculative)
             let target_func_idx = self.rip_to_func_idx(target);
@@ -1836,8 +1806,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Handle RET instruction - pop return address and jump to it
-    fn handle_ret(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
-        let tail_idx = self.reactor.fn_count() - 1;
+    fn handle_ret(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // Handle optional immediate operand (for stack cleanup)
         let stack_cleanup = if inst.op_count() > 0 {
             match inst.op0_kind() {
@@ -1856,65 +1825,65 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             let escape_tag = self.escape_tag.unwrap();
 
             // Step 1: Load return address from [RSP] (don't modify RSP yet)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP
-            self.emit_memory_load(ctx, 64, false)?; // Stack top value (should be return address)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP
+            self.emit_memory_load(ctx, 64, false, tail_idx)?; // Stack top value (should be return address)
 
             // Step 2: Load expected_ra from the local set by the caller's fixup
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
 
             // Step 3: Compare them
-            self.reactor.tail().instruction(ctx, &Instruction::I64Eq)?; // Compare stack top with expected
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Eq)?; // Compare stack top with expected
 
             // Step 4: If equal (ABI-compliant), use regular return; else throw exception
-            self.reactor.tail().instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
             // ABI-compliant return path: pop stack and use WASM Return
             // Increment RSP by 8 (for the return address)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(8))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(8))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
 
             // Add any immediate stack cleanup (for ret <imm> instruction)
             if stack_cleanup > 0 {
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
             }
 
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
             // Direct WASM return (ABI-compliant case)
-            self.reactor.tail().instruction(ctx, &Instruction::Return)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Return)?;
 
-            self.reactor.tail().instruction(ctx, &Instruction::Else)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Else)?;
 
             // Non-ABI-compliant return: throw escape tag with all register/stack state
             self.reactor.ret(tail_idx, ctx, self.total_params, escape_tag)?;
 
-            self.reactor.tail().instruction(ctx, &Instruction::End)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::End)?;
             return Ok(Some(()));
         } else {
             // Non-speculative path: original implementation
 
             // Step 1: Load return address from stack
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP
-            self.emit_memory_load(ctx, 64, false)?; // Load 64-bit return address (zero-extended)
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP
+            self.emit_memory_load(ctx, 64, false, tail_idx)?; // Load 64-bit return address (zero-extended)
 
             // Store return address in a temporary local (use local 23 for return address)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(23))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(23))?;
 
             // Step 2: Adjust stack pointer
             // Increment RSP by 8 (for the return address)
-            self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(8))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(8))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
 
             // Add any immediate stack cleanup (for ret <imm> instruction)
             if stack_cleanup > 0 {
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(stack_cleanup as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
             }
 
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
             // Step 3: Jump to return address using indirect dispatch
             let return_addr_snippet = ReturnAddressSnippet {
@@ -1936,7 +1905,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             let params = yecta::JumpCallParams::indirect_jump(
                 &return_addr_snippet,
                 self.total_params,
-                Pool { handler: &self.pool_table, ty: self.pool_ty },
+                self.pool,
             );
             self.reactor.ji_with_params(ctx, params, tail_idx)?;
 
@@ -1945,7 +1914,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Handle PUSH instruction - push operand onto stack
-    fn handle_push(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_push(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // Determine operand size and value based on operand type
         let (operand_size, stack_decrement) = match inst.op0_kind() {
             OpKind::Register => {
@@ -1970,39 +1939,39 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         // Step 1: Decrement RSP
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(stack_decrement))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Sub)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP is local 4
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(stack_decrement))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
         // Step 2: Store operand value at [RSP]
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // Address = RSP
 
         // Get the value to push based on operand type
         match inst.op0_kind() {
             OpKind::Register => {
                 let reg = inst.op0_register();
                 if let Some((reg_local, reg_size, _, bit_offset)) = Self::resolve_reg(reg) {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(reg_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(reg_local))?;
 
                     // Handle bit offset for subregisters
                     if bit_offset > 0 {
-                        self.emit_mask_shift_for_read(ctx, reg_size, bit_offset)?;
+                        self.emit_mask_shift_for_read(ctx, reg_size, bit_offset, tail_idx)?;
                     }
 
                     // Apply size mask if needed
                     match reg_size {
                         8 => {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFF))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                         }
                         16 => {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFF))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                         }
                         32 => {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-                            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                         }
                         64 => { /* No masking needed */ }
                         _ => {}
@@ -2016,24 +1985,24 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             | OpKind::Immediate16
             | OpKind::Immediate32 => {
                 let imm = inst.immediate64() as i64;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(imm))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(imm))?;
             }
             OpKind::Memory => {
                 // Load from memory address
-                self.emit_memory_address(ctx, inst)?;
-                self.emit_memory_load(ctx, operand_size, false)?;
+                self.emit_memory_address(ctx, inst, tail_idx)?;
+                self.emit_memory_load(ctx, operand_size, false, tail_idx)?;
             }
             _ => return Ok(None),
         }
 
         // Step 3: Store the value
-        self.emit_memory_store(ctx, operand_size)?;
+        self.emit_memory_store(ctx, operand_size, tail_idx)?;
 
         Ok(Some(()))
     }
 
     /// Handle POP instruction - pop from stack into operand
-    fn handle_pop(&mut self, ctx: &mut Context, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_pop(&mut self, ctx: &mut Context, inst: &IxInst, tail_idx: usize) -> Result<Option<()>, E> {
         // Only support register destination for now
         let (reg_local, reg_size, zero_extend, bit_offset) = match inst.op0_kind() {
             OpKind::Register => {
@@ -2056,33 +2025,33 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         };
 
         // Step 1: Load value from [RSP]
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?; // RSP
-        self.emit_memory_load(ctx, operand_size, false)?; // Load with zero extension
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?; // RSP
+        self.emit_memory_load(ctx, operand_size, false, tail_idx)?; // Load with zero extension
 
         // Store the loaded value in a temporary local (use local 24 for pop value)
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(24))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(24))?;
 
         // Step 2: Increment RSP
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(4))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(stack_increment))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(4))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(stack_increment))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(4))?; // Update RSP
 
         // Step 3: Store the value in the destination register
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(24))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(24))?;
 
         if zero_extend && reg_size == 32 {
             // 32-bit writes zero-extend to 64-bit
-            self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
-            self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
         }
 
         if bit_offset > 0 || reg_size < 64 {
             // Handle subregister writes using RMW
-            self.emit_subreg_write_rmw(ctx, reg_local, reg_size, bit_offset)?;
+            self.emit_subreg_write_rmw(ctx, reg_local, reg_size, bit_offset, tail_idx)?;
         } else {
             // Full register write
-            self.reactor.tail().instruction(ctx, &Instruction::LocalSet(reg_local))?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(reg_local))?;
         }
 
         Ok(Some(()))

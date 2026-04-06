@@ -45,7 +45,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
 
     // Create recompiler with HINT tracking enabled
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        TableIdx(0), TypeIdx(0),
+        { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
         None,
         start_addr as u64,
         true,  // Enable HINT tracking
@@ -143,7 +143,7 @@ fn test_hint_tracking_performance() {
         RiscVRecompiler::<(), Infallible, Function>::new_with_base_pc(0x1000);
     let mut recompiler_with_hints =
         RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            TableIdx(0), TypeIdx(0),
+            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
             None,
             0x1000,
             true,

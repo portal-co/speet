@@ -16,7 +16,7 @@ fn main() {
 
     // Create a recompiler with HINT tracking enabled
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        TableIdx(0), TypeIdx(0),
+        { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
         None,
         0x1000, // base PC
         true,   // enable HINT tracking

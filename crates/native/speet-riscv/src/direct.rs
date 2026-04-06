@@ -1,3 +1,4 @@
+use yecta::Fed;
 use crate::*;
 use rv_asm::AmoOp;
 use speet_ordering::{
@@ -72,18 +73,18 @@ where
         }
 
         // Compute address: base + offset
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, offset)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, offset, tail_idx)?;
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
             }
         } else {
-            self.reactor.tail().instruction(ctx, &Instruction::I32Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
@@ -96,7 +97,7 @@ where
         // emit_load can compare it against any pending lazy store addresses.
         let load_addr = self.load_addr_scratch_local();
         let addr_type = self.addr_val_type();
-        self.reactor.tail().instruction(ctx, &Instruction::LocalTee(load_addr))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(load_addr))?;
 
         // Load from memory
         match op {
@@ -131,7 +132,7 @@ where
                     )?;
                     // If RV64 but not memory64, extend to i64
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -165,7 +166,7 @@ where
                         tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -199,7 +200,7 @@ where
                         tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -233,7 +234,7 @@ where
                         tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -267,7 +268,7 @@ where
                         tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -301,7 +302,7 @@ where
                         }),
                         tail_idx,
                     )?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
                 }
             }
             LoadOp::I64 => {
@@ -322,7 +323,7 @@ where
             }
         }
 
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(dest)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(dest)))?;
         Ok(())
     }
 
@@ -338,18 +339,18 @@ where
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, offset)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, offset, tail_idx)?;
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
             }
         } else {
-            self.reactor.tail().instruction(ctx, &Instruction::I32Add)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
@@ -359,12 +360,12 @@ where
         }
 
         // Load value to store
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
 
         // If RV64 but not memory64, need to wrap i64 value to i32 for 32-bit stores
         let need_wrap = self.enable_rv64 && !self.use_memory64 && !matches!(op, StoreOp::I64);
         if need_wrap {
-            self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
         }
 
         // Store to memory
@@ -494,9 +495,9 @@ where
         tail_idx: usize,
     ) -> Result<(), E> {
         // Compute address: base + offset
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, offset)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Add)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, offset, tail_idx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -507,7 +508,7 @@ where
         // Save the effective address for alias checks.
         let load_addr = self.load_addr_scratch_local();
         let addr_type = self.addr_val_type();
-        self.reactor.tail().instruction(ctx, &Instruction::LocalTee(load_addr))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(load_addr))?;
 
         // Load from memory
         match op {
@@ -525,7 +526,7 @@ where
                     }),
                     tail_idx,
                 )?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64PromoteF32)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64PromoteF32)?;
             }
             FLoadOp::F64 => {
                 emit_load(
@@ -544,7 +545,7 @@ where
             }
         }
 
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
         Ok(())
     }
 
@@ -560,9 +561,9 @@ where
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, offset)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32Add)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, offset, tail_idx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -571,12 +572,12 @@ where
         }
 
         // Load value to store
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
 
         // Store to memory
         match op {
             FStoreOp::F32 => {
-                self.reactor.tail().instruction(ctx, &Instruction::F32DemoteF64)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32DemoteF64)?;
                 emit_store(
                     ctx,
                     &mut self.reactor,
@@ -619,54 +620,55 @@ where
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         // Sign injection uses bit manipulation on the float representation
         // Get magnitude from src1, sign from src2 (possibly modified)
 
         // Convert src1 to i32 to manipulate bits
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        self.unbox_f32(ctx)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32ReinterpretF32)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        self.unbox_f32(ctx, tail_idx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ReinterpretF32)?;
 
         // Mask to keep only magnitude (clear sign bit): 0x7FFFFFFF
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(0x7FFFFFFF))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0x7FFFFFFF))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
 
         // Get sign bit from src2
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        self.unbox_f32(ctx)?;
-        self.reactor.tail().instruction(ctx, &Instruction::I32ReinterpretF32)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        self.unbox_f32(ctx, tail_idx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ReinterpretF32)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly: mask with 0x80000000
-                self.reactor.tail().instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                self.reactor.tail().instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32Xor)?; // Flip the sign bit
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Xor)?; // Flip the sign bit
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits of src1 and src2
                 // Need original src1 sign
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32ReinterpretF32)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32Xor)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ReinterpretF32)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Xor)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
             }
         }
 
         // Combine magnitude and sign
-        self.reactor.tail().instruction(ctx, &Instruction::I32Or)?;
-        self.reactor.tail().instruction(ctx, &Instruction::F32ReinterpretI32)?;
-        self.nan_box_f32(ctx)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Or)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+        self.nan_box_f32(ctx, tail_idx)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
 
         Ok(())
     }
@@ -679,47 +681,48 @@ where
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
+        tail_idx: usize,
     ) -> Result<(), E> {
         // Similar to single-precision but using i64
         // Convert src1 to i64 to manipulate bits
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ReinterpretF64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
 
         // Mask to keep only magnitude (clear sign bit)
-        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
 
         // Get sign bit from src2
-        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        self.reactor.tail().instruction(ctx, &Instruction::I64ReinterpretF64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Xor)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Xor)?;
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64ReinterpretF64)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Xor)?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Xor)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
             }
         }
 
         // Combine magnitude and sign
-        self.reactor.tail().instruction(ctx, &Instruction::I64Or)?;
-        self.reactor.tail().instruction(ctx, &Instruction::F64ReinterpretI64)?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ReinterpretI64)?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
 
         Ok(())
     }
@@ -813,8 +816,8 @@ where
         self.init_function(ctx, pc, inst_len, 8, f)?;
         let tail_idx = self.reactor.fn_count() - 1;
         // Update PC
-        self.reactor.tail().instruction(ctx, &Instruction::I32Const(pc as i32))?;
-        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(pc as i32))?;
+        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::pc_local()))?;
 
         // Fire instruction trap (if installed).
         let insn_info = InstructionInfo {
@@ -840,8 +843,8 @@ where
             // LUI places the 32-bit U-immediate value into the destination register rd, filling in the
             // lowest 12 bits with zeros."
             Inst::Lui { uimm, dest } => {
-                self.emit_imm(ctx, *uimm)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                self.emit_imm(ctx, *uimm, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
             }
 
             // Auipc: Add Upper Immediate to PC
@@ -853,16 +856,16 @@ where
             Inst::Auipc { uimm, dest } => {
                 if self.enable_rv64 {
                     // RV64: Use full 64-bit PC
-                    self.reactor.tail().instruction(ctx, &Instruction::I64Const(pc as i64))?;
-                    self.emit_imm(ctx, *uimm)?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(pc as i64))?;
+                    self.emit_imm(ctx, *uimm, tail_idx)?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else {
                     // RV32: Use 32-bit PC
-                    self.reactor.tail().instruction(ctx, &Instruction::I32Const(pc as i32))?;
-                    self.emit_imm(ctx, *uimm)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32Add)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(pc as i32))?;
+                    self.emit_imm(ctx, *uimm, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -892,11 +895,11 @@ where
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
                     } else {
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
                     }
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
                     // Create a snippet that sets expected_ra to the return address
                     let expected_ra_snippet = ExpectedRaSnippet {
@@ -909,7 +912,7 @@ where
                         target_func,
                         self.total_params,
                         escape_tag,
-                        Pool { handler: &self.pool_table, ty: self.pool_ty },
+                        self.pool,
                     )
                     .with_fixup(Self::expected_ra_local(), &expected_ra_snippet);
 
@@ -924,11 +927,11 @@ where
                     // Non-speculative path: original jump-based implementation
                     if dest.0 != 0 {
                         if self.enable_rv64 {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
                         } else {
-                            self.reactor.tail().instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
                         }
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                     // Jump trap: Jal rd!=x0,ra → Call; others → DirectJump
                     let jal_kind = if dest.0 == 1 {
@@ -944,7 +947,7 @@ where
                     {
                         return Ok(());
                     }
-                    self.jump_to_pc(ctx, target_pc, self.total_params)?;
+                    self.jump_to_pc(ctx, target_pc, self.total_params, tail_idx)?;
                     return Ok(());
                 }
             }
@@ -969,9 +972,9 @@ where
                     // Jump trap: jalr x0, ra, 0 → Return (indirect)
                     // Tee ra into load_addr_scratch_local so the trap can inspect it.
                     let scratch = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::Drop)?; // balance the stack
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(scratch))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Drop)?; // balance the stack
                     let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
                     if self
                         .traps
@@ -986,30 +989,30 @@ where
                     let escape_tag = self.escape_tag.unwrap();
 
                     // Load ra (current return address)
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
 
                     // Load expected_ra
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
 
                     // Compare them
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Eq)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Eq)?;
                     } else {
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Eq)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Eq)?;
                     }
 
                     // If equal (ABI-compliant), use regular return; else throw exception
-                    self.reactor.tail().instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
                     // ABI-compliant return - use WASM Return
-                    self.reactor.tail().instruction(ctx, &Instruction::Return)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Return)?;
 
-                    self.reactor.tail().instruction(ctx, &Instruction::Else)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Else)?;
 
                     // Non-ABI-compliant return - throw escape tag with all register state
                     self.reactor.ret(tail_idx, ctx, self.total_params, escape_tag)?;;
 
-                    self.reactor.tail().instruction(ctx, &Instruction::End)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::End)?;
                     return Ok(());
                 }
 
@@ -1025,11 +1028,11 @@ where
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
                     } else {
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
                     }
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
                     // Create a snippet that sets expected_ra to the return address
                     let expected_ra_snippet = ExpectedRaSnippet {
@@ -1147,7 +1150,7 @@ where
                             idx: &target_snippet,
                         },
                         call: Some(escape_tag),
-                        pool: Pool { handler: &self.pool_table, ty: self.pool_ty },
+                        pool: self.pool,
                         condition: None,
                     };
 
@@ -1160,27 +1163,27 @@ where
                     // Non-speculative path: original implementation
                     if dest.0 != 0 {
                         if self.enable_rv64 {
-                            self.reactor.tail().instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(return_addr as i64))?;
                         } else {
-                            self.reactor.tail().instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
+                            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(return_addr as i32))?;
                         }
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                     // JALR is indirect, compute target and update PC.
                     // Tee the target into load_addr_scratch_local for the jump trap.
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
-                    self.emit_imm(ctx, *offset)?;
-                    self.emit_add(ctx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
+                    self.emit_imm(ctx, *offset, tail_idx)?;
+                    self.emit_add(ctx, tail_idx)?;
                     if self.enable_rv64 {
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64And)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
                     } else {
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32And)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)?;
                     }
                     let scratch = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalTee(scratch))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(scratch))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::pc_local()))?;
                     // Jump trap: dest==1 → IndirectCall; dest==0 without base==ra → IndirectJump
                     let jalr_kind = if dest.0 == 1 {
                         JumpKind::IndirectCall
@@ -1302,176 +1305,176 @@ where
                     // No WebAssembly code generation needed - this is a true no-op
                 } else if src1.0 == 0 {
                     // li (load immediate) pseudoinstruction
-                    self.emit_imm(ctx, *imm)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slti { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32LtS)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32LtS)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sltiu { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32LtU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32LtU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Xori { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_xor(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_xor(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Ori { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_or(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_or(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Andi { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_and(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_and(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slli { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_shl(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_shl(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srli { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_shr_u(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_shr_u(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srai { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, *imm)?;
-                    self.emit_shr_s(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, *imm, tail_idx)?;
+                    self.emit_shr_s(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             // Register-Register Operations
             Inst::Add { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_add(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_add(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sub { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_sub(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_sub(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sll { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shl(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shl(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slt { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32LtS)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32LtS)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sltu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32LtU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32LtU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Xor { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_xor(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_xor(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srl { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shr_u(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shr_u(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sra { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shr_s(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shr_s(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Or { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_or(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_or(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::And { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_and(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_and(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1498,7 +1501,7 @@ where
                 } else {
                     // Default behavior: environment call - implementation specific
                     // Would need to be handled by runtime
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1511,7 +1514,7 @@ where
                     callback.call(&ebreak_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1522,10 +1525,10 @@ where
             // held in two integer registers."
             Inst::Mul { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_mul(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_mul(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1536,23 +1539,19 @@ where
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed multiplication
-                        self.emit_mulh_signed(
-                            ctx,
-                            Self::reg_to_local(*src1),
-                            Self::reg_to_local(*src2),
-                        )?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_signed(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply and shift
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Mul)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(32))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
@@ -1564,23 +1563,19 @@ where
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed-unsigned multiplication
-                        self.emit_mulh_signed_unsigned(
-                            ctx,
-                            Self::reg_to_local(*src1),
-                            Self::reg_to_local(*src2),
-                        )?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_signed_unsigned(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply with mixed sign extension
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Mul)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(32))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ShrS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
@@ -1592,60 +1587,56 @@ where
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit unsigned multiplication
-                        self.emit_mulh_unsigned(
-                            ctx,
-                            Self::reg_to_local(*src1),
-                            Self::reg_to_local(*src2),
-                        )?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_unsigned(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply and shift
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32U)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Mul)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Const(32))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ShrU)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(32))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
 
             Inst::Div { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32DivS)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32DivS)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Divu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32DivU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32DivU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Rem { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32RemS)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32RemS)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Remu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32RemU)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32RemU)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1664,57 +1655,57 @@ where
             Inst::FaddS {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Add)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Add)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsubS {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmulS {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Mul)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Mul)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FdivS {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Div)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Div)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsqrtS { dest, src, .. } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Sqrt)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Sqrt)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-Point Double-Precision (D Extension)
@@ -1729,138 +1720,138 @@ where
             Inst::FaddD {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Add)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Add)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsubD {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Sub)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Sub)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmulD {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FdivD {
                 dest, src1, src2, ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Div)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Div)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsqrtD { dest, src, .. } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Sqrt)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Sqrt)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point min/max operations
             Inst::FminS { dest, src1, src2 } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Min)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Min)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaxS { dest, src1, src2 } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Max)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Max)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FminD { dest, src1, src2 } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Min)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Min)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaxD { dest, src1, src2 } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Max)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Max)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point comparison operations
             Inst::FeqS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F32Eq)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Eq)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FltS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F32Lt)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Lt)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FleS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F32Le)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Le)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FeqD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64Eq)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Eq)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FltD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64Lt)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Lt)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FleD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64Le)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Le)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1871,69 +1862,69 @@ where
             Inst::FcvtWS { dest, src, .. } => {
                 // Convert single to signed 32-bit integer
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32TruncF32S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32TruncF32S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtWuS { dest, src, .. } => {
                 // Convert single to unsigned 32-bit integer
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32TruncF32U)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32TruncF32U)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtSW { dest, src, .. } => {
                 // Convert signed 32-bit integer to single
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32ConvertI32S)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ConvertI32S)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtSWu { dest, src, .. } => {
                 // Convert unsigned 32-bit integer to single
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32ConvertI32U)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ConvertI32U)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtWD { dest, src, .. } => {
                 // Convert double to signed 32-bit integer
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32TruncF64S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32TruncF64S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtWuD { dest, src, .. } => {
                 // Convert double to unsigned 32-bit integer
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32TruncF64U)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32TruncF64U)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtDW { dest, src, .. } => {
                 // Convert signed 32-bit integer to double
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64ConvertI32S)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ConvertI32S)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtDWu { dest, src, .. } => {
                 // Convert unsigned 32-bit integer to double
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64ConvertI32U)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ConvertI32U)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtSD { dest, src, .. } => {
@@ -1941,39 +1932,39 @@ where
                 // "FCVT.S.D converts double-precision float to single-precision float,
                 // rounding according to the dynamic rounding mode."
                 // Convert double to single with proper NaN-boxing
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32DemoteF64)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32DemoteF64)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtDS { dest, src, .. } => {
                 // RISC-V Specification Quote:
                 // "FCVT.D.S converts single-precision float to double-precision float."
                 // Unbox the NaN-boxed single value, then promote to double
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64PromoteF32)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64PromoteF32)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point move operations
             Inst::FmvXW { dest, src } => {
                 // Move bits from float register to integer register
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::I32ReinterpretF32)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ReinterpretF32)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FmvWX { dest, src } => {
                 // Move bits from integer register to float register
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32ReinterpretI32)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Sign-injection operations for single-precision
@@ -1983,29 +1974,29 @@ where
             Inst::FsgnjS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src2)
                 // We'll use a simple implementation using bit manipulation
-                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj, tail_idx)?;
             }
 
             Inst::FsgnjnS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with NOT(sign(src2))
-                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn, tail_idx)?;
             }
 
             Inst::FsgnjxS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src1) XOR sign(src2)
-                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_s(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx, tail_idx)?;
             }
 
             Inst::FsgnjD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnj, tail_idx)?;
             }
 
             Inst::FsgnjnD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjn, tail_idx)?;
             }
 
             Inst::FsgnjxD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_d(ctx, *dest, *src1, *src2, FsgnjOp::Sgnjx, tail_idx)?;
             }
 
             // Fused multiply-add operations
@@ -2018,16 +2009,16 @@ where
                 ..
             } => {
                 // dest = (src1 * src2) + src3
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Add)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Add)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmsubS {
@@ -2038,16 +2029,16 @@ where
                 ..
             } => {
                 // dest = (src1 * src2) - src3
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmsubS {
@@ -2058,16 +2049,16 @@ where
                 ..
             } => {
                 // dest = -(src1 * src2) + src3 = src3 - (src1 * src2)
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmaddS {
@@ -2078,17 +2069,17 @@ where
                 ..
             } => {
                 // dest = -(src1 * src2) - src3
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Neg)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Neg)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, tail_idx)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaddD {
@@ -2098,12 +2089,12 @@ where
                 src3,
                 ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Add)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Add)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmsubD {
@@ -2113,12 +2104,12 @@ where
                 src3,
                 ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Sub)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Sub)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmsubD {
@@ -2128,12 +2119,12 @@ where
                 src3,
                 ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Sub)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Sub)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmaddD {
@@ -2143,13 +2134,13 @@ where
                 src3,
                 ..
             } => {
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Mul)?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Neg)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.reactor.tail().instruction(ctx, &Instruction::F64Sub)?;
-                self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Mul)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Neg)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64Sub)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Atomic operations (A extension)
@@ -2173,9 +2164,9 @@ where
                 if dest.0 != 0 {
                     let addr_type = self.addr_val_type();
                     let load_addr = self.load_addr_scratch_local();
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                     // Tee address for alias check in emit_lr.
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalTee(load_addr))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         &mut self.reactor,
@@ -2188,9 +2179,9 @@ where
                     )?;;
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit loaded value to i64.
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2202,13 +2193,13 @@ where
             } => {
                 // SC.W: store-conditional word.  Always succeeds in single-threaded
                 // wasm — write 0 (success) into `dest`.
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
                     // Truncate i64 register to the 32-bit value to store.
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 }
                 emit_sc(
                     ctx,
@@ -2225,8 +2216,8 @@ where
                     } else {
                         Instruction::I32Const(0)
                     };
-                    self.reactor.tail().instruction(ctx, &zero)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &zero)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2242,8 +2233,8 @@ where
                 // A real implementation would need to call into a CSR handler
                 if dest.0 != 0 {
                     // Return zero as placeholder
-                    self.reactor.tail().instruction(ctx, &Instruction::I32Const(0))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
                 // Silently ignore the write for now
                 let _ = src;
@@ -2251,8 +2242,8 @@ where
 
             Inst::Csrrwi { dest, .. } | Inst::Csrrsi { dest, .. } | Inst::Csrrci { dest, .. } => {
                 if dest.0 != 0 {
-                    self.reactor.tail().instruction(ctx, &Instruction::I32Const(0))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2262,7 +2253,7 @@ where
                 if self.enable_rv64 {
                     self.translate_load(ctx, *base, *offset, *dest, LoadOp::U32, tail_idx)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2270,7 +2261,7 @@ where
                 if self.enable_rv64 {
                     self.translate_load(ctx, *base, *offset, *dest, LoadOp::I64, tail_idx)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2278,7 +2269,7 @@ where
                 if self.enable_rv64 {
                     self.translate_store(ctx, *base, *offset, *src, StoreOp::I64, tail_idx)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2286,139 +2277,139 @@ where
             Inst::AddiW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.emit_imm(ctx, *imm)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.emit_imm(ctx, *imm, tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
                         // Sign-extend lower 32 bits to 64 bits
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SlliW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Shl)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Shl)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SrliW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32ShrU)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrU)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SraiW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32ShrS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(imm.as_i32()))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::AddW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Add)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SubW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Sub)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SllW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32Shl)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Shl)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SrlW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32ShrU)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrU)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SraW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32ShrS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2426,79 +2417,79 @@ where
             Inst::MulW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64Mul)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::DivW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32DivS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32DivS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::DivuW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32DivU)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32DivU)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::RemW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32RemS)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32RemS)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::RemuW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I32RemU)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32RemU)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2507,13 +2498,13 @@ where
                 // Convert single-precision float to signed 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.unbox_f32(ctx)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64TruncF32S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32(ctx, tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64TruncF32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2521,37 +2512,37 @@ where
                 // Convert single-precision float to unsigned 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.unbox_f32(ctx)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64TruncF32U)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32(ctx, tail_idx)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64TruncF32U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtSL { dest, src, .. } => {
                 // Convert signed 64-bit integer to single-precision float
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F32ConvertI64S)?;
-                    self.nan_box_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ConvertI64S)?;
+                    self.nan_box_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtSLu { dest, src, .. } => {
                 // Convert unsigned 64-bit integer to single-precision float
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F32ConvertI64U)?;
-                    self.nan_box_f32(ctx)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ConvertI64U)?;
+                    self.nan_box_f32(ctx, tail_idx)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2559,12 +2550,12 @@ where
                 // Convert double-precision float to signed 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64TruncF64S)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64TruncF64S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2572,34 +2563,34 @@ where
                 // Convert double-precision float to unsigned 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64TruncF64U)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64TruncF64U)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtDL { dest, src, .. } => {
                 // Convert signed 64-bit integer to double-precision float
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64ConvertI64S)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ConvertI64S)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtDLu { dest, src, .. } => {
                 // Convert unsigned 64-bit integer to double-precision float
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64ConvertI64U)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ConvertI64U)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2607,23 +2598,23 @@ where
                 // Move bits from double-precision float register to 64-bit integer register
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ReinterpretF64)?;
-                        self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FmvDX { dest, src } => {
                 // Move bits from 64-bit integer register to double-precision float register
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    self.reactor.tail().instruction(ctx, &Instruction::F64ReinterpretI64)?;
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ReinterpretI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2658,13 +2649,13 @@ where
                 let scratch = self.amo_scratch_local();
 
                 // Push addr and src onto the wasm stack for emit_rmw to consume.
-                self.reactor.tail().instruction(ctx, &Instruction::LocalGet(addr_local))?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(addr_local))?;
                 if self.enable_rv64 {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(src_local))?;
                     // Truncate i64 register to i32 for the 32-bit AMO.
-                    self.reactor.tail().instruction(ctx, &Instruction::I32WrapI64)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
                 } else {
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalGet(src_local))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(src_local))?;
                 }
                 // emit_rmw consumes [addr, src] from the stack and leaves [old].
                 // When atomic_opts.use_atomic_insns is true, direct ops use wasm
@@ -2689,12 +2680,12 @@ where
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit old value to the 64-bit register.
-                        self.reactor.tail().instruction(ctx, &Instruction::I64ExtendI32S)?;
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32S)?;
                     }
-                    self.reactor.tail().instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else {
                     // Discard the returned old value.
-                    self.reactor.tail().instruction(ctx, &Instruction::Drop)?;
+                    Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Drop)?;
                 }
             }
 
@@ -2704,7 +2695,7 @@ where
                 // FCLASS returns a 10-bit mask indicating the class of the floating-point number
                 // (positive/negative infinity, normal, subnormal, zero, NaN, etc.)
                 // This requires complex bit pattern analysis not yet implemented
-                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
             }
 
             // Catch-all for any other unhandled instructions
@@ -2712,7 +2703,7 @@ where
                 // This should ideally never be reached if all instruction variants are handled.
                 // If it is reached, it indicates an instruction type that was added to rv-asm
                 // but not yet implemented in this recompiler.
-                self.reactor.tail().instruction(ctx, &Instruction::Unreachable)?;
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
                 return Ok(()); // Don't fallthrough for unimplemented instructions
             }
         }
@@ -2854,7 +2845,7 @@ where
             &BTreeMap::new(),  // fixups: none needed
             target,            // target: branch target
             None,              // call: not an escape call
-            Pool { handler: &self.pool_table, ty: self.pool_ty },  // pool: for indirect calls
+            self.pool,  // pool: for indirect calls
             Some(&condition),  // condition: branch condition
             tail_idx,
         )?;
