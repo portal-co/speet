@@ -78,7 +78,7 @@ pub struct LinearMemoryObjects {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn emit_load<C, E>(
-    sink: &mut dyn InstructionSink<C, E>,
+    sink: &mut (dyn InstructionSink<C, E> + '_),
     ctx: &mut C,
     byte_offset: u32,
     ty: FieldValType,
@@ -111,7 +111,7 @@ fn emit_load<C, E>(
 }
 
 fn emit_store<C, E>(
-    sink: &mut dyn InstructionSink<C, E>,
+    sink: &mut (dyn InstructionSink<C, E> + '_),
     ctx: &mut C,
     byte_offset: u32,
     ty: FieldValType,
@@ -151,7 +151,7 @@ fn emit_store<C, E>(
 /// `local.set(scratch)`.  Leaves a single `i32` (0 or 1) on the stack
 /// representing whether the object's stored hash matches `(hash, dim)`.
 fn emit_hash_compare<C, E>(
-    sink: &mut dyn InstructionSink<C, E>,
+    sink: &mut (dyn InstructionSink<C, E> + '_),
     ctx: &mut C,
     hash: &TypeHash,
     dim: u32,
@@ -202,7 +202,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_new_object(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         data_size: u32,
     ) -> Result<(), E> {
@@ -219,7 +219,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_new_array(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         elem_hash: &TypeHash,
         dim: u32,
         elem_bytes: u32,
@@ -240,7 +240,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_iget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         byte_offset: u32,
         ty: FieldValType,
     ) -> Result<(), E> {
@@ -250,7 +250,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_iput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         byte_offset: u32,
         ty: FieldValType,
     ) -> Result<(), E> {
@@ -260,7 +260,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_aget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         ty: FieldValType,
     ) -> Result<(), E> {
         // Stack before: [arr_ref: i32, index: i32]
@@ -301,7 +301,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_aput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         ty: FieldValType,
         scratch_i32: u32,
         scratch_i64: u32,
@@ -365,7 +365,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_array_length(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
     ) -> Result<(), E> {
         // Stack: [arr_ref] → [length: i32]
         sink.instruction(
@@ -381,7 +381,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_instanceof(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         dim: u32,
         scratch: u32,
@@ -404,7 +404,7 @@ impl<C, E> ObjectModel<C, E> for LinearMemoryObjects {
     fn emit_check_cast(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         dim: u32,
         scratch: u32,

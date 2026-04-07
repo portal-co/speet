@@ -124,7 +124,7 @@ pub trait ObjectModel<C, E> {
     fn emit_new_object(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         data_size: u32,
     ) -> Result<(), E>;
@@ -140,7 +140,7 @@ pub trait ObjectModel<C, E> {
     fn emit_new_array(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         elem_hash: &TypeHash,
         dim: u32,
         elem_bytes: u32,
@@ -163,7 +163,7 @@ pub trait ObjectModel<C, E> {
     fn emit_iget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         byte_offset: u32,
         ty: FieldValType,
     ) -> Result<(), E>;
@@ -179,7 +179,7 @@ pub trait ObjectModel<C, E> {
     fn emit_iput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         byte_offset: u32,
         ty: FieldValType,
     ) -> Result<(), E>;
@@ -193,7 +193,7 @@ pub trait ObjectModel<C, E> {
     fn emit_aget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         ty: FieldValType,
     ) -> Result<(), E>;
 
@@ -209,7 +209,7 @@ pub trait ObjectModel<C, E> {
     fn emit_aput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         ty: FieldValType,
         scratch_i32: u32,
         scratch_i64: u32,
@@ -219,7 +219,7 @@ pub trait ObjectModel<C, E> {
     ///
     /// Stack before: `[ref]`  
     /// Stack after:  `[length: i32]`
-    fn emit_array_length(&self, ctx: &mut C, sink: &mut dyn InstructionSink<C, E>)
+    fn emit_array_length(&self, ctx: &mut C, sink: &mut (dyn InstructionSink<C, E> + '_))
     -> Result<(), E>;
 
     // ── Type checks ───────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ pub trait ObjectModel<C, E> {
     fn emit_instanceof(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         dim: u32,
         scratch: u32,
@@ -258,7 +258,7 @@ pub trait ObjectModel<C, E> {
     fn emit_check_cast(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         hash: &TypeHash,
         dim: u32,
         scratch: u32,
@@ -284,7 +284,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_new_object(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _hash: &TypeHash,
         _data_size: u32,
     ) -> Result<(), E> {
@@ -294,7 +294,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_new_array(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _elem_hash: &TypeHash,
         _dim: u32,
         _elem_bytes: u32,
@@ -305,7 +305,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_iget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _byte_offset: u32,
         _ty: FieldValType,
     ) -> Result<(), E> {
@@ -315,7 +315,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_iput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _byte_offset: u32,
         _ty: FieldValType,
     ) -> Result<(), E> {
@@ -325,7 +325,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_aget(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _ty: FieldValType,
     ) -> Result<(), E> {
         sink.instruction(ctx, &Instruction::Unreachable)
@@ -334,7 +334,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_aput(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _ty: FieldValType,
         _scratch_i32: u32,
         _scratch_i64: u32,
@@ -345,7 +345,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_array_length(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
     ) -> Result<(), E> {
         sink.instruction(ctx, &Instruction::Unreachable)
     }
@@ -353,7 +353,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_instanceof(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _hash: &TypeHash,
         _dim: u32,
         _scratch: u32,
@@ -364,7 +364,7 @@ impl<C, E> ObjectModel<C, E> for NoObjectModel {
     fn emit_check_cast(
         &self,
         ctx: &mut C,
-        sink: &mut dyn InstructionSink<C, E>,
+        sink: &mut (dyn InstructionSink<C, E> + '_),
         _hash: &TypeHash,
         _dim: u32,
         _scratch: u32,
