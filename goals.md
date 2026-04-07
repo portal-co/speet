@@ -13,5 +13,6 @@
     - [ ] app-level security hardening
     - [ ] antimalware
     - [ ] agentic AI safety
+- [ ] trace support, including transfers to assembly traces
 
 Prefer dynamically creating subgoals to handling entire goals at a time; AI agents, add this to files and memory.
