@@ -29,7 +29,7 @@
 //! * **After**: physical address of the same type is on the stack.
 
 use crate::mapper::{CallbackContext, MapperCallback};
-use yecta::{LocalDeclarator, LocalLayout};
+use yecta::{LocalDeclarator, LocalLayout, layout::CellIdx};
 use wasm_encoder::{Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 
@@ -148,7 +148,7 @@ pub struct StandardPageTableMapper {
 }
 
 impl LocalDeclarator for StandardPageTableMapper {
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
@@ -279,7 +279,7 @@ pub struct StandardPageTableMapper32 {
 }
 
 impl LocalDeclarator for StandardPageTableMapper32 {
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
@@ -439,7 +439,7 @@ pub struct MultilevelPageTableMapper {
 }
 
 impl LocalDeclarator for MultilevelPageTableMapper {
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }
@@ -602,7 +602,7 @@ pub struct MultilevelPageTableMapper32 {
 }
 
 impl LocalDeclarator for MultilevelPageTableMapper32 {
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
     }

@@ -262,6 +262,8 @@ impl LocalLayout {
         self.slots.is_empty()
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CellIdx(pub u32);
 
 // ── LocalAllocator ────────────────────────────────────────────────────────────
 
@@ -340,11 +342,11 @@ impl LocalAllocator for LocalLayout {
 pub trait LocalDeclarator {
     /// Append parameter-level slots (persist across `return_call` chains).
     #[allow(unused_variables)]
-    fn declare_params(&mut self, params: &mut LocalLayout) {}
+    fn declare_params(&mut self, cell: CellIdx, params: &mut LocalLayout) {}
 
     /// Append per-function scratch slots (reset each new wasm function).
     #[allow(unused_variables)]
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {}
+    fn declare_locals(&mut self, cell: CellIdx, locals: &mut LocalLayout) {}
 }
 
 impl core::fmt::Debug for LocalLayout {

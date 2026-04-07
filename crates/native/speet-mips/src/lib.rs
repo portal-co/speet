@@ -52,7 +52,7 @@ use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx,
+    TableIdx, Target, TypeIdx, layout::CellIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -537,7 +537,7 @@ where
         self.layout.append(32, gpr_type); // $0-$31 (params 0-31)
         self.layout.append(2, gpr_type); // HI/LO (params 32-33)
         self.layout.append(1, ValType::I32); // PC (param 34)
-        self.traps.declare_params(&mut self.layout);
+        self.traps.declare_params(CellIdx(0),&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
         self.total_params
@@ -630,7 +630,7 @@ where
         self.addr_scratch_slot = self.layout.append(1, ValType::I32);
         self.pool_i32_slot = self.layout.append(Self::N_POOL_I32, ValType::I32);
         self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
-        self.traps.declare_locals(&mut self.layout);
+        self.traps.declare_locals(CellIdx(0), &mut self.layout);
         // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_i32_start = self.layout.base(self.pool_i32_slot);
         let pool_i64_start = self.layout.base(self.pool_i64_slot);

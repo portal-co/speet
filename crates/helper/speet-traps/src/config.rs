@@ -66,6 +66,7 @@
 //! The layout is owned by the arch recompiler and shared (read-only) with
 //! traps through [`TrapContext::layout`].
 
+use yecta::layout::CellIdx;
 use yecta::{EmitSink, LocalAllocator, LocalLayout};
 
 use crate::context::TrapContext;
@@ -154,12 +155,12 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
     /// groups, before placing the [`Mark`](yecta::Mark).  Each trap will call
     /// [`LocalLayout::append`] for its parameter groups and store the returned
     /// [`LocalSlot`](yecta::LocalSlot) handles in its own fields.
-    pub fn declare_params(&mut self, layout: &mut LocalLayout) {
+    pub fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         if let Some(t) = self.insn_trap.as_mut() {
-            t.declare_params(layout);
+            t.declare_params(cell, layout);
         }
         if let Some(t) = self.jump_trap.as_mut() {
-            t.declare_params(layout);
+            t.declare_params(cell, layout);
         }
     }
 
@@ -172,12 +173,12 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
     /// local groups (temps, pool slots, etc.) and before calling
     /// `reactor.next_with`.  Each trap calls [`LocalLayout::append`] for its
     /// local groups and stores the returned handles.
-    pub fn declare_locals(&mut self, layout: &mut LocalLayout) {
+    pub fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         if let Some(t) = self.insn_trap.as_mut() {
-            t.declare_locals(layout);
+            t.declare_locals(cell, layout);
         }
         if let Some(t) = self.jump_trap.as_mut() {
-            t.declare_locals(layout);
+            t.declare_locals(cell, layout);
         }
     }
 

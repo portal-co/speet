@@ -50,6 +50,7 @@
 // wasm *parameter* (not a local) for RopDetectTrap's depth counter.
 
 use wasm_encoder::{Instruction, ValType};
+use yecta::layout::CellIdx;
 use yecta::{FuncIdx, LocalDeclarator, LocalLayout, LocalSlot};
 
 use crate::context::TrapContext;
@@ -127,7 +128,7 @@ impl RopDetectTrap {
 }
 
 impl LocalDeclarator for RopDetectTrap {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
+    fn declare_params(&mut self, cell: CellIdx, params: &mut LocalLayout) {
         self.depth_param_slot = params.append(1, ValType::I32);
     }
 }

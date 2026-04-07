@@ -49,7 +49,7 @@ use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx,
+    TableIdx, Target, TypeIdx, layout::CellIdx,
 };
 
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -751,7 +751,7 @@ where
         if max_regs > 0 {
             self.layout.append(max_regs, ValType::I32);
         }
-        self.traps.declare_params(&mut self.layout);
+        self.traps.declare_params(CellIdx(0),&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
         self.total_params
@@ -820,7 +820,7 @@ where
         // Per-function scratch locals for intermediate values.
         self.scratch_slot = self.layout.append(1, ValType::I32);
         self.scratch_i64_slot = self.layout.append(1, ValType::I64);
-        self.traps.declare_locals(&mut self.layout);
+        self.traps.declare_locals(CellIdx(0), &mut self.layout);
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), depth)?;
         Ok(())

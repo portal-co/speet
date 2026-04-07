@@ -509,6 +509,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "speet-module-target"
+version = "0.1.0"
+dependencies = [
+ "wasm-encoder",
+ "wasmparser",
+]
+
+[[package]]
 name = "speet-object"
 version = "0.1.0"
 dependencies = [

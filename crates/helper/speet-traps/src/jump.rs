@@ -42,6 +42,7 @@
 
 use alloc::boxed::Box;
 use wasm_encoder::Instruction;
+use yecta::layout::CellIdx;
 use yecta::{LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
@@ -164,12 +165,12 @@ where
 
 /// `Box<dyn JumpTrap<…>>` delegates to the inner value.
 impl<Context, E> LocalDeclarator for Box<dyn JumpTrap<Context, E> + '_> {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
-        (**self).declare_params(params);
+    fn declare_params(&mut self, cell: CellIdx, params: &mut LocalLayout) {
+        (**self).declare_params(cell, params);
     }
 
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {
-        (**self).declare_locals(locals);
+    fn declare_locals(&mut self, cell: CellIdx, locals: &mut LocalLayout) {
+        (**self).declare_locals(cell, locals);
     }
 }
 

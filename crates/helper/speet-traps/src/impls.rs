@@ -8,6 +8,7 @@
 //! | [`security`](crate::security) | [`CfiReturnTrap`](crate::CfiReturnTrap) |
 //! | [`hardening`](crate::hardening) | [`RopDetectTrap`](crate::RopDetectTrap) |
 
+use yecta::layout::CellIdx;
 use yecta::{LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
@@ -77,14 +78,14 @@ impl<A, B> ChainedTrap<A, B> {
 }
 
 impl<A: LocalDeclarator, B: LocalDeclarator> LocalDeclarator for ChainedTrap<A, B> {
-    fn declare_params(&mut self, params: &mut LocalLayout) {
-        self.a.declare_params(params);
-        self.b.declare_params(params);
+    fn declare_params(&mut self, cell: CellIdx, params: &mut LocalLayout) {
+        self.a.declare_params(cell, params);
+        self.b.declare_params(cell, params);
     }
 
-    fn declare_locals(&mut self, locals: &mut LocalLayout) {
-        self.a.declare_locals(locals);
-        self.b.declare_locals(locals);
+    fn declare_locals(&mut self, cell: CellIdx, locals: &mut LocalLayout) {
+        self.a.declare_locals(cell, locals);
+        self.b.declare_locals(cell, locals);
     }
 }
 

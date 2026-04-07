@@ -18,7 +18,7 @@ members = [
     "crates/managed/speet-object",
     "crates/managed/speet-wasm",
     "crates/os/osctx",
-    "crates/os/speet-link",
+    "crates/os/speet-link", "crates/os/speet-module-target",
 ]
 resolver = "3"
 

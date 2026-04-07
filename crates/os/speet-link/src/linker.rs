@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
+use yecta::layout::CellIdx;
 use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 
 use crate::context::{BaseContext, ReactorContext};
@@ -178,10 +179,10 @@ where
     }
 
     fn declare_trap_params(&mut self) {
-        self.traps.declare_params(&mut self.layout);
+        self.traps.declare_params(CellIdx(0), &mut self.layout);
     }
     fn declare_trap_locals(&mut self) {
-        self.traps.declare_locals(&mut self.layout);
+        self.traps.declare_locals(CellIdx(0), &mut self.layout);
     }
     fn on_instruction(
         &mut self,

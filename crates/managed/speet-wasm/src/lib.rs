@@ -50,7 +50,7 @@ use speet_memory::{
     AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter, StoreKind,
 };
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
-use wasm_layout::{LocalLayout, LocalSlot, Mark};
+use wasm_layout::{CellIdx, LocalLayout, LocalSlot, Mark};
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 use wax_core::build::InstructionSink;
 
@@ -466,7 +466,7 @@ where
 
         for p in self.per_memory.iter_mut() {
             if let Some(m) = p.mapper.as_deref_mut() {
-                m.declare_locals(base_ctx.layout_mut());
+                m.declare_locals(CellIdx(0), base_ctx.layout_mut());
             }
         }
 
@@ -630,7 +630,7 @@ where
                 break loop_slot; // unused
             };
             if let Some(m) = p.mapper.as_deref_mut() {
-                m.declare_locals(base_ctx.layout_mut());
+                m.declare_locals(CellIdx(0), base_ctx.layout_mut());
 
                 if let None = loop_slot {
                     loop_slot = Some(base_ctx.layout_mut().append(3, ValType::I32));

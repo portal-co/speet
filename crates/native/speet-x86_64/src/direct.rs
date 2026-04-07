@@ -3,6 +3,7 @@ use crate::*;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use wax_core::build::InstructionSource;
+use yecta::layout::CellIdx;
 use yecta::{FuncIdx, JumpCallParams, Fed};
 
 use iced_x86::{Decoder, DecoderOptions, Instruction as IxInst, Mnemonic, OpKind, Register};
@@ -339,7 +340,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // Rewind to the params mark, discarding any locals from the previous function.
         self.layout.rewind(&self.locals_mark);
         // Let traps declare their per-function locals.
-        self.traps.declare_locals(&mut self.layout);
+        self.traps.declare_locals(CellIdx(0),&mut self.layout);
         // Yield only non-param locals to the function.
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), inst_len)?;

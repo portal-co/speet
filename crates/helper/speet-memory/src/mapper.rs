@@ -1,7 +1,7 @@
 //! [`CallbackContext`] and [`MapperCallback`] — the generic mapper-callback
 //! interface shared by all architecture recompilers.
 
-use yecta::{LocalDeclarator, LocalLayout};
+use yecta::{LocalDeclarator, LocalLayout, layout::CellIdx};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 
@@ -106,13 +106,13 @@ pub struct ChunkedMapper<M> {
 
 impl<M: LocalDeclarator> LocalDeclarator for ChunkedMapper<M> {
     #[inline]
-    fn declare_params(&mut self, layout: &mut LocalLayout) {
-        self.inner.declare_params(layout);
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        self.inner.declare_params(cell, layout);
     }
 
     #[inline]
-    fn declare_locals(&mut self, layout: &mut LocalLayout) {
-        self.inner.declare_locals(layout);
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        self.inner.declare_locals(cell, layout);
     }
 }
 

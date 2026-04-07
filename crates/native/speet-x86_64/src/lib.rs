@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx, layout::CellIdx};
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
@@ -238,7 +238,7 @@ where
         self.layout.append(1, wasm_encoder::ValType::I32); // PC (param 16)
         self.layout.append(5, wasm_encoder::ValType::I32); // ZF/SF/CF/OF/PF (params 17-21)
         self.layout.append(4, wasm_encoder::ValType::I64); // temps + expected_RA (params 22-25)
-        self.traps.declare_params(&mut self.layout);
+        self.traps.declare_params(CellIdx(0),&mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
         self.total_params

@@ -64,7 +64,7 @@ use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsi
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, TypeIdx,
+    TableIdx, TypeIdx, layout::CellIdx,
 };
 
 // Re-export the shared memory/mapper abstractions so existing users do not
@@ -775,7 +775,7 @@ where
         self.layout.append(32, ValType::F64); // f0-f31 (params 32-63)
         self.layout.append(1, ValType::I32); // PC (param 64)
         self.layout.append(1, int_type); // expected_RA (param 65)
-        self.traps.declare_params(&mut self.layout);
+        self.traps.declare_params(CellIdx(0), &mut self.layout);
         self.locals_mark = self.layout.mark();
         self.total_params = self.locals_mark.total_locals;
         self.total_params
@@ -910,7 +910,7 @@ where
         self.addr_scratch_slot = self.layout.append(1, addr_type);
         self.pool_addr_slot = self.layout.append(Self::N_POOL_ADDR, addr_type);
         self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
-        self.traps.declare_locals(&mut self.layout);
+        self.traps.declare_locals(CellIdx(0), &mut self.layout);
         // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_addr_start = self.layout.base(self.pool_addr_slot);
         let pool_i64_start = self.layout.base(self.pool_i64_slot);
