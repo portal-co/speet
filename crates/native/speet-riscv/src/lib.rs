@@ -49,6 +49,7 @@
 //! Key specification quotes are included as documentation comments throughout the code.
 
 #![no_std]
+pub mod cfg;
 pub mod direct;
 extern crate alloc;
 use alloc::collections::BTreeMap;

@@ -502,6 +502,7 @@ dependencies = [
  "speet-link",
  "speet-memory",
  "speet-ordering",
+ "speet-reach",
  "speet-traps",
  "wasm-encoder",
  "wax-core",
@@ -545,6 +546,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "speet-reach"
+version = "0.1.0"
+dependencies = [
+ "speet-traps",
+ "yecta",
+]
+
+[[package]]
 name = "speet-riscv"
 version = "0.1.0"
 dependencies = [
@@ -553,6 +562,7 @@ dependencies = [
  "speet-link",
  "speet-memory",
  "speet-ordering",
+ "speet-reach",
  "speet-traps",
  "speet-wasm-helpers",
  "wasm-encoder",
@@ -595,6 +605,7 @@ dependencies = [
  "object",
  "speet-link",
  "speet-memory",
+ "speet-reach",
  "speet-traps",
  "wasm-encoder",
  "wax-core",

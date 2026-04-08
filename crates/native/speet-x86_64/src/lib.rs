@@ -43,6 +43,7 @@ use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx, layout::CellIdx};
+pub mod cfg;
 pub mod direct;
 use speet_traps::{
     insn::{ArchTag, InsnClass},

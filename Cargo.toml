@@ -7,6 +7,7 @@ members = [
     "crates/helper/speet-ordering",
     "crates/helper/speet-traps",
     "crates/helper/speet-wasm-helpers",
+    "crates/helper/speet-reach",
     # Native architecture crates
     "crates/native/speet-x86_64",
     "crates/native/speet-riscv",
@@ -28,6 +29,7 @@ license-file = "COPYING.md"
 
 [workspace.dependencies]
 wasm-layout = { path = "crates/helper/wasm-layout" }
+speet-reach = { path = "crates/helper/speet-reach" }
 speet-link = { path = "crates/os/speet-link" }
 wasmparser = { version = "0.240.0", default-features = false }
 wasm-encoder = { version = "0.240.0", default-features = false, features = [

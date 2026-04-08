@@ -44,6 +44,7 @@
 #![no_std]
 
 extern crate alloc;
+pub mod cfg;
 use alloc::collections::BTreeMap;
 use wax_core::build::InstructionSink;
 
