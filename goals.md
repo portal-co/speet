@@ -6,7 +6,7 @@
   - [ ] parallelizable recompilation
   - [ ] omission of trivial (undefined) code
   - [ ] omission of dead code
-    - [ ] function slot omission for unreachable instructions (requires reachable count passed to FuncSchedule::push before emission)
+    - [x] function slot omission for unreachable instructions (requires reachable count passed to FuncSchedule::push before emission)
 - [ ] support OS emulation
   - [ ] implement Linux syscall ABI
   - [ ] implement container lifting

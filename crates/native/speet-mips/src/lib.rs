@@ -53,7 +53,7 @@ use speet_ordering::{emit_fence, emit_load, emit_lr, emit_sc, emit_store};
 use wasm_encoder::{Instruction as WasmInstruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx, layout::CellIdx,
+    SlotAssigner, TableIdx, Target, TypeIdx, layout::CellIdx,
 };
 // Re-export the shared memory/mapper and ordering abstractions.
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -264,6 +264,8 @@ pub struct MipsRecompiler<
     pool_i32_slot: LocalSlot,
     /// Slot for i64 pool locals.
     pool_i64_slot: LocalSlot,
+    /// Optional slot assigner: controls which guest PCs receive function slots.
+    slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> MipsRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -309,6 +311,7 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            slot_assigner: None,
         };
         recomp.setup_traps();
         recomp
@@ -354,6 +357,7 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            slot_assigner: None,
         };
         recomp.setup_traps();
         recomp
@@ -594,11 +598,37 @@ where
         self.enable_mips64
     }
 
-    /// Convert a PC value to a function index
-    /// PC values are offset by base_pc and then divided by 4 for 4-byte alignment
-    fn pc_to_func_idx(&self, pc: u32) -> FuncIdx {
-        let offset_pc = pc.wrapping_sub(self.base_pc);
-        FuncIdx(offset_pc / 4)
+    /// Install a slot assigner to control which guest PCs receive WASM function slots.
+    ///
+    /// When set, `pc_to_func_idx` uses `SlotAssigner::slot_for_pc` instead of the
+    /// legacy `(pc - base_pc) / 4` formula.  Must be called before `translate_bytes`.
+    pub fn set_slot_assigner(&mut self, gate: impl SlotAssigner + Send + Sync + 'static) {
+        self.slot_assigner = Some(alloc::boxed::Box::new(gate));
+    }
+
+    /// Return the total WASM function slots declared by the installed slot assigner.
+    ///
+    /// Panics if no slot assigner has been installed via `set_slot_assigner`.
+    pub fn count_fns(&self) -> u32 {
+        self.slot_assigner
+            .as_ref()
+            .expect("set_slot_assigner must be called before count_fns")
+            .total_slots()
+    }
+
+    /// Convert a PC value to its 0-based WASM function slot index.
+    ///
+    /// When a slot assigner is installed, uses `SlotAssigner::slot_for_pc` (correct
+    /// for all instruction widths).  Falls back to `(pc - base_pc) / 4` otherwise.
+    ///
+    /// Returns `None` when the PC is omitted; callers emit `unreachable` at the jump site.
+    fn pc_to_func_idx(&self, pc: u32) -> Option<FuncIdx> {
+        if let Some(gate) = &self.slot_assigner {
+            gate.slot_for_pc(pc as u64).map(FuncIdx)
+        } else {
+            let offset_pc = pc.wrapping_sub(self.base_pc);
+            Some(FuncIdx(offset_pc / 4))
+        }
     }
 
     /// Initialize a function for a single instruction at given PC
@@ -786,10 +816,14 @@ where
         }
     }
 
-    /// Perform a jump to a target PC using yecta's jump API
+    /// Perform a jump to a target PC using yecta's jump API.
+    ///
+    /// If `target_pc` is omitted from the slot assigner, emits `unreachable` instead.
     fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u32, params: u32, tail_idx: usize) -> Result<(), E> {
-        let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(tail_idx, ctx, target_func, params)
+        match self.pc_to_func_idx(target_pc) {
+            Some(target_func) => self.reactor.jmp(tail_idx, ctx, target_func, params),
+            None => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable),
+        }
     }
 
     /// Helper to translate branch instructions using yecta's ji API with custom condition
@@ -910,7 +944,10 @@ where
         }
 
         // Use ji with condition for branch taken path
-        let target_func = self.pc_to_func_idx(target_pc);
+        let Some(target_func) = self.pc_to_func_idx(target_pc) else {
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &WasmInstruction::Unreachable)?;
+            return Ok(());
+        };
         let target = Target::Static { func: target_func };
 
         self.reactor.ji(
@@ -942,6 +979,13 @@ where
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<(), E> {
         let pc = instruction.vram;
+
+        // Slot gate: skip omitted instructions entirely (true slot omission).
+        if let Some(gate) = &self.slot_assigner {
+            if gate.slot_for_pc(pc as u64).is_none() {
+                return Ok(());
+            }
+        }
 
         // Initialize function for this instruction
         self.init_function(ctx, pc, 8, f)?;

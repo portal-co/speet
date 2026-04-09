@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx, layout::CellIdx};
+use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::CellIdx};
 pub mod cfg;
 pub mod direct;
 use speet_traps::{
@@ -80,6 +80,8 @@ pub struct X86Recompiler<
     layout: LocalLayout,
     /// Mark placed after all param slots.
     locals_mark: Mark,
+    /// Optional slot assigner: controls which RIPs get function slots.
+    slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> X86Recompiler<'cb, 'ctx, Context, E, F, P>
@@ -123,9 +125,28 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
+            slot_assigner: None,
         };
         recomp.setup_traps();
         recomp
+    }
+
+    /// Install a slot assigner to control which guest RIPs receive WASM function slots.
+    ///
+    /// When set, `rip_to_func_idx` uses `SlotAssigner::slot_for_pc` instead of the
+    /// legacy `(rip - base_rip) / 1` formula, fixing the latent PC→slot-index bug.
+    pub fn set_slot_assigner(&mut self, gate: impl SlotAssigner + Send + Sync + 'static) {
+        self.slot_assigner = Some(alloc::boxed::Box::new(gate));
+    }
+
+    /// Return the total WASM function slots declared by the installed slot assigner.
+    ///
+    /// Panics if no slot assigner has been installed via `set_slot_assigner`.
+    pub fn count_fns(&self) -> u32 {
+        self.slot_assigner
+            .as_ref()
+            .expect("set_slot_assigner must be called before count_fns")
+            .total_slots()
     }
 
     /// Enable or disable speculative call optimization

@@ -323,8 +323,12 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     X86Recompiler<'cb, 'ctx, Context, E, F>
 {
-    fn rip_to_func_idx(&self, rip: u64) -> FuncIdx {
-        FuncIdx((rip.wrapping_sub(self.base_rip) / 1) as u32)
+    fn rip_to_func_idx(&self, rip: u64) -> Option<FuncIdx> {
+        if let Some(gate) = &self.slot_assigner {
+            gate.slot_for_pc(rip).map(FuncIdx)
+        } else {
+            Some(FuncIdx((rip.wrapping_sub(self.base_rip)) as u32))
+        }
     }
 
     fn init_function(
@@ -457,6 +461,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             let inst = dec.decode();
             let inst_len = inst.len() as u32;
             let inst_rip = dec.ip() - inst_len as u64; // decoder advanced
+
+            // Slot gate: skip omitted instructions entirely (true slot omission).
+            if let Some(gate) = &self.slot_assigner {
+                if gate.slot_for_pc(inst_rip).is_none() {
+                    continue;
+                }
+            }
 
             self.init_function(ctx, inst_rip, inst_len, 4, f)?;
             let tail_idx = self.reactor.fn_count() - 1;
@@ -1653,7 +1664,6 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             _ => return Ok(None),
         };
 
-        let target_func_idx = self.rip_to_func_idx(target);
         let _pool = self.pool;
         // Unconditional jump (direct)
         {
@@ -1667,6 +1677,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 return Ok(Some(()));
             }
         }
+        let Some(target_func_idx) = self.rip_to_func_idx(target) else {
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+            return Ok(Some(()));
+        };
         self.reactor.jmp(tail_idx, ctx, target_func_idx, self.total_params)?;
 
         Ok(Some(()))
@@ -1688,7 +1702,6 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             _ => return Ok(None),
         };
 
-        let target_func_idx = self.rip_to_func_idx(target);
         let pool = self.pool;
 
         // Conditional branch.
@@ -1703,6 +1716,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 return Ok(Some(()));
             }
         }
+        let Some(target_func_idx) = self.rip_to_func_idx(target) else {
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+            return Ok(Some(()));
+        };
         let condition = ConditionSnippet { condition_type };
         let params =
             JumpCallParams::conditional_jump(target_func_idx, self.total_params, &condition, pool);
@@ -1743,7 +1760,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         if use_speculative {
             // Speculative call lowering: emit a native WASM call with try-catch
             let escape_tag = self.escape_tag.unwrap();
-            let target_func = self.rip_to_func_idx(target);
+            let Some(target_func) = self.rip_to_func_idx(target) else {
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+                return Ok(Some(()));
+            };
 
             // Step 1: Push return address onto stack (normal x86_64 behavior)
             // Decrement RSP by 8 (64-bit address)
@@ -1788,7 +1808,6 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             self.emit_memory_store(ctx, 64, tail_idx)?; // Store 64-bit address
 
             // Step 2: Jump to target function (non-speculative)
-            let target_func_idx = self.rip_to_func_idx(target);
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let call_info = JumpInfo::direct(inst.ip(), target, JumpKind::Call);
@@ -1800,6 +1819,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     return Ok(Some(()));
                 }
             }
+            let Some(target_func_idx) = self.rip_to_func_idx(target) else {
+                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+                return Ok(Some(()));
+            };
             self.reactor.jmp(tail_idx, ctx, target_func_idx, self.total_params)?;
 
             Ok(Some(()))

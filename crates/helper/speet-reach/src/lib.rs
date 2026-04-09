@@ -51,9 +51,11 @@ extern crate alloc;
 mod compute;
 mod edges;
 mod filter;
+mod pc_slot_map;
 mod spec;
 
 pub use compute::{ReachableSet, compute_reachable};
 pub use edges::{CfgDecoder, CfgEdges};
 pub use filter::ReachabilityFilter;
+pub use pc_slot_map::PcSlotMap;
 pub use spec::ReachabilitySpec;

@@ -65,7 +65,7 @@ use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsi
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, TypeIdx, layout::CellIdx,
+    SlotAssigner, TableIdx, TypeIdx, layout::CellIdx,
 };
 
 // Re-export the shared memory/mapper abstractions so existing users do not
@@ -315,6 +315,9 @@ pub struct RiscVRecompiler<
     pool_addr_slot: LocalSlot,
     /// Slot for i64 pool locals.
     pool_i64_slot: LocalSlot,
+    /// Optional slot assigner: controls which PCs get function slots and maps
+    /// PCs to sequential slot indices.  When `None`, the legacy formula is used.
+    slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
 impl<'cb, 'ctx, Context, E, F, P> RiscVRecompiler<'cb, 'ctx, Context, E, F, P>
@@ -369,6 +372,7 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            slot_assigner: None,
         };
         recomp.setup_traps();
         recomp
@@ -423,6 +427,7 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            slot_assigner: None,
         };
         recomp.setup_traps();
         recomp
@@ -866,12 +871,40 @@ where
         self.enable_speculative_calls
     }
 
-    /// Convert a PC value to a function index
-    /// PC values are offset by base_pc and then divided by 2 for 2-byte alignment
-    /// For RV64, accepts 64-bit PC values
-    fn pc_to_func_idx(&self, pc: u64) -> FuncIdx {
-        let offset_pc = pc.wrapping_sub(self.base_pc);
-        FuncIdx((offset_pc / 2) as u32)
+    /// Install a slot assigner to control which guest PCs receive WASM function slots.
+    ///
+    /// When set, `pc_to_func_idx` uses the assigner's `slot_for_pc` instead of the
+    /// legacy `(pc - base_pc) / 2` formula, fixing the latent PC→slot-index bug for
+    /// 4-byte instructions.  Must be called before `translate_bytes` / `count_fns`.
+    pub fn set_slot_assigner(&mut self, gate: impl SlotAssigner + Send + Sync + 'static) {
+        self.slot_assigner = Some(alloc::boxed::Box::new(gate));
+    }
+
+    /// Return the total WASM function slots declared by the installed slot assigner.
+    ///
+    /// Panics if no slot assigner has been installed via `set_slot_assigner`.
+    pub fn count_fns(&self) -> u32 {
+        self.slot_assigner
+            .as_ref()
+            .expect("set_slot_assigner must be called before count_fns")
+            .total_slots()
+    }
+
+    /// Convert a PC value to its 0-based WASM function slot index.
+    ///
+    /// When a slot assigner is installed, uses `SlotAssigner::slot_for_pc` (correct
+    /// for all instruction widths).  Falls back to the legacy `(pc - base_pc) / 2`
+    /// formula otherwise (preserved for backward compat, but wrong for 4-byte insns).
+    ///
+    /// Returns `None` when the PC is omitted from the slot assigner (true slot
+    /// omission); callers should emit `unreachable` at the jump site.
+    fn pc_to_func_idx(&self, pc: u64) -> Option<FuncIdx> {
+        if let Some(gate) = &self.slot_assigner {
+            gate.slot_for_pc(pc).map(FuncIdx)
+        } else {
+            let offset_pc = pc.wrapping_sub(self.base_pc);
+            Some(FuncIdx((offset_pc / 2) as u32))
+        }
     }
 
     /// Initialize a function for a single instruction at the given PC
@@ -1096,10 +1129,16 @@ where
         }
     }
 
-    /// Perform a jump to a target PC using yecta's jump API
+    /// Perform a jump to a target PC using yecta's jump API.
+    ///
+    /// If `target_pc` is omitted from the slot assigner (true slot omission),
+    /// emits `unreachable` instead.  In a correctly analyzed binary this path
+    /// is never taken at runtime.
     fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u64, params: u32, tail_idx: usize) -> Result<(), E> {
-        let target_func = self.pc_to_func_idx(target_pc);
-        self.reactor.jmp(tail_idx, ctx, target_func, params)
+        match self.pc_to_func_idx(target_pc) {
+            Some(target_func) => self.reactor.jmp(tail_idx, ctx, target_func, params),
+            None => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
+        }
     }
 
     /// Classify a decoded RISC-V instruction into [`InsnClass`] flags.

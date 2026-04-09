@@ -776,6 +776,18 @@ where
 
             let pc = start_pc + offset as u32;
 
+            // Slot gate: skip omitted instructions entirely (true slot omission).
+            let inst_byte_len = match is_compressed {
+                IsCompressed::Yes => 2,
+                IsCompressed::No => 4,
+            };
+            if let Some(gate) = &self.slot_assigner {
+                if gate.slot_for_pc(pc as u64).is_none() {
+                    offset += inst_byte_len;
+                    continue;
+                }
+            }
+
             // Translate the instruction
             if let Err(_) = self.translate_instruction(ctx, &inst, pc, is_compressed, f) {
                 break;
@@ -891,7 +903,11 @@ where
                     // Speculative call lowering: emit a native WASM call
                     // See SPECULATIVE_CALLS.md and set_speculative_calls() docs for the full pattern
                     let escape_tag = self.escape_tag.unwrap();
-                    let target_func = self.pc_to_func_idx(target_pc);
+                    let Some(target_func) = self.pc_to_func_idx(target_pc) else {
+                        // Target is omitted — unreachable in a correctly analyzed binary.
+                        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+                        return Ok(());
+                    };
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
@@ -2836,7 +2852,11 @@ where
 
         // Use ji with condition for branch taken path
         // When condition is true, jump to target; yecta handles else/end automatically
-        let target_func = self.pc_to_func_idx(target_pc);
+        let Some(target_func) = self.pc_to_func_idx(target_pc) else {
+            // Target is omitted — unreachable in a correctly analyzed binary.
+            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+            return Ok(());
+        };
         let target = yecta::Target::Static { func: target_func };
 
         self.reactor.ji(

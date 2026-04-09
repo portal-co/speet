@@ -76,6 +76,9 @@
 pub mod layout;
 pub use layout::{LocalAllocator, LocalDeclarator, LocalLayout, LocalSlot, Mark};
 
+pub mod slots;
+pub use slots::{FunctionCount, PassthroughSlots, SlotAssigner};
+
 use core::{
     convert::Infallible,
     marker::PhantomData,
@@ -118,10 +121,11 @@ pub trait EmitSink<Context, E> {
     fn emit_jmp(&mut self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E>;
 }
 
-impl<Context, E, F, P> EmitSink<Context, E> for Reactor<Context, E, F, P>
+impl<Context, E, F, P, Gate> EmitSink<Context, E> for Reactor<Context, E, F, P, Gate>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
+    Gate: SlotAssigner,
 {
     #[inline]
     fn emit(&mut self, ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
@@ -650,10 +654,11 @@ struct FuncCfg {
 
 /// A reactor manages the generation of WebAssembly functions with control flow.
 /// It handles function generation, control flow edges (predecessors), and nested if statements.
-pub struct Reactor<Context, E = Infallible, F = Function, P = LocalPool>
+pub struct Reactor<Context, E = Infallible, F = Function, P = LocalPool, Gate = PassthroughSlots>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
+    Gate: SlotAssigner,
 {
     lock: spin::Mutex<LockCfg>,
     fns: core::cell::UnsafeCell<Vec<Entry<F>>>,
@@ -670,11 +675,14 @@ where
     /// operands around alias-check `if` guards in lazy emission.
     pub local_pool: spin::Mutex<P>,
     peephole: spin::Mutex<Option<Instruction<'static>>>,
+    /// Controls which guest PCs receive function slots and maps PCs to indices.
+    slot_assigner: Gate,
 }
-impl<Context, E, F, P> Default for Reactor<Context, E, F, P>
+impl<Context, E, F, P, Gate> Default for Reactor<Context, E, F, P, Gate>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend + Default,
+    Gate: SlotAssigner + Default,
 {
     fn default() -> Self {
         Self {
@@ -687,11 +695,14 @@ where
             local_pool: spin::Mutex::new(P::default()),
             peephole: spin::Mutex::new(None),
             lock: Default::default(),
+            slot_assigner: Gate::default(),
         }
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
+    Reactor<Context, E, F, P, Gate>
+{
     /// Create a new reactor with a base function offset.
     ///
     /// The offset is added to all emitted function indices. This is useful when
@@ -707,6 +718,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     pub fn with_base_func_offset(base_func_offset: u32) -> Self
     where
         P: Default,
+        Gate: Default,
     {
         Self {
             fns: Default::default(),
@@ -718,7 +730,40 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
             local_pool: spin::Mutex::new(P::default()),
             peephole: spin::Mutex::new(None),
             lock: Default::default(),
+            slot_assigner: Gate::default(),
         }
+    }
+
+    /// Create a new reactor with a custom slot assigner.
+    ///
+    /// The slot assigner controls which guest PCs receive WASM function slots
+    /// and maps each included PC to its sequential slot index.
+    pub fn with_slot_assigner(gate: Gate) -> Self
+    where
+        P: Default,
+    {
+        Self {
+            fns: Default::default(),
+            lens: Default::default(),
+            phantom: Default::default(),
+            base_func_offset: 0,
+            max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
+            max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
+            local_pool: spin::Mutex::new(P::default()),
+            peephole: spin::Mutex::new(None),
+            lock: Default::default(),
+            slot_assigner: gate,
+        }
+    }
+
+    /// Access the installed slot assigner.
+    pub fn slot_assigner(&self) -> &Gate {
+        &self.slot_assigner
+    }
+
+    /// Replace the slot assigner.
+    pub fn set_slot_assigner(&mut self, gate: Gate) {
+        self.slot_assigner = gate;
     }
 
     /// Get the current base function offset.
@@ -802,20 +847,20 @@ impl<Context, E> Reactor<Context, E> {
         self.next_with(ctx, Function::new(locals), len)
     }
 }
-pub struct Fed<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
-    pub reactor: &'a Reactor<Context, E, F, P>,
+pub struct Fed<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner = PassthroughSlots> {
+    pub reactor: &'a Reactor<Context, E, F, P, Gate>,
     pub tail_idx: usize,
 }
-impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> InstructionSink<Context, E>
-    for Fed<'_, Context, E, F, P>
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
+    InstructionSink<Context, E> for Fed<'_, Context, E, F, P, Gate>
 {
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.reactor.feed_to(self.tail_idx, ctx, instruction)
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> InstructionSink<Context, E>
-    for Reactor<Context, E, F, P>
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
+    InstructionSink<Context, E> for Reactor<Context, E, F, P, Gate>
 {
     /// Emit `instruction` into the current tail function.
     ///
@@ -832,7 +877,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Instructio
         self.feed_to(tail_idx, ctx, instruction)
     }
 }
-impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Context, E, F, P> {
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
+    Reactor<Context, E, F, P, Gate>
+{
     fn lock_global(&self) -> impl DerefMut<Target = Vec<Entry<F>>> + '_ {
         loop {
             let mut guard = self.lock.lock();
@@ -843,26 +890,26 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                 continue;
             }
             guard.main = true;
-            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
-                this: &'a Reactor<Context, E, F, P>,
+            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> {
+                this: &'a Reactor<Context, E, F, P, Gate>,
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Deref
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> Deref
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 type Target = Vec<Entry<F>>;
                 fn deref(&self) -> &Self::Target {
                     unsafe { &*self.this.fns.get() }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> DerefMut
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> DerefMut
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     unsafe { &mut *self.this.fns.get() }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> Drop
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 fn drop(&mut self) {
                     let mut guard = self.this.lock.lock();
@@ -902,13 +949,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     }
                 }
             }
-            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> {
-                this: &'a Reactor<Context, E, F, P>,
+            struct Lock<'a, Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> {
+                this: &'a Reactor<Context, E, F, P, Gate>,
                 idx: usize,
                 ro: bool,
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Deref
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> Deref
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 type Target = Entry<F>;
                 fn deref(&self) -> &Self::Target {
@@ -917,8 +964,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> DerefMut
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> DerefMut
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     loop {
@@ -932,8 +979,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
                     }
                 }
             }
-            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Drop
-                for Lock<'_, Context, E, F, P>
+            impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner> Drop
+                for Lock<'_, Context, E, F, P, Gate>
             {
                 fn drop(&mut self) {
                     let mut guard = self.this.lock.lock();
@@ -2830,7 +2877,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend> Reactor<Co
     ///
     /// # Panics
     /// Panics if the reactor contains no functions yet.
-    pub fn tail(&self) -> Fed<'_, Context, E, F, P> {
+    pub fn tail(&self) -> Fed<'_, Context, E, F, P, Gate> {
         let tail_idx = self
             .fn_count()
             .checked_sub(1)
