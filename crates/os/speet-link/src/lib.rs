@@ -93,7 +93,7 @@ pub mod unit;
 mod tests;
 
 // Flat re-exports for the most commonly used items.
-pub use builder::{MegabinaryBuilder, MegabinaryOutput};
+pub use builder::{ElementsOwned, MegabinaryBuilder, MegabinaryOutput};
 pub use context::{BaseContext, ReactorContext};
 pub use layout::{FuncLayout, FuncSlot};
 pub use linker::{Linker, LinkerPlugin};
