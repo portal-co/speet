@@ -10,9 +10,7 @@ mod unit_tests {
     use wasm_encoder::ValType;
 
     use crate::{
-        builder::MegabinaryBuilder,
-        layout::{FuncLayout, FuncSlot},
-        linker::LinkerPlugin,
+        layout::FuncLayout,
         unit::{BinaryUnit, FuncType},
     };
 
@@ -49,59 +47,6 @@ mod unit_tests {
         map.insert(ft2.clone(), 1); // overwrites
         assert_eq!(map.len(), 1);
         assert_eq!(map[&ft1], 1);
-    }
-
-    // ── MegabinaryBuilder type deduplication ──────────────────────────────────
-
-    #[test]
-    fn megabinary_type_dedup() {
-        let type_a = FuncType::from_val_types(&[ValType::I32], &[]);
-        let type_b = FuncType::from_val_types(&[ValType::I64], &[]);
-
-        let mut builder: MegabinaryBuilder<u32> = MegabinaryBuilder::new();
-
-        // Unit 1: two functions of type_a and one of type_b.
-        builder.on_unit(BinaryUnit {
-            fns: vec![1u32, 2u32, 3u32],
-            base_func_offset: 0,
-            entry_points: vec![("foo".to_string(), 0)],
-            func_types: vec![type_a.clone(), type_a.clone(), type_b.clone()],
-            data_segments: vec![],
-            data_init_fn: None,
-        });
-
-        // Unit 2: one function of type_a (duplicate type) and one new type_b.
-        builder.on_unit(BinaryUnit {
-            fns: vec![4u32, 5u32],
-            base_func_offset: 3,
-            entry_points: vec![("bar".to_string(), 3)],
-            func_types: vec![type_a.clone(), type_b.clone()],
-            data_segments: vec![],
-            data_init_fn: None,
-        });
-
-        let out = builder.finish();
-
-        // Only 2 unique types.
-        assert_eq!(out.types.len(), 2);
-
-        // 5 functions total.
-        assert_eq!(out.fns.len(), 5);
-        assert_eq!(out.func_type_indices.len(), 5);
-
-        // Functions 0,1,3 use type_a (index 0); functions 2,4 use type_b (index 1).
-        let idx_a = out.types.iter().position(|t| *t == type_a).unwrap() as u32;
-        let idx_b = out.types.iter().position(|t| *t == type_b).unwrap() as u32;
-        assert_eq!(out.func_type_indices[0], idx_a);
-        assert_eq!(out.func_type_indices[1], idx_a);
-        assert_eq!(out.func_type_indices[2], idx_b);
-        assert_eq!(out.func_type_indices[3], idx_a);
-        assert_eq!(out.func_type_indices[4], idx_b);
-
-        // 2 exports.
-        assert_eq!(out.exports.len(), 2);
-        assert_eq!(out.exports[0].0, "foo");
-        assert_eq!(out.exports[1].0, "bar");
     }
 
     // ── BinaryUnit ────────────────────────────────────────────────────────────
@@ -347,8 +292,6 @@ mod unit_tests {
     /// Build a minimal `BinaryUnit<Function>` with `n` empty WASM functions.
     fn dummy_unit_fn(n: usize, base: u32) -> BinaryUnit<Function> {
         let ft = FuncType::from_val_types(&[], &[]);
-        let mut f = Function::new(vec![]);
-        f.instruction(&wasm_encoder::Instruction::End);
         BinaryUnit {
             fns: (0..n).map(|_| {
                 let mut fn_ = Function::new(vec![]);
@@ -376,22 +319,8 @@ mod unit_tests {
         assert_eq!(schedule.layout().total(), 8);
     }
 
-    #[test]
-    fn func_schedule_execute_collects_units() {
-        use yecta::LocalPool;
-        let mut linker = Linker::<(), SchedErr, Function, LocalPool, MegabinaryBuilder<Function>>::with_plugin(
-            MegabinaryBuilder::new(),
-        );
-
-        let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
-        schedule.push(2, |_, _| dummy_unit_fn(2, 0));
-        schedule.push(3, |_, _| dummy_unit_fn(3, 2));
-
-        schedule.execute(&mut linker, &mut ());
-
-        let out = linker.plugin.finish();
-        assert_eq!(out.fns.len(), 5);
-    }
+    // func_schedule_execute_collects_units is in speet-module-builder tests
+    // (MegabinaryBuilder now lives there).
 
     #[test]
     fn func_schedule_correct_count_succeeds() {

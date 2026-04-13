@@ -24,7 +24,7 @@
 //!
 //! LinkerPlugin::on_unit(BinaryUnit<F>)
 //!         ▼
-//!  MegabinaryBuilder<F>
+//!  speet_module_builder::MegabinaryBuilder<F>
 //!  ├── types:             Vec<FuncType>  → TypeSection
 //!  ├── func_type_indices: Vec<u32>       → FunctionSection
 //!  ├── fns:               Vec<F>         → CodeSection
@@ -41,15 +41,17 @@
 //! | [`recompiler::Recompile`] | Trait an arch recompiler implements |
 //! | [`linker::Linker`] | Owns reactor + traps; implements `ReactorContext` |
 //! | [`linker::LinkerPlugin`] | Callback per committed `BinaryUnit` |
-//! | [`builder::MegabinaryBuilder`] | Accumulates units; deduplicates types |
 //! | [`shim::ShimSpec`] / [`shim::emit_shim`] | ABI shim emitter |
+//!
+//! Module-level accumulation ([`MegabinaryBuilder`], [`MegabinaryOutput`],
+//! [`ElementsOwned`]) lives in `speet-module-builder`.
 //!
 //! ## End-to-end example (two-pass)
 //!
 //! ```ignore
 //! use speet_link::linker::Linker;
-//! use speet_link::builder::MegabinaryBuilder;
 //! use speet_link::schedule::FuncSchedule;
+//! use speet_module_builder::{MegabinaryBuilder, assemble};
 //!
 //! let mut linker = Linker::with_plugin(MegabinaryBuilder::new());
 //!
@@ -68,19 +70,14 @@
 //! // --- Emit phase ---
 //! schedule.execute(&mut linker, &mut ctx);
 //!
-//! // Retrieve and assemble the final module.
-//! let out = linker.plugin.finish();
-//! // out.types             → TypeSection
-//! // out.func_type_indices → FunctionSection
-//! // out.fns               → CodeSection
-//! // out.exports           → ExportSection
+//! // Assemble the final module.
+//! let module = assemble(linker.plugin.finish());
 //! ```
 
 #![no_std]
 
 extern crate alloc;
 
-pub mod builder;
 pub mod context;
 pub mod layout;
 pub mod linker;
@@ -93,7 +90,6 @@ pub mod unit;
 mod tests;
 
 // Flat re-exports for the most commonly used items.
-pub use builder::{ElementsOwned, MegabinaryBuilder, MegabinaryOutput};
 pub use context::{BaseContext, ReactorContext};
 pub use layout::{FuncLayout, FuncSlot};
 pub use linker::{Linker, LinkerPlugin};
