@@ -19,7 +19,10 @@ members = [
     "crates/managed/speet-object",
     "crates/managed/speet-wasm",
     "crates/os/osctx",
-    "crates/os/speet-link", "crates/os/speet-module-target",
+    "crates/os/speet-link-core",
+    "crates/os/speet-linker",
+    "crates/os/speet-schedule",
+    "crates/os/speet-module-target",
     "crates/os/speet-module-builder",
 ]
 resolver = "3"
@@ -31,7 +34,9 @@ license-file = "COPYING.md"
 [workspace.dependencies]
 wasm-layout = { path = "crates/helper/wasm-layout" }
 speet-reach = { path = "crates/helper/speet-reach" }
-speet-link          = { path = "crates/os/speet-link" }
+speet-link-core     = { path = "crates/os/speet-link-core" }
+speet-linker        = { path = "crates/os/speet-linker" }
+speet-schedule      = { path = "crates/os/speet-schedule" }
 speet-module-target = { path = "crates/os/speet-module-target" }
 wasmparser = { version = "0.240.0", default-features = false }
 wasm-encoder = { version = "0.240.0", default-features = false, features = [

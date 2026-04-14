@@ -55,11 +55,19 @@ pub trait BaseContext<Context, E> {
     /// Absolute WASM function index of the first function compiled so far.
     fn base_func_offset(&self) -> u32;
 
-    /// Advance `base_func_offset` by `n` without going through the reactor.
+    /// Set `base_func_offset` to an absolute value.
+    ///
+    /// Used by [`FuncSchedule`] to position each binary slot at its
+    /// pre-computed base before invoking the emit closure.
+    fn set_base_func_offset(&mut self, n: u32);
+
+    /// Advance `base_func_offset` by `n`.
     ///
     /// Non-yecta frontends that accumulate `F` values directly call this at
     /// the end of `drain_unit` to keep the linker's offset in sync.
-    fn advance_base_func_offset(&mut self, n: u32);
+    fn advance_base_func_offset(&mut self, n: u32) {
+        self.set_base_func_offset(self.base_func_offset() + n);
+    }
 
     // ── Trap support ──────────────────────────────────────────────────────
 
@@ -197,9 +205,8 @@ where
     fn base_func_offset(&self) -> u32 {
         self.reactor.base_func_offset()
     }
-    fn advance_base_func_offset(&mut self, n: u32) {
-        self.reactor
-            .set_base_func_offset(self.reactor.base_func_offset() + n);
+    fn set_base_func_offset(&mut self, n: u32) {
+        self.reactor.set_base_func_offset(n);
     }
 
     // No traps — no-op.

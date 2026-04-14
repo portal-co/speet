@@ -14,7 +14,7 @@
 //! ```ignore
 //! use speet_wasm::{WasmFrontend, GuestMemoryConfig, IndexOffsets};
 //! use speet_memory::{AddressWidth, standard_page_table_mapper, PageTableBase};
-//! use speet_link::Linker;
+//! use speet_linker::Linker;
 //! use wasm_encoder::Function;
 //!
 //! let mapper: Box<dyn Fn() -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
@@ -43,7 +43,7 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
-use speet_link::{
+use speet_link_core::{
     BaseContext, BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType,
 };
 use speet_memory::{
@@ -270,7 +270,7 @@ where
     /// every function.
     ///
     /// `base_ctx` provides layout management and trap coordination.  Pass a
-    /// [`Linker`](speet_link::Linker) (which implements [`BaseContext`]) to
+    /// [`Linker`](speet_linker::Linker) (which implements [`BaseContext`]) to
     /// wire up installed traps.
     ///
     /// After this call:
@@ -1529,7 +1529,7 @@ fn func_type_from_wasmparser(ft: &wasmparser::FuncType) -> FuncType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speet_link::Linker;
+    use speet_linker::Linker;
     use wasmparser::BinaryReaderError;
 
     type TestError = BinaryReaderError;
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn drain_unit_produces_data_init_fn() {
-        use speet_link::Linker;
+        use speet_linker::Linker;
 
         let bytes = build_test_wasm();
 

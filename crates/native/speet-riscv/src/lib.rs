@@ -3194,7 +3194,7 @@ mod tests {
 // ── Recompile impl ────────────────────────────────────────────────────────────
 
 use alloc::string::String as AString;
-use speet_link::{
+use speet_link_core::{
     context::ReactorContext,
     recompiler::Recompile,
     unit::{BinaryUnit, FuncType},

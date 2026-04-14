@@ -1,0 +1,14 @@
+[package]
+name = "speet-linker"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-link-core = { path = "../speet-link-core" }
+speet-schedule  = { path = "../speet-schedule" }
+yecta           = { path = "../../helper/yecta" }
+speet-traps     = { path = "../../helper/speet-traps" }
+wasm-encoder    = { workspace = true }
+wax-core        = { workspace = true }

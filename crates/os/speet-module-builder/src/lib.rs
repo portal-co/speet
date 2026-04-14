@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 
 use core::convert::Infallible;
 
-use speet_link::linker::LinkerPlugin;
-use speet_link::unit::{BinaryUnit, FuncType};
+use speet_link_core::linker::LinkerPlugin;
+use speet_link_core::unit::{BinaryUnit, FuncType};
 use speet_module_target::ModuleTarget;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportKind, ExportSection,
@@ -670,7 +670,7 @@ impl<Ctx> ModuleTarget<Ctx, Infallible> for ModuleBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speet_link::unit::{BinaryUnit, DataSegment, FuncType};
+    use speet_link_core::unit::{BinaryUnit, DataSegment, FuncType};
     use wasm_encoder::{Function, Instruction, ValType};
 
     fn validate(bytes: &[u8]) {
@@ -736,7 +736,8 @@ mod tests {
 
     #[test]
     fn func_schedule_execute_collects_units() {
-        use speet_link::{FuncSchedule, Linker};
+        use speet_linker::Linker;
+        use speet_schedule::FuncSchedule;
         use yecta::LocalPool;
 
         type SchedErr = Infallible;
@@ -749,7 +750,7 @@ mod tests {
         let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
         schedule.push(2, |_, _| dummy_unit(2, 0));
         schedule.push(3, |_, _| dummy_unit(3, 2));
-        schedule.execute(&mut linker, &mut ());
+        linker.execute_schedule(schedule, &mut ());
 
         let out = linker.plugin.finish();
         assert_eq!(out.fns.len(), 5);

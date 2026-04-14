@@ -1,0 +1,13 @@
+[package]
+name = "speet-schedule"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-link-core = { path = "../speet-link-core" }
+wax-core        = { workspace = true }
+
+[dev-dependencies]
+wasm-encoder = { workspace = true }

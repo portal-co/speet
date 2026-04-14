@@ -7,9 +7,11 @@ license-file.workspace = true
 
 [dependencies]
 speet-module-target = { path = "../speet-module-target" }
-speet-link          = { path = "../speet-link" }
+speet-link-core     = { path = "../speet-link-core" }
 wasm-encoder        = { workspace = true }
 
 [dev-dependencies]
-wasmparser = { version = "0.240.0", features = ["validate"] }
-yecta      = { path = "../../helper/yecta" }
+wasmparser   = { version = "0.240.0", features = ["validate"] }
+yecta        = { path = "../../helper/yecta" }
+speet-linker  = { path = "../speet-linker" }
+speet-schedule = { path = "../speet-schedule" }

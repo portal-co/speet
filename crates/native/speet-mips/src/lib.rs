@@ -2046,7 +2046,7 @@ where
 // ── Recompile impl ────────────────────────────────────────────────────────────
 
 use alloc::{string::String, vec::Vec};
-use speet_link::{
+use speet_link_core::{
     context::ReactorContext,
     recompiler::Recompile,
     unit::{BinaryUnit, FuncType},
