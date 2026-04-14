@@ -24,6 +24,7 @@ use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::layout::CellIdx;
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
 
@@ -99,6 +100,22 @@ pub trait BaseContext<Context, E> {
     ///
     /// Returns [`TrapAction::Continue`] when no trap is installed.
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E>;
+
+    /// Allocate (or retrieve) a [`CellIdx`] for the current function's
+    /// (params, locals) signature.
+    ///
+    /// Call this after both [`declare_trap_params`](Self::declare_trap_params)
+    /// and [`declare_trap_locals`](Self::declare_trap_locals) have finished so
+    /// that the layout is fully populated.  The returned cell uniquely
+    /// identifies the combination of function-type params and non-param locals
+    /// that the current function uses.
+    ///
+    /// Implementations that own a [`CellRegistry`] should override this to
+    /// return a semantically unique cell.  The default returns `CellIdx(0)`,
+    /// which is the legacy placeholder behaviour.
+    fn alloc_cell(&mut self) -> CellIdx {
+        CellIdx(0)
+    }
 }
 
 // ── ReactorContext ────────────────────────────────────────────────────────────

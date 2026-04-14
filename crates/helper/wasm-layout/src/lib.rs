@@ -256,6 +256,24 @@ impl LocalLayout {
             .map(|&(count, ty, _)| (count, ty))
     }
 
+    /// Iterate over `(count, ValType)` pairs for slots *before* `mark`.
+    ///
+    /// The yielded pairs span the parameter portion of the layout — i.e. the
+    /// slots appended before the params [`Mark`] was placed.  Suitable as the
+    /// `params` argument to [`CellRegistry::register`]:
+    ///
+    /// ```ignore
+    /// let cell = registry.register(
+    ///     layout.iter_before(&locals_mark),  // param groups
+    ///     layout.iter_since(&locals_mark),   // local groups
+    /// );
+    /// ```
+    pub fn iter_before<'a>(&'a self, mark: &Mark) -> impl Iterator<Item = (u32, ValType)> + 'a {
+        self.slots[..mark.slot_count]
+            .iter()
+            .map(|&(count, ty, _)| (count, ty))
+    }
+
     /// Returns `true` if the layout has no slots.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -264,6 +282,121 @@ impl LocalLayout {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CellIdx(pub u32);
+
+// ── CellSignature ─────────────────────────────────────────────────────────────
+
+/// The canonical key identifying a unique (function-type params, non-param
+/// locals) pair.
+///
+/// Produced and stored by [`CellRegistry`].  The `params` field contains the
+/// flat wasm parameter types (one entry per wasm local param) in declaration
+/// order.  The `locals` field contains the non-param locals as `(count, type)`
+/// groups, exactly as passed to `wasm_encoder::Function::new`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellSignature {
+    /// Flat wasm parameter types in declaration order (one per wasm param).
+    pub params: Vec<ValType>,
+    /// Non-param locals as `(count, type)` groups, in declaration order.
+    pub locals: Vec<(u32, ValType)>,
+}
+
+// ── CellRegistry ──────────────────────────────────────────────────────────────
+
+/// A registry that allocates [`CellIdx`] handles for unique
+/// (function-type params, non-param locals) combinations.
+///
+/// Each distinct `(params, locals)` combination is assigned exactly one
+/// [`CellIdx`].  Calling [`register`](Self::register) with an already-seen
+/// signature returns the existing handle; a new `CellIdx` is minted only
+/// on first encounter.
+///
+/// ## Usage in the recompiler pipeline
+///
+/// The recompiler (or linker) owns one `CellRegistry`.  After both
+/// `declare_params` and `declare_locals` have finished appending to the
+/// layout, the recompiler registers the complete signature:
+///
+/// ```ignore
+/// // (inside init_function, after traps.declare_locals has returned):
+/// let cell = self.cell_registry.register(
+///     self.layout.iter_before(&self.locals_mark),  // param groups
+///     self.layout.iter_since(&self.locals_mark),   // local groups
+/// );
+/// self.current_cell = cell;
+/// ```
+///
+/// The returned `cell` uniquely identifies the (function type, locals)
+/// signature and can be looked up again via [`signature`](Self::signature).
+pub struct CellRegistry {
+    /// `(signature, assigned_index)` pairs in insertion order.
+    /// Linear scan is used for lookup because a given recompiler instance
+    /// produces at most a handful of distinct signatures.
+    entries: Vec<(CellSignature, CellIdx)>,
+}
+
+impl CellRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Look up or insert a cell for the given `(params, locals)` signature.
+    ///
+    /// `params` should iterate the `(count, ValType)` groups for the
+    /// function's parameter slots — i.e. `layout.iter_before(&locals_mark)`.
+    ///
+    /// `locals` should iterate the `(count, ValType)` groups for the
+    /// non-parameter locals — i.e. `layout.iter_since(&locals_mark)`.
+    ///
+    /// If an identical `(params, locals)` combination was registered before,
+    /// the existing [`CellIdx`] is returned unchanged.  Otherwise a new
+    /// [`CellIdx`] is allocated sequentially from 0.
+    pub fn register(
+        &mut self,
+        params: impl IntoIterator<Item = (u32, ValType)>,
+        locals: impl IntoIterator<Item = (u32, ValType)>,
+    ) -> CellIdx {
+        let sig = CellSignature {
+            params: params
+                .into_iter()
+                .flat_map(|(c, t)| core::iter::repeat(t).take(c as usize))
+                .collect(),
+            locals: locals.into_iter().collect(),
+        };
+        for (s, idx) in &self.entries {
+            if s == &sig {
+                return *idx;
+            }
+        }
+        let idx = CellIdx(self.entries.len() as u32);
+        self.entries.push((sig, idx));
+        idx
+    }
+
+    /// Return the signature for a previously allocated cell.
+    ///
+    /// # Panics
+    /// Panics if `cell` was not produced by this registry.
+    pub fn signature(&self, cell: CellIdx) -> &CellSignature {
+        &self.entries[cell.0 as usize].0
+    }
+
+    /// Total number of unique cells registered so far.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no cells have been registered yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for CellRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── LocalAllocator ────────────────────────────────────────────────────────────
 

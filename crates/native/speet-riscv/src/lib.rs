@@ -65,7 +65,7 @@ use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_signed_unsigned, mulh_unsi
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    SlotAssigner, TableIdx, TypeIdx, layout::CellIdx,
+    SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry},
 };
 
 // Re-export the shared memory/mapper abstractions so existing users do not
@@ -307,6 +307,11 @@ pub struct RiscVRecompiler<
     layout: LocalLayout,
     /// Mark placed after all param slots; used to rewind before each function.
     locals_mark: Mark,
+    /// Registry mapping unique (function-type params, locals) combinations
+    /// to [`CellIdx`] handles.  Populated on each `init_function` call.
+    cell_registry: CellRegistry,
+    /// The [`CellIdx`] allocated for the most-recently initialised function.
+    current_cell: CellIdx,
     /// Slot for per-function int-type temp locals (num_temps of them).
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
@@ -372,6 +377,8 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            cell_registry: CellRegistry::new(),
+            current_cell: CellIdx(0),
             slot_assigner: None,
         };
         recomp.setup_traps();
@@ -427,6 +434,8 @@ where
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
+            cell_registry: CellRegistry::new(),
+            current_cell: CellIdx(0),
             slot_assigner: None,
         };
         recomp.setup_traps();
@@ -945,6 +954,11 @@ where
         self.pool_addr_slot = self.layout.append(Self::N_POOL_ADDR, addr_type);
         self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
+        // Register the (params, locals) signature and store the allocated cell.
+        self.current_cell = self.cell_registry.register(
+            self.layout.iter_before(&self.locals_mark),
+            self.layout.iter_since(&self.locals_mark),
+        );
         // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_addr_start = self.layout.base(self.pool_addr_slot);
         let pool_i64_start = self.layout.base(self.pool_i64_slot);

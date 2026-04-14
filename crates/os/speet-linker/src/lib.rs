@@ -31,6 +31,7 @@ use wax_core::build::InstructionSink;
 use yecta::layout::CellIdx;
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor,
+    layout::CellRegistry,
 };
 
 pub use speet_link_core::linker::LinkerPlugin;
@@ -62,6 +63,9 @@ where
     pub pool: Pool<'cb, Context, E>,
     /// Optional escape tag for exception-based control flow.
     pub escape_tag: Option<EscapeTag>,
+    /// Registry mapping unique (function-type params, locals) combinations
+    /// to [`CellIdx`] handles.  Populated lazily by [`BaseContext::alloc_cell`].
+    pub cell_registry: CellRegistry,
 }
 
 // ── BaseContext for LinkerInner ───────────────────────────────────────────────
@@ -98,6 +102,13 @@ where
     }
     fn declare_trap_locals(&mut self) {
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
+    }
+    fn alloc_cell(&mut self) -> CellIdx {
+        let mark = self.locals_mark;
+        self.cell_registry.register(
+            self.layout.iter_before(&mark),
+            self.layout.iter_since(&mark),
+        )
     }
     fn on_instruction(
         &mut self,
@@ -234,6 +245,7 @@ where
                     Pool { handler: &T, ty: TypeIdx(0) }
                 },
                 escape_tag: None,
+                cell_registry: CellRegistry::new(),
             },
             plugin,
         }
@@ -273,6 +285,9 @@ where
     }
     fn declare_trap_locals(&mut self) {
         self.inner.declare_trap_locals();
+    }
+    fn alloc_cell(&mut self) -> CellIdx {
+        self.inner.alloc_cell()
     }
     fn on_instruction(
         &mut self,

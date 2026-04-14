@@ -345,6 +345,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         self.layout.rewind(&self.locals_mark);
         // Let traps declare their per-function locals.
         self.traps.declare_locals(CellIdx(0),&mut self.layout);
+        // Register the (params, locals) signature in the cell registry and
+        // store the resulting cell as `current_cell`.  The cell uniquely
+        // identifies this function type + locals combination.
+        self.current_cell = self.cell_registry.register(
+            self.layout.iter_before(&self.locals_mark),
+            self.layout.iter_since(&self.locals_mark),
+        );
         // Yield only non-param locals to the function.
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), inst_len)?;

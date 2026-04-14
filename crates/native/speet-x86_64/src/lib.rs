@@ -42,7 +42,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::CellIdx};
+use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry}};
 pub mod cfg;
 pub mod direct;
 use speet_traps::{
@@ -80,6 +80,12 @@ pub struct X86Recompiler<
     layout: LocalLayout,
     /// Mark placed after all param slots.
     locals_mark: Mark,
+    /// Registry mapping unique (function-type params, locals) combinations
+    /// to [`CellIdx`] handles.  Populated on each `init_function` call.
+    cell_registry: CellRegistry,
+    /// The [`CellIdx`] allocated for the most-recently initialised function.
+    /// Updated on every `init_function` call after `declare_locals` completes.
+    current_cell: CellIdx,
     /// Optional slot assigner: controls which RIPs get function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
@@ -125,6 +131,8 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
+            cell_registry: CellRegistry::new(),
+            current_cell: CellIdx(0),
             slot_assigner: None,
         };
         recomp.setup_traps();

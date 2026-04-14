@@ -49,7 +49,7 @@ use dex::{DexReader, code::ExceptionType, jtype::Type, string::DexString};
 use wasm_encoder::{Instruction, ValType};
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, LocalSlot, Mark, Pool, Reactor,
-    TableIdx, Target, TypeIdx, layout::CellIdx,
+    TableIdx, Target, TypeIdx, layout::{CellIdx, CellRegistry},
 };
 
 pub use speet_memory::{CallbackContext, MapperCallback};
@@ -584,6 +584,11 @@ pub struct DexRecompiler<
     layout: LocalLayout,
     /// Mark placed after all param slots; used to rewind before each function.
     locals_mark: Mark,
+    /// Registry mapping unique (function-type params, locals) combinations
+    /// to [`CellIdx`] handles.  Populated on each `init_function` call.
+    cell_registry: CellRegistry,
+    /// The [`CellIdx`] allocated for the most-recently initialised function.
+    current_cell: CellIdx,
     /// Slot for a single per-function scratch `i32` local.
     scratch_slot: LocalSlot,
     /// Slot for a single per-function scratch `i64` local (used for wide operations).
@@ -629,6 +634,8 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
+            cell_registry: CellRegistry::new(),
+            current_cell: CellIdx(0),
             scratch_slot: LocalSlot::default(),
             scratch_i64_slot: LocalSlot::default(),
             obj_model: NoObjectModel,
@@ -685,6 +692,8 @@ where
                 slot_count: 0,
                 total_locals: 0,
             },
+            cell_registry: CellRegistry::new(),
+            current_cell: CellIdx(0),
             scratch_slot: LocalSlot::default(),
             scratch_i64_slot: LocalSlot::default(),
             obj_model,
@@ -821,6 +830,11 @@ where
         self.scratch_slot = self.layout.append(1, ValType::I32);
         self.scratch_i64_slot = self.layout.append(1, ValType::I64);
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
+        // Register the (params, locals) signature and store the allocated cell.
+        self.current_cell = self.cell_registry.register(
+            self.layout.iter_before(&self.locals_mark),
+            self.layout.iter_since(&self.locals_mark),
+        );
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
         self.reactor.next_with(ctx, f(&mut locals_iter), depth)?;
         Ok(())

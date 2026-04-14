@@ -471,6 +471,7 @@ where
         }
 
         base_ctx.declare_trap_locals();
+        let _cell = base_ctx.alloc_cell();
 
         let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
@@ -645,6 +646,7 @@ where
 
         // Let traps declare their per-function locals.
         base_ctx.declare_trap_locals();
+        let _cell = base_ctx.alloc_cell();
 
         // Extra scratch for call_indirect: saves the table index while we push
         // injected params onto the stack.  Only allocated when n_injected > 0.
