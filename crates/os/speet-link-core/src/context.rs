@@ -21,7 +21,7 @@
 
 use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
-use wasm_encoder::Instruction;
+use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 use yecta::layout::CellIdx;
@@ -115,6 +115,46 @@ pub trait BaseContext<Context, E> {
     /// which is the legacy placeholder behaviour.
     fn alloc_cell(&mut self) -> CellIdx {
         CellIdx(0)
+    }
+
+    /// Pre-allocate a guest-keyed [`CellIdx`] from the guest function type
+    /// and guest local declarations.
+    ///
+    /// Unlike [`alloc_cell`](Self::alloc_cell), this may be called *before*
+    /// any `declare_locals` call — as soon as the parsed guest function type
+    /// and declared locals are available.  The returned cell can then be
+    /// forwarded to every `declare_locals` invocation (mapper and trap) for
+    /// that function.
+    ///
+    /// * `guest_params`  — parameter types from the guest WASM function type.
+    /// * `guest_results` — result types from the guest WASM function type.
+    /// * `guest_locals`  — `(count, type)` groups from the function body's
+    ///   locals section, in declaration order.
+    ///
+    /// Implementations that own a [`CellRegistry`] should override this.
+    /// The default returns `CellIdx(0)`.
+    fn alloc_cell_for_guest(
+        &mut self,
+        _guest_params: &[ValType],
+        _guest_results: &[ValType],
+        _guest_locals: &[(u32, ValType)],
+    ) -> CellIdx {
+        CellIdx(0)
+    }
+
+    /// Like [`declare_trap_locals`](Self::declare_trap_locals) but threads a
+    /// pre-allocated [`CellIdx`] through to each trap's `declare_locals` call.
+    ///
+    /// Use this instead of `declare_trap_locals` when a real cell has been
+    /// pre-allocated via [`alloc_cell_for_guest`](Self::alloc_cell_for_guest)
+    /// so that traps receive the semantically correct cell rather than the
+    /// `CellIdx(0)` placeholder.
+    ///
+    /// The default delegates to `declare_trap_locals` (preserving the
+    /// placeholder behaviour for contexts that do not override it).
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+        let _ = cell;
+        self.declare_trap_locals();
     }
 }
 

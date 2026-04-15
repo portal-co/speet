@@ -285,19 +285,48 @@ pub struct CellIdx(pub u32);
 
 // ── CellSignature ─────────────────────────────────────────────────────────────
 
-/// The canonical key identifying a unique (function-type params, non-param
-/// locals) pair.
+/// The canonical key identifying a unique cell.
 ///
-/// Produced and stored by [`CellRegistry`].  The `params` field contains the
-/// flat wasm parameter types (one entry per wasm local param) in declaration
-/// order.  The `locals` field contains the non-param locals as `(count, type)`
-/// groups, exactly as passed to `wasm_encoder::Function::new`.
+/// Produced and stored by [`CellRegistry`].  Two registration paths exist,
+/// and they occupy disjoint namespaces because the field groups they populate
+/// are mutually exclusive:
+///
+/// ## Host-keyed cells (native recompilers)
+///
+/// Registered via [`CellRegistry::register`] *after* both `declare_params`
+/// and `declare_locals` have finished appending to the [`LocalLayout`].  The
+/// `params` and `locals` fields are populated from the host layout; the
+/// `guest_*` fields are left empty.
+///
+/// ## Guest-keyed cells (WASM frontend)
+///
+/// Registered via [`CellRegistry::register_for_guest`] *before*
+/// `declare_locals` is called — as soon as the guest function type and
+/// declared locals are known from the parsed WASM binary.  The `guest_params`,
+/// `guest_results`, and `guest_locals` fields are populated; `params` and
+/// `locals` remain empty until a future pass fills them in.
+///
+/// Because host-keyed entries always have empty `guest_*` fields and
+/// guest-keyed entries always have empty `params`/`locals`, the two namespaces
+/// are disjoint and equality comparison never produces false collisions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellSignature {
     /// Flat wasm parameter types in declaration order (one per wasm param).
+    /// Populated by host-keyed registration; empty for guest-keyed cells.
     pub params: Vec<ValType>,
     /// Non-param locals as `(count, type)` groups, in declaration order.
+    /// Populated by host-keyed registration; empty for guest-keyed cells.
     pub locals: Vec<(u32, ValType)>,
+    /// Guest function-type parameter types, in declaration order.
+    /// Populated by guest-keyed registration; empty for host-keyed cells.
+    pub guest_params: Vec<ValType>,
+    /// Guest function-type result types, in declaration order.
+    /// Populated by guest-keyed registration; empty for host-keyed cells.
+    pub guest_results: Vec<ValType>,
+    /// Guest declared non-param locals as `(count, type)` groups, in
+    /// declaration order (from the function body's locals section).
+    /// Populated by guest-keyed registration; empty for host-keyed cells.
+    pub guest_locals: Vec<(u32, ValType)>,
 }
 
 // ── CellRegistry ──────────────────────────────────────────────────────────────
@@ -305,16 +334,14 @@ pub struct CellSignature {
 /// A registry that allocates [`CellIdx`] handles for unique
 /// (function-type params, non-param locals) combinations.
 ///
-/// Each distinct `(params, locals)` combination is assigned exactly one
-/// [`CellIdx`].  Calling [`register`](Self::register) with an already-seen
-/// signature returns the existing handle; a new `CellIdx` is minted only
-/// on first encounter.
+/// Each distinct signature is assigned exactly one [`CellIdx`].  Calling
+/// either registration method with an already-seen signature returns the
+/// existing handle; a new `CellIdx` is minted only on first encounter.
 ///
-/// ## Usage in the recompiler pipeline
+/// Two registration paths exist — see [`CellSignature`] for the contract each
+/// one fills.
 ///
-/// The recompiler (or linker) owns one `CellRegistry`.  After both
-/// `declare_params` and `declare_locals` have finished appending to the
-/// layout, the recompiler registers the complete signature:
+/// ## Host-keyed path (native recompilers)
 ///
 /// ```ignore
 /// // (inside init_function, after traps.declare_locals has returned):
@@ -325,8 +352,18 @@ pub struct CellSignature {
 /// self.current_cell = cell;
 /// ```
 ///
-/// The returned `cell` uniquely identifies the (function type, locals)
-/// signature and can be looked up again via [`signature`](Self::signature).
+/// ## Guest-keyed path (WASM frontend)
+///
+/// ```ignore
+/// // (before declare_locals — as soon as guest info is available):
+/// let cell = registry.register_for_guest(
+///     func_type.params_val_types(),
+///     func_type.results_val_types(),
+///     guest_locals.iter().copied(),
+/// );
+/// mapper.declare_locals(cell, layout);
+/// traps.declare_locals(cell, layout);
+/// ```
 pub struct CellRegistry {
     /// `(signature, assigned_index)` pairs in insertion order.
     /// Linear scan is used for lookup because a given recompiler instance
@@ -340,7 +377,7 @@ impl CellRegistry {
         Self { entries: Vec::new() }
     }
 
-    /// Look up or insert a cell for the given `(params, locals)` signature.
+    /// Look up or insert a host-keyed cell for the given `(params, locals)` signature.
     ///
     /// `params` should iterate the `(count, ValType)` groups for the
     /// function's parameter slots — i.e. `layout.iter_before(&locals_mark)`.
@@ -351,6 +388,10 @@ impl CellRegistry {
     /// If an identical `(params, locals)` combination was registered before,
     /// the existing [`CellIdx`] is returned unchanged.  Otherwise a new
     /// [`CellIdx`] is allocated sequentially from 0.
+    ///
+    /// The `guest_*` fields of the stored [`CellSignature`] are empty;
+    /// use [`register_for_guest`](Self::register_for_guest) for the WASM
+    /// frontend's guest-keyed path.
     pub fn register(
         &mut self,
         params: impl IntoIterator<Item = (u32, ValType)>,
@@ -362,6 +403,44 @@ impl CellRegistry {
                 .flat_map(|(c, t)| core::iter::repeat(t).take(c as usize))
                 .collect(),
             locals: locals.into_iter().collect(),
+            guest_params: Vec::new(),
+            guest_results: Vec::new(),
+            guest_locals: Vec::new(),
+        };
+        for (s, idx) in &self.entries {
+            if s == &sig {
+                return *idx;
+            }
+        }
+        let idx = CellIdx(self.entries.len() as u32);
+        self.entries.push((sig, idx));
+        idx
+    }
+
+    /// Look up or insert a guest-keyed cell for the given
+    /// `(guest_params, guest_results, guest_locals)` triple.
+    ///
+    /// Call this *before* `declare_locals` — as soon as the guest function
+    /// type and declared locals are available from the parsed WASM binary.
+    /// The returned [`CellIdx`] can then be passed directly to every
+    /// `declare_locals` call (mapper and trap) for that function.
+    ///
+    /// The `params` and `locals` fields of the stored [`CellSignature`] are
+    /// left empty (they belong to the host-layout namespace and will be filled
+    /// in by a future pass).  Use [`register`](Self::register) for native
+    /// recompilers that key on the host layout instead.
+    pub fn register_for_guest(
+        &mut self,
+        guest_params: impl IntoIterator<Item = ValType>,
+        guest_results: impl IntoIterator<Item = ValType>,
+        guest_locals: impl IntoIterator<Item = (u32, ValType)>,
+    ) -> CellIdx {
+        let sig = CellSignature {
+            params: Vec::new(),
+            locals: Vec::new(),
+            guest_params: guest_params.into_iter().collect(),
+            guest_results: guest_results.into_iter().collect(),
+            guest_locals: guest_locals.into_iter().collect(),
         };
         for (s, idx) in &self.entries {
             if s == &sig {

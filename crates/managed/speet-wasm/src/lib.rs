@@ -428,6 +428,9 @@ where
         let n_injected = self.injected_params.len() as u32;
         let inj_clone = self.injected_params.clone();
         let init_fn_type = FuncType::from_val_types(&inj_clone, &inj_clone);
+        // Collect guest type info before the cache insert may move init_fn_type.
+        let init_guest_params: Vec<ValType> = init_fn_type.params_val_types().collect();
+        let init_guest_results: Vec<ValType> = init_fn_type.results_val_types().collect();
 
         let (params_snap, params_mark) = match self.fn_type_param_layouts.get(&init_fn_type) {
             Some(entry) => entry.clone(),
@@ -449,29 +452,18 @@ where
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
 
-        // // Create one mapper instance, call declare_locals to allocate its scratch.
-        // // This mapper is reused for all init ops (sequential calls are safe).
-        // let mut mapper_box: Option<Box<dyn MapperCallback<Context, E, F>>> =
-        //     if let Some(cfg) = self.per_memory.get(0) {
-        //         if let Some(factory) = &cfg.mapper {
-        //             let mut m = factory();
-        //             m.declare_locals(base_ctx.layout_mut());
-        //             Some(m)
-        //         } else {
-        //             None
-        //         }
-        //     } else {
-        //         None
-        //     };
+        // Pre-allocate a cell for the data-init function.  It has no guest
+        // locals (it is a synthetic function), and its type is (inj...) -> (inj...).
+        let cell = base_ctx.alloc_cell_for_guest(&init_guest_params, &init_guest_results, &[]);
 
+        // // Create one mapper instance, call declare_locals to allocate its scratch.
         for p in self.per_memory.iter_mut() {
             if let Some(m) = p.mapper.as_deref_mut() {
-                m.declare_locals(CellIdx(0), base_ctx.layout_mut());
+                m.declare_locals(cell, base_ctx.layout_mut());
             }
         }
 
-        base_ctx.declare_trap_locals();
-        let _cell = base_ctx.alloc_cell();
+        base_ctx.declare_trap_locals_with_cell(cell);
 
         let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
@@ -547,7 +539,7 @@ where
         func_type: FuncType,
         body: FunctionBody<'_>,
     ) -> Result<(), E> {
-        // ── Extend function type with injected params ─────────────────────
+        // -- Extend function type with injected params ---------------------
         let orig_param_count = func_type.params_val_types().count() as u32;
         let n_injected = self.injected_params.len() as u32;
         // Injected params live at local indices orig_param_count..orig_param_count+n_injected.
@@ -565,7 +557,24 @@ where
             func_type
         };
 
-        // ── Params layout snapshot (cached per function type) ─────────────
+        // -- Parse guest locals early (needed for cell pre-allocation) -----
+        // get_locals_reader() takes &self and does not consume the operators
+        // reader, so this is safe to call before any layout manipulation.
+        let locals_reader = body.get_locals_reader()?;
+        let mut guest_locals: Vec<(u32, ValType)> = Vec::new();
+        for local in locals_reader {
+            let (count, wasm_ty) = local?;
+            guest_locals.push((count, val_type_from_wasmparser(wasm_ty)));
+        }
+
+        // -- Pre-allocate cell keyed on (extended func_type, guest_locals) -
+        // This happens before declare_locals so the real CellIdx can be
+        // forwarded to every declare_locals call for this function.
+        let guest_params: Vec<ValType> = func_type.params_val_types().collect();
+        let guest_results: Vec<ValType> = func_type.results_val_types().collect();
+        let cell = base_ctx.alloc_cell_for_guest(&guest_params, &guest_results, &guest_locals);
+
+        // -- Params layout snapshot (cached per function type) -------------
         // Params are implicit in WASM (not in Function::new locals list).
         // We cache the (layout snapshot, mark) per unique extended function type
         // so that trap params are only declared once per type.
@@ -590,22 +599,16 @@ where
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
 
-        // Guest declared locals: collect first, then append to layout in order.
-        let locals_reader = body.get_locals_reader()?;
-        let mut guest_locals: Vec<(u32, ValType)> = Vec::new();
-        for local in locals_reader {
-            let (count, wasm_ty) = local?;
-            guest_locals.push((count, val_type_from_wasmparser(wasm_ty)));
-        }
+        // Append guest declared locals to the layout.
         for &(count, ty) in &guest_locals {
             base_ctx.layout_mut().append(count, ty);
         }
 
         // 4 type-specific scratch locals for store value saving:
-        //   slot_i32 → i32 scratch  (offset +0 from base)
-        //   slot_i64 → i64 scratch  (offset +0 from base)
-        //   slot_f32 → f32 scratch  (offset +0 from base)
-        //   slot_f64 → f64 scratch  (offset +0 from base)
+        //   slot_i32 -> i32 scratch  (offset +0 from base)
+        //   slot_i64 -> i64 scratch  (offset +0 from base)
+        //   slot_f32 -> f32 scratch  (offset +0 from base)
+        //   slot_f64 -> f64 scratch  (offset +0 from base)
         let slot_i32 = base_ctx.layout_mut().append(1, ValType::I32);
         let slot_i64 = base_ctx.layout_mut().append(1, ValType::I64);
         let slot_f32 = base_ctx.layout_mut().append(1, ValType::F32);
@@ -631,7 +634,7 @@ where
                 break loop_slot; // unused
             };
             if let Some(m) = p.mapper.as_deref_mut() {
-                m.declare_locals(CellIdx(0), base_ctx.layout_mut());
+                m.declare_locals(cell, base_ctx.layout_mut());
 
                 if let None = loop_slot {
                     loop_slot = Some(base_ctx.layout_mut().append(3, ValType::I32));
@@ -644,9 +647,9 @@ where
         let (loop_dst_local, loop_src_local, loop_len_local) =
             (loop_base, loop_base + 1, loop_base + 2);
 
-        // Let traps declare their per-function locals.
-        base_ctx.declare_trap_locals();
-        let _cell = base_ctx.alloc_cell();
+        // Let traps declare their per-function locals, forwarding the
+        // pre-allocated cell so traps receive a meaningful CellIdx.
+        base_ctx.declare_trap_locals_with_cell(cell);
 
         // Extra scratch for call_indirect: saves the table index while we push
         // injected params onto the stack.  Only allocated when n_injected > 0.

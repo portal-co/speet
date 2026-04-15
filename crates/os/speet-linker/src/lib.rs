@@ -26,7 +26,7 @@ mod tests;
 
 use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
-use wasm_encoder::Instruction;
+use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
 use yecta::layout::CellIdx;
 use yecta::{
@@ -109,6 +109,21 @@ where
             self.layout.iter_before(&mark),
             self.layout.iter_since(&mark),
         )
+    }
+    fn alloc_cell_for_guest(
+        &mut self,
+        guest_params: &[ValType],
+        guest_results: &[ValType],
+        guest_locals: &[(u32, ValType)],
+    ) -> CellIdx {
+        self.cell_registry.register_for_guest(
+            guest_params.iter().copied(),
+            guest_results.iter().copied(),
+            guest_locals.iter().copied(),
+        )
+    }
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+        self.traps.declare_locals(cell, &mut self.layout);
     }
     fn on_instruction(
         &mut self,
@@ -288,6 +303,17 @@ where
     }
     fn alloc_cell(&mut self) -> CellIdx {
         self.inner.alloc_cell()
+    }
+    fn alloc_cell_for_guest(
+        &mut self,
+        guest_params: &[ValType],
+        guest_results: &[ValType],
+        guest_locals: &[(u32, ValType)],
+    ) -> CellIdx {
+        self.inner.alloc_cell_for_guest(guest_params, guest_results, guest_locals)
+    }
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+        self.inner.declare_trap_locals_with_cell(cell);
     }
     fn on_instruction(
         &mut self,
