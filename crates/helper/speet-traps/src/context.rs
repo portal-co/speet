@@ -49,7 +49,7 @@
 //! recompiler's stored field.
 
 use wasm_encoder::Instruction;
-use yecta::{EmitSink, FuncIdx, LocalAllocator};
+use yecta::{ConstPeek, EmitSink, FuncIdx, LocalAllocator};
 
 // ── TrapContext ───────────────────────────────────────────────────────────────
 
@@ -122,3 +122,7 @@ impl<'a, Context, E> TrapContext<'a, Context, E> {
         self.sink.emit(ctx, &Instruction::End)
     }
 }
+
+// TrapContext has no constant-folding state of its own; return None for all
+// queries so downstream code uses the dynamic flush/restore fallback.
+impl<Context, E> ConstPeek for TrapContext<'_, Context, E> {}

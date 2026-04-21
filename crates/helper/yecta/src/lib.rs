@@ -75,6 +75,7 @@
 
 pub mod layout;
 pub use layout::{LocalAllocator, LocalDeclarator, LocalLayout, LocalSlot, Mark};
+pub use wax_core::build::ConstPeek;
 
 pub mod slots;
 pub use slots::{FunctionCount, PassthroughSlots, SlotAssigner};
@@ -91,7 +92,7 @@ use alloc::{
     vec::Vec,
 };
 use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
-use wax_core::build::{ConstPeek, InstructionSink};
+use wax_core::build::InstructionSink;
 
 extern crate alloc;
 
