@@ -91,7 +91,7 @@ use alloc::{
     vec::Vec,
 };
 use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{ConstPeek, InstructionSink};
 
 extern crate alloc;
 
@@ -2884,6 +2884,64 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     pub fn fn_count(&self) -> usize {
         self.lock_global().len()
     }
+}
+
+// ─── ConstPeek for Reactor and Fed ───────────────────────────────────────────────────
+
+impl<Context, E, F, P, Gate> ConstPeek for Reactor<Context, E, F, P, Gate>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Gate: SlotAssigner,
+{
+    fn peek_stack_i32(&self, depth: usize) -> Option<i32> {
+        let n = self.fn_count();
+        if n == 0 { return None; }
+        let tail_idx = n - 1;
+        let func = self.lock_entry(tail_idx, true);
+        let len = func.const_stack.len();
+        if depth >= len { return None; }
+        let (v, _) = func.const_stack[len - 1 - depth]?;
+        Some(v as i32)
+    }
+
+    fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
+        let n = self.fn_count();
+        if n == 0 { return None; }
+        let tail_idx = n - 1;
+        let func = self.lock_entry(tail_idx, true);
+        let (v, _) = *func.locals_const.get(&local_idx)?;
+        Some(v as i32)
+    }
+}
+
+impl<Context, E, F, P, Gate> ConstPeek for Fed<'_, Context, E, F, P, Gate>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Gate: SlotAssigner,
+{
+    fn peek_stack_i32(&self, depth: usize) -> Option<i32> {
+        let func = self.reactor.lock_entry(self.tail_idx, true);
+        let len = func.const_stack.len();
+        if depth >= len { return None; }
+        let (v, _) = func.const_stack[len - 1 - depth]?;
+        Some(v as i32)
+    }
+
+    fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
+        let func = self.reactor.lock_entry(self.tail_idx, true);
+        let (v, _) = *func.locals_const.get(&local_idx)?;
+        Some(v as i32)
+    }
+}
+
+impl<Context, E, F, P, Gate> Reactor<Context, E, F, P, Gate>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Gate: SlotAssigner,
+{
 
     /// Non-consuming variant of [`into_fns`](Self::into_fns).
     ///
