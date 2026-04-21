@@ -649,8 +649,7 @@ where
 
         // Let traps declare their per-function locals, forwarding the
         // pre-allocated cell so traps receive a meaningful CellIdx.
-        base_ctx.declare_trap_locals_with_cell(cell);
-
+        base_ctx.declare_trap_locals_with_cell(cell)
         // Extra scratch for call_indirect: saves the table index while we push
         // injected params onto the stack.  Only allocated when n_injected > 0.
         let call_indirect_scratch = if n_injected > 0 {

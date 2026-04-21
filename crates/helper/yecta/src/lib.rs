@@ -674,7 +674,6 @@ where
     /// Pool of recyclable local indices used to save/restore deferred store
     /// operands around alias-check `if` guards in lazy emission.
     pub local_pool: spin::Mutex<P>,
-    peephole: spin::Mutex<Option<Instruction<'static>>>,
     /// Controls which guest PCs receive function slots and maps PCs to indices.
     slot_assigner: Gate,
 }
@@ -693,7 +692,6 @@ where
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
             local_pool: spin::Mutex::new(P::default()),
-            peephole: spin::Mutex::new(None),
             lock: Default::default(),
             slot_assigner: Gate::default(),
         }
@@ -728,7 +726,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
             local_pool: spin::Mutex::new(P::default()),
-            peephole: spin::Mutex::new(None),
             lock: Default::default(),
             slot_assigner: Gate::default(),
         }
@@ -750,7 +747,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             max_insts_per_fn: DEFAULT_MAX_INSTS_PER_FN,
             max_ifs_per_fn: DEFAULT_MAX_IFS_PER_FN,
             local_pool: spin::Mutex::new(P::default()),
-            peephole: spin::Mutex::new(None),
             lock: Default::default(),
             slot_assigner: gate,
         }
@@ -830,6 +826,9 @@ struct Entry<F> {
     locals_virtual: BTreeSet<u32>,
     skip_depth: usize,
     block_frames: Vec<bool>, // true = taken-if frame (End should be skipped), false = normal
+    /// Per-function one-slot peephole buffer.  Holds at most one static
+    /// instruction awaiting possible combination with the next instruction.
+    peephole: Option<Instruction<'static>>,
 }
 impl<Context, E> Reactor<Context, E> {
     /// Create a new function with the given locals and control flow distance.
@@ -1063,12 +1062,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             if_stmts: 0,
             inst_count: 0,
             bundles: Vec::new(),
-            transitive_preds: None, // computed lazily on first use
+            transitive_preds: None,
             const_stack: Vec::new(),
             locals_const: BTreeMap::new(),
             locals_virtual: BTreeSet::new(),
             skip_depth: 0,
             block_frames: Vec::new(),
+            peephole: None,
         });
         Ok(())
     }
@@ -1234,6 +1234,12 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 let f = &mut lock[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
+                // Flush per-entry peephole before emitting ReturnCall.
+                if let Some(prev) = f.peephole.take() {
+                    f.function.instruction(ctx, &prev)?;
+                    f.inst_count += 1;
+                    Self::update_shadow_stack(f, &prev);
+                }
                 // Drain deferred stores: emit the flag-guarded unconditional flush.
                 // We can't borrow `self.local_pool` and `f` simultaneously so we
                 // drain into a local vec first.
@@ -1810,47 +1816,58 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         ctx: &mut Context,
         instruction: &Instruction<'_>,
     ) -> Result<(), E> {
-        let mut peephole = self.peephole.lock();
-        // Reactor-level peephole: check if (prev, curr) matches an elision pattern.
-        let elide = match (&*peephole, instruction) {
-            (Some(Instruction::LocalGet(_)), Instruction::Drop) => true,
-            (Some(Instruction::I32Const(0)), Instruction::I32Add) => true,
-            (Some(Instruction::I32Const(1)), Instruction::I32Mul) => true,
-            _ => false,
-        };
-        if elide {
-            *peephole = None;
-            return Ok(());
+        let reachable = self.transitive_preds_of(target).clone();
+        for FuncIdx(idx) in reachable {
+            self.feed_to_entry(ctx, idx as usize, instruction)?;
         }
-
-        // Flush buffered instruction if it didn't combine.
-        if peephole.is_some() {
-            let prev = peephole.take().unwrap();
-            let reachable = self.transitive_preds_of(target).clone();
-            for FuncIdx(idx) in reachable {
-                self.feed_one(ctx, idx as usize, &prev)?;
-            }
-        }
-
-        // Try to buffer current instruction in peephole (only static variants).
-        if let Some(static_insn) = Self::to_static_insn(instruction) {
-            *peephole = Some(static_insn);
-        } else {
-            let reachable = self.transitive_preds_of(target).clone();
-            for FuncIdx(idx) in reachable {
-                self.feed_one(ctx, idx as usize, instruction)?;
-            }
-        }
-
         Ok(())
     }
 
-    /// Flush the peephole buffer by broadcasting its held instruction to all reachable entries.
+    /// Feed one instruction to one specific entry, applying the per-entry peephole.
+    ///
+    /// The peephole state is updated atomically under one lock acquisition.
+    /// After releasing the lock, any previously-buffered instruction and/or
+    /// the current instruction are forwarded to `feed_one`.
+    fn feed_to_entry(&self, ctx: &mut Context, idx: usize, instruction: &Instruction<'_>) -> Result<(), E> {
+        // Step 1: atomically check/update the per-entry peephole.
+        let (prev_to_flush, current_buffered) = {
+            let mut func = self.lock_entry(idx, false);
+            let elide = match (&func.peephole, instruction) {
+                (Some(Instruction::LocalGet(_)), Instruction::Drop) => true,
+                (Some(Instruction::I32Const(0)), Instruction::I32Add) => true,
+                (Some(Instruction::I32Const(1)), Instruction::I32Mul) => true,
+                _ => false,
+            };
+            if elide {
+                func.peephole = None;
+                return Ok(());
+            }
+            let prev = func.peephole.take();
+            let static_insn = Self::to_static_insn(instruction);
+            let buffered = static_insn.is_some();
+            func.peephole = static_insn;
+            (prev, buffered)
+        }; // lock released here
+        // Step 2: emit previously-buffered instruction (if any).
+        if let Some(prev) = prev_to_flush {
+            self.feed_one(ctx, idx, &prev)?;
+        }
+        // Step 3: emit current instruction if it was not buffered.
+        if !current_buffered {
+            self.feed_one(ctx, idx, instruction)?;
+        }
+        Ok(())
+    }
+
+    /// Flush the per-entry peephole for every entry reachable from `target`.
     fn flush_peephole(&self, target: usize, ctx: &mut Context) -> Result<(), E> {
-        let mut peephole = self.peephole.lock();
-        if let Some(prev) = peephole.take() {
-            let reachable = self.transitive_preds_of(target).clone();
-            for FuncIdx(idx) in reachable {
+        let reachable = self.transitive_preds_of(target).clone();
+        for FuncIdx(idx) in reachable {
+            let prev = {
+                let mut func = self.lock_entry(idx as usize, false);
+                func.peephole.take()
+            };
+            if let Some(prev) = prev {
                 self.feed_one(ctx, idx as usize, &prev)?;
             }
         }
@@ -2227,20 +2244,18 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             Instruction::If(_block_type) => {
                 let cond = entry.const_stack.last().cloned();
                 match cond {
-                    Some(Some((v, _))) => {
+                    Some(Some((v, _))) if v != 0 => {
+                        // Known-true: don't emit If; inline the then-body and
+                        // skip the else-body via skip_depth.
                         entry.const_stack.pop(); // consume condition
-                        if v != 0 {
-                            // Always taken: emit body, skip End.
-                            entry.block_frames.push(true); // TakenIf
-                        } else {
-                            // Never taken: skip everything until matching End.
-                            entry.skip_depth += 1;
-                        }
+                        entry.block_frames.push(true); // TakenIf
                         return true; // Don't emit If
                     }
                     _ => {
-                        // Unknown condition: emit If normally.
-                        // Track block frame so End handling is correct.
+                        // Unknown condition OR known-false: emit If normally.
+                        // For known-false the condition constant stays on
+                        // const_stack; materialize_for will emit I32Const(0)
+                        // and the WASM runtime will select the else-branch.
                         entry.block_frames.push(false); // Normal
                         // Fall through to emit.
                     }
@@ -2286,8 +2301,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     }
 
     /// Materialize any deferred constants that the instruction needs from the shadow stack.
-    /// For instructions whose stack signature is not specifically known, flushes the entire
-    /// shadow stack to be safe.
+    /// For call-like instructions whose argument count is not statically known by
+    /// `stack_pops`, every deferred constant is emitted first so the WASM stack
+    /// contains the full set of real values before the call.
     fn materialize_for(
         &self,
         ctx: &mut Context,
@@ -2296,9 +2312,28 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         insn: &Instruction<'_>,
     ) -> Result<(), E> {
         let pops = Self::stack_pops(insn);
-        if pops == 0 {
-            return Ok(());
-        }
+        // Call-like instructions consume an unknown number of arguments that
+        // stack_pops cannot determine without the function signature.  Flush
+        // the entire shadow stack so those arguments are concretely on the
+        // WASM stack before the call is emitted.
+        let pops = if pops == 0 {
+            let is_call = matches!(
+                insn,
+                Instruction::Call(_)
+                    | Instruction::CallIndirect { .. }
+                    | Instruction::ReturnCall(_)
+                    | Instruction::ReturnCallIndirect { .. }
+                    | Instruction::CallRef(_)
+                    | Instruction::ReturnCallRef(_)
+            );
+            if is_call {
+                entry.const_stack.len() // flush everything
+            } else {
+                return Ok(());
+            }
+        } else {
+            pops
+        };
 
         let len = entry.const_stack.len();
         let start = len.saturating_sub(pops);
@@ -2662,6 +2697,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         entry: &mut Entry<F>,
         idx: usize,
     ) -> Result<(), E> {
+        // Materialize any deferred constants still on the shadow stack.
         let stack: Vec<_> = entry.const_stack.drain(..).collect();
         for slot in stack {
             if let Some((v, ty)) = slot {
@@ -2672,6 +2708,23 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 };
                 entry.function.instruction(ctx, &insn)?;
                 entry.inst_count += 1;
+            }
+        }
+        // Materialize virtual locals: emit the deferred LocalSet instructions
+        // so that the WASM local actually holds the constant value.  This is
+        // required before any control-flow split (seal_for_split, seal_to, or
+        // cycle-break) where the function may later be entered from a path
+        // that has not seen the original constant-folded store.
+        for n in entry.locals_virtual.iter().copied().collect::<alloc::vec::Vec<_>>() {
+            if let Some(&(v, ty)) = entry.locals_const.get(&n) {
+                let const_insn = match ty {
+                    ValType::I32 => Instruction::I32Const(v as i32),
+                    ValType::I64 => Instruction::I64Const(v as i64),
+                    _ => Instruction::I64Const(v as i64),
+                };
+                entry.function.instruction(ctx, &const_insn)?;
+                entry.function.instruction(ctx, &Instruction::LocalSet(n))?;
+                entry.inst_count += 2;
             }
         }
         entry.locals_const.clear();
@@ -2849,7 +2902,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let result = self.lock_global().drain(..).map(|e| e.function).collect();
         self.base_func_offset += count;
         self.lens.get_mut().clear();
-        *self.peephole.get_mut() = None;
         result
     }
 
