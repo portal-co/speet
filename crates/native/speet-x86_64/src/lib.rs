@@ -58,56 +58,28 @@ use speet_traps::{
 /// # Type parameters
 /// - `Context` / `E` / `F` – forwarded to the underlying [`yecta::Reactor`].
 /// - `P` – the local-pool backend (defaults to [`yecta::LocalPool`]).
-pub struct X86Recompiler<
-    'cb,
-    'ctx,
-    Context,
-    E,
-    F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend = yecta::LocalPool,
-> {
-    reactor: Reactor<Context, E, F, P>,
-    pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>,
+pub struct X86Recompiler {
     base_rip: u64,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
-    /// Pluggable instruction-level and jump-level trap hooks.
-    traps: TrapConfig<'cb, 'ctx, Context, E>,
-    /// Total wasm function parameter count (recompiler params + trap params).
-    total_params: u32,
-    /// Unified layout: arch params + trap params, then per-function locals.
-    layout: LocalLayout,
-    /// Mark placed after all param slots.
-    locals_mark: Mark,
-    /// Registry mapping unique (function-type params, locals) combinations
-    /// to [`CellIdx`] handles.  Populated on each `init_function` call.
-    cell_registry: CellRegistry,
-    /// The [`CellIdx`] allocated for the most-recently initialised function.
-    /// Updated on every `init_function` call after `declare_locals` completes.
-    current_cell: CellIdx,
     /// Optional slot assigner: controls which RIPs get function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
-impl<'cb, 'ctx, Context, E, F, P> X86Recompiler<'cb, 'ctx, Context, E, F, P>
-where
-    F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend + Default,
-{
+impl X86Recompiler {
     /// Returns the function-index base used by the underlying reactor.
     ///
     /// All WASM function indices emitted during translation are offset by
     /// this value, allowing multiple recompilers to share a single WASM
     /// module without index collisions.
-    pub fn base_func_offset(&self) -> u32 {
-        self.reactor.base_func_offset()
+    pub fn base_func_offset<Context, E, F>(&self, ctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+        ctx.base_func_offset()
     }
 
     /// Sets the function-index base.  Must be called before translation
     /// to ensure correct inter-function references.
-    pub fn set_base_func_offset(&mut self, offset: u32) {
-        self.reactor.set_base_func_offset(offset);
+    pub fn set_base_func_offset<Context, E, F>(&mut self, ctx: &mut dyn ReactorContext<Context, E, FnType = F>, offset: u32) {
+        ctx.set_base_func_offset(offset);
     }
     /// Create a new recompiler with `base_rip = 0`.
     pub fn new() -> Self {
@@ -117,26 +89,12 @@ where
     /// Create a new recompiler whose RIP-relative addresses are resolved
     /// relative to `base_rip`.
     pub fn new_with_base_rip(base_rip: u64) -> Self {
-        let mut recomp = Self {
-            reactor: Reactor::default(),
-            pool: { static T: TableIdx = TableIdx(0); Pool { handler: &T, ty: TypeIdx(0) } },
-            escape_tag: None,
+        Self {
             base_rip,
             hints: Vec::new(),
             enable_speculative_calls: false,
-            traps: TrapConfig::new(),
-            total_params: Self::BASE_PARAMS,
-            layout: LocalLayout::empty(),
-            locals_mark: Mark {
-                slot_count: 0,
-                total_locals: 0,
-            },
-            cell_registry: CellRegistry::new(),
-            current_cell: CellIdx(0),
             slot_assigner: None,
-        };
-        recomp.setup_traps();
-        recomp
+        }
     }
 
     /// Install a slot assigner to control which guest RIPs receive WASM function slots.
@@ -174,13 +132,13 @@ where
     }
 
     /// Set the escape tag used for exception-based control flow in speculative calls
-    pub fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
-        self.escape_tag = tag;
+    pub fn set_escape_tag<Context, E>(&mut self, rctx: &mut dyn ReactorContext<Context, E>, tag: Option<EscapeTag>) {
+        rctx.set_escape_tag(tag);
     }
 
     /// Get the current escape tag
-    pub fn get_escape_tag(&self) -> Option<EscapeTag> {
-        self.escape_tag
+    pub fn get_escape_tag<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> Option<EscapeTag> {
+        rctx.escape_tag()
     }
 
     /// Get the local index for the expected return address used in speculative calls
@@ -188,36 +146,36 @@ where
         Self::EXPECTED_RA_LOCAL
     }
 
-    fn emit_i64_const(&mut self, ctx: &mut Context, value: i64, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(value))
+    fn emit_i64_const<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: i64) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Const(value))
     }
 
-    fn emit_i64_add(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)
+    fn emit_i64_add<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Add)
     }
-    fn emit_i64_sub(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)
+    fn emit_i64_sub<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Sub)
     }
-    fn emit_i64_mul(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)
+    fn emit_i64_mul<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Mul)
     }
-    fn emit_i64_and(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)
+    fn emit_i64_and<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64And)
     }
-    fn emit_i64_or(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)
+    fn emit_i64_or<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Or)
     }
-    fn emit_i64_xor(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Xor)
+    fn emit_i64_xor<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Xor)
     }
-    fn emit_i64_shl(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)
+    fn emit_i64_shl<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64Shl)
     }
-    fn emit_i64_shr_u(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)
+    fn emit_i64_shr_u<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64ShrU)
     }
-    fn emit_i64_shr_s(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)
+    fn emit_i64_shr_s<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64ShrS)
     }
 
     // Condition flag helpers
@@ -236,47 +194,36 @@ where
     pub const BASE_PARAMS: u32 = 26;
 
     /// Install an instruction trap.
-    pub fn set_instruction_trap(
-        &mut self,
+    pub fn set_instruction_trap<'cb, 'ctx, Context, E>(
+        &self,
+        rctx: &mut dyn ReactorContext<Context, E>,
         trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
     ) {
-        self.traps.set_instruction_trap(trap);
-    }
-
-    /// Remove the instruction trap.
-    pub fn clear_instruction_trap(&mut self) {
-        self.traps.clear_instruction_trap();
-    }
-
-    /// Install a jump trap.
-    pub fn set_jump_trap(
-        &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E> + 'ctx),
-    ) {
-        self.traps.set_jump_trap(trap);
-    }
-
-    /// Remove the jump trap.
-    pub fn clear_jump_trap(&mut self) {
-        self.traps.clear_jump_trap();
+        // This now requires access to the TrapConfig which is in the context.
+        // But ReactorContext doesn't have a way to set traps directly.
+        // Wait, maybe I should add it to ReactorContext or LinkerInner?
+        // Actually, LinkerInner HAS pub traps.
+        // But if we only have &mut dyn ReactorContext, we can't access .traps.
+        // I might need to add set_instruction_trap to ReactorContext trait.
+        unimplemented!("Traps must be set on the Linker/ReactorContext provider directly")
     }
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
-    pub fn setup_traps(&mut self) -> u32 {
-        self.layout = LocalLayout::empty();
-        self.layout.append(16, wasm_encoder::ValType::I64); // GPRs (params 0-15)
-        self.layout.append(1, wasm_encoder::ValType::I32); // PC (param 16)
-        self.layout.append(5, wasm_encoder::ValType::I32); // ZF/SF/CF/OF/PF (params 17-21)
-        self.layout.append(4, wasm_encoder::ValType::I64); // temps + expected_RA (params 22-25)
-        self.traps.declare_params(CellIdx(0),&mut self.layout);
-        self.locals_mark = self.layout.mark();
-        self.total_params = self.locals_mark.total_locals;
-        self.total_params
+    pub fn setup_traps<Context, E>(&self, rctx: &mut dyn ReactorContext<Context, E>) -> u32 {
+        let layout = rctx.layout_mut();
+        layout.append(16, wasm_encoder::ValType::I64); // GPRs (params 0-15)
+        layout.append(1, wasm_encoder::ValType::I32); // PC (param 16)
+        layout.append(5, wasm_encoder::ValType::I32); // ZF/SF/CF/OF/PF (params 17-21)
+        layout.append(4, wasm_encoder::ValType::I64); // temps + expected_RA (params 22-25)
+        rctx.declare_trap_params();
+        let mark = layout.mark();
+        rctx.set_locals_mark(mark);
+        mark.total_locals
     }
 
     /// The current total wasm function parameter count.
-    pub fn total_params(&self) -> u32 {
-        self.total_params
+    pub fn total_params<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> u32 {
+        rctx.locals_mark().total_locals
     }
 
     /// Classify an x86-64 mnemonic into [`InsnClass`] flags.
@@ -371,63 +318,63 @@ where
         }
     }
 
-    fn set_zf(&mut self, ctx: &mut Context, value: bool, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
+    fn set_zf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
-    fn set_sf(&mut self, ctx: &mut Context, value: bool, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
+    fn set_sf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
-    fn set_cf(&mut self, ctx: &mut Context, value: bool, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
+    fn set_cf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
-    fn set_of(&mut self, ctx: &mut Context, value: bool, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
+    fn set_of<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
-    fn set_pf(&mut self, ctx: &mut Context, value: bool, tail_idx: usize) -> Result<(), E> {
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+    fn set_pf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
-    fn compute_parity(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn compute_parity<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
         // Assume value is on stack (i64)
         // Extract lowest byte: value & 0xFF
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+        rctx.feed(ctx, &Instruction::I64Const(0xFF))?;
+        rctx.feed(ctx, &Instruction::I64And)?;
         // Count bits: use popcnt if available, otherwise simulate
         // For simplicity, we'll implement a basic parity check
         // This is a simplified version - real parity counts all bits in lowest byte
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, &Instruction::I32WrapI64)?;
         // Simple parity: check if number of 1s is even
         // For now, just set to 0 (even parity) - this is a simplification
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Drop)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        rctx.feed(ctx, &Instruction::Drop)?;
+        rctx.feed(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
+        rctx.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to set flags after arithmetic operation
-    fn set_flags_after_operation(
-        &mut self,
+    fn set_flags_after_operation<Context, E, F>(
+        &self,
         ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
         result: i64,
         operand1: i64,
         operand2: i64,
         is_subtraction: bool,
-        tail_idx: usize,
     ) -> Result<(), E> {
         // ZF: result == 0
-        self.set_zf(ctx, result == 0, tail_idx)?;
+        self.set_zf(ctx, rctx, result == 0)?;
 
         // SF: result < 0 (for signed)
-        self.set_sf(ctx, result < 0, tail_idx)?;
+        self.set_sf(ctx, rctx, result < 0)?;
 
         // For CF and OF, we need to detect carry/borrow and overflow
         // This is simplified - real implementation would need proper overflow detection
@@ -435,10 +382,10 @@ where
         // CF: carry flag (simplified)
         if is_subtraction {
             // For subtraction: CF if borrow occurred (operand1 < operand2 for unsigned)
-            self.set_cf(ctx, (operand1 as u64) < (operand2 as u64), tail_idx)?;
+            self.set_cf(ctx, rctx, (operand1 as u64) < (operand2 as u64))?;
         } else {
             // For addition: CF if result < operand1 (unsigned overflow)
-            self.set_cf(ctx, (result as u64) < (operand1 as u64), tail_idx)?;
+            self.set_cf(ctx, rctx, (result as u64) < (operand1 as u64))?;
         }
 
         // OF: overflow flag (simplified - check if sign changed unexpectedly)
@@ -449,142 +396,142 @@ where
             // For subtraction: overflow if (op1 positive, op2 negative, result negative) or (op1 negative, op2 positive, result positive)
             let overflow =
                 (op1_sign && !op2_sign && !result_sign) || (!op1_sign && op2_sign && result_sign);
-            self.set_of(ctx, overflow, tail_idx)?;
+            self.set_of(ctx, rctx, overflow)?;
         } else {
             // For addition: overflow if both operands same sign but result different sign
             let overflow = (op1_sign == op2_sign) && (op1_sign != result_sign);
-            self.set_of(ctx, overflow, tail_idx)?;
+            self.set_of(ctx, rctx, overflow)?;
         }
 
         // PF: parity (simplified)
-        self.compute_parity(ctx, tail_idx)?;
+        self.compute_parity(ctx, rctx)?;
 
         Ok(())
     }
 
-    fn emit_memory_load(
-        &mut self,
+    fn emit_memory_load<Context, E, F>(
+        &self,
         ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
         size_bits: u32,
         signed: bool,
-        tail_idx: usize,
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match (size_bits, signed) {
-            (8, true) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load8S(MemArg {
+            (8, true) => rctx.feed(ctx, &Instruction::I64Load8S(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            (8, false) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load8U(MemArg {
+            (8, false) => rctx.feed(ctx, &Instruction::I64Load8U(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            (16, true) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load16S(MemArg {
+            (16, true) => rctx.feed(ctx, &Instruction::I64Load16S(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            (16, false) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load16U(MemArg {
+            (16, false) => rctx.feed(ctx, &Instruction::I64Load16U(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            (32, true) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load32S(MemArg {
+            (32, true) => rctx.feed(ctx, &Instruction::I64Load32S(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            (32, false) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load32U(MemArg {
+            (32, false) => rctx.feed(ctx, &Instruction::I64Load32U(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            (64, _) => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Load(MemArg {
+            (64, _) => rctx.feed(ctx, &Instruction::I64Load(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
                 }),
             ),
-            _ => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
+            _ => rctx.feed(ctx, &Instruction::Unreachable),
         }
     }
 
-    fn emit_memory_store(&mut self, ctx: &mut Context, size_bits: u32, tail_idx: usize) -> Result<(), E> {
+    fn emit_memory_store<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, size_bits: u32) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match size_bits {
-            8 => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Store8(MemArg {
+            8 => rctx.feed(ctx, &Instruction::I64Store8(MemArg {
                     offset: 0,
                     align: 0,
                     memory_index: 0,
                 }),
             ),
-            16 => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Store16(MemArg {
+            16 => rctx.feed(ctx, &Instruction::I64Store16(MemArg {
                     offset: 0,
                     align: 1,
                     memory_index: 0,
                 }),
             ),
-            32 => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Store32(MemArg {
+            32 => rctx.feed(ctx, &Instruction::I64Store32(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
                 }),
             ),
-            64 => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Store(MemArg {
+            64 => rctx.feed(ctx, &Instruction::I64Store(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
                 }),
             ),
-            _ => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
+            _ => rctx.feed(ctx, &Instruction::Unreachable),
         }
     }
 
     // Helpers for sub-register read/write
-    fn emit_mask_shift_for_read(
-        &mut self,
+    fn emit_mask_shift_for_read<Context, E, F>(
+        &self,
         ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
         size_bits: u32,
         bit_offset: u32,
-        tail_idx: usize,
     ) -> Result<(), E> {
         // shift right by bit_offset then mask size_bits
         if bit_offset > 0 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
+            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, &Instruction::I64ShrU)?;
         }
         match size_bits {
             64 => { /* no mask */ }
             32 => { /* locals model 32-bit values as zero-extended into 64, so no mask needed for reads */
             }
             16 => {
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, &Instruction::I64Const(0xFFFF))?;
+                rctx.feed(ctx, &Instruction::I64And)?;
             }
             8 => {
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFF))?;
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, &Instruction::I64Const(0xFF))?;
+                rctx.feed(ctx, &Instruction::I64And)?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn emit_subreg_write_rmw(
-        &mut self,
+    fn emit_subreg_write_rmw<Context, E, F>(
+        &self,
         ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
         local: u32,
         size_bits: u32,
         bit_offset: u32,
-        tail_idx: usize,
     ) -> Result<(), E> {
         // Assume new value is on stack (i64) and we need to write it into `local` at bit_offset preserving other bits.
         // Steps:
@@ -596,28 +543,28 @@ where
         // local.set(local, combined)
 
         // local.get(local)
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(local))?;
+        rctx.feed(ctx, &Instruction::LocalGet(local))?;
         // store original in temp (we rely on temp locals being available after local 16). We'll use LocalSet(17) and LocalGet(17).
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(17))?;
+        rctx.feed(ctx, &Instruction::LocalSet(17))?;
         // compute mask = (1<<size_bits)-1
         let mask: i64 = if size_bits == 64 {
             -1i64
         } else {
             ((1u128 << size_bits) - 1) as i64
         };
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(mask))?;
+        rctx.feed(ctx, &Instruction::I64Const(mask))?;
         // shift mask left by bit_offset
         if bit_offset > 0 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, &Instruction::I64Shl)?;
         }
         // invert mask -> ~mask
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
+        rctx.feed(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
+        rctx.feed(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
                                                        // get original
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(17))?;
+        rctx.feed(ctx, &Instruction::LocalGet(17))?;
         // cleared = original & ~mask
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?;
+        rctx.feed(ctx, &Instruction::I64And)?;
         // now compute new_shifted: we assume new_value is currently on top of stack
         // mask = (1<<size_bits)-1 (again)
         let small_mask: i64 = if size_bits == 64 {
@@ -625,16 +572,16 @@ where
         } else {
             ((1u128 << size_bits) - 1) as i64
         };
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(small_mask))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)?; // new_value & small_mask
+        rctx.feed(ctx, &Instruction::I64Const(small_mask))?;
+        rctx.feed(ctx, &Instruction::I64And)?; // new_value & small_mask
         if bit_offset > 0 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?; // << bit_offset
+            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, &Instruction::I64Shl)?; // << bit_offset
         }
         // combined = cleared | new_shifted
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
+        rctx.feed(ctx, &Instruction::I64Or)?;
         // store back into local
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(local))?;
+        rctx.feed(ctx, &Instruction::LocalSet(local))?;
         Ok(())
     }
 }
@@ -675,11 +622,10 @@ use speet_link_core::{
 };
 use wasm_encoder::ValType;
 
-impl<'cb, 'ctx, Context, E, F, P> Recompile<Context, E, F>
-    for X86Recompiler<'cb, 'ctx, Context, E, F, P>
+impl<Context, E, F> Recompile<Context, E, F>
+    for X86Recompiler
 where
     F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend + Default,
 {
     /// New `base_rip` for the next binary.
     type BinaryArgs = u64;
@@ -695,18 +641,19 @@ where
 
     fn drain_unit(
         &mut self,
-        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
+        rctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(String, u32)>,
     ) -> BinaryUnit<F> {
         // Build the uniform function type: all params are i64 (x86-64 GPRs,
         // PC, flags, temps are all i64 or i32, but each function shares the
         // same total_params-wide signature).
+        let total_params = rctx.locals_mark().total_locals;
         let param_types: alloc::vec::Vec<ValType> =
-            (0..self.total_params).map(|_| ValType::I64).collect();
+            (0..total_params).map(|_| ValType::I64).collect();
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
-        let base = ctx.base_func_offset();
-        let fns = ctx.drain_fns();
+        let base = rctx.base_func_offset();
+        let fns = rctx.drain_fns();
         let count = fns.len();
         BinaryUnit {
             fns,

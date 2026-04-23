@@ -248,11 +248,7 @@ pub struct RiscVRecompiler<
     Context,
     E,
     F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend = yecta::LocalPool,
 > {
-    reactor: Reactor<Context, E, F, P>,
-    pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>,
     /// Base PC address - subtracted from PC values to compute function indices
     /// For RV64, this is a 64-bit address
     base_pc: u64,
@@ -262,16 +258,16 @@ pub struct RiscVRecompiler<
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
     hint_callback:
-        Option<&'cb mut (dyn HintCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx)>,
+        Option<&'cb mut (dyn HintCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for ECALL instructions
     ecall_callback:
-        Option<&'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx)>,
+        Option<&'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for EBREAK instructions
     ebreak_callback:
-        Option<&'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx)>,
+        Option<&'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for address mapping (paging support - see PAGING.md)
     mapper_callback:
-        Option<&'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx)>,
+        Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -295,23 +291,6 @@ pub struct RiscVRecompiler<
     /// with their wasm atomic equivalents.  This is gated behind a separate
     /// flag so it can be enabled independently of `mem_order`.
     atomic_opts: AtomicOpts,
-    /// Pluggable instruction-level and jump-level trap hooks.
-    traps: TrapConfig<'cb, 'ctx, Context, E>,
-    /// Total wasm function parameter count (recompiler params + trap params).
-    ///
-    /// Set by [`Self::setup_traps`] and used as the `params` argument to every
-    /// `jmp` / `ji` / `ji_with_params` call so that trap parameters (e.g. the
-    /// ROP depth counter) are forwarded along every control-flow edge.
-    total_params: u32,
-    /// Unified layout: arch params + trap params, then per-function locals.
-    layout: LocalLayout,
-    /// Mark placed after all param slots; used to rewind before each function.
-    locals_mark: Mark,
-    /// Registry mapping unique (function-type params, locals) combinations
-    /// to [`CellIdx`] handles.  Populated on each `init_function` call.
-    cell_registry: CellRegistry,
-    /// The [`CellIdx`] allocated for the most-recently initialised function.
-    current_cell: CellIdx,
     /// Slot for per-function int-type temp locals (num_temps of them).
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
@@ -325,10 +304,9 @@ pub struct RiscVRecompiler<
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
-impl<'cb, 'ctx, Context, E, F, P> RiscVRecompiler<'cb, 'ctx, Context, E, F, P>
+impl<'cb, 'ctx, Context, E, F> RiscVRecompiler<'cb, 'ctx, Context, E, F>
 where
     F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend,
 {
     /// Create a new RISC-V recompiler instance with full configuration
     ///
@@ -340,18 +318,13 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_full_config(
-        pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>,
         base_pc: u64,
         track_hints: bool,
         enable_rv64: bool,
         use_memory64: bool,
     ) -> Self
-    where
-        P: Default,
     {
-        let mut recomp = Self {
-            reactor: Reactor::default(),
+        Self {
             pool,
             escape_tag,
             base_pc,
@@ -366,23 +339,12 @@ where
             enable_speculative_calls: false,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
-            traps: TrapConfig::new(),
-            total_params: Self::BASE_PARAMS,
-            layout: LocalLayout::empty(),
-            locals_mark: Mark {
-                slot_count: 0,
-                total_locals: 0,
-            },
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_addr_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
-            cell_registry: CellRegistry::new(),
-            current_cell: CellIdx(0),
             slot_assigner: None,
-        };
-        recomp.setup_traps();
-        recomp
+        }
     }
 
     /// Create a new RISC-V recompiler instance with all configuration options including base function offset
@@ -396,50 +358,14 @@ where
     /// * `enable_rv64` - Whether to enable RV64 instruction support
     /// * `use_memory64` - Whether to use memory64 (i64 addresses) for memory operations
     pub fn new_with_all_config(
-        pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>,
         base_pc: u64,
-        base_func_offset: u32,
+        _base_func_offset: u32,
         track_hints: bool,
         enable_rv64: bool,
         use_memory64: bool,
     ) -> Self
-    where
-        P: Default,
     {
-        let mut recomp = Self {
-            reactor: Reactor::with_base_func_offset(base_func_offset),
-            pool,
-            escape_tag,
-            base_pc,
-            track_hints,
-            hints: Vec::new(),
-            hint_callback: None,
-            ecall_callback: None,
-            ebreak_callback: None,
-            mapper_callback: None,
-            enable_rv64,
-            use_memory64,
-            enable_speculative_calls: false,
-            mem_order: MemOrder::Strong,
-            atomic_opts: AtomicOpts::NONE,
-            traps: TrapConfig::new(),
-            total_params: Self::BASE_PARAMS,
-            layout: LocalLayout::empty(),
-            locals_mark: Mark {
-                slot_count: 0,
-                total_locals: 0,
-            },
-            temps_slot: LocalSlot::default(),
-            addr_scratch_slot: LocalSlot::default(),
-            pool_addr_slot: LocalSlot::default(),
-            pool_i64_slot: LocalSlot::default(),
-            cell_registry: CellRegistry::new(),
-            current_cell: CellIdx(0),
-            slot_assigner: None,
-        };
-        recomp.setup_traps();
-        recomp
+        Self::new_with_full_config(pool, escape_tag, base_pc, track_hints, enable_rv64, use_memory64)
     }
 
     /// Get the current base function offset.
@@ -447,8 +373,8 @@ where
     /// The offset is added to all emitted function indices. This is useful when
     /// the WebAssembly module has imported functions or helper functions that
     /// precede the generated functions.
-    pub fn base_func_offset(&self) -> u32 {
-        self.reactor.base_func_offset()
+    pub fn base_func_offset(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+        rctx.base_func_offset()
     }
 
     /// Set the base function offset.
@@ -463,8 +389,8 @@ where
     /// # Example
     /// If the module has 10 imports and 5 helper functions, use `offset = 15`
     /// so that generated function 0 emits as WebAssembly function 15.
-    pub fn set_base_func_offset(&mut self, offset: u32) {
-        self.reactor.set_base_func_offset(offset);
+    pub fn set_base_func_offset(&mut self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, offset: u32) {
+        rctx.set_base_func_offset(offset);
     }
 
     /// Create a new RISC-V recompiler instance
@@ -473,8 +399,6 @@ where
     /// * `pool` - Pool configuration for indirect calls
     /// * `escape_tag` - Optional exception tag for non-local control flow
     /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
-    pub fn new_with_config(pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>, base_pc: u64) -> Self
     where
         P: Default,
     {
@@ -568,7 +492,7 @@ where
     /// ```
     pub fn set_hint_callback(
         &mut self,
-        callback: &'cb mut (dyn HintCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        callback: &'cb mut (dyn HintCallback<Context, E, F> + 'ctx),
     ) {
         self.hint_callback = Some(callback);
     }
@@ -608,7 +532,7 @@ where
     /// ```
     pub fn set_ecall_callback(
         &mut self,
-        callback: &'cb mut (dyn EcallCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        callback: &'cb mut (dyn EcallCallback<Context, E, F> + 'ctx),
     ) {
         self.ecall_callback = Some(callback);
     }
@@ -648,7 +572,7 @@ where
     /// ```
     pub fn set_ebreak_callback(
         &mut self,
-        callback: &'cb mut (dyn EbreakCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        callback: &'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx),
     ) {
         self.ebreak_callback = Some(callback);
     }
@@ -688,9 +612,16 @@ where
     /// ```
     pub fn set_mapper_callback(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E, Reactor<Context, E, F, P>> + 'ctx),
+        callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx),
     ) {
         self.mapper_callback = Some(callback);
+    }
+
+    /// Clear the address mapping callback
+    ///
+    /// Removes any previously set mapper callback, returning to identity mapping.
+    pub fn clear_mapper_callback(&mut self) {
+        self.mapper_callback = None;
     }
 
     /// Clear the address mapping callback
@@ -738,37 +669,6 @@ where
     /// traps installed (32 int regs + 32 float regs + PC + expected_RA = 66).
     pub const BASE_PARAMS: u32 = 66;
 
-    /// Install an instruction trap.
-    ///
-    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
-    /// before the first `translate_instruction` call.
-    pub fn set_instruction_trap(
-        &mut self,
-        trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
-    ) {
-        self.traps.set_instruction_trap(trap);
-    }
-
-    /// Remove the instruction trap.
-    pub fn clear_instruction_trap(&mut self) {
-        self.traps.clear_instruction_trap();
-    }
-
-    /// Install a jump trap.
-    ///
-    /// Call [`setup_traps`](Self::setup_traps) after installing traps and
-    /// before the first `translate_instruction` call.
-    pub fn set_jump_trap(
-        &mut self,
-        trap: &'cb mut (dyn JumpTrap<Context, E> + 'ctx),
-    ) {
-        self.traps.set_jump_trap(trap);
-    }
-
-    /// Remove the jump trap.
-    pub fn clear_jump_trap(&mut self) {
-        self.traps.clear_jump_trap();
-    }
 
     /// **Phase 1** — register trap parameters and compute [`total_params`].
     ///
@@ -779,26 +679,26 @@ where
     /// The returned `total_params` value is the wasm function parameter count
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
-    pub fn setup_traps(&mut self) -> u32 {
+    pub fn setup_traps<Context, E, F>(&self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>) -> u32 {
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
             ValType::I32
         };
-        self.layout = LocalLayout::empty();
-        self.layout.append(32, int_type); // x0-x31 (params 0-31)
-        self.layout.append(32, ValType::F64); // f0-f31 (params 32-63)
-        self.layout.append(1, ValType::I32); // PC (param 64)
-        self.layout.append(1, int_type); // expected_RA (param 65)
-        self.traps.declare_params(CellIdx(0), &mut self.layout);
-        self.locals_mark = self.layout.mark();
-        self.total_params = self.locals_mark.total_locals;
-        self.total_params
+        let layout = rctx.layout_mut();
+        layout.append(32, int_type); // x0-x31 (params 0-31)
+        layout.append(32, ValType::F64); // f0-f31 (params 32-63)
+        layout.append(1, ValType::I32); // PC (param 64)
+        layout.append(1, int_type); // expected_RA (param 65)
+        rctx.declare_trap_params();
+        let mark = layout.mark();
+        rctx.set_locals_mark(mark);
+        mark.total_locals
     }
 
     /// The current total wasm function parameter count (recompiler + trap params).
-    pub fn total_params(&self) -> u32 {
-        self.total_params
+    pub fn total_params<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> u32 {
+        rctx.locals_mark().total_locals
     }
 
     ///
@@ -928,9 +828,10 @@ where
     /// * `_pc` - Program counter for this instruction (used for documentation)
     /// * `_inst_len` - Length of instruction in 2-byte increments (1 for compressed, 2 for normal)
     /// * `num_temps` - Number of additional temporary registers needed
-    fn init_function(
-        &mut self,
+    fn init_function<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self,
         ctx: &mut Context,
+        rctx: &mut RC,
         _pc: u32,
         _inst_len: u32,
         num_temps: u32,
@@ -947,35 +848,31 @@ where
             ValType::I32
         };
         // Rewind to the params mark, discarding any locals from the previous function.
-        self.layout.rewind(&self.locals_mark);
+        let mark = rctx.locals_mark();
+        rctx.layout_mut().rewind(&mark);
         // Append per-function non-param locals in order:
-        self.temps_slot = self.layout.append(num_temps, int_type);
-        self.addr_scratch_slot = self.layout.append(1, addr_type);
-        self.pool_addr_slot = self.layout.append(Self::N_POOL_ADDR, addr_type);
-        self.pool_i64_slot = self.layout.append(Self::N_POOL_I64, ValType::I64);
-        self.traps.declare_locals(CellIdx(0), &mut self.layout);
+        let temps_slot = rctx.layout_mut().append(num_temps, int_type);
+        let addr_scratch_slot = rctx.layout_mut().append(1, addr_type);
+        let pool_addr_slot = rctx.layout_mut().append(Self::N_POOL_ADDR, addr_type);
+        let pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
+        rctx.declare_trap_locals();
         // Register the (params, locals) signature and store the allocated cell.
-        self.current_cell = self.cell_registry.register(
-            self.layout.iter_before(&self.locals_mark),
-            self.layout.iter_since(&self.locals_mark),
-        );
+        let _cell = rctx.alloc_cell();
         // Seed the reactor's local pool with the freshly-declared pool slots.
-        let pool_addr_start = self.layout.base(self.pool_addr_slot);
-        let pool_i64_start = self.layout.base(self.pool_i64_slot);
+        let pool_addr_start = rctx.layout().base(pool_addr_slot);
+        let pool_i64_start = rctx.layout().base(pool_i64_slot);
         match addr_type {
-            ValType::I32 => self
-                .reactor
+            ValType::I32 => rctx
                 .with_local_pool(|p| p.seed_i32(pool_addr_start, Self::N_POOL_ADDR)),
-            ValType::I64 => self
-                .reactor
+            ValType::I64 => rctx
                 .with_local_pool(|p| p.seed_i64(pool_addr_start, Self::N_POOL_ADDR)),
             _ => {}
         }
-        self.reactor
-            .with_local_pool(|p| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
+        rctx.with_local_pool(|p| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
+
         // Declare only non-param locals to the function (params are already in the type).
-        let mut locals_iter = self.layout.iter_since(&self.locals_mark);
-        self.reactor.next_with(ctx, f(&mut locals_iter), 2)?;
+        let mut locals_iter = rctx.layout().iter_since(&mark);
+        rctx.next_with(ctx, f(&mut locals_iter), 2)?;
         Ok(())
     }
 
@@ -1044,102 +941,102 @@ where
     }
 
     /// Emit instructions to load an immediate value
-    fn emit_imm(&mut self, ctx: &mut Context, imm: Imm, tail_idx: usize) -> Result<(), E> {
+    fn emit_imm<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, imm: Imm) -> Result<(), E> {
         if self.enable_rv64 {
             // Sign-extend the 32-bit immediate to 64 bits
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(imm.as_i32() as i64))
+            rctx.feed(ctx, &Instruction::I64Const(imm.as_i32() as i64))
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(imm.as_i32()))
+            rctx.feed(ctx, &Instruction::I32Const(imm.as_i32()))
         }
     }
 
     /// Emit an integer constant (i32 or i64 depending on RV64 mode)
-    fn emit_int_const(&mut self, ctx: &mut Context, value: i32, tail_idx: usize) -> Result<(), E> {
+    fn emit_int_const<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, value: i32) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(value as i64))
+            rctx.feed(ctx, &Instruction::I64Const(value as i64))
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Const(value))
+            rctx.feed(ctx, &Instruction::I32Const(value))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on RV64 mode)
-    fn emit_add(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_add<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Add)
+            rctx.feed(ctx, &Instruction::I64Add)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Add)
+            rctx.feed(ctx, &Instruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on RV64 mode)
-    fn emit_sub(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_sub<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Sub)
+            rctx.feed(ctx, &Instruction::I64Sub)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Sub)
+            rctx.feed(ctx, &Instruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on RV64 mode)
-    fn emit_mul(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_mul<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Mul)
+            rctx.feed(ctx, &Instruction::I64Mul)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Mul)
+            rctx.feed(ctx, &Instruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on RV64 mode)
-    fn emit_and(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_and<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64And)
+            rctx.feed(ctx, &Instruction::I64And)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32And)
+            rctx.feed(ctx, &Instruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on RV64 mode)
-    fn emit_or(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_or<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)
+            rctx.feed(ctx, &Instruction::I64Or)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Or)
+            rctx.feed(ctx, &Instruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on RV64 mode)
-    fn emit_xor(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_xor<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Xor)
+            rctx.feed(ctx, &Instruction::I64Xor)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Xor)
+            rctx.feed(ctx, &Instruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on RV64 mode)
-    fn emit_shl(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_shl<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)
+            rctx.feed(ctx, &Instruction::I64Shl)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32Shl)
+            rctx.feed(ctx, &Instruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on RV64 mode)
-    fn emit_shr_u(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_shr_u<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)
+            rctx.feed(ctx, &Instruction::I64ShrU)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrU)
+            rctx.feed(ctx, &Instruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on RV64 mode)
-    fn emit_shr_s(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn emit_shr_s<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         if self.enable_rv64 {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrS)
+            rctx.feed(ctx, &Instruction::I64ShrS)
         } else {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ShrS)
+            rctx.feed(ctx, &Instruction::I32ShrS)
         }
     }
 
@@ -1148,10 +1045,10 @@ where
     /// If `target_pc` is omitted from the slot assigner (true slot omission),
     /// emits `unreachable` instead.  In a correctly analyzed binary this path
     /// is never taken at runtime.
-    fn jump_to_pc(&mut self, ctx: &mut Context, target_pc: u64, params: u32, tail_idx: usize) -> Result<(), E> {
+    fn jump_to_pc<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, target_pc: u64, params: u32) -> Result<(), E> {
         match self.pc_to_func_idx(target_pc) {
-            Some(target_func) => self.reactor.jmp(tail_idx, ctx, target_func, params),
-            None => Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable),
+            Some(target_func) => rctx.jmp(ctx, target_func, params),
+            None => rctx.feed(ctx, &Instruction::Unreachable),
         }
     }
 
@@ -1264,24 +1161,29 @@ where
     /// FLEN-bit NaN value, with the upper bits all 1s. We call this a NaN-boxed value."
     ///
     /// For F32 values in F64 registers: set upper 32 bits to all 1s
-    fn nan_box_f32(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn nan_box_f32<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
         // Convert F32 to I32, then to I64, OR with 0xFFFFFFFF00000000, reinterpret as F64
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32ReinterpretF32)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F64ReinterpretI64)?;
+        rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
+        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
+        rctx.feed(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
+        rctx.feed(ctx, &Instruction::I64Or)?;
+        rctx.feed(ctx, &Instruction::F64ReinterpretI64)?;
         Ok(())
     }
 
     /// Unbox a NaN-boxed single-precision value from a double-precision register
     ///
     /// Extract the F32 value from the lower 32 bits of the NaN-boxed F64 value
-    fn unbox_f32(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+    fn unbox_f32<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+        rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
+        rctx.feed(ctx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, &Instruction::F32ReinterpretI32)?;
+        Ok(())
+    }
         // Reinterpret F64 as I64, wrap to I32 (takes lower 32 bits), reinterpret as F32
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
+        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::I32WrapI64)?;
+        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::F32ReinterpretI32)?;
         Ok(())
     }
 
@@ -1301,21 +1203,21 @@ where
     ///
     /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
     /// to the high 64 bits, only through carries.
-    fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32, tail_idx: usize) -> Result<(), E> {
+    fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32, rctx: usize) -> Result<(), E> {
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed(src1, src2, temps);
         for instr in instrs {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &instr)?;
+            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
         }
         Ok(())
     }
 
     /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
-    fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32, tail_idx: usize) -> Result<(), E> {
+    fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32, rctx: usize) -> Result<(), E> {
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_unsigned(src1, src2, temps);
         for instr in instrs {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &instr)?;
+            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
         }
         Ok(())
     }
@@ -1326,24 +1228,23 @@ where
         ctx: &mut Context,
         src1: u32,
         src2: u32,
-        tail_idx: usize,
     ) -> Result<(), E> {
         let temps = MulhTemps::new(self.temps_start());
         let instrs = mulh_signed_unsigned(src1, src2, temps);
         for instr in instrs {
-            Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &instr)?;
+            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
         }
         Ok(())
     }
 
     /// Finalize the function
-    pub fn seal(&mut self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
-        self.reactor.seal_to(tail_idx, ctx, &Instruction::Unreachable)
+    pub fn seal(&mut self, ctx: &mut Context, rctx: usize) -> Result<(), E> {
+        rctx.seal_fn(ctx, &Instruction::Unreachable)
     }
 
     /// Get the reactor (consumes self)
     pub fn into_reactor(self) -> Reactor<Context, E, F, P> {
-        self.reactor
+        rctx
     }
 }
 
@@ -3214,11 +3115,10 @@ use speet_link_core::{
     unit::{BinaryUnit, FuncType},
 };
 
-impl<'cb, 'ctx, Context, E, F, P> Recompile<Context, E, F>
-    for RiscVRecompiler<'cb, 'ctx, Context, E, F, P>
+impl<'cb, 'ctx, Context, E, F> Recompile<Context, E, F>
+    for RiscVRecompiler<'cb, 'ctx, Context, E, F>
 where
     F: InstructionSink<Context, E>,
-    P: yecta::LocalPoolBackend + Default,
 {
     /// New `base_pc` for the next RISC-V binary.
     type BinaryArgs = u64;
@@ -3234,15 +3134,16 @@ where
 
     fn drain_unit(
         &mut self,
-        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
-        entry_points: Vec<(AString, u32)>,
+        rctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
+        entry_points: Vec<(alloc::string::String, u32)>,
     ) -> BinaryUnit<F> {
         // RISC-V: all params are i64 (int regs, fp regs, PC).
-        let param_types: Vec<ValType> = (0..self.total_params).map(|_| ValType::I64).collect();
+        let total_params = rctx.locals_mark().total_locals;
+        let param_types: Vec<ValType> = (0..total_params).map(|_| ValType::I64).collect();
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
-        let base = ctx.base_func_offset();
-        let fns = ctx.drain_fns();
+        let base = rctx.base_func_offset();
+        let fns = rctx.drain_fns();
         let count = fns.len();
         BinaryUnit {
             fns,

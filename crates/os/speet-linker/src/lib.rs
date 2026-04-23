@@ -147,6 +147,20 @@ where
     }
 }
 
+// ── InstructionSink for LinkerInner ──────────────────────────────────────────
+
+impl<'cb, 'ctx, Context, E, F, P> InstructionSink<Context, E>
+    for LinkerInner<'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+{
+    fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.reactor.instruction(ctx, insn)
+    }
+}
+
 // ── ReactorContext for LinkerInner ────────────────────────────────────────────
 
 impl<'cb, 'ctx, Context, E, F, P> ReactorContext<Context, E>
@@ -189,6 +203,38 @@ where
     }
     fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
         self.escape_tag = tag;
+    }
+
+    fn ji(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+    ) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ji(ctx, params, fixups, target, call, pool, condition, tail_idx)
+    }
+
+    fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ji_with_params(ctx, params, tail_idx)
+    }
+
+    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ret(tail_idx, ctx, params, tag)
+    }
+
+    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
+        self.reactor.with_local_pool(f)
     }
 }
 
@@ -264,6 +310,21 @@ where
             },
             plugin,
         }
+    }
+}
+
+// ── InstructionSink for Linker ──────────────────────────────────────────────
+
+impl<'cb, 'ctx, Context, E, F, P, Plugin> InstructionSink<Context, E>
+    for Linker<'cb, 'ctx, Context, E, F, P, Plugin>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+    Plugin: LinkerPlugin<F>,
+    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+{
+    fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.inner.reactor.instruction(ctx, insn)
     }
 }
 
@@ -365,6 +426,35 @@ where
     }
     fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
         self.inner.set_escape_tag(tag);
+    }
+
+    fn ji(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+    ) -> Result<(), E> {
+        self.inner.ji(ctx, params, fixups, target, call, pool, condition)
+    }
+
+    fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E> {
+        self.inner.ji_with_params(ctx, params)
+    }
+
+    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.inner.ret(ctx, params, tag)
+    }
+
+    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
+        self.inner.with_local_pool(f)
     }
 }
 

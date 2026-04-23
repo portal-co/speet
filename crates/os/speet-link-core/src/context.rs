@@ -170,7 +170,7 @@ pub trait BaseContext<Context, E> {
 /// ## Type parameters
 /// - `Context` — the translation context passed through to the reactor.
 /// - `E` — the error type.
-pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
+pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<Context, E> {
     /// The function type produced by the underlying reactor.
     type FnType;
 
@@ -214,6 +214,31 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> {
 
     /// Set the escape tag.
     fn set_escape_tag(&mut self, tag: Option<EscapeTag>);
+
+    /// Emit an indirect jump or call using yecta's `ji` API.
+    fn ji(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+    ) -> Result<(), E>;
+
+    /// Emit an indirect jump or call using yecta's `ji_with_params` API.
+    fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E>;
+
+    /// Emit a return through the escape-tag mechanism.
+    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E>;
+
+    /// Access the underlying local pool (if any).
+    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R;
 }
 
 // ── Blanket impl for Reactor (provides a minimal ReactorContext without traps) ─
@@ -238,6 +263,17 @@ where
     pub pool: Pool<'a, Context, E>,
     /// Optional escape tag.
     pub escape_tag: Option<EscapeTag>,
+}
+
+impl<'a, Context, E, F, P> InstructionSink<Context, E> for ReactorAdapter<'a, Context, E, F, P>
+where
+    F: InstructionSink<Context, E> + Default,
+    P: LocalPoolBackend,
+    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+{
+    fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.reactor.instruction(ctx, insn)
+    }
 }
 
 impl<'a, Context, E, F, P> BaseContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
@@ -320,5 +356,37 @@ where
     }
     fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
         self.escape_tag = tag;
+    }
+
+    fn ji(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+    ) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ji(ctx, params, fixups, target, call, pool, condition, tail_idx)
+    }
+
+    fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ji_with_params(ctx, params, tail_idx)
+    }
+
+    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+        self.reactor.ret(tail_idx, ctx, params, tag)
+    }
+
+    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
+        self.reactor.with_local_pool(f)
     }
 }

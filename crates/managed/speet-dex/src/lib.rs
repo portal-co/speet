@@ -559,9 +559,6 @@ pub struct DexRecompiler<
     P: LocalPoolBackend = yecta::LocalPool,
     M = NoObjectModel,
 > {
-    reactor: Reactor<Context, E, F, P>,
-    pool: Pool<'cb, Context, E>,
-    escape_tag: Option<EscapeTag>,
 
     /// Flattened method and code-unit data.
     flat: FlatMethods,
@@ -572,23 +569,17 @@ pub struct DexRecompiler<
     atomic_opts: AtomicOpts,
 
     /// Pluggable trap hooks.
-    traps: TrapConfig<'cb, 'ctx, Context, E>,
 
     /// Total wasm function parameter count (registers + trap params).
     ///
     /// Set by [`setup_traps`](Self::setup_traps).  Pass as the `params`
     /// argument to every `jmp` / `ji` / `ji_with_params` call.
-    total_params: u32,
 
     /// Unified layout: DEX register params, then trap params, then per-function locals.
-    layout: LocalLayout,
     /// Mark placed after all param slots; used to rewind before each function.
-    locals_mark: Mark,
     /// Registry mapping unique (function-type params, locals) combinations
     /// to [`CellIdx`] handles.  Populated on each `init_function` call.
-    cell_registry: CellRegistry,
     /// The [`CellIdx`] allocated for the most-recently initialised function.
-    current_cell: CellIdx,
     /// Slot for a single per-function scratch `i32` local.
     scratch_slot: LocalSlot,
     /// Slot for a single per-function scratch `i64` local (used for wide operations).
@@ -762,25 +753,25 @@ where
         }
         self.traps.declare_params(CellIdx(0),&mut self.layout);
         self.locals_mark = self.layout.mark();
-        self.total_params = self.locals_mark.total_locals;
-        self.total_params
+        rctx.locals_mark().total_locals = self.locals_mark.total_locals;
+        rctx.locals_mark().total_locals
     }
 
     /// The current total wasm function parameter count.
     pub fn total_params(&self) -> u32 {
-        self.total_params
+        rctx.locals_mark().total_locals
     }
 
     // ── Reactor delegation ────────────────────────────────────────────────
 
     /// Returns the underlying reactor's function-index base offset.
     pub fn base_func_offset(&self) -> u32 {
-        self.reactor.base_func_offset()
+        rctx.base_func_offset()
     }
 
     /// Sets the function-index base offset.
     pub fn set_base_func_offset(&mut self, offset: u32) {
-        self.reactor.set_base_func_offset(offset);
+        rctx.set_base_func_offset(offset);
     }
 
     // ── Memory / atomic mode ──────────────────────────────────────────────
@@ -836,7 +827,7 @@ where
             self.layout.iter_since(&self.locals_mark),
         );
         let mut locals_iter = self.layout.iter_since(&self.locals_mark);
-        self.reactor.next_with(ctx, f(&mut locals_iter), depth)?;
+        rctx.next_with(ctx, f(&mut locals_iter), depth)?;
         Ok(())
     }
 
@@ -860,7 +851,7 @@ where
 
         // Each instruction becomes one wasm function.
         self.init_function(ctx, flat_idx, 1, f)?;
-        let tail_idx = self.reactor.fn_count() - 1;
+        
 
         let code_base = method.base as usize;
         let code_end = code_base + method.code_units as usize;
@@ -870,7 +861,7 @@ where
             Some(pair) => pair,
             None => {
                 // Reserved opcode or pseudo-instruction marker — emit unreachable.
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)?;
+                rctx.feed(ctx, &Instruction::Unreachable)?;
                 return Ok(());
             }
         };
@@ -888,7 +879,7 @@ where
         let layout_ptr = &self.layout as *const LocalLayout;
         if self
             .traps
-            .on_instruction(&insn_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+            .on_instruction(&insn_info, ctx, rctx, unsafe { &*layout_ptr })?
             == TrapAction::Skip
         {
             return Ok(());
@@ -899,14 +890,14 @@ where
             let jump_info = Self::build_jump_info(flat_idx, &insn, scratch);
             if self
                 .traps
-                .on_jump(&jump_info, ctx, &mut self.reactor, unsafe { &*layout_ptr })?
+                .on_jump(&jump_info, ctx, rctx, unsafe { &*layout_ptr })?
                 == TrapAction::Skip
             {
                 return Ok(());
             }
         }
 
-        self.translate_body(ctx, flat_idx, &insn, tail_idx)?;
+        self.translate_body(ctx, flat_idx, &insn, rctx)?;
         Ok(())
     }
 
@@ -995,15 +986,14 @@ where
         ctx: &mut Context,
         flat_idx: u64,
         insn: &DexInsn,
-        tail_idx: usize,
     ) -> Result<(), E> {
         // Precompute scratch indices before any reactor borrows.
         let scratch = self.layout.base(self.scratch_slot);
         let scratch_i64 = self.layout.base(self.scratch_i64_slot);
-        let total_params = self.total_params;
-        let pool = self.pool;
-        let bfo = self.reactor.base_func_offset();
-        let escape_tag = self.escape_tag;
+        let total_params = rctx.locals_mark().total_locals;
+        let pool = rctx.pool();
+        let bfo = rctx.base_func_offset();
+        let escape_tag = rctx.escape_tag();
 
         // Compute target FuncIdx for a flat-index + signed branch offset.
         let target =
@@ -1011,7 +1001,7 @@ where
 
         macro_rules! feed {
             ($insn:expr) => {
-                Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &$insn)?
+                rctx.feed(ctx, &$insn)?
             };
         }
 
@@ -1081,7 +1071,7 @@ where
             | DexInsn::ReturnWide { .. }
             | DexInsn::ReturnObject { .. } => {
                 if let Some(tag) = escape_tag {
-                    self.reactor.ret(tail_idx, ctx, total_params, tag)?;;
+                    rctx.ret(ctx, total_params, tag)?;;
                 } else {
                     feed!(Instruction::Unreachable);
                 }
@@ -1162,15 +1152,15 @@ where
             DexInsn::NegLong { dst, src } => {
                 // Combine src pair into i64, negate, split to dst pair.
                 feed!(Instruction::I64Const(0));
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Sub);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::NotLong { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Const(-1));
                 feed!(Instruction::I64Xor);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             // ── Unary float/double ────────────────────────────────────────────
@@ -1182,18 +1172,18 @@ where
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::NegDouble { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Neg);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             // ── Type conversions ─────────────────────────────────────────────
             DexInsn::IntToLong { dst, src } => {
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::I64ExtendI32S);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::IntToFloat { dst, src } => {
                 feed!(Instruction::LocalGet(*src as u32));
@@ -1205,23 +1195,23 @@ where
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::F64ConvertI32S);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::LongToInt { dst, src } => {
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::LongToFloat { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F32ConvertI64S);
                 feed!(Instruction::I32ReinterpretF32);
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::LongToDouble { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ConvertI64S);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::FloatToInt { dst, src } => {
                 feed!(Instruction::LocalGet(*src as u32));
@@ -1233,29 +1223,29 @@ where
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::F32ReinterpretI32);
                 feed!(Instruction::I64TruncSatF32S);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::FloatToDouble { dst, src } => {
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::F32ReinterpretI32);
                 feed!(Instruction::F64PromoteF32);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DoubleToInt { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::I32TruncSatF64S);
                 feed!(Instruction::LocalSet(*dst as u32));
             }
             DexInsn::DoubleToLong { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::I64TruncSatF64S);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DoubleToFloat { dst, src } => {
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F32DemoteF64);
                 feed!(Instruction::I32ReinterpretF32);
@@ -1541,145 +1531,145 @@ where
 
             // ── Binary long ops (23x — wide pairs) ──────────────────────────
             DexInsn::AddLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64Add);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::SubLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64Sub);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::MulLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64Mul);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DivLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64DivS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::RemLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64RemS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::AndLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64And);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::OrLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64Or);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::XorLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::I64Xor);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             // Long shifts: value is a wide pair, shift amount is a single i32.
             DexInsn::ShlLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::LocalGet(*b as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64Shl);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::ShrLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::LocalGet(*b as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64ShrS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::UshrLong { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::LocalGet(*b as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64ShrU);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             // ── Binary long 2addr ────────────────────────────────────────────
             DexInsn::AddLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Add);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::SubLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Sub);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::MulLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Mul);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DivLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64DivS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::RemLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64RemS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::AndLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64And);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::OrLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Or);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::XorLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::I64Xor);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::ShlLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64Shl);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::ShrLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64ShrS);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::UshrLong2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::LocalGet(*src as u32));
                 feed!(Instruction::I64ExtendI32U);
                 feed!(Instruction::I64ShrU);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             // ── Binary float ops (i32 as f32 bit pattern) ───────────────────
@@ -1769,40 +1759,40 @@ where
 
             // ── Binary double ops (wide pair as f64 bit pattern) ─────────────
             DexInsn::AddDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Add);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::SubDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Sub);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::MulDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Mul);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DivDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Div);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::RemDouble { dst, a, b } => {
                 let _ = (dst, a, b);
@@ -1811,40 +1801,40 @@ where
 
             // ── Double 2addr ─────────────────────────────────────────────────
             DexInsn::AddDouble2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Add);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::SubDouble2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Sub);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::MulDouble2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Mul);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::DivDouble2addr { dst, src } => {
-                self.emit_wide_to_stack(ctx, *dst, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *dst)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Div);
                 feed!(Instruction::I64ReinterpretF64);
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
             DexInsn::RemDouble2addr { dst, src } => {
                 let _ = (dst, src);
@@ -1893,14 +1883,14 @@ where
 
             // cmpl-double: NaN → -1
             DexInsn::CmplDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Gt);
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Ge);
                 feed!(Instruction::I32Const(1));
@@ -1911,16 +1901,16 @@ where
 
             // cmpg-double: NaN → +1
             DexInsn::CmpgDouble { dst, a, b } => {
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Le);
                 feed!(Instruction::I32Const(1));
                 feed!(Instruction::I32Xor);
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::F64ReinterpretI64);
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::F64ReinterpretI64);
                 feed!(Instruction::F64Lt);
                 feed!(Instruction::I32Sub);
@@ -1931,14 +1921,14 @@ where
             // Store b pair in scratch_i64, compute (a > scratch) - (a < scratch).
             DexInsn::CmpLong { dst, a, b } => {
                 // Store b as i64 in scratch.
-                self.emit_wide_to_stack(ctx, *b, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *b)?;
                 feed!(Instruction::LocalSet(scratch_i64));
                 // (a > b): combine a, get scratch, compare.
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::LocalGet(scratch_i64));
                 feed!(Instruction::I64GtS);
                 // (a < b): combine a again, get scratch.
-                self.emit_wide_to_stack(ctx, *a, tail_idx)?;
+                self.emit_wide_to_stack(ctx, rctx, *a)?;
                 feed!(Instruction::LocalGet(scratch_i64));
                 feed!(Instruction::I64LtS);
                 feed!(Instruction::I32Sub);
@@ -1948,15 +1938,15 @@ where
             // ── Unconditional branches ───────────────────────────────────────
             DexInsn::Goto { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
+                rctx.jmp(ctx, tgt, total_params)?;
             }
             DexInsn::Goto16 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
+                rctx.jmp(ctx, tgt, total_params)?;
             }
             DexInsn::Goto32 { offset } => {
                 let tgt = target(*offset as i64);
-                self.reactor.jmp(tail_idx, ctx, tgt, total_params)?;
+                rctx.jmp(ctx, tgt, total_params)?;
             }
 
             // ── Conditional branches (two-register) ─────────────────────────
@@ -1967,7 +1957,7 @@ where
                     op: DexCondOp::I32Eq,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -1975,7 +1965,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfNe { a, b, offset } => {
@@ -1985,7 +1974,7 @@ where
                     op: DexCondOp::I32Ne,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -1993,7 +1982,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfLt { a, b, offset } => {
@@ -2003,7 +1991,7 @@ where
                     op: DexCondOp::I32LtS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2011,7 +1999,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfGe { a, b, offset } => {
@@ -2021,7 +2008,7 @@ where
                     op: DexCondOp::I32GeS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2029,7 +2016,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfGt { a, b, offset } => {
@@ -2039,7 +2025,7 @@ where
                     op: DexCondOp::I32GtS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2047,7 +2033,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfLe { a, b, offset } => {
@@ -2057,7 +2042,7 @@ where
                     op: DexCondOp::I32LeS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2065,7 +2050,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
 
@@ -2077,7 +2061,7 @@ where
                     op: DexCondOp::I32Eqz,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2085,7 +2069,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfNez { reg, offset } => {
@@ -2095,7 +2078,7 @@ where
                     op: DexCondOp::I32Nez,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2103,7 +2086,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfLtz { reg, offset } => {
@@ -2113,7 +2095,7 @@ where
                     op: DexCondOp::I32LtzS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2121,7 +2103,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfGez { reg, offset } => {
@@ -2131,7 +2112,7 @@ where
                     op: DexCondOp::I32GezS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2139,7 +2120,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfGtz { reg, offset } => {
@@ -2149,7 +2129,7 @@ where
                     op: DexCondOp::I32GtzS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2157,7 +2137,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
             DexInsn::IfLez { reg, offset } => {
@@ -2167,7 +2146,7 @@ where
                     op: DexCondOp::I32LezS,
                 };
                 let tgt = target(*offset as i64);
-                self.reactor.ji(
+                rctx.ji(
                     ctx,
                     total_params,
                     &BTreeMap::new(),
@@ -2175,7 +2154,6 @@ where
                     None,
                     pool,
                     Some(&cond),
-                    tail_idx,
                 )?;
             }
 
@@ -2183,7 +2161,7 @@ where
             DexInsn::ArrayLength { dst, array } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 // SAFETY: obj_model and reactor are distinct fields.
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_array_length(ctx, unsafe { &mut *reactor_ptr })?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2199,7 +2177,7 @@ where
                 let class_name = type_desc_to_class_name(desc);
                 let hash = TypeHash::of_class(class_name);
                 let data_size = self.class_sizes.get(&type_id).copied().unwrap_or(0);
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_new_object(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2217,7 +2195,7 @@ where
                     .unwrap_or("[I");
                 let (elem_hash, dim, elem_bytes) = array_desc_to_info(desc);
                 feed!(Instruction::LocalGet(*size as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_new_array(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2241,7 +2219,7 @@ where
                     (TypeHash::of_class(type_desc_to_class_name(desc)), 0u32)
                 };
                 feed!(Instruction::LocalGet(*reg as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_check_cast(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2264,7 +2242,7 @@ where
                     (TypeHash::of_class(type_desc_to_class_name(desc)), 0u32)
                 };
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_instanceof(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2284,7 +2262,7 @@ where
                     .copied()
                     .unwrap_or((0, FieldValType::I32));
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2296,7 +2274,7 @@ where
                     .copied()
                     .unwrap_or((0, FieldValType::I8U));
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iget(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2312,7 +2290,7 @@ where
                     .copied()
                     .unwrap_or((0, FieldValType::I8S));
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iget(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2328,7 +2306,7 @@ where
                     .copied()
                     .unwrap_or((0, FieldValType::I16U));
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iget(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2344,7 +2322,7 @@ where
                     .copied()
                     .unwrap_or((0, FieldValType::I16S));
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iget(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2365,10 +2343,10 @@ where
                     FieldValType::I64
                 };
                 feed!(Instruction::LocalGet(*obj as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_iget(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             DexInsn::Iput { src, obj, field } | DexInsn::IputObject { src, obj, field } => {
@@ -2379,7 +2357,7 @@ where
                     .unwrap_or((0, FieldValType::I32));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, vt)?;
             }
@@ -2391,7 +2369,7 @@ where
                     .unwrap_or((0, FieldValType::I8U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2407,7 +2385,7 @@ where
                     .unwrap_or((0, FieldValType::I8S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2423,7 +2401,7 @@ where
                     .unwrap_or((0, FieldValType::I16U));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2439,7 +2417,7 @@ where
                     .unwrap_or((0, FieldValType::I16S));
                 feed!(Instruction::LocalGet(*obj as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_iput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2459,8 +2437,8 @@ where
                     FieldValType::I64
                 };
                 feed!(Instruction::LocalGet(*obj as u32));
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
-                let reactor_ptr = &mut self.reactor as *mut _;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_iput(ctx, unsafe { &mut *reactor_ptr }, off, mem_ty)?;
             }
@@ -2469,7 +2447,7 @@ where
             DexInsn::Aget { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I32)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2477,7 +2455,7 @@ where
             DexInsn::AgetObject { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::Ref)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2485,7 +2463,7 @@ where
             DexInsn::AgetBoolean { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8U)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2493,7 +2471,7 @@ where
             DexInsn::AgetByte { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I8S)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2501,7 +2479,7 @@ where
             DexInsn::AgetChar { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16U)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2509,7 +2487,7 @@ where
             DexInsn::AgetShort { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I16S)?;
                 feed!(Instruction::LocalSet(*dst as u32));
@@ -2517,17 +2495,17 @@ where
             DexInsn::AgetWide { dst, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model
                     .emit_aget(ctx, unsafe { &mut *reactor_ptr }, FieldValType::I64)?;
-                self.emit_split_wide(ctx, *dst, scratch_i64, tail_idx)?;
+                self.emit_split_wide(ctx, rctx, *dst, scratch_i64)?;
             }
 
             DexInsn::Aput { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2540,7 +2518,7 @@ where
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2553,7 +2531,7 @@ where
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2566,7 +2544,7 @@ where
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2579,7 +2557,7 @@ where
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2592,7 +2570,7 @@ where
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
                 feed!(Instruction::LocalGet(*src as u32));
-                let reactor_ptr = &mut self.reactor as *mut _;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2604,8 +2582,8 @@ where
             DexInsn::AputWide { src, array, index } => {
                 feed!(Instruction::LocalGet(*array as u32));
                 feed!(Instruction::LocalGet(*index as u32));
-                self.emit_wide_to_stack(ctx, *src, tail_idx)?;
-                let reactor_ptr = &mut self.reactor as *mut _;
+                self.emit_wide_to_stack(ctx, rctx, *src)?;
+                let reactor_ptr = rctx as *mut _;
                 self.obj_model.emit_aput(
                     ctx,
                     unsafe { &mut *reactor_ptr },
@@ -2627,34 +2605,34 @@ where
     /// wasm stack (leaves the i64 value on the stack).
     ///
     /// The low register `v` contributes the low 32 bits; `v+1` the high 32 bits.
-    fn emit_wide_to_stack(&mut self, ctx: &mut Context, v: u8, tail_idx: usize) -> Result<(), E> {
+    fn emit_wide_to_stack(&mut self, ctx: &mut Context, v: u8, rctx: usize) -> Result<(), E> {
         // low
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(v as u32))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
+        rctx.feed(ctx, &Instruction::LocalGet(v as u32))?;
+        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
         // high << 32
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(v as u32 + 1))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ExtendI32U)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(32))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Shl)?;
+        rctx.feed(ctx, &Instruction::LocalGet(v as u32 + 1))?;
+        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
+        rctx.feed(ctx, &Instruction::I64Const(32))?;
+        rctx.feed(ctx, &Instruction::I64Shl)?;
         // low | (high << 32)
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Or)?;
+        rctx.feed(ctx, &Instruction::I64Or)?;
         Ok(())
     }
 
     /// Emit: split the i64 in `scratch_i64` into two adjacent i32 registers
     /// `(dst, dst+1)`.  `scratch_i64` is overwritten with the high half.
-    fn emit_split_wide(&mut self, ctx: &mut Context, dst: u8, scratch_i64: u32, tail_idx: usize) -> Result<(), E> {
+    fn emit_split_wide(&mut self, ctx: &mut Context, dst: u8, scratch_i64: u32, rctx: usize) -> Result<(), E> {
         // tee scratch_i64 so we can use it twice.
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalTee(scratch_i64))?;
+        rctx.feed(ctx, &Instruction::LocalTee(scratch_i64))?;
         // low 32 bits → dst
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst as u32))?;
+        rctx.feed(ctx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, &Instruction::LocalSet(dst as u32))?;
         // high 32 bits → dst+1
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalGet(scratch_i64))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64Const(32))?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I64ShrU)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::I32WrapI64)?;
-        Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
+        rctx.feed(ctx, &Instruction::LocalGet(scratch_i64))?;
+        rctx.feed(ctx, &Instruction::I64Const(32))?;
+        rctx.feed(ctx, &Instruction::I64ShrU)?;
+        rctx.feed(ctx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, &Instruction::LocalSet(dst as u32 + 1))?;
         Ok(())
     }
 
@@ -2727,11 +2705,10 @@ pub struct DexBinaryArgs {
     pub flat: FlatMethods,
 }
 
-impl<'cb, 'ctx, Context, E, F, P, M> Recompile<Context, E, F>
-    for DexRecompiler<'cb, 'ctx, Context, E, F, P, M>
+impl<'cb, 'ctx, Context, E, F, M> Recompile<Context, E, F>
+    for DexRecompiler<'cb, 'ctx, Context, E, F, M>
 where
     F: InstructionSink<Context, E>,
-    P: LocalPoolBackend + Default,
     M: speet_object::ObjectModel<Context, E> + Default,
 {
     type BinaryArgs = DexBinaryArgs;
@@ -2742,24 +2719,22 @@ where
         args: DexBinaryArgs,
     ) {
         self.flat = args.flat;
-        // Rebuild total_params for the new binary's register count.
-        let max_regs = self.flat.max_registers();
-        self.total_params = max_regs; // traps may add more; caller should re-run setup_traps
     }
 
     fn drain_unit(
         &mut self,
-        ctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
+        rctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(AString, u32)>,
     ) -> BinaryUnit<F> {
         use wasm_encoder::ValType;
         // DEX: all params are i32 (Dalvik register file).
+        let total_params = rctx.locals_mark().total_locals;
         let param_types: alloc::vec::Vec<ValType> =
-            (0..self.total_params).map(|_| ValType::I32).collect();
+            (0..total_params).map(|_| ValType::I32).collect();
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
-        let base = ctx.base_func_offset();
-        let fns = ctx.drain_fns();
+        let base = rctx.base_func_offset();
+        let fns = rctx.drain_fns();
         let count = fns.len();
         BinaryUnit {
             fns,
