@@ -185,6 +185,13 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
     /// and the reactor is ready for the next binary unit.
     fn drain_fns(&mut self) -> Vec<Self::FnType>;
 
+    /// Seal any functions that were never explicitly terminated.
+    ///
+    /// Appends `unreachable; end` to each unsealed function so the WASM
+    /// binary validator sees properly terminated function bodies.  Call this
+    /// once — before `drain_fns` — after finishing a translation pass.
+    fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E>;
+
     // ── Reactor operations ────────────────────────────────────────────────
 
     /// Start a new function in the reactor.
@@ -369,6 +376,9 @@ where
     }
     fn drain_fns(&mut self) -> Vec<F> {
         self.reactor.drain_fns()
+    }
+    fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
+        self.reactor.seal_remaining(ctx)
     }
 
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {

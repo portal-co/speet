@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
+name = "bumpalo"
+version = "3.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+
+[[package]]
 name = "cc"
 version = "1.2.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -193,6 +199,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +221,12 @@ name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "lock_api"
@@ -461,6 +479,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -481,6 +500,19 @@ dependencies = [
  "proc-macro2 1.0.106",
  "quote 1.0.45",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.149"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -507,8 +539,27 @@ dependencies = [
  "speet-ordering",
  "speet-traps",
  "speet-wasm-helpers",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
+ "yecta",
+]
+
+[[package]]
+name = "speet-e2e"
+version = "0.1.0"
+dependencies = [
+ "object",
+ "rv-asm",
+ "serde",
+ "serde_json",
+ "speet-link-core",
+ "speet-memory",
+ "speet-module-builder",
+ "speet-riscv",
+ "wasm-encoder 0.240.0",
+ "wasm-layout",
+ "wasmi",
+ "wasmparser 0.240.0",
  "yecta",
 ]
 
@@ -517,7 +568,7 @@ name = "speet-link-core"
 version = "0.1.0"
 dependencies = [
  "speet-traps",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -529,7 +580,7 @@ dependencies = [
  "speet-link-core",
  "speet-schedule",
  "speet-traps",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -538,7 +589,7 @@ dependencies = [
 name = "speet-memory"
 version = "0.1.0"
 dependencies = [
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -554,7 +605,7 @@ dependencies = [
  "speet-ordering",
  "speet-reach",
  "speet-traps",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -567,8 +618,8 @@ dependencies = [
  "speet-linker",
  "speet-module-target",
  "speet-schedule",
- "wasm-encoder",
- "wasmparser",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
  "yecta",
 ]
 
@@ -576,8 +627,8 @@ dependencies = [
 name = "speet-module-target"
 version = "0.1.0"
 dependencies = [
- "wasm-encoder",
- "wasmparser",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
 ]
 
 [[package]]
@@ -585,7 +636,7 @@ name = "speet-object"
 version = "0.1.0"
 dependencies = [
  "tiny-keccak",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -595,7 +646,7 @@ name = "speet-ordering"
 version = "0.1.0"
 dependencies = [
  "speet-link-core",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -605,7 +656,7 @@ name = "speet-powerpc"
 version = "0.1.0"
 dependencies = [
  "powerpc",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "yecta",
 ]
 
@@ -629,7 +680,7 @@ dependencies = [
  "speet-reach",
  "speet-traps",
  "speet-wasm-helpers",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
@@ -639,7 +690,7 @@ name = "speet-schedule"
 version = "0.1.0"
 dependencies = [
  "speet-link-core",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
 ]
 
@@ -647,7 +698,7 @@ dependencies = [
 name = "speet-traps"
 version = "0.1.0"
 dependencies = [
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "yecta",
 ]
 
@@ -658,9 +709,9 @@ dependencies = [
  "speet-link-core",
  "speet-linker",
  "speet-memory",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wasm-layout",
- "wasmparser",
+ "wasmparser 0.240.0",
  "wax-core",
 ]
 
@@ -668,7 +719,7 @@ dependencies = [
 name = "speet-wasm-helpers"
 version = "0.1.0"
 dependencies = [
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
 ]
 
 [[package]]
@@ -681,10 +732,16 @@ dependencies = [
  "speet-memory",
  "speet-reach",
  "speet-traps",
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
  "wax-core",
  "yecta",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "spin"
@@ -700,6 +757,16 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "string-interner"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23de088478b31c349c9ba67816fa55d9355232d63c3afea8bf513e31f0f1d2c0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "serde",
+]
 
 [[package]]
 name = "syn"
@@ -777,6 +844,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
 name = "unicode-xid"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -789,14 +862,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06d642d8c5ecc083aafe9ceb32809276a304547a3a6eeecceb5d8152598bc71f"
 dependencies = [
  "leb128fmt",
- "wasmparser",
+ "wasmparser 0.240.0",
+]
+
+[[package]]
+name = "wasm-encoder"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30b6733b8b91d010a6ac5b0fb237dc46a19650bc4c67db66857e2e787d437204"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.247.0",
 ]
 
 [[package]]
 name = "wasm-layout"
 version = "0.1.0"
 dependencies = [
- "wasm-encoder",
+ "wasm-encoder 0.240.0",
+]
+
+[[package]]
+name = "wasmi"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22bf475363d09d960b48275c4ea9403051add498a9d80c64dbc91edabab9d1d0"
+dependencies = [
+ "spin 0.9.8",
+ "wasmi_collections",
+ "wasmi_core",
+ "wasmi_ir",
+ "wasmparser 0.228.0",
+ "wat",
+]
+
+[[package]]
+name = "wasmi_collections"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85851acbdffd675a9b699b3590406a1d37fc1e1fd073743c7c9cf47c59caacba"
+dependencies = [
+ "string-interner",
+]
+
+[[package]]
+name = "wasmi_core"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef64cf60195d1f937dbaed592a5afce3e6d86868fb8070c5255bc41539d68f9d"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "wasmi_ir"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dcb572ce4400e06b5475819f3d6b9048513efbca785f0b9ef3a41747f944fd8"
+dependencies = [
+ "wasmi_core",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.228.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4abf1132c1fdf747d56bbc1bb52152400c70f336870f968b85e89ea422198ae3"
+dependencies = [
+ "bitflags 2.11.0",
+ "indexmap",
 ]
 
 [[package]]
@@ -813,12 +947,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmparser"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e6fb4c2bee46c5ea4d40f8cdb5c131725cd976718ec56f1c8e82fbde5fa2a80"
+dependencies = [
+ "bitflags 2.11.0",
+ "indexmap",
+]
+
+[[package]]
+name = "wast"
+version = "247.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579d2d47eb33b0cdf9b14723cb115f1e1b7d6e77aac6f0816e5b7c7aeaa418ff"
+dependencies = [
+ "bumpalo",
+ "leb128fmt",
+ "memchr",
+ "unicode-width",
+ "wasm-encoder 0.247.0",
+]
+
+[[package]]
+name = "wat"
+version = "1.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3f4091c56437e86f2b57fa2fac72c4f528957a605b3f44f7c0b3b19a17ac5ee"
+dependencies = [
+ "wast",
+]
+
+[[package]]
 name = "wax-core"
 version = "0.1.0"
 dependencies = [
  "impl-trait-for-tuples",
- "wasm-encoder",
- "wasmparser",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
 ]
 
 [[package]]
@@ -834,11 +1000,169 @@ dependencies = [
 name = "yecta"
 version = "0.1.0"
 dependencies = [
- "spin",
- "wasm-encoder",
+ "spin 0.10.0",
+ "wasm-encoder 0.240.0",
  "wasm-layout",
  "wax-core",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "dreamcomp-ir-plugin-host"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcomp-plugin-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-arena"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps-c-backend"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-e2e-tests"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-edu"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-fast-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-lower"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-mini-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-c-interp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-interp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-swibb"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-generator"
+version = "0.8.0-pre.10"
+
+[[patch.unused]]
+name = "portal-jsc-simpl-js"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-opt-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
 
 [[patch.unused]]
 name = "ast-traits"
@@ -993,112 +1317,8 @@ name = "portal-pc-asm-common"
 version = "0.1.1"
 
 [[patch.unused]]
-name = "dreamcomp-ir-plugin-host"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcomp-plugin-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-arena"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps-c-backend"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-e2e-tests"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-edu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-fast-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-lower"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-mini-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-c-interp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-interp"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "wax-tags"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
 
 [[patch.unused]]
 name = "portal-solutions-asm-aarch64"
@@ -1127,51 +1347,3 @@ version = "0.1.0"
 [[patch.unused]]
 name = "portal-solutions-asm-x86-64-shim"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"

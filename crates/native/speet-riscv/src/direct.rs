@@ -808,6 +808,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             };
         }
 
+        // Seal any functions that were not explicitly terminated by a branch
+        // or jump — the trailing instructions of a translated region have no
+        // explicit successor and must be closed with unreachable; end.
+        let _ = rctx.seal_remaining(ctx);
+
         Ok(offset)
     }
 

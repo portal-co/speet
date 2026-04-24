@@ -851,6 +851,11 @@ struct Entry<F> {
     /// Per-function one-slot peephole buffer.  Holds at most one static
     /// instruction awaiting possible combination with the next instruction.
     peephole: Option<Instruction<'static>>,
+    /// Set to `true` once the function body has been terminated (via
+    /// `seal_to`, `seal_for_split`, or the `jmp` cycle path).  `drain_fns`
+    /// uses this to emit `unreachable; end` for any functions that were never
+    /// explicitly sealed (e.g. the final instructions of a translated region).
+    sealed: bool,
 }
 impl<Context, E> Reactor<Context, E> {
     /// Create a new function with the given locals and control flow distance.
@@ -1091,6 +1096,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             skip_depth: 0,
             block_frames: Vec::new(),
             peephole: None,
+            sealed: false,
         });
         Ok(())
     }
@@ -1138,6 +1144,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     .function
                     .instruction(ctx, &Instruction::End)?;
             }
+            // Close the function body's implicit outer block.
+            lock[idx as usize]
+                .function
+                .instruction(ctx, &Instruction::End)?;
+            lock[idx as usize].sealed = true;
             _ = take(&mut lock[idx as usize].preds);
             lock[idx as usize].const_stack.clear();
             lock[idx as usize].locals_const.clear();
@@ -1292,6 +1303,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 for _ in 0..ifs {
                     f.function.instruction(ctx, &Instruction::End)?;
                 }
+                // Close the function body's implicit outer block.
+                f.function.instruction(ctx, &Instruction::End)?;
+                f.sealed = true;
             }
         } else {
             self.add_pred(succ, pred);
@@ -2876,6 +2890,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             for _ in 0..ifs {
                 func.function.instruction(ctx, &Instruction::End)?;
             }
+            // Close the function body's implicit outer block.
+            func.function.instruction(ctx, &Instruction::End)?;
+            func.sealed = true;
             _ = take(&mut func.preds);
             func.const_stack.clear();
             func.locals_const.clear();
@@ -2977,6 +2994,21 @@ where
     /// // ... compile more functions into reactor ...
     /// let fns_b = reactor.drain_fns();   // reactor offset by fns_a.len() + fns_b.len()
     /// ```
+    /// Seal any functions that were not explicitly closed by a terminal
+    /// instruction (e.g. the trailing instructions of a translated region).
+    ///
+    /// Must be called with the same `ctx` used during translation, before
+    /// `drain_fns`.  Each unsealed function gets `unreachable; end` appended
+    /// so the WASM validator sees a properly terminated function body.
+    pub fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
+        for entry in self.fns.get_mut().iter_mut().filter(|e| !e.sealed) {
+            entry.function.instruction(ctx, &Instruction::Unreachable)?;
+            entry.function.instruction(ctx, &Instruction::End)?;
+            entry.sealed = true;
+        }
+        Ok(())
+    }
+
     pub fn drain_fns(&mut self) -> Vec<F> {
         let count = self.lock_global().len() as u32;
         let result = self.lock_global().drain(..).map(|e| e.function).collect();

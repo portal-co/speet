@@ -175,6 +175,9 @@ where
     fn drain_fns(&mut self) -> Vec<F> {
         self.reactor.drain_fns()
     }
+    fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
+        self.reactor.seal_remaining(ctx)
+    }
 
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
         self.reactor.next_with(ctx, f, len)?;
@@ -421,6 +424,9 @@ where
     }
     fn drain_fns(&mut self) -> Vec<F> {
         self.inner.drain_fns()
+    }
+    fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
+        self.inner.seal_remaining(ctx)
     }
     fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
         self.inner.next_with(ctx, f, len)

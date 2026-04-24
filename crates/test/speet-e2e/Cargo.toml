@@ -1,0 +1,19 @@
+[package]
+name = "speet-e2e"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+wasmi = "1"
+object = "0.36"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rv-asm.workspace = true
+speet-riscv = { path = "../../native/speet-riscv" }
+speet-link-core = { path = "../../os/speet-link-core" }
+speet-module-builder = { path = "../../os/speet-module-builder" }
+speet-memory = { path = "../../helper/speet-memory" }
+wasm-encoder.workspace = true
+wasmparser = { version = "0.240.0", features = ["validate"] }
+yecta = { path = "../../helper/yecta" }
+wasm-layout = { path = "../../helper/wasm-layout" }

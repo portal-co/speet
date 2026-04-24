@@ -24,6 +24,8 @@ members = [
     "crates/os/speet-schedule",
     "crates/os/speet-module-target",
     "crates/os/speet-module-builder",
+    # End-to-end integration tests
+    "crates/test/speet-e2e",
 ]
 resolver = "3"
 
