@@ -9,3 +9,4 @@ license-file.workspace = true
 wasm-encoder.workspace = true
 wax-core.workspace = true
 yecta = { path = "../yecta" }
+speet-link-core = { path = "../../os/speet-link-core" }

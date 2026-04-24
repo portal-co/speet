@@ -185,6 +185,27 @@ pub trait LocalPoolBackend {
     fn seed_i64(&mut self, start: u32, count: u32);
 }
 
+// ── LocalPoolApi ──────────────────────────────────────────────────────────────
+
+/// Dyn-object-safe interface to a [`LocalPool`].
+///
+/// `LocalPoolBackend` cannot be used as `dyn LocalPoolBackend` in some
+/// contexts.  `LocalPoolApi` is a stable, explicitly dyn-safe view of the
+/// same four operations.  A blanket impl covers every `T: LocalPoolBackend`.
+pub trait LocalPoolApi {
+    fn alloc(&mut self, ty: ValType) -> Option<u32>;
+    fn free(&mut self, idx: u32, ty: ValType);
+    fn seed_i32(&mut self, start: u32, count: u32);
+    fn seed_i64(&mut self, start: u32, count: u32);
+}
+
+impl<T: LocalPoolBackend> LocalPoolApi for T {
+    fn alloc(&mut self, ty: ValType) -> Option<u32> { LocalPoolBackend::alloc(self, ty) }
+    fn free(&mut self, idx: u32, ty: ValType) { LocalPoolBackend::free(self, idx, ty) }
+    fn seed_i32(&mut self, start: u32, count: u32) { LocalPoolBackend::seed_i32(self, start, count) }
+    fn seed_i64(&mut self, start: u32, count: u32) { LocalPoolBackend::seed_i64(self, start, count) }
+}
+
 /// A fixed-capacity pool of recyclable wasm local indices.
 ///
 /// The pool is split into two typed buckets — one for `i32` locals and one for

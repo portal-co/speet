@@ -61,12 +61,12 @@ use wax_core::build::InstructionSink;
 /// Supply one entry per guest memory (indexed by guest memory index).
 /// Entries beyond the number of parsed memories fall back to identity
 /// (no mapper, 32-bit addresses).
-pub struct GuestMemoryConfig<Context, E, F = Function> {
+pub struct GuestMemoryConfig<Context, E> {
     /// Width of guest addresses for this memory.
     pub addr_width: AddressWidth,
     /// Mapper that translates virtual → physical addresses.
     /// The mapper declares its own scratch locals via `declare_locals`.
-    pub mapper: Option<Box<dyn MapperCallback<Context, E, F>>>,
+    pub mapper: Option<Box<dyn MapperCallback<Context, E>>>,
 }
 
 // ── IndexOffsets ──────────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ pub struct WasmFrontend<Context, E, F = Function> {
     memory_infos: Vec<MemoryInfo>,
     /// Per-guest-memory mapper + address-width configurations.
     /// Index `N` applies to guest memory `N`.
-    pub per_memory: Vec<GuestMemoryConfig<Context, E, F>>,
+    pub per_memory: Vec<GuestMemoryConfig<Context, E>>,
     /// Host linear memory index (always 0 in single-memory lowering).
     pub host_memory: u32,
     /// Index offsets for calls, globals, and tables.
@@ -168,7 +168,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
     /// * `offsets`      — additive index offsets for calls/globals/tables.
     /// * `fn_creator`   — closure that builds an `F` from a local-variable list.
     pub fn new(
-        per_memory: Vec<GuestMemoryConfig<Context, E, F>>,
+        per_memory: Vec<GuestMemoryConfig<Context, E>>,
         host_memory: u32,
         offsets: IndexOffsets,
         fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
@@ -236,7 +236,7 @@ impl<Context, E> WasmFrontend<Context, E, Function> {
     /// Convenience constructor that uses `wasm_encoder::Function` as the
     /// output type.
     pub fn with_wasm_encoder_fn(
-        per_memory: Vec<GuestMemoryConfig<Context, E, Function>>,
+        per_memory: Vec<GuestMemoryConfig<Context, E>>,
         host_memory: u32,
         offsets: IndexOffsets,
     ) -> Self {
@@ -1410,7 +1410,7 @@ fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     addr_width: AddressWidth,
     int_width: IntWidth,
     memory_index: u32,
-    mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
+    mapper: Option<&mut (dyn MapperCallback<Context, E> + '_)>,
     kind: LoadKind,
 ) -> Result<(), E> {
     let mut emitter = MemoryEmitter::new(addr_width, int_width, memory_index, mapper);
@@ -1424,7 +1424,7 @@ fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     memarg: &wasmparser::MemArg,
     addr_width: AddressWidth,
     memory_index: u32,
-    mapper: Option<&mut (dyn MapperCallback<Context, E, F> + '_)>,
+    mapper: Option<&mut (dyn MapperCallback<Context, E> + '_)>,
     kind: StoreKind,
     int_width: IntWidth,
     base_scratch_idx: u32,

@@ -54,10 +54,10 @@ impl From<u64> for PageTableBase {
 
 impl PageTableBase {
     /// Emit the instructions that push this value onto the wasm stack.
-    pub fn emit_load<Context, E, F: InstructionSink<Context, E>>(
+    pub fn emit_load<Context, E>(
         &self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E, F>,
+        cb: &mut CallbackContext<Context, E>,
         use_i64: bool,
     ) -> Result<(), E> {
         match self {
@@ -154,7 +154,7 @@ impl LocalDeclarator for StandardPageTableMapper {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+impl<Context, E> MapperCallback<Context, E>
     for StandardPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
@@ -164,7 +164,7 @@ impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     fn call(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E, F>,
+        cb: &mut CallbackContext<Context, E>,
     ) -> Result<(), E> {
         let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
@@ -285,7 +285,7 @@ impl LocalDeclarator for StandardPageTableMapper32 {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+impl<Context, E> MapperCallback<Context, E>
     for StandardPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
@@ -295,7 +295,7 @@ impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     fn call(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E, F>,
+        cb: &mut CallbackContext<Context, E>,
     ) -> Result<(), E> {
         let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
@@ -445,7 +445,7 @@ impl LocalDeclarator for MultilevelPageTableMapper {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+impl<Context, E> MapperCallback<Context, E>
     for MultilevelPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
@@ -455,7 +455,7 @@ impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     fn call(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E, F>,
+        cb: &mut CallbackContext<Context, E>,
     ) -> Result<(), E> {
         let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;
@@ -608,7 +608,7 @@ impl LocalDeclarator for MultilevelPageTableMapper32 {
     }
 }
 
-impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
+impl<Context, E> MapperCallback<Context, E>
     for MultilevelPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
@@ -618,7 +618,7 @@ impl<Context, E, F: InstructionSink<Context, E>> MapperCallback<Context, E, F>
     fn call(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E, F>,
+        cb: &mut CallbackContext<Context, E>,
     ) -> Result<(), E> {
         let locals = self.locals.expect("declare_locals must be called before call");
         let lv = locals.vaddr;

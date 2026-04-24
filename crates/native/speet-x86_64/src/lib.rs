@@ -132,12 +132,12 @@ impl X86Recompiler {
     }
 
     /// Set the escape tag used for exception-based control flow in speculative calls
-    pub fn set_escape_tag<Context, E>(&mut self, rctx: &mut dyn ReactorContext<Context, E>, tag: Option<EscapeTag>) {
+    pub fn set_escape_tag<Context, E, F>(&mut self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tag: Option<EscapeTag>) {
         rctx.set_escape_tag(tag);
     }
 
     /// Get the current escape tag
-    pub fn get_escape_tag<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> Option<EscapeTag> {
+    pub fn get_escape_tag<Context, E, F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Option<EscapeTag> {
         rctx.escape_tag()
     }
 
@@ -146,36 +146,36 @@ impl X86Recompiler {
         Self::EXPECTED_RA_LOCAL
     }
 
-    fn emit_i64_const<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: i64) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Const(value))
+    fn emit_i64_const<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: i64) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(value))
     }
 
-    fn emit_i64_add<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Add)
+    fn emit_i64_add<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Add)
     }
-    fn emit_i64_sub<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Sub)
+    fn emit_i64_sub<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Sub)
     }
-    fn emit_i64_mul<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Mul)
+    fn emit_i64_mul<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Mul)
     }
-    fn emit_i64_and<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64And)
+    fn emit_i64_and<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)
     }
-    fn emit_i64_or<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Or)
+    fn emit_i64_or<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Or)
     }
-    fn emit_i64_xor<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Xor)
+    fn emit_i64_xor<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)
     }
-    fn emit_i64_shl<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64Shl)
+    fn emit_i64_shl<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64Shl)
     }
-    fn emit_i64_shr_u<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64ShrU)
+    fn emit_i64_shr_u<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)
     }
-    fn emit_i64_shr_s<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64ShrS)
+    fn emit_i64_shr_s<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)
     }
 
     // Condition flag helpers
@@ -194,9 +194,9 @@ impl X86Recompiler {
     pub const BASE_PARAMS: u32 = 26;
 
     /// Install an instruction trap.
-    pub fn set_instruction_trap<'cb, 'ctx, Context, E>(
+    pub fn set_instruction_trap<'cb, 'ctx, Context, E, F>(
         &self,
-        rctx: &mut dyn ReactorContext<Context, E>,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
     ) {
         // This now requires access to the TrapConfig which is in the context.
@@ -209,20 +209,19 @@ impl X86Recompiler {
     }
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
-    pub fn setup_traps<Context, E>(&self, rctx: &mut dyn ReactorContext<Context, E>) -> u32 {
-        let layout = rctx.layout_mut();
-        layout.append(16, wasm_encoder::ValType::I64); // GPRs (params 0-15)
-        layout.append(1, wasm_encoder::ValType::I32); // PC (param 16)
-        layout.append(5, wasm_encoder::ValType::I32); // ZF/SF/CF/OF/PF (params 17-21)
-        layout.append(4, wasm_encoder::ValType::I64); // temps + expected_RA (params 22-25)
+    pub fn setup_traps<Context, E, F>(&self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+        rctx.layout_mut().append(16, wasm_encoder::ValType::I64);
+        rctx.layout_mut().append(1, wasm_encoder::ValType::I32);
+        rctx.layout_mut().append(5, wasm_encoder::ValType::I32);
+        rctx.layout_mut().append(4, wasm_encoder::ValType::I64);
         rctx.declare_trap_params();
-        let mark = layout.mark();
+        let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
     }
 
     /// The current total wasm function parameter count.
-    pub fn total_params<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> u32 {
+    pub fn total_params<Context, E, F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
         rctx.locals_mark().total_locals
     }
 
@@ -318,46 +317,46 @@ impl X86Recompiler {
         }
     }
 
-    fn set_zf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::ZF_LOCAL))
+    fn set_zf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
-    fn set_sf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::SF_LOCAL))
+    fn set_sf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
-    fn set_cf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::CF_LOCAL))
+    fn set_cf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
-    fn set_of<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::OF_LOCAL))
+    fn set_of<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
-    fn set_pf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, value: bool) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+    fn set_pf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
-    fn compute_parity<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Result<(), E> {
+    fn compute_parity<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         // Assume value is on stack (i64)
         // Extract lowest byte: value & 0xFF
-        rctx.feed(ctx, &Instruction::I64Const(0xFF))?;
-        rctx.feed(ctx, &Instruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
         // Count bits: use popcnt if available, otherwise simulate
         // For simplicity, we'll implement a basic parity check
         // This is a simplified version - real parity counts all bits in lowest byte
-        rctx.feed(ctx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         // Simple parity: check if number of 1s is even
         // For now, just set to 0 (even parity) - this is a simplification
-        rctx.feed(ctx, &Instruction::Drop)?;
-        rctx.feed(ctx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
-        rctx.feed(ctx, &Instruction::LocalSet(Self::PF_LOCAL))
+        rctx.feed(ctx, tail_idx, &Instruction::Drop)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to set flags after arithmetic operation
@@ -365,16 +364,17 @@ impl X86Recompiler {
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
         result: i64,
         operand1: i64,
         operand2: i64,
         is_subtraction: bool,
     ) -> Result<(), E> {
         // ZF: result == 0
-        self.set_zf(ctx, rctx, result == 0)?;
+        self.set_zf(ctx, rctx, tail_idx, result == 0)?;
 
         // SF: result < 0 (for signed)
-        self.set_sf(ctx, rctx, result < 0)?;
+        self.set_sf(ctx, rctx, tail_idx, result < 0)?;
 
         // For CF and OF, we need to detect carry/borrow and overflow
         // This is simplified - real implementation would need proper overflow detection
@@ -382,10 +382,10 @@ impl X86Recompiler {
         // CF: carry flag (simplified)
         if is_subtraction {
             // For subtraction: CF if borrow occurred (operand1 < operand2 for unsigned)
-            self.set_cf(ctx, rctx, (operand1 as u64) < (operand2 as u64))?;
+            self.set_cf(ctx, rctx, tail_idx, (operand1 as u64) < (operand2 as u64))?;
         } else {
             // For addition: CF if result < operand1 (unsigned overflow)
-            self.set_cf(ctx, rctx, (result as u64) < (operand1 as u64))?;
+            self.set_cf(ctx, rctx, tail_idx, (result as u64) < (operand1 as u64))?;
         }
 
         // OF: overflow flag (simplified - check if sign changed unexpectedly)
@@ -396,15 +396,15 @@ impl X86Recompiler {
             // For subtraction: overflow if (op1 positive, op2 negative, result negative) or (op1 negative, op2 positive, result positive)
             let overflow =
                 (op1_sign && !op2_sign && !result_sign) || (!op1_sign && op2_sign && result_sign);
-            self.set_of(ctx, rctx, overflow)?;
+            self.set_of(ctx, rctx, tail_idx, overflow)?;
         } else {
             // For addition: overflow if both operands same sign but result different sign
             let overflow = (op1_sign == op2_sign) && (op1_sign != result_sign);
-            self.set_of(ctx, rctx, overflow)?;
+            self.set_of(ctx, rctx, tail_idx, overflow)?;
         }
 
         // PF: parity (simplified)
-        self.compute_parity(ctx, rctx)?;
+        self.compute_parity(ctx, rctx, tail_idx)?;
 
         Ok(())
     }
@@ -413,112 +413,55 @@ impl X86Recompiler {
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
         size_bits: u32,
         signed: bool,
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match (size_bits, signed) {
-            (8, true) => rctx.feed(ctx, &Instruction::I64Load8S(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }),
-            ),
-            (8, false) => rctx.feed(ctx, &Instruction::I64Load8U(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }),
-            ),
-            (16, true) => rctx.feed(ctx, &Instruction::I64Load16S(MemArg {
-                    offset: 0,
-                    align: 1,
-                    memory_index: 0,
-                }),
-            ),
-            (16, false) => rctx.feed(ctx, &Instruction::I64Load16U(MemArg {
-                    offset: 0,
-                    align: 1,
-                    memory_index: 0,
-                }),
-            ),
-            (32, true) => rctx.feed(ctx, &Instruction::I64Load32S(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }),
-            ),
-            (32, false) => rctx.feed(ctx, &Instruction::I64Load32U(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }),
-            ),
-            (64, _) => rctx.feed(ctx, &Instruction::I64Load(MemArg {
-                    offset: 0,
-                    align: 3,
-                    memory_index: 0,
-                }),
-            ),
-            _ => rctx.feed(ctx, &Instruction::Unreachable),
+            (8, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load8S(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+            (8, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load8U(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+            (16, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load16S(MemArg { offset: 0, align: 1, memory_index: 0 })),
+            (16, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load16U(MemArg { offset: 0, align: 1, memory_index: 0 })),
+            (32, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(MemArg { offset: 0, align: 2, memory_index: 0 })),
+            (32, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load32U(MemArg { offset: 0, align: 2, memory_index: 0 })),
+            (64, _) => rctx.feed(ctx, tail_idx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 })),
+            _ => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
         }
     }
 
-    fn emit_memory_store<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, size_bits: u32) -> Result<(), E> {
+    fn emit_memory_store<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, size_bits: u32) -> Result<(), E> {
         use wasm_encoder::MemArg;
         match size_bits {
-            8 => rctx.feed(ctx, &Instruction::I64Store8(MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }),
-            ),
-            16 => rctx.feed(ctx, &Instruction::I64Store16(MemArg {
-                    offset: 0,
-                    align: 1,
-                    memory_index: 0,
-                }),
-            ),
-            32 => rctx.feed(ctx, &Instruction::I64Store32(MemArg {
-                    offset: 0,
-                    align: 2,
-                    memory_index: 0,
-                }),
-            ),
-            64 => rctx.feed(ctx, &Instruction::I64Store(MemArg {
-                    offset: 0,
-                    align: 3,
-                    memory_index: 0,
-                }),
-            ),
-            _ => rctx.feed(ctx, &Instruction::Unreachable),
+            8  => rctx.feed(ctx, tail_idx, &Instruction::I64Store8(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+            16 => rctx.feed(ctx, tail_idx, &Instruction::I64Store16(MemArg { offset: 0, align: 1, memory_index: 0 })),
+            32 => rctx.feed(ctx, tail_idx, &Instruction::I64Store32(MemArg { offset: 0, align: 2, memory_index: 0 })),
+            64 => rctx.feed(ctx, tail_idx, &Instruction::I64Store(MemArg   { offset: 0, align: 3, memory_index: 0 })),
+            _  => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
         }
     }
 
-    // Helpers for sub-register read/write
     fn emit_mask_shift_for_read<Context, E, F>(
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
         size_bits: u32,
         bit_offset: u32,
     ) -> Result<(), E> {
-        // shift right by bit_offset then mask size_bits
         if bit_offset > 0 {
-            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            rctx.feed(ctx, &Instruction::I64ShrU)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
         }
         match size_bits {
-            64 => { /* no mask */ }
-            32 => { /* locals model 32-bit values as zero-extended into 64, so no mask needed for reads */
-            }
+            64 | 32 => {}
             16 => {
-                rctx.feed(ctx, &Instruction::I64Const(0xFFFF))?;
-                rctx.feed(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
             }
             8 => {
-                rctx.feed(ctx, &Instruction::I64Const(0xFF))?;
-                rctx.feed(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
             }
             _ => {}
         }
@@ -529,59 +472,32 @@ impl X86Recompiler {
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
         local: u32,
         size_bits: u32,
         bit_offset: u32,
     ) -> Result<(), E> {
-        // Assume new value is on stack (i64) and we need to write it into `local` at bit_offset preserving other bits.
-        // Steps:
-        // local_val = local.get(local)
-        // mask = ((1 << size_bits) - 1) << bit_offset
-        // cleared = local_val & ~mask
-        // new_shifted = (new_value & ((1<<size_bits)-1)) << bit_offset
-        // combined = cleared | new_shifted
-        // local.set(local, combined)
-
-        // local.get(local)
-        rctx.feed(ctx, &Instruction::LocalGet(local))?;
-        // store original in temp (we rely on temp locals being available after local 16). We'll use LocalSet(17) and LocalGet(17).
-        rctx.feed(ctx, &Instruction::LocalSet(17))?;
-        // compute mask = (1<<size_bits)-1
-        let mask: i64 = if size_bits == 64 {
-            -1i64
-        } else {
-            ((1u128 << size_bits) - 1) as i64
-        };
-        rctx.feed(ctx, &Instruction::I64Const(mask))?;
-        // shift mask left by bit_offset
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(17))?;
+        let mask: i64 = if size_bits == 64 { -1i64 } else { ((1u128 << size_bits) - 1) as i64 };
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(mask))?;
         if bit_offset > 0 {
-            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            rctx.feed(ctx, &Instruction::I64Shl)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
         }
-        // invert mask -> ~mask
-        rctx.feed(ctx, &Instruction::I64Const(-1))?; // -1 is all ones
-        rctx.feed(ctx, &Instruction::I64Xor)?; // ~mask = mask ^ -1
-                                                       // get original
-        rctx.feed(ctx, &Instruction::LocalGet(17))?;
-        // cleared = original & ~mask
-        rctx.feed(ctx, &Instruction::I64And)?;
-        // now compute new_shifted: we assume new_value is currently on top of stack
-        // mask = (1<<size_bits)-1 (again)
-        let small_mask: i64 = if size_bits == 64 {
-            -1i64
-        } else {
-            ((1u128 << size_bits) - 1) as i64
-        };
-        rctx.feed(ctx, &Instruction::I64Const(small_mask))?;
-        rctx.feed(ctx, &Instruction::I64And)?; // new_value & small_mask
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(17))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+        let small_mask: i64 = if size_bits == 64 { -1i64 } else { ((1u128 << size_bits) - 1) as i64 };
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(small_mask))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
         if bit_offset > 0 {
-            rctx.feed(ctx, &Instruction::I64Const(bit_offset as i64))?;
-            rctx.feed(ctx, &Instruction::I64Shl)?; // << bit_offset
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
         }
-        // combined = cleared | new_shifted
-        rctx.feed(ctx, &Instruction::I64Or)?;
-        // store back into local
-        rctx.feed(ctx, &Instruction::LocalSet(local))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
         Ok(())
     }
 }

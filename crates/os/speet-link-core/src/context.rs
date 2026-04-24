@@ -187,18 +187,24 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
 
     // ── Reactor operations ────────────────────────────────────────────────
 
-    /// Emit a single WASM instruction into the current function.
-    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
+    /// Start a new function in the reactor.
+    ///
+    /// Returns the `tail_idx` of the newly-created function.  Callers must
+    /// save this index and pass it to every subsequent emission call
+    /// (`feed`, `jmp`, `seal_fn`, `ji`, `ji_with_params`, `ret`) that
+    /// targets this function.  Keeping `tail_idx` explicit enables parallel
+    /// emission over multiple simultaneously-live functions.
+    fn next_with(&mut self, ctx: &mut Context, f: Self::FnType, len: u32) -> Result<usize, E>;
+
+    /// Emit a single WASM instruction into the function identified by `tail_idx`.
+    fn feed(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E>;
 
     /// Emit an unconditional tail-call jump to `target`, forwarding `params`
-    /// parameters.
-    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E>;
+    /// parameters, into the function identified by `tail_idx`.
+    fn jmp(&self, ctx: &mut Context, tail_idx: usize, target: FuncIdx, params: u32) -> Result<(), E>;
 
-    /// Start a new function in the reactor using `next_with`.
-    fn next_with(&mut self, ctx: &mut Context, f: Self::FnType, len: u32) -> Result<(), E>;
-
-    /// Seal the current function group with a terminal instruction.
-    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>;
+    /// Seal the function group identified by `tail_idx` with a terminal instruction.
+    fn seal_fn(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E>;
 
     // ── Configuration ─────────────────────────────────────────────────────
 
@@ -219,26 +225,62 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
     fn ji(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: u32,
-        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
         call: Option<EscapeTag>,
         pool: Pool<'_, Context, E>,
-        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E>;
 
     /// Emit an indirect jump or call using yecta's `ji_with_params` API.
     fn ji_with_params(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: yecta::JumpCallParams<'_, Context, E>,
     ) -> Result<(), E>;
 
     /// Emit a return through the escape-tag mechanism.
-    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E>;
+    fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E>;
 
-    /// Access the underlying local pool (if any).
-    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R;
+    /// Seed the underlying local pool.
+    ///
+    /// The closure receives a `&mut dyn LocalPoolApi` so this method is
+    /// dyn-object-safe.  All current uses are side-effectful seeding calls
+    /// (`seed_i32` / `seed_i64`) that return no value.
+    fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi));
+
+    /// Flush all pending lazy store bundles (used by FENCE/SYNC handlers).
+    ///
+    /// Equivalent to `Reactor::flush_bundles`.
+    fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E>;
+
+    /// Flush any deferred (lazy) stores that might alias a load at `addr_local`.
+    ///
+    /// Equivalent to `Reactor::flush_bundles_for_load`.  Used by the ordering
+    /// helpers in `speet-ordering` so they can work through a `ReactorContext`
+    /// instead of a bare `Reactor`.
+    fn flush_for_load(
+        &self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        tail_idx: usize,
+    ) -> Result<(), E>;
+
+    /// Defer a store instruction via the lazy-bundle mechanism.
+    ///
+    /// Equivalent to `Reactor::feed_lazy`.  Used by the ordering helpers.
+    fn feed_lazy(
+        &self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        val_type: ValType,
+        insn: &Instruction<'static>,
+        tail_idx: usize,
+    ) -> Result<(), E>;
 }
 
 // ── Blanket impl for Reactor (provides a minimal ReactorContext without traps) ─
@@ -267,20 +309,18 @@ where
 
 impl<'a, Context, E, F, P> InstructionSink<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
-    F: InstructionSink<Context, E> + Default,
+    F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.instruction(ctx, insn)
+        self.reactor.tail().instruction(ctx, insn)
     }
 }
 
 impl<'a, Context, E, F, P> BaseContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
-    F: InstructionSink<Context, E> + Default,
+    F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn layout(&self) -> &LocalLayout {
         &self.layout
@@ -319,9 +359,8 @@ where
 
 impl<'a, Context, E, F, P> ReactorContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
-    F: InstructionSink<Context, E> + Default,
-    P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend + yecta::LocalPoolApi,
 {
     type FnType = F;
 
@@ -332,19 +371,17 @@ where
         self.reactor.drain_fns()
     }
 
-    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
+        self.reactor.next_with(ctx, f, len)?;
+        Ok(self.reactor.fn_count() - 1)
+    }
+    fn feed(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, insn)
     }
-    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn jmp(&self, ctx: &mut Context, tail_idx: usize, target: FuncIdx, params: u32) -> Result<(), E> {
         self.reactor.jmp(tail_idx, ctx, target, params)
     }
-    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
-        self.reactor.next_with(ctx, f, len)
-    }
-    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn seal_fn(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.seal_to(tail_idx, ctx, insn)
     }
 
@@ -361,32 +398,127 @@ where
     fn ji(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: u32,
-        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
         call: Option<EscapeTag>,
         pool: Pool<'_, Context, E>,
-        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.ji(ctx, params, fixups, target, call, pool, condition, tail_idx)
     }
 
     fn ji_with_params(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: yecta::JumpCallParams<'_, Context, E>,
     ) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.ji_with_params(ctx, params, tail_idx)
     }
 
-    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
         self.reactor.ret(tail_idx, ctx, params, tag)
     }
 
-    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
-        self.reactor.with_local_pool(f)
+    fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {
+        self.reactor.with_local_pool(|p| f(p as &mut dyn yecta::LocalPoolApi))
+    }
+
+    fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+        self.reactor.flush_bundles(ctx, tail_idx)
+    }
+
+    fn flush_for_load(
+        &self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)
+    }
+
+    fn feed_lazy(
+        &self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        val_type: ValType,
+        insn: &Instruction<'static>,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
+    }
+}
+
+// ── FedContext ────────────────────────────────────────────────────────────────
+
+/// A `ReactorContext` reference bound to a saved `tail_idx`.
+///
+/// Bundles `&RC` with the index of the currently-active function, providing:
+/// - `InstructionSink` — for passing to [`ObjectModel`](speet_object) methods
+///   and other `&mut dyn InstructionSink` consumers without an unsafe cast.
+/// - Thin delegation methods (`feed`, `jmp`, `ret`, `ji`, …) that inject
+///   `tail_idx` automatically, so callers never pass it explicitly.
+///
+/// Create once after each [`ReactorContext::next_with`] call and pass
+/// `&FedContext` to pure-emission helpers, `&mut FedContext` where
+/// `InstructionSink` is needed.
+pub struct FedContext<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> {
+    pub rctx: &'a RC,
+    pub tail_idx: usize,
+    _phantom: core::marker::PhantomData<(Context, E)>,
+}
+
+impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> FedContext<'a, Context, E, RC> {
+    pub fn new(rctx: &'a RC, tail_idx: usize) -> Self {
+        Self { rctx, tail_idx, _phantom: core::marker::PhantomData }
+    }
+
+    pub fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.rctx.feed(ctx, self.tail_idx, insn)
+    }
+    pub fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+        self.rctx.jmp(ctx, self.tail_idx, target, params)
+    }
+    pub fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.rctx.ret(ctx, self.tail_idx, params, tag)
+    }
+    pub fn ji(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
+    ) -> Result<(), E> {
+        self.rctx.ji(ctx, self.tail_idx, params, fixups, target, call, pool, condition)
+    }
+    pub fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E> {
+        self.rctx.ji_with_params(ctx, self.tail_idx, params)
+    }
+    pub fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.rctx.seal_fn(ctx, self.tail_idx, insn)
+    }
+
+    pub fn pool(&self) -> Pool<'_, Context, E> { self.rctx.pool() }
+    pub fn escape_tag(&self) -> Option<EscapeTag> { self.rctx.escape_tag() }
+    pub fn locals_mark(&self) -> Mark { self.rctx.locals_mark() }
+    pub fn base_func_offset(&self) -> u32 { self.rctx.base_func_offset() }
+    pub fn layout(&self) -> &LocalLayout { self.rctx.layout() }
+}
+
+impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Context, E>
+    for FedContext<'a, Context, E, RC>
+{
+    fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.rctx.feed(ctx, self.tail_idx, insn)
     }
 }

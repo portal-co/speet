@@ -75,7 +75,6 @@ impl<'cb, 'ctx, Context, E, F, P> BaseContext<Context, E>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn layout(&self) -> &LocalLayout {
         &self.layout
@@ -154,10 +153,9 @@ impl<'cb, 'ctx, Context, E, F, P> InstructionSink<Context, E>
 where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.reactor.instruction(ctx, insn)
+        self.reactor.tail().instruction(ctx, insn)
     }
 }
 
@@ -167,8 +165,7 @@ impl<'cb, 'ctx, Context, E, F, P> ReactorContext<Context, E>
     for LinkerInner<'cb, 'ctx, Context, E, F, P>
 where
     F: InstructionSink<Context, E>,
-    P: LocalPoolBackend,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
+    P: LocalPoolBackend + yecta::LocalPoolApi,
 {
     type FnType = F;
 
@@ -179,19 +176,17 @@ where
         self.reactor.drain_fns()
     }
 
-    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
+        self.reactor.next_with(ctx, f, len)?;
+        Ok(self.reactor.fn_count() - 1)
+    }
+    fn feed(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         Fed { reactor: &self.reactor, tail_idx }.instruction(ctx, insn)
     }
-    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn jmp(&self, ctx: &mut Context, tail_idx: usize, target: FuncIdx, params: u32) -> Result<(), E> {
         self.reactor.jmp(tail_idx, ctx, target, params)
     }
-    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
-        self.reactor.next_with(ctx, f, len)
-    }
-    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn seal_fn(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.seal_to(tail_idx, ctx, insn)
     }
 
@@ -208,33 +203,57 @@ where
     fn ji(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: u32,
-        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
         call: Option<EscapeTag>,
         pool: Pool<'_, Context, E>,
-        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.ji(ctx, params, fixups, target, call, pool, condition, tail_idx)
     }
 
     fn ji_with_params(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: yecta::JumpCallParams<'_, Context, E>,
     ) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
         self.reactor.ji_with_params(ctx, params, tail_idx)
     }
 
-    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
-        let tail_idx = self.reactor.fn_count().saturating_sub(1);
+    fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
         self.reactor.ret(tail_idx, ctx, params, tag)
     }
 
-    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
-        self.reactor.with_local_pool(f)
+    fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {
+        self.reactor.with_local_pool(|p| f(p as &mut dyn yecta::LocalPoolApi))
+    }
+
+    fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+        self.reactor.flush_bundles(ctx, tail_idx)
+    }
+
+    fn flush_for_load(
+        &self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)
+    }
+
+    fn feed_lazy(
+        &self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        val_type: ValType,
+        insn: &Instruction<'static>,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
     }
 }
 
@@ -321,10 +340,9 @@ where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
     Plugin: LinkerPlugin<F>,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.inner.reactor.instruction(ctx, insn)
+        self.inner.reactor.tail().instruction(ctx, insn)
     }
 }
 
@@ -336,7 +354,6 @@ where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
     Plugin: LinkerPlugin<F>,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     fn layout(&self) -> &LocalLayout {
         self.inner.layout()
@@ -394,9 +411,8 @@ impl<'cb, 'ctx, Context, E, F, P, Plugin> ReactorContext<Context, E>
     for Linker<'cb, 'ctx, Context, E, F, P, Plugin>
 where
     F: InstructionSink<Context, E>,
-    P: LocalPoolBackend,
+    P: LocalPoolBackend + yecta::LocalPoolApi,
     Plugin: LinkerPlugin<F>,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     type FnType = F;
 
@@ -406,17 +422,17 @@ where
     fn drain_fns(&mut self) -> Vec<F> {
         self.inner.drain_fns()
     }
-    fn feed(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.inner.feed(ctx, insn)
-    }
-    fn jmp(&self, ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
-        self.inner.jmp(ctx, target, params)
-    }
-    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<(), E> {
+    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
         self.inner.next_with(ctx, f, len)
     }
-    fn seal_fn(&self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
-        self.inner.seal_fn(ctx, insn)
+    fn feed(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+        self.inner.feed(ctx, tail_idx, insn)
+    }
+    fn jmp(&self, ctx: &mut Context, tail_idx: usize, target: FuncIdx, params: u32) -> Result<(), E> {
+        self.inner.jmp(ctx, tail_idx, target, params)
+    }
+    fn seal_fn(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+        self.inner.seal_fn(ctx, tail_idx, insn)
     }
     fn pool(&self) -> Pool<'_, Context, E> {
         self.inner.pool()
@@ -431,30 +447,57 @@ where
     fn ji(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: u32,
-        fixups: &alloc::collections::BTreeMap<u32, &dyn wax_core::build::InstructionSource<Context, E>>,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
         call: Option<EscapeTag>,
         pool: Pool<'_, Context, E>,
-        condition: Option<&dyn wax_core::build::InstructionSource<Context, E>>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
-        self.inner.ji(ctx, params, fixups, target, call, pool, condition)
+        self.inner.ji(ctx, tail_idx, params, fixups, target, call, pool, condition)
     }
 
     fn ji_with_params(
         &self,
         ctx: &mut Context,
+        tail_idx: usize,
         params: yecta::JumpCallParams<'_, Context, E>,
     ) -> Result<(), E> {
-        self.inner.ji_with_params(ctx, params)
+        self.inner.ji_with_params(ctx, tail_idx, params)
     }
 
-    fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
-        self.inner.ret(ctx, params, tag)
+    fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.inner.ret(ctx, tail_idx, params, tag)
     }
 
-    fn with_local_pool<R>(&self, f: impl FnOnce(&mut dyn yecta::LocalPoolApi) -> R) -> R {
+    fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {
         self.inner.with_local_pool(f)
+    }
+
+    fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+        self.inner.flush_bundles(ctx, tail_idx)
+    }
+
+    fn flush_for_load(
+        &self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.inner.flush_for_load(ctx, addr_local, addr_type, tail_idx)
+    }
+
+    fn feed_lazy(
+        &self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        val_type: ValType,
+        insn: &Instruction<'static>,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.inner.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
     }
 }
 
@@ -465,7 +508,6 @@ where
     F: InstructionSink<Context, E>,
     P: LocalPoolBackend,
     Plugin: LinkerPlugin<F>,
-    Reactor<Context, E, F, P>: InstructionSink<Context, E>,
 {
     /// Execute a [`speet_schedule::FuncSchedule`] using this linker.
     ///

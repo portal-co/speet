@@ -1,3 +1,4 @@
+use speet_link_core::FedContext;
 use yecta::Fed;
 use crate::*;
 use rv_asm::AmoOp;
@@ -57,10 +58,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     RiscVRecompiler<'cb, 'ctx, Context, E, F>
 {
     /// Helper to translate load instructions
-    pub(crate) fn translate_load<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn translate_load<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
         rctx: &mut RC,
+        tail_idx: usize,
         base: Reg,
         offset: Imm,
         dest: Reg,
@@ -71,31 +73,32 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         }
 
         // Compute address: base + offset
-        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, rctx, offset)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, rctx, tail_idx, offset)?;
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Add)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                rctx.feed(ctx, &Instruction::I32WrapI64)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         } else {
-            rctx.feed(ctx, &Instruction::I32Add)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext::new(rctx);
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
         // Save the effective address into the load-addr scratch local so that
         // emit_load can compare it against any pending lazy store addresses.
-        let load_addr = self.load_addr_scratch_local();
+        let load_addr = self.load_addr_scratch_local(rctx.layout());
         let addr_type = self.addr_val_type();
-        rctx.feed(ctx, &Instruction::LocalTee(load_addr))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalTee(load_addr))?;
 
         // Load from memory
         match op {
@@ -112,6 +115,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -125,10 +129,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     // If RV64 but not memory64, extend to i64
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -145,6 +150,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -158,9 +164,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -177,6 +184,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -190,9 +198,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -209,6 +218,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -222,9 +232,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
                     }
                 }
             }
@@ -241,6 +252,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -254,9 +266,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     }
                 }
             }
@@ -274,6 +287,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_load(
@@ -287,8 +301,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
-                    rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
                 }
             }
             LoadOp::I64 => {
@@ -304,53 +319,56 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
 
-        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(dest)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(dest)))?;
         Ok(())
     }
 
     /// Helper to translate store instructions
-    pub(crate) fn translate_store<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn translate_store<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         base: Reg,
         offset: Imm,
         src: Reg,
         op: StoreOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
-        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, rctx, offset)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, rctx, tail_idx, offset)?;
 
         // Add instruction depends on whether we're using memory64 and RV64
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Add)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             // If not using memory64, wrap to 32-bit address
             if !self.use_memory64 {
-                rctx.feed(ctx, &Instruction::I32WrapI64)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         } else {
-            rctx.feed(ctx, &Instruction::I32Add)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
         }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext::new(rctx);
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
         // Load value to store
-        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
 
         // If RV64 but not memory64, need to wrap i64 value to i32 for 32-bit stores
         let need_wrap = self.enable_rv64 && !self.use_memory64 && !matches!(op, StoreOp::I64);
         if need_wrap {
-            rctx.feed(ctx, &Instruction::I32WrapI64)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         }
 
         // Store to memory
@@ -368,6 +386,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -381,6 +400,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 0,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -397,6 +417,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -410,6 +431,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 1,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -426,6 +448,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 } else {
                     emit_store(
@@ -439,6 +462,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             align: 2,
                             memory_index: 0,
                         }),
+                        tail_idx,
                     )?;
                 }
             }
@@ -455,6 +479,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -463,30 +488,32 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Helper to translate floating-point load instructions
-    pub(crate) fn translate_fload<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn translate_fload<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         base: Reg,
         offset: Imm,
         dest: FReg,
         op: FLoadOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         // Compute address: base + offset
-        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, rctx, offset)?;
-        rctx.feed(ctx, &Instruction::I32Add)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, rctx, tail_idx, offset)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext::new(rctx);
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
         // Save the effective address for alias checks.
-        let load_addr = self.load_addr_scratch_local();
+        let load_addr = self.load_addr_scratch_local(rctx.layout());
         let addr_type = self.addr_val_type();
-        rctx.feed(ctx, &Instruction::LocalTee(load_addr))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalTee(load_addr))?;
 
         // Load from memory
         match op {
@@ -502,8 +529,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 2,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
-                rctx.feed(ctx, &Instruction::F64PromoteF32)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
             }
             FLoadOp::F64 => {
                 emit_load(
@@ -517,43 +545,46 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
 
-        rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
         Ok(())
     }
 
     /// Helper to translate floating-point store instructions
-    pub(crate) fn translate_fstore<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn translate_fstore<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         base: Reg,
         offset: Imm,
         src: FReg,
         op: FStoreOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         let addr_type = self.addr_val_type();
         // Compute address: base + offset
-        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
-        self.emit_imm(ctx, rctx, offset)?;
-        rctx.feed(ctx, &Instruction::I32Add)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
+        self.emit_imm(ctx, rctx, tail_idx, offset)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut callback_ctx = CallbackContext::new(rctx);
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
             mapper.call(ctx, &mut callback_ctx)?;
         }
 
         // Load value to store
-        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
 
         // Store to memory
         match op {
             FStoreOp::F32 => {
-                rctx.feed(ctx, &Instruction::F32DemoteF64)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32DemoteF64)?;
                 emit_store(
                     ctx,
                     rctx,
@@ -565,6 +596,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 2,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
             FStoreOp::F64 => {
@@ -579,6 +611,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         align: 3,
                         memory_index: 0,
                     }),
+                    tail_idx,
                 )?;
             }
         }
@@ -587,116 +620,118 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Helper to emit sign-injection for single-precision floats
-    pub(crate) fn emit_fsgnj_s<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn emit_fsgnj_s<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         dest: FReg,
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         // Sign injection uses bit manipulation on the float representation
         // Get magnitude from src1, sign from src2 (possibly modified)
 
         // Convert src1 to i32 to manipulate bits
-        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        self.unbox_f32(ctx, rctx)?;
-        rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        self.unbox_f32(ctx, rctx, tail_idx)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
 
         // Mask to keep only magnitude (clear sign bit): 0x7FFFFFFF
-        rctx.feed(ctx, &Instruction::I32Const(0x7FFFFFFF))?;
-        rctx.feed(ctx, &Instruction::I32And)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(0x7FFFFFFF))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
 
         // Get sign bit from src2
-        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        self.unbox_f32(ctx, rctx)?;
-        rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        self.unbox_f32(ctx, rctx, tail_idx)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly: mask with 0x80000000
-                rctx.feed(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                rctx.feed(ctx, &Instruction::I32And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                rctx.feed(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                rctx.feed(ctx, &Instruction::I32And)?;
-                rctx.feed(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                rctx.feed(ctx, &Instruction::I32Xor)?; // Flip the sign bit
+                rctx.feed(ctx, tail_idx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?; // Flip the sign bit
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits of src1 and src2
                 // Need original src1 sign
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
-                rctx.feed(ctx, &Instruction::I32Xor)?;
-                rctx.feed(ctx, &Instruction::I32Const(0x80000000_u32 as i32))?;
-                rctx.feed(ctx, &Instruction::I32And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Const(0x80000000_u32 as i32))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
             }
         }
 
         // Combine magnitude and sign
-        rctx.feed(ctx, &Instruction::I32Or)?;
-        rctx.feed(ctx, &Instruction::F32ReinterpretI32)?;
-        self.nan_box_f32(ctx, rctx)?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Or)?;
+        rctx.feed(ctx, tail_idx, &Instruction::F32ReinterpretI32)?;
+        self.nan_box_f32(ctx, rctx, tail_idx)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
 
         Ok(())
     }
 
     /// Helper to emit sign-injection for double-precision floats
-    pub(crate) fn emit_fsgnj_d<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn emit_fsgnj_d<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         dest: FReg,
         src1: FReg,
         src2: FReg,
         op: FsgnjOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         // Similar to single-precision but using i64
         // Convert src1 to i64 to manipulate bits
-        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-        rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)?;
 
         // Mask to keep only magnitude (clear sign bit)
-        rctx.feed(ctx, &Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
-        rctx.feed(ctx, &Instruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0x7FFFFFFFFFFFFFFF))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
 
         // Get sign bit from src2
-        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
-        rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src2)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)?;
 
         match op {
             FsgnjOp::Sgnj => {
                 // Use sign from src2 directly
-                rctx.feed(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                rctx.feed(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
             }
             FsgnjOp::Sgnjn => {
                 // Use negated sign from src2
-                rctx.feed(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                rctx.feed(ctx, &Instruction::I64And)?;
-                rctx.feed(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                rctx.feed(ctx, &Instruction::I64Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
             }
             FsgnjOp::Sgnjx => {
                 // XOR sign bits
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
-                rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
-                rctx.feed(ctx, &Instruction::I64Xor)?;
-                rctx.feed(ctx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
-                rctx.feed(ctx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0x8000000000000000_u64 as i64))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
             }
         }
 
         // Combine magnitude and sign
-        rctx.feed(ctx, &Instruction::I64Or)?;
-        rctx.feed(ctx, &Instruction::F64ReinterpretI64)?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &Instruction::F64ReinterpretI64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
 
         Ok(())
     }
@@ -713,13 +748,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     ///
     /// # Returns
     /// The number of bytes successfully translated
-    pub fn translate_bytes<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub fn translate_bytes<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
         bytes: &[u8],
         start_pc: u32,
         xlen: Xlen,
-        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
+        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
     ) -> Result<usize, ()> {
         let mut offset = 0;
 
@@ -763,7 +799,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
 
             // Translate the instruction
-            if let Err(_) = self.translate_instruction(ctx, &inst, pc, is_compressed, f) {
+            if let Err(_) = self.translate_instruction(ctx, rctx, &inst, pc, is_compressed, f) {
                 break;
             } // Advance by instruction size
             offset += match is_compressed {
@@ -784,26 +820,22 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// * `inst` - The decoded RISC-V instruction
     /// * `pc` - Current program counter value
     /// * `is_compressed` - Whether the instruction is compressed (2 bytes vs 4 bytes)
-    pub fn translate_instruction<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub fn translate_instruction<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
         rctx: &mut RC,
         inst: &Inst,
         pc: u32,
         is_compressed: IsCompressed,
-        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
+        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
     ) -> Result<(), E> {
-        // Calculate instruction length in 2-byte increments
         let inst_len = match is_compressed {
-            IsCompressed::Yes => 1, // 2 bytes
-            IsCompressed::No => 2,  // 4 bytes
+            IsCompressed::Yes => 1,
+            IsCompressed::No => 2,
         };
-
-        // Initialize function for this instruction
-        self.init_function(ctx, rctx, pc, inst_len, 8, f)?;
-        // Update PC
-        rctx.feed(ctx, &Instruction::I32Const(pc as i32))?;
-        rctx.feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+        let tail_idx = self.init_function(ctx, rctx, pc, inst_len, 8, f)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(pc as i32))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::pc_local()))?;
 
         // Fire instruction trap (if installed).
         let insn_info = InstructionInfo {
@@ -826,8 +858,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // LUI places the 32-bit U-immediate value into the destination register rd, filling in the
             // lowest 12 bits with zeros."
             Inst::Lui { uimm, dest } => {
-                self.emit_imm(ctx, rctx, *uimm)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                self.emit_imm(ctx, rctx, tail_idx, *uimm)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
             }
 
             // Auipc: Add Upper Immediate to PC
@@ -839,16 +871,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             Inst::Auipc { uimm, dest } => {
                 if self.enable_rv64 {
                     // RV64: Use full 64-bit PC
-                    rctx.feed(ctx, &Instruction::I64Const(pc as i64))?;
-                    self.emit_imm(ctx, rctx, *uimm)?;
-                    self.emit_add(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(pc as i64))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *uimm)?;
+                    self.emit_add(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else {
                     // RV32: Use 32-bit PC
-                    rctx.feed(ctx, &Instruction::I32Const(pc as i32))?;
-                    self.emit_imm(ctx, rctx, *uimm)?;
-                    rctx.feed(ctx, &Instruction::I32Add)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32Const(pc as i32))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *uimm)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -876,17 +908,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     let escape_tag = rctx.escape_tag().unwrap();
                     let Some(target_func) = self.pc_to_func_idx(target_pc) else {
                         // Target is omitted — unreachable in a correctly analyzed binary.
-                        rctx.feed(ctx, &Instruction::Unreachable)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                         return Ok(());
                     };
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
                     } else {
-                        rctx.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(return_addr as i32))?;
                     }
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
                     // Create a snippet that sets expected_ra to the return address
                     let expected_ra_snippet = ExpectedRaSnippet {
@@ -905,7 +937,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // Emit the speculative call using yecta's ji_with_params API
                     // This wraps the call in a try-catch block and uses fixups mechanism
-                    rctx.ji_with_params(ctx, params)?;
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
 
                     // After the call returns (via exception catch), execution continues here
                     // No manual validation needed - the ret() in the callee threw the state
@@ -914,11 +946,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // Non-speculative path: original jump-based implementation
                     if dest.0 != 0 {
                         if self.enable_rv64 {
-                            rctx.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
                         } else {
-                            rctx.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I32Const(return_addr as i32))?;
                         }
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                     // Jump trap: Jal rd!=x0,ra → Call; others → DirectJump
                     let jal_kind = if dest.0 == 1 {
@@ -927,14 +959,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::DirectJump
                     };
                     let jal_info = JumpInfo::direct(pc as u64, target_pc, jal_kind);
-                    if self
-                        .traps
-                        .on_jump(&jal_info, ctx, rctx, &self.layout)?
+                    if                         rctx.on_jump(&jal_info, ctx)?
                         == TrapAction::Skip
                     {
                         return Ok(());
                     }
-                    self.jump_to_pc(ctx, rctx, target_pc, rctx.locals_mark().total_locals)?;
+                    self.jump_to_pc(ctx, rctx, tail_idx, target_pc, rctx.locals_mark().total_locals)?;
                     return Ok(());
                 }
             }
@@ -958,14 +988,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if is_abi_return {
                     // Jump trap: jalr x0, ra, 0 → Return (indirect)
                     // Tee ra into load_addr_scratch_local so the trap can inspect it.
-                    let scratch = self.load_addr_scratch_local();
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
-                    rctx.feed(ctx, &Instruction::LocalTee(scratch))?;
-                    rctx.feed(ctx, &Instruction::Drop)?; // balance the stack
+                    let scratch = self.load_addr_scratch_local(rctx.layout());
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalTee(scratch))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Drop)?; // balance the stack
                     let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
-                    if self
-                        .traps
-                        .on_jump(&jalr_ret_info, ctx, rctx, &self.layout)?
+                    if                         rctx.on_jump(&jalr_ret_info, ctx)?
                         == TrapAction::Skip
                     {
                         return Ok(());
@@ -976,30 +1004,30 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     let escape_tag = rctx.escape_tag().unwrap();
 
                     // Load ra (current return address)
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
 
                     // Load expected_ra
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::expected_ra_local()))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::expected_ra_local()))?;
 
                     // Compare them
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64Eq)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
                     } else {
-                        rctx.feed(ctx, &Instruction::I32Eq)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Eq)?;
                     }
 
                     // If equal (ABI-compliant), use regular return; else throw exception
-                    rctx.feed(ctx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
                     // ABI-compliant return - use WASM Return
-                    rctx.feed(ctx, &Instruction::Return)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Return)?;
 
-                    rctx.feed(ctx, &Instruction::Else)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Else)?;
 
                     // Non-ABI-compliant return - throw escape tag with all register state
-                    rctx.ret(ctx, rctx.locals_mark().total_locals, escape_tag)?;;
+                    rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, escape_tag)?;;
 
-                    rctx.feed(ctx, &Instruction::End)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
                     return Ok(());
                 }
 
@@ -1015,11 +1043,11 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
                     } else {
-                        rctx.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(return_addr as i32))?;
                     }
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
 
                     // Create a snippet that sets expected_ra to the return address
                     let expected_ra_snippet = ExpectedRaSnippet {
@@ -1142,7 +1170,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     };
 
                     // Emit the speculative call using yecta's ji_with_params API
-                    rctx.ji_with_params(ctx, params)?;
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
 
                     // After the call returns (via exception catch), execution continues here
                     return Ok(());
@@ -1150,27 +1178,27 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // Non-speculative path: original implementation
                     if dest.0 != 0 {
                         if self.enable_rv64 {
-                            rctx.feed(ctx, &Instruction::I64Const(return_addr as i64))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
                         } else {
-                            rctx.feed(ctx, &Instruction::I32Const(return_addr as i32))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I32Const(return_addr as i32))?;
                         }
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                     // JALR is indirect, compute target and update PC.
                     // Tee the target into load_addr_scratch_local for the jump trap.
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
-                    self.emit_imm(ctx, rctx, *offset)?;
-                    self.emit_add(ctx, rctx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*base)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *offset)?;
+                    self.emit_add(ctx, rctx, tail_idx)?;
                     if self.enable_rv64 {
-                        rctx.feed(ctx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
-                        rctx.feed(ctx, &Instruction::I64And)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     } else {
-                        rctx.feed(ctx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
-                        rctx.feed(ctx, &Instruction::I32And)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
                     }
-                    let scratch = self.load_addr_scratch_local();
-                    rctx.feed(ctx, &Instruction::LocalTee(scratch))?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::pc_local()))?;
+                    let scratch = self.load_addr_scratch_local(rctx.layout());
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalTee(scratch))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::pc_local()))?;
                     // Jump trap: dest==1 → IndirectCall; dest==0 without base==ra → IndirectJump
                     let jalr_kind = if dest.0 == 1 {
                         JumpKind::IndirectCall
@@ -1178,15 +1206,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         JumpKind::IndirectJump
                     };
                     let jalr_info = JumpInfo::indirect(pc as u64, scratch, jalr_kind);
-                    if self
-                        .traps
-                        .on_jump(&jalr_info, ctx, rctx, &self.layout)?
+                    if                         rctx.on_jump(&jalr_info, ctx)?
                         == TrapAction::Skip
                     {
                         return Ok(());
                     }
                     // For indirect jumps, seal with unreachable as we can't statically determine target
-                    rctx.seal_fn(ctx, &Instruction::Unreachable)?;
+                    rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
                     return Ok(());
                 }
             }
@@ -1197,32 +1223,32 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // signed offsets in multiples of 2 bytes. The offset is sign-extended and added to the address
             // of the branch instruction to give the target address."
             Inst::Beq { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Eq)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::Eq)?;
                 return Ok(()); // Branch handles control flow
             }
 
             Inst::Bne { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::Ne)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::Ne)?;
                 return Ok(());
             }
 
             Inst::Blt { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtS)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtS)?;
                 return Ok(());
             }
 
             Inst::Bge { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeS)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeS)?;
                 return Ok(());
             }
 
             Inst::Bltu { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtU)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::LtU)?;
                 return Ok(());
             }
 
             Inst::Bgeu { offset, src1, src2 } => {
-                self.translate_branch(ctx, rctx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeU)?;
+                self.translate_branch(ctx, rctx, tail_idx, *src1, *src2, *offset, pc, inst_len, BranchOp::GeU)?;
                 return Ok(());
             }
 
@@ -1231,36 +1257,36 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // "Load and store instructions transfer a value between the registers and memory.
             // Loads are encoded in the I-type format and stores are S-type."
             Inst::Lb { offset, dest, base } => {
-                self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::I8)?;
+                self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::I8)?;
             }
 
             Inst::Lh { offset, dest, base } => {
-                self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::I16)?;
+                self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::I16)?;
             }
 
             Inst::Lw { offset, dest, base } => {
-                self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::I32)?;
+                self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::I32)?;
             }
 
             Inst::Lbu { offset, dest, base } => {
-                self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::U8)?;
+                self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::U8)?;
             }
 
             Inst::Lhu { offset, dest, base } => {
-                self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::U16)?;
+                self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::U16)?;
             }
 
             // Store Instructions
             Inst::Sb { offset, src, base } => {
-                self.translate_store(ctx, rctx, *base, *offset, *src, StoreOp::I8)?;
+                self.translate_store(ctx, rctx, tail_idx, *base, *offset, *src, StoreOp::I8)?;
             }
 
             Inst::Sh { offset, src, base } => {
-                self.translate_store(ctx, rctx, *base, *offset, *src, StoreOp::I16)?;
+                self.translate_store(ctx, rctx, tail_idx, *base, *offset, *src, StoreOp::I16)?;
             }
 
             Inst::Sw { offset, src, base } => {
-                self.translate_store(ctx, rctx, *base, *offset, *src, StoreOp::I32)?;
+                self.translate_store(ctx, rctx, tail_idx, *base, *offset, *src, StoreOp::I32)?;
             }
 
             // Integer Computational Instructions
@@ -1285,183 +1311,184 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                     // Invoke callback if set
                     if let Some(ref mut callback) = self.hint_callback {
-                        let mut callback_ctx = CallbackContext::new(rctx);
+                        let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
                         callback.call(&hint_info, ctx, &mut callback_ctx);
                     }
 
                     // No WebAssembly code generation needed - this is a true no-op
                 } else if src1.0 == 0 {
                     // li (load immediate) pseudoinstruction
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_add(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_add(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slti { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    rctx.feed(ctx, &Instruction::I32LtS)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32LtS)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sltiu { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    rctx.feed(ctx, &Instruction::I32LtU)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32LtU)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Xori { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_xor(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_xor(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Ori { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_or(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_or(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Andi { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_and(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_and(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slli { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_shl(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_shl(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srli { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_shr_u(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_shr_u(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srai { imm, dest, src1 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    self.emit_imm(ctx, rctx, *imm)?;
-                    self.emit_shr_s(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                    self.emit_shr_s(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             // Register-Register Operations
             Inst::Add { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_add(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_add(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sub { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_sub(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_sub(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sll { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shl(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shl(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Slt { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32LtS)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32LtS)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sltu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32LtU)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32LtU)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Xor { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_xor(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_xor(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Srl { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shr_u(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shr_u(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Sra { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_shr_s(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_shr_s(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Or { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_or(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_or(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::And { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_and(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_and(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1474,7 +1501,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // deferred by feed_lazy, committing them in program order before the
                 // next instruction.  Under MemOrder::Strong the lazy buffer is always
                 // empty, so this is a guaranteed no-op with zero overhead.
-                emit_fence(ctx, rctx, self.mem_order, rctx)?;
+                emit_fence(ctx, rctx, self.mem_order, tail_idx)?;
             }
 
             // System calls
@@ -1483,12 +1510,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ecall_callback {
-                    let mut callback_ctx = CallbackContext::new(rctx);
+                    let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
                     callback.call(&ecall_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: environment call - implementation specific
                     // Would need to be handled by runtime
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1497,11 +1525,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 // Invoke callback if set
                 if let Some(ref mut callback) = self.ebreak_callback {
-                    let mut callback_ctx = CallbackContext::new(rctx);
+                    let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
                     callback.call(&ebreak_info, ctx, &mut callback_ctx);
                 } else {
                     // Default behavior: breakpoint - implementation specific
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -1512,10 +1541,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // held in two integer registers."
             Inst::Mul { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    self.emit_mul(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    self.emit_mul(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1526,19 +1555,19 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed multiplication
-                        self.emit_mulh_signed(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), rctx)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_signed(ctx, rctx, tail_idx, Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply and shift
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::I64Mul)?;
-                        rctx.feed(ctx, &Instruction::I64Const(32))?;
-                        rctx.feed(ctx, &Instruction::I64ShrS)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Mul)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
@@ -1550,19 +1579,19 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit signed-unsigned multiplication
-                        self.emit_mulh_signed_unsigned(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), rctx)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_signed_unsigned(ctx, rctx, tail_idx, Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply with mixed sign extension
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
-                        rctx.feed(ctx, &Instruction::I64Mul)?;
-                        rctx.feed(ctx, &Instruction::I64Const(32))?;
-                        rctx.feed(ctx, &Instruction::I64ShrS)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Mul)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
@@ -1574,56 +1603,56 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // For RV64: compute high 64 bits of 128-bit unsigned multiplication
-                        self.emit_mulh_unsigned(ctx, Self::reg_to_local(*src1), Self::reg_to_local(*src2), rctx)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        self.emit_mulh_unsigned(ctx, rctx, tail_idx, Self::reg_to_local(*src1), Self::reg_to_local(*src2))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     } else {
                         // For RV32: use i64 multiply and shift
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
-                        rctx.feed(ctx, &Instruction::I64Mul)?;
-                        rctx.feed(ctx, &Instruction::I64Const(32))?;
-                        rctx.feed(ctx, &Instruction::I64ShrU)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Mul)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(32))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 }
             }
 
             Inst::Div { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32DivS)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32DivS)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Divu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32DivU)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32DivU)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Rem { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32RemS)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32RemS)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::Remu { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::I32RemU)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32RemU)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1632,213 +1661,213 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // "This chapter describes the standard instruction-set extension for single-precision
             // floating-point, which is named 'F'"
             Inst::Flw { offset, dest, base } => {
-                self.translate_fload(ctx, rctx, *base, *offset, *dest, FLoadOp::F32)?;
+                self.translate_fload(ctx, rctx, tail_idx, *base, *offset, *dest, FLoadOp::F32)?;
             }
 
             Inst::Fsw { offset, src, base } => {
-                self.translate_fstore(ctx, rctx, *base, *offset, *src, FStoreOp::F32)?;
+                self.translate_fstore(ctx, rctx, tail_idx, *base, *offset, *src, FStoreOp::F32)?;
             }
 
             Inst::FaddS {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Add)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Add)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsubS {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmulS {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Mul)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Mul)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FdivS {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Div)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Div)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsqrtS { dest, src, .. } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Sqrt)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Sqrt)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-Point Double-Precision (D Extension)
             Inst::Fld { offset, dest, base } => {
-                self.translate_fload(ctx, rctx, *base, *offset, *dest, FLoadOp::F64)?;
+                self.translate_fload(ctx, rctx, tail_idx, *base, *offset, *dest, FLoadOp::F64)?;
             }
 
             Inst::Fsd { offset, src, base } => {
-                self.translate_fstore(ctx, rctx, *base, *offset, *src, FStoreOp::F64)?;
+                self.translate_fstore(ctx, rctx, tail_idx, *base, *offset, *src, FStoreOp::F64)?;
             }
 
             Inst::FaddD {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Add)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Add)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsubD {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Sub)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Sub)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmulD {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Mul)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FdivD {
                 dest, src1, src2, ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Div)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Div)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FsqrtD { dest, src, .. } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F64Sqrt)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Sqrt)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point min/max operations
             Inst::FminS { dest, src1, src2 } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Min)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Min)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaxS { dest, src1, src2 } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Max)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Max)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FminD { dest, src1, src2 } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Min)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Min)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaxD { dest, src1, src2 } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Max)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Max)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point comparison operations
             Inst::FeqS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::F32Eq)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F32Eq)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FltS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::F32Lt)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F32Lt)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FleS { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::F32Le)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F32Le)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FeqD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::F64Eq)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64Eq)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FltD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::F64Lt)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64Lt)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FleD { dest, src1, src2 } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                    rctx.feed(ctx, &Instruction::F64Le)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64Le)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -1849,69 +1878,69 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             Inst::FcvtWS { dest, src, .. } => {
                 // Convert single to signed 32-bit integer
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::I32TruncF32S)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF32S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtWuS { dest, src, .. } => {
                 // Convert single to unsigned 32-bit integer
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::I32TruncF32U)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF32U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtSW { dest, src, .. } => {
                 // Convert signed 32-bit integer to single
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F32ConvertI32S)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32S)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtSWu { dest, src, .. } => {
                 // Convert unsigned 32-bit integer to single
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F32ConvertI32U)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32U)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtWD { dest, src, .. } => {
                 // Convert double to signed 32-bit integer
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::I32TruncF64S)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtWuD { dest, src, .. } => {
                 // Convert double to unsigned 32-bit integer
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::I32TruncF64U)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FcvtDW { dest, src, .. } => {
                 // Convert signed 32-bit integer to double
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F64ConvertI32S)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI32S)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtDWu { dest, src, .. } => {
                 // Convert unsigned 32-bit integer to double
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F64ConvertI32U)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI32U)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtSD { dest, src, .. } => {
@@ -1919,39 +1948,39 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // "FCVT.S.D converts double-precision float to single-precision float,
                 // rounding according to the dynamic rounding mode."
                 // Convert double to single with proper NaN-boxing
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F32DemoteF64)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32DemoteF64)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FcvtDS { dest, src, .. } => {
                 // RISC-V Specification Quote:
                 // "FCVT.D.S converts single-precision float to double-precision float."
                 // Unbox the NaN-boxed single value, then promote to double
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F64PromoteF32)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Floating-point move operations
             Inst::FmvXW { dest, src } => {
                 // Move bits from float register to integer register
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                    self.unbox_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                    self.unbox_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
             Inst::FmvWX { dest, src } => {
                 // Move bits from integer register to float register
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                rctx.feed(ctx, &Instruction::F32ReinterpretI32)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32ReinterpretI32)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Sign-injection operations for single-precision
@@ -1961,29 +1990,29 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             Inst::FsgnjS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src2)
                 // We'll use a simple implementation using bit manipulation
-                self.emit_fsgnj_s(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_s(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with NOT(sign(src2))
-                self.emit_fsgnj_s(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_s(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxS { dest, src1, src2 } => {
                 // Result = magnitude(src1) with sign(src1) XOR sign(src2)
-                self.emit_fsgnj_s(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_s(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             Inst::FsgnjD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
+                self.emit_fsgnj_d(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnj)?;
             }
 
             Inst::FsgnjnD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
+                self.emit_fsgnj_d(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnjn)?;
             }
 
             Inst::FsgnjxD { dest, src1, src2 } => {
-                self.emit_fsgnj_d(ctx, rctx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
+                self.emit_fsgnj_d(ctx, rctx, tail_idx, *dest, *src1, *src2, FsgnjOp::Sgnjx)?;
             }
 
             // Fused multiply-add operations
@@ -1996,16 +2025,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 ..
             } => {
                 // dest = (src1 * src2) + src3
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Mul)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Add)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Add)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmsubS {
@@ -2016,16 +2045,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 ..
             } => {
                 // dest = (src1 * src2) - src3
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Mul)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmsubS {
@@ -2036,16 +2065,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 ..
             } => {
                 // dest = -(src1 * src2) + src3 = src3 - (src1 * src2)
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Mul)?;
-                rctx.feed(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmaddS {
@@ -2056,17 +2085,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 ..
             } => {
                 // dest = -(src1 * src2) - src3
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Mul)?;
-                rctx.feed(ctx, &Instruction::F32Neg)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                self.unbox_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::F32Sub)?;
-                self.nan_box_f32(ctx, rctx)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Neg)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                self.unbox_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F32Sub)?;
+                self.nan_box_f32(ctx, rctx, tail_idx)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmaddD {
@@ -2076,12 +2105,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 src3,
                 ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Mul)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                rctx.feed(ctx, &Instruction::F64Add)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Add)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FmsubD {
@@ -2091,12 +2120,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 src3,
                 ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Mul)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                rctx.feed(ctx, &Instruction::F64Sub)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Sub)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmsubD {
@@ -2106,12 +2135,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 src3,
                 ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Mul)?;
-                rctx.feed(ctx, &Instruction::F64Sub)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Sub)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             Inst::FnmaddD {
@@ -2121,13 +2150,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 src3,
                 ..
             } => {
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
-                rctx.feed(ctx, &Instruction::F64Mul)?;
-                rctx.feed(ctx, &Instruction::F64Neg)?;
-                rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
-                rctx.feed(ctx, &Instruction::F64Sub)?;
-                rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src1)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src2)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Mul)?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Neg)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src3)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::F64Sub)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
             }
 
             // Atomic operations (A extension)
@@ -2150,10 +2179,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // thread.
                 if dest.0 != 0 {
                     let addr_type = self.addr_val_type();
-                    let load_addr = self.load_addr_scratch_local();
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                    let load_addr = self.load_addr_scratch_local(rctx.layout());
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                     // Tee address for alias check in emit_lr.
-                    rctx.feed(ctx, &Instruction::LocalTee(load_addr))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalTee(load_addr))?;
                     emit_lr(
                         ctx,
                         rctx,
@@ -2162,12 +2191,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         load_addr,
                         addr_type,
                         MemOrder::Strong,
-                    )?;;
+                        tail_idx,
+                    )?;
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit loaded value to i64.
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2179,13 +2209,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             } => {
                 // SC.W: store-conditional word.  Always succeeds in single-threaded
                 // wasm — write 0 (success) into `dest`.
-                rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
                     // Truncate i64 register to the 32-bit value to store.
-                    rctx.feed(ctx, &Instruction::I32WrapI64)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
                 } else {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
                 }
                 emit_sc(
                     ctx,
@@ -2193,7 +2223,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     RmwWidth::W32,
                     self.atomic_opts,
                     self.mem_order,
-                )?;;
+                    tail_idx,
+                )?;
                 if dest.0 != 0 {
                     // SC always succeeds: write 0 into dest.
                     let zero = if self.enable_rv64 {
@@ -2201,8 +2232,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     } else {
                         Instruction::I32Const(0)
                     };
-                    rctx.feed(ctx, &zero)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &zero)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2218,8 +2249,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // A real implementation would need to call into a CSR handler
                 if dest.0 != 0 {
                     // Return zero as placeholder
-                    rctx.feed(ctx, &Instruction::I32Const(0))?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
                 // Silently ignore the write for now
                 let _ = src;
@@ -2227,8 +2258,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
             Inst::Csrrwi { dest, .. } | Inst::Csrrsi { dest, .. } | Inst::Csrrci { dest, .. } => {
                 if dest.0 != 0 {
-                    rctx.feed(ctx, &Instruction::I32Const(0))?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 }
             }
 
@@ -2236,25 +2267,25 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             // These are RV64-specific. When RV64 is disabled, we emit unreachable.
             Inst::Lwu { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::U32)?;
+                    self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::U32)?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::Ld { offset, dest, base } => {
                 if self.enable_rv64 {
-                    self.translate_load(ctx, rctx, *base, *offset, *dest, LoadOp::I64)?;
+                    self.translate_load(ctx, rctx, tail_idx, *base, *offset, *dest, LoadOp::I64)?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::Sd { offset, base, src } => {
                 if self.enable_rv64 {
-                    self.translate_store(ctx, rctx, *base, *offset, *src, StoreOp::I64)?;
+                    self.translate_store(ctx, rctx, tail_idx, *base, *offset, *src, StoreOp::I64)?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2262,139 +2293,139 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             Inst::AddiW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        self.emit_imm(ctx, rctx, *imm)?;
-                        rctx.feed(ctx, &Instruction::I64Add)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        self.emit_imm(ctx, rctx, tail_idx, *imm)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                         // Sign-extend lower 32 bits to 64 bits
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SlliW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        rctx.feed(ctx, &Instruction::I32Shl)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(imm.as_i32()))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Shl)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SrliW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        rctx.feed(ctx, &Instruction::I32ShrU)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(imm.as_i32()))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32ShrU)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SraiW { imm, dest, src1 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32Const(imm.as_i32()))?;
-                        rctx.feed(ctx, &Instruction::I32ShrS)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Const(imm.as_i32()))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32ShrS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::AddW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64Add)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SubW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64Sub)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Sub)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SllW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32Shl)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32Shl)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SrlW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32ShrU)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32ShrU)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::SraW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32ShrS)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32ShrS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2402,79 +2433,79 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             Inst::MulW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I64Mul)?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Mul)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::DivW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32DivS)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32DivS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::DivuW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32DivU)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32DivU)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::RemW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32RemS)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32RemS)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::RemuW { dest, src1, src2 } => {
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
-                        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-                        rctx.feed(ctx, &Instruction::I32RemU)?;
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src1)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src2)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I32RemU)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2483,13 +2514,13 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Convert single-precision float to signed 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.unbox_f32(ctx, rctx)?;
-                        rctx.feed(ctx, &Instruction::I64TruncF32S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32(ctx, rctx, tail_idx)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64TruncF32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2497,37 +2528,37 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Convert single-precision float to unsigned 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        self.unbox_f32(ctx, rctx)?;
-                        rctx.feed(ctx, &Instruction::I64TruncF32U)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        self.unbox_f32(ctx, rctx, tail_idx)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64TruncF32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtSL { dest, src, .. } => {
                 // Convert signed 64-bit integer to single-precision float
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::F32ConvertI64S)?;
-                    self.nan_box_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI64S)?;
+                    self.nan_box_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtSLu { dest, src, .. } => {
                 // Convert unsigned 64-bit integer to single-precision float
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::F32ConvertI64U)?;
-                    self.nan_box_f32(ctx, rctx)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI64U)?;
+                    self.nan_box_f32(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2535,12 +2566,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Convert double-precision float to signed 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        rctx.feed(ctx, &Instruction::I64TruncF64S)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2548,34 +2579,34 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Convert double-precision float to unsigned 64-bit integer
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        rctx.feed(ctx, &Instruction::I64TruncF64U)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtDL { dest, src, .. } => {
                 // Convert signed 64-bit integer to double-precision float
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::F64ConvertI64S)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FcvtDLu { dest, src, .. } => {
                 // Convert unsigned 64-bit integer to double-precision float
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::F64ConvertI64U)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2583,23 +2614,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Move bits from double-precision float register to 64-bit integer register
                 if self.enable_rv64 {
                     if dest.0 != 0 {
-                        rctx.feed(ctx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
-                        rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
-                        rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(*src)))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                     }
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
             Inst::FmvDX { dest, src } => {
                 // Move bits from 64-bit integer register to double-precision float register
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
-                    rctx.feed(ctx, &Instruction::F64ReinterpretI64)?;
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*src)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::F64ReinterpretI64)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(*dest)))?;
                 } else {
-                    rctx.feed(ctx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 }
             }
 
@@ -2631,16 +2662,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
                 let addr_local = Self::reg_to_local(*addr);
                 let src_local = Self::reg_to_local(*src);
-                let scratch = self.amo_scratch_local();
+                let scratch = self.amo_scratch_local(rctx.layout());
 
                 // Push addr and src onto the wasm stack for emit_rmw to consume.
-                rctx.feed(ctx, &Instruction::LocalGet(addr_local))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(addr_local))?;
                 if self.enable_rv64 {
-                    rctx.feed(ctx, &Instruction::LocalGet(src_local))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
                     // Truncate i64 register to i32 for the 32-bit AMO.
-                    rctx.feed(ctx, &Instruction::I32WrapI64)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
                 } else {
-                    rctx.feed(ctx, &Instruction::LocalGet(src_local))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
                 }
                 // emit_rmw consumes [addr, src] from the stack and leaves [old].
                 // When atomic_opts.use_atomic_insns is true, direct ops use wasm
@@ -2659,17 +2690,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     addr_local,
                     src_local,
                     scratch,
+                    tail_idx,
                 )?;
 
                 if dest.0 != 0 {
                     if self.enable_rv64 {
                         // Sign-extend the 32-bit old value to the 64-bit register.
-                        rctx.feed(ctx, &Instruction::I64ExtendI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(*dest)))?;
                 } else {
                     // Discard the returned old value.
-                    rctx.feed(ctx, &Instruction::Drop)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Drop)?;
                 }
             }
 
@@ -2679,7 +2711,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // FCLASS returns a 10-bit mask indicating the class of the floating-point number
                 // (positive/negative infinity, normal, subnormal, zero, NaN, etc.)
                 // This requires complex bit pattern analysis not yet implemented
-                rctx.feed(ctx, &Instruction::Unreachable)?;
+                rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
             }
 
             // Catch-all for any other unhandled instructions
@@ -2687,7 +2719,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // This should ideally never be reached if all instruction variants are handled.
                 // If it is reached, it indicates an instruction type that was added to rv-asm
                 // but not yet implemented in this recompiler.
-                rctx.feed(ctx, &Instruction::Unreachable)?;
+                rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 return Ok(()); // Don't fallthrough for unimplemented instructions
             }
         }
@@ -2698,16 +2730,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Helper to translate branch instructions using yecta's ji API with custom Snippet
-    pub(crate) fn translate_branch<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+    pub(crate) fn translate_branch<RC: ReactorContext<Context, E> + ?Sized>(
         &mut self,
         ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
         src1: Reg,
         src2: Reg,
         offset: Imm,
         pc: u32,
         _inst_len: u32,
         op: BranchOp,
-        rctx: &mut RC,
     ) -> Result<(), E> {
         let target_pc = if self.enable_rv64 {
             // RV64: Use 64-bit PC arithmetic
@@ -2810,9 +2843,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
 
         // Jump trap: conditional branch.
         let branch_info = JumpInfo::direct(pc as u64, target_pc, JumpKind::ConditionalBranch);
-        if self
-            .traps
-            .on_jump(&branch_info, ctx, rctx, &self.layout)?
+        if             rctx.on_jump(&branch_info, ctx)?
             == TrapAction::Skip
         {
             return Ok(());
@@ -2822,19 +2853,20 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         // When condition is true, jump to target; yecta handles else/end automatically
         let Some(target_func) = self.pc_to_func_idx(target_pc) else {
             // Target is omitted — unreachable in a correctly analyzed binary.
-            rctx.feed(ctx, &Instruction::Unreachable)?;
+            rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
             return Ok(());
         };
         let target = yecta::Target::Static { func: target_func };
 
         rctx.ji(
             ctx,
-            rctx.locals_mark().total_locals, // params: pass all registers (including expected_ra + trap params)
-            &BTreeMap::new(),  // fixups: none needed
-            target,            // target: branch target
-            None,              // call: not an escape call
-            rctx.pool(),  // pool: for indirect calls
-            Some(&condition),  // condition: branch condition
+            tail_idx,
+            rctx.locals_mark().total_locals,
+            &BTreeMap::new(),
+            target,
+            None,
+            rctx.pool(),
+            Some(&condition),
         )?;
 
         Ok(())

@@ -117,15 +117,15 @@ pub enum StoreKind {
 /// [`MemoryEmitter::new`]) *before* calling the mapper.  The emitter itself
 /// only calls the mapper; management of `scratch_local` is the caller's
 /// responsibility.
-pub struct MemoryEmitter<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> {
+pub struct MemoryEmitter<'cb, 'ctx, Context, E> {
     pub addr_width: AddressWidth,
     pub int_width: IntWidth,
     pub memory_index: u32,
-    pub mapper: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
+    pub mapper: Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
 }
 
-impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
-    MemoryEmitter<'cb, 'ctx, Context, E, F>
+impl<'cb, 'ctx, Context, E>
+    MemoryEmitter<'cb, 'ctx, Context, E>
 {
     /// Create a new `MemoryEmitter`.
     ///
@@ -137,7 +137,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         addr_width: AddressWidth,
         int_width: IntWidth,
         memory_index: u32,
-        mapper: Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
+        mapper: Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
     ) -> Self {
         Self {
             addr_width,
@@ -160,7 +160,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Wrap i64 address to i32 if required by the address/memory width combo.
-    fn maybe_wrap_addr(&self, ctx: &mut Context, sink: &mut F) -> Result<(), E> {
+    fn maybe_wrap_addr(&self, ctx: &mut Context, sink: &mut dyn InstructionSink<Context, E>) -> Result<(), E> {
         if self.addr_width == (AddressWidth::W64 { memory64: false }) {
             sink.instruction(ctx, &Instruction::I32WrapI64)?;
         }
@@ -168,7 +168,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     }
 
     /// Optionally invoke the mapper callback.
-    fn maybe_map(&mut self, ctx: &mut Context, sink: &mut F) -> Result<(), E> {
+    fn maybe_map(&mut self, ctx: &mut Context, sink: &mut dyn InstructionSink<Context, E>) -> Result<(), E> {
         if let Some(mapper) = self.mapper.as_mut() {
             let mut cb = CallbackContext::new(sink);
             mapper.call(ctx, &mut cb)?;
@@ -182,7 +182,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     ///
     /// Stack before: `... guest_address`
     /// Stack after:  `... value` (type determined by `int_width` / `LoadKind`)
-    pub fn emit_load(&mut self, ctx: &mut Context, sink: &mut F, kind: LoadKind) -> Result<(), E> {
+    pub fn emit_load(&mut self, ctx: &mut Context, sink: &mut dyn InstructionSink<Context, E>, kind: LoadKind) -> Result<(), E> {
         self.maybe_wrap_addr(ctx, sink)?;
         self.maybe_map(ctx, sink)?;
 
@@ -300,7 +300,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     /// Stack before: `... guest_address`  (value NOT yet pushed)
     /// Emits: wrap? + mapper?
     /// Returns: caller should then push the value and call [`emit_store_insn`].
-    pub fn emit_store_addr(&mut self, ctx: &mut Context, sink: &mut F) -> Result<(), E> {
+    pub fn emit_store_addr(&mut self, ctx: &mut Context, sink: &mut dyn InstructionSink<Context, E>) -> Result<(), E> {
         self.maybe_wrap_addr(ctx, sink)?;
         self.maybe_map(ctx, sink)?;
         Ok(())
@@ -314,7 +314,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
     pub fn emit_store_insn(
         &self,
         ctx: &mut Context,
-        sink: &mut F,
+        sink: &mut dyn InstructionSink<Context, E>,
         kind: StoreKind,
     ) -> Result<(), E> {
         let mem64 = self.addr_width.memory64();

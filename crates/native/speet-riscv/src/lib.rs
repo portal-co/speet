@@ -76,10 +76,8 @@ pub use speet_memory::{
 };
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 
-/// Legacy type alias — `MapperContext` is the same as [`CallbackContext`].
-pub type MapperContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
-/// Legacy type alias — `HintContext` is the same as [`CallbackContext`].
-pub type HintContext<'a, Context, E, F> = CallbackContext<'a, Context, E, F>;
+pub type MapperContext<'a, Context, E> = CallbackContext<'a, Context, E>;
+pub type HintContext<'a, Context, E> = CallbackContext<'a, Context, E>;
 
 /// Information about a detected HINT instruction
 ///
@@ -124,107 +122,70 @@ pub struct EbreakInfo {
 ///
 /// The trait is automatically implemented for all `FnMut` closures with the
 /// appropriate signature.
-pub trait HintCallback<Context, E, F: InstructionSink<Context, E>> {
-    /// Process a HINT instruction
-    ///
-    /// # Arguments
-    /// * `hint` - Information about the detected HINT instruction
-    /// * `ctx` - User context for passing external state
-    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+pub trait HintCallback<Context, E> {
     fn call(
         &mut self,
         hint: &HintInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     );
 }
 
-/// Blanket implementation of HintCallback for FnMut closures
-impl<Context, E, G: InstructionSink<Context, E>, F> HintCallback<Context, E, G> for F
+impl<Context, E, F> HintCallback<Context, E> for F
 where
-    F: FnMut(&HintInfo, &mut Context, &mut CallbackContext<Context, E, G>),
+    F: FnMut(&HintInfo, &mut Context, &mut CallbackContext<Context, E>),
 {
     fn call(
         &mut self,
         hint: &HintInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, G>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     ) {
         self(hint, ctx, callback_ctx)
     }
 }
 
-/// Trait for ECALL instruction callbacks
-///
-/// This trait defines the interface for callbacks that are invoked when ECALL
-/// instructions are encountered during translation. Implementations receive
-/// both the ECALL information and a unified context for generating WebAssembly code.
-///
-/// The trait is automatically implemented for all `FnMut` closures with the
-/// appropriate signature.
-pub trait EcallCallback<Context, E, F: InstructionSink<Context, E>> {
-    /// Process an ECALL instruction
-    ///
-    /// # Arguments
-    /// * `ecall` - Information about the detected ECALL instruction
-    /// * `ctx` - User context for passing external state
-    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+pub trait EcallCallback<Context, E> {
     fn call(
         &mut self,
         ecall: &EcallInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     );
 }
 
-/// Blanket implementation of EcallCallback for FnMut closures
-impl<Context, E, G: InstructionSink<Context, E>, F> EcallCallback<Context, E, G> for F
+impl<Context, E, F> EcallCallback<Context, E> for F
 where
-    F: FnMut(&EcallInfo, &mut Context, &mut CallbackContext<Context, E, G>),
+    F: FnMut(&EcallInfo, &mut Context, &mut CallbackContext<Context, E>),
 {
     fn call(
         &mut self,
         ecall: &EcallInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, G>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     ) {
         self(ecall, ctx, callback_ctx)
     }
 }
 
-/// Trait for EBREAK instruction callbacks
-///
-/// This trait defines the interface for callbacks that are invoked when EBREAK
-/// instructions are encountered during translation. Implementations receive
-/// both the EBREAK information and a unified context for generating WebAssembly code.
-///
-/// The trait is automatically implemented for all `FnMut` closures with the
-/// appropriate signature.
-pub trait EbreakCallback<Context, E, F: InstructionSink<Context, E>> {
-    /// Process an EBREAK instruction
-    ///
-    /// # Arguments
-    /// * `ebreak` - Information about the detected EBREAK instruction
-    /// * `ctx` - User context for passing external state
-    /// * `callback_ctx` - Unified context for emitting WebAssembly instructions
+pub trait EbreakCallback<Context, E> {
     fn call(
         &mut self,
         ebreak: &EbreakInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, F>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     );
 }
 
-/// Blanket implementation of EbreakCallback for FnMut closures
-impl<Context, E, G: InstructionSink<Context, E>, F> EbreakCallback<Context, E, G> for F
+impl<Context, E, F> EbreakCallback<Context, E> for F
 where
-    F: FnMut(&EbreakInfo, &mut Context, &mut CallbackContext<Context, E, G>),
+    F: FnMut(&EbreakInfo, &mut Context, &mut CallbackContext<Context, E>),
 {
     fn call(
         &mut self,
         ebreak: &EbreakInfo,
         ctx: &mut Context,
-        callback_ctx: &mut CallbackContext<Context, E, G>,
+        callback_ctx: &mut CallbackContext<Context, E>,
     ) {
         self(ebreak, ctx, callback_ctx)
     }
@@ -247,8 +208,9 @@ pub struct RiscVRecompiler<
     'ctx,
     Context,
     E,
-    F: InstructionSink<Context, E>,
+    F,
 > {
+    _phantom_f: core::marker::PhantomData<fn(F)>,
     /// Base PC address - subtracted from PC values to compute function indices
     /// For RV64, this is a 64-bit address
     base_pc: u64,
@@ -258,16 +220,16 @@ pub struct RiscVRecompiler<
     hints: Vec<HintInfo>,
     /// Optional callback for inline HINT processing
     hint_callback:
-        Option<&'cb mut (dyn HintCallback<Context, E, F> + 'ctx)>,
+        Option<&'cb mut (dyn HintCallback<Context, E> + 'ctx)>,
     /// Optional callback for ECALL instructions
     ecall_callback:
-        Option<&'cb mut (dyn EcallCallback<Context, E, F> + 'ctx)>,
+        Option<&'cb mut (dyn EcallCallback<Context, E> + 'ctx)>,
     /// Optional callback for EBREAK instructions
     ebreak_callback:
-        Option<&'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx)>,
+        Option<&'cb mut (dyn EbreakCallback<Context, E> + 'ctx)>,
     /// Optional callback for address mapping (paging support - see PAGING.md)
     mapper_callback:
-        Option<&'cb mut (dyn MapperCallback<Context, E, F> + 'ctx)>,
+        Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -295,10 +257,6 @@ pub struct RiscVRecompiler<
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
     addr_scratch_slot: LocalSlot,
-    /// Slot for addr-type pool locals.
-    pool_addr_slot: LocalSlot,
-    /// Slot for i64 pool locals.
-    pool_i64_slot: LocalSlot,
     /// Optional slot assigner: controls which PCs get function slots and maps
     /// PCs to sequential slot indices.  When `None`, the legacy formula is used.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
@@ -325,8 +283,7 @@ where
     ) -> Self
     {
         Self {
-            pool,
-            escape_tag,
+            _phantom_f: core::marker::PhantomData,
             base_pc,
             track_hints,
             hints: Vec::new(),
@@ -341,8 +298,6 @@ where
             atomic_opts: AtomicOpts::NONE,
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
-            pool_addr_slot: LocalSlot::default(),
-            pool_i64_slot: LocalSlot::default(),
             slot_assigner: None,
         }
     }
@@ -365,7 +320,7 @@ where
         use_memory64: bool,
     ) -> Self
     {
-        Self::new_with_full_config(pool, escape_tag, base_pc, track_hints, enable_rv64, use_memory64)
+        Self::new_with_full_config(base_pc, track_hints, enable_rv64, use_memory64)
     }
 
     /// Get the current base function offset.
@@ -393,44 +348,20 @@ where
         rctx.set_base_func_offset(offset);
     }
 
-    /// Create a new RISC-V recompiler instance
-    ///
-    /// # Arguments
-    /// * `pool` - Pool configuration for indirect calls
-    /// * `escape_tag` - Optional exception tag for non-local control flow
-    /// * `base_pc` - Base PC address to offset function indices (64-bit for RV64 support)
-    where
-        P: Default,
-    {
-        Self::new_with_full_config(pool, escape_tag, base_pc, false, false, false)
+    pub fn new_with_config(base_pc: u64) -> Self {
+        Self::new_with_full_config(base_pc, false, false, false)
     }
 
-    /// Create a new RISC-V recompiler with default configuration
-    /// Uses base_pc of 0
-    pub fn new() -> Self
-    where
-        P: Default,
-    {
-        Self::new_with_config(
-            { static T: TableIdx = TableIdx(0); Pool { handler: &T, ty: TypeIdx(0) } },
-            None,
-            0,
-        )
+    pub fn new() -> Self {
+        Self::new_with_full_config(0, false, false, false)
     }
 
     /// Create a new RISC-V recompiler with a specified base PC
     ///
     /// # Arguments
     /// * `base_pc` - Base PC address - this is subtracted from instruction PCs to compute function indices (64-bit for RV64 support)
-    pub fn new_with_base_pc(base_pc: u64) -> Self
-    where
-        P: Default,
-    {
-        Self::new_with_config(
-            { static T: TableIdx = TableIdx(0); Pool { handler: &T, ty: TypeIdx(0) } },
-            None,
-            base_pc,
-        )
+    pub fn new_with_base_pc(base_pc: u64) -> Self {
+        Self::new_with_config(base_pc)
     }
 
     /// Enable or disable HINT instruction tracking
@@ -492,7 +423,7 @@ where
     /// ```
     pub fn set_hint_callback(
         &mut self,
-        callback: &'cb mut (dyn HintCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn HintCallback<Context, E> + 'ctx),
     ) {
         self.hint_callback = Some(callback);
     }
@@ -532,7 +463,7 @@ where
     /// ```
     pub fn set_ecall_callback(
         &mut self,
-        callback: &'cb mut (dyn EcallCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn EcallCallback<Context, E> + 'ctx),
     ) {
         self.ecall_callback = Some(callback);
     }
@@ -572,7 +503,7 @@ where
     /// ```
     pub fn set_ebreak_callback(
         &mut self,
-        callback: &'cb mut (dyn EbreakCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn EbreakCallback<Context, E> + 'ctx),
     ) {
         self.ebreak_callback = Some(callback);
     }
@@ -612,16 +543,9 @@ where
     /// ```
     pub fn set_mapper_callback(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E, F> + 'ctx),
+        callback: &'cb mut (dyn MapperCallback<Context, E> + 'ctx),
     ) {
         self.mapper_callback = Some(callback);
-    }
-
-    /// Clear the address mapping callback
-    ///
-    /// Removes any previously set mapper callback, returning to identity mapping.
-    pub fn clear_mapper_callback(&mut self) {
-        self.mapper_callback = None;
     }
 
     /// Clear the address mapping callback
@@ -679,25 +603,27 @@ where
     /// The returned `total_params` value is the wasm function parameter count
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
-    pub fn setup_traps<Context, E, F>(&self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+    pub fn setup_traps<RC: ReactorContext<Context, E> + ?Sized>(&self, rctx: &mut RC) -> u32 {
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
             ValType::I32
         };
-        let layout = rctx.layout_mut();
-        layout.append(32, int_type); // x0-x31 (params 0-31)
-        layout.append(32, ValType::F64); // f0-f31 (params 32-63)
-        layout.append(1, ValType::I32); // PC (param 64)
-        layout.append(1, int_type); // expected_RA (param 65)
+        {
+            let layout = rctx.layout_mut();
+            layout.append(32, int_type); // x0-x31 (params 0-31)
+            layout.append(32, ValType::F64); // f0-f31 (params 32-63)
+            layout.append(1, ValType::I32); // PC (param 64)
+            layout.append(1, int_type); // expected_RA (param 65)
+        }
         rctx.declare_trap_params();
-        let mark = layout.mark();
+        let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
     }
 
     /// The current total wasm function parameter count (recompiler + trap params).
-    pub fn total_params<Context, E>(&self, rctx: &dyn ReactorContext<Context, E>) -> u32 {
+    pub fn total_params<RC: ReactorContext<Context, E> + ?Sized>(&self, rctx: &RC) -> u32 {
         rctx.locals_mark().total_locals
     }
 
@@ -828,52 +754,40 @@ where
     /// * `_pc` - Program counter for this instruction (used for documentation)
     /// * `_inst_len` - Length of instruction in 2-byte increments (1 for compressed, 2 for normal)
     /// * `num_temps` - Number of additional temporary registers needed
-    fn init_function<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
-        &self,
+    fn init_function<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self,
         ctx: &mut Context,
         rctx: &mut RC,
         _pc: u32,
         _inst_len: u32,
         num_temps: u32,
-        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
-    ) -> Result<(), E> {
-        let int_type = if self.enable_rv64 {
-            ValType::I64
-        } else {
-            ValType::I32
-        };
-        let addr_type = if self.use_memory64 {
-            ValType::I64
-        } else {
-            ValType::I32
-        };
-        // Rewind to the params mark, discarding any locals from the previous function.
+        f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
+    ) -> Result<usize, E> {
+        let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
+        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
-        // Append per-function non-param locals in order:
         let temps_slot = rctx.layout_mut().append(num_temps, int_type);
         let addr_scratch_slot = rctx.layout_mut().append(1, addr_type);
         let pool_addr_slot = rctx.layout_mut().append(Self::N_POOL_ADDR, addr_type);
         let pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
         rctx.declare_trap_locals();
-        // Register the (params, locals) signature and store the allocated cell.
         let _cell = rctx.alloc_cell();
-        // Seed the reactor's local pool with the freshly-declared pool slots.
         let pool_addr_start = rctx.layout().base(pool_addr_slot);
         let pool_i64_start = rctx.layout().base(pool_i64_slot);
         match addr_type {
-            ValType::I32 => rctx
-                .with_local_pool(|p| p.seed_i32(pool_addr_start, Self::N_POOL_ADDR)),
-            ValType::I64 => rctx
-                .with_local_pool(|p| p.seed_i64(pool_addr_start, Self::N_POOL_ADDR)),
+            ValType::I32 => rctx.with_local_pool(&mut |p: &mut dyn yecta::LocalPoolApi| p.seed_i32(pool_addr_start, Self::N_POOL_ADDR)),
+            ValType::I64 => rctx.with_local_pool(&mut |p: &mut dyn yecta::LocalPoolApi| p.seed_i64(pool_addr_start, Self::N_POOL_ADDR)),
             _ => {}
         }
-        rctx.with_local_pool(|p| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
-
-        // Declare only non-param locals to the function (params are already in the type).
-        let mut locals_iter = rctx.layout().iter_since(&mark);
-        rctx.next_with(ctx, f(&mut locals_iter), 2)?;
-        Ok(())
+        rctx.with_local_pool(&mut |p: &mut dyn yecta::LocalPoolApi| p.seed_i64(pool_i64_start, Self::N_POOL_I64));
+        // Store slots for use by helper methods.
+        self.temps_slot = temps_slot;
+        self.addr_scratch_slot = addr_scratch_slot;
+        let locals: alloc::vec::Vec<_> = rctx.layout().iter_since(&mark).collect();
+        let mut locals_iter = locals.into_iter();
+        let tail_idx = rctx.next_with(ctx, f(&mut locals_iter), 2)?;
+        Ok(tail_idx)
     }
 
     /// Number of addr-type locals reserved in the local pool for address saving.
@@ -911,15 +825,15 @@ where
     }
 
     /// Get the starting index for temporary registers
-    fn temps_start(&self) -> u32 {
-        self.layout.base(self.temps_slot)
+    fn temps_start(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.base(self.temps_slot)
     }
 
     /// Scratch local used by AMO min/max synthesis (cmpxchg loop).
     ///
     /// Offset 3 within the temps slot: first 3 temps are mapper scratch locals.
-    fn amo_scratch_local(&self) -> u32 {
-        self.layout.local(self.temps_slot, 3)
+    fn amo_scratch_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.temps_slot, 3)
     }
 
     /// The wasm [`ValType`] of an effective (post-mapper) memory address.
@@ -936,107 +850,107 @@ where
 
     /// Scratch local used to save the effective load address for alias checks
     /// against pending lazy stores.
-    fn load_addr_scratch_local(&self) -> u32 {
-        self.layout.base(self.addr_scratch_slot)
+    fn load_addr_scratch_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.base(self.addr_scratch_slot)
     }
 
     /// Emit instructions to load an immediate value
-    fn emit_imm<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, imm: Imm) -> Result<(), E> {
+    fn emit_imm<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize, imm: Imm) -> Result<(), E> {
         if self.enable_rv64 {
             // Sign-extend the 32-bit immediate to 64 bits
-            rctx.feed(ctx, &Instruction::I64Const(imm.as_i32() as i64))
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm.as_i32() as i64))
         } else {
-            rctx.feed(ctx, &Instruction::I32Const(imm.as_i32()))
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(imm.as_i32()))
         }
     }
 
     /// Emit an integer constant (i32 or i64 depending on RV64 mode)
-    fn emit_int_const<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, value: i32) -> Result<(), E> {
+    fn emit_int_const<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize, value: i32) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Const(value as i64))
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(value as i64))
         } else {
-            rctx.feed(ctx, &Instruction::I32Const(value))
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(value))
         }
     }
 
     /// Emit an add instruction (I32Add or I64Add depending on RV64 mode)
-    fn emit_add<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_add<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Add)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Add)
         } else {
-            rctx.feed(ctx, &Instruction::I32Add)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Add)
         }
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on RV64 mode)
-    fn emit_sub<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_sub<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Sub)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Sub)
         } else {
-            rctx.feed(ctx, &Instruction::I32Sub)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Sub)
         }
     }
 
     /// Emit a multiply instruction (I32Mul or I64Mul depending on RV64 mode)
-    fn emit_mul<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_mul<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Mul)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Mul)
         } else {
-            rctx.feed(ctx, &Instruction::I32Mul)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Mul)
         }
     }
 
     /// Emit a logical and instruction (I32And or I64And depending on RV64 mode)
-    fn emit_and<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_and<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64And)
+            rctx.feed(ctx, tail_idx, &Instruction::I64And)
         } else {
-            rctx.feed(ctx, &Instruction::I32And)
+            rctx.feed(ctx, tail_idx, &Instruction::I32And)
         }
     }
 
     /// Emit a logical or instruction (I32Or or I64Or depending on RV64 mode)
-    fn emit_or<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_or<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Or)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Or)
         } else {
-            rctx.feed(ctx, &Instruction::I32Or)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Or)
         }
     }
 
     /// Emit a logical xor instruction (I32Xor or I64Xor depending on RV64 mode)
-    fn emit_xor<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_xor<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Xor)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Xor)
         } else {
-            rctx.feed(ctx, &Instruction::I32Xor)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Xor)
         }
     }
 
     /// Emit a shift left instruction (I32Shl or I64Shl depending on RV64 mode)
-    fn emit_shl<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_shl<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64Shl)
+            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)
         } else {
-            rctx.feed(ctx, &Instruction::I32Shl)
+            rctx.feed(ctx, tail_idx, &Instruction::I32Shl)
         }
     }
 
     /// Emit a logical shift right instruction (I32ShrU or I64ShrU depending on RV64 mode)
-    fn emit_shr_u<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_shr_u<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64ShrU)
+            rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)
         } else {
-            rctx.feed(ctx, &Instruction::I32ShrU)
+            rctx.feed(ctx, tail_idx, &Instruction::I32ShrU)
         }
     }
 
     /// Emit an arithmetic shift right instruction (I32ShrS or I64ShrS depending on RV64 mode)
-    fn emit_shr_s<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn emit_shr_s<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         if self.enable_rv64 {
-            rctx.feed(ctx, &Instruction::I64ShrS)
+            rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)
         } else {
-            rctx.feed(ctx, &Instruction::I32ShrS)
+            rctx.feed(ctx, tail_idx, &Instruction::I32ShrS)
         }
     }
 
@@ -1045,10 +959,10 @@ where
     /// If `target_pc` is omitted from the slot assigner (true slot omission),
     /// emits `unreachable` instead.  In a correctly analyzed binary this path
     /// is never taken at runtime.
-    fn jump_to_pc<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, target_pc: u64, params: u32) -> Result<(), E> {
+    fn jump_to_pc<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize, target_pc: u64, params: u32) -> Result<(), E> {
         match self.pc_to_func_idx(target_pc) {
-            Some(target_func) => rctx.jmp(ctx, target_func, params),
-            None => rctx.feed(ctx, &Instruction::Unreachable),
+            Some(target_func) => rctx.jmp(ctx, tail_idx, target_func, params),
+            None => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
         }
     }
 
@@ -1161,29 +1075,23 @@ where
     /// FLEN-bit NaN value, with the upper bits all 1s. We call this a NaN-boxed value."
     ///
     /// For F32 values in F64 registers: set upper 32 bits to all 1s
-    fn nan_box_f32<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
+    fn nan_box_f32<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
         // Convert F32 to I32, then to I64, OR with 0xFFFFFFFF00000000, reinterpret as F64
-        rctx.feed(ctx, &Instruction::I32ReinterpretF32)?;
-        rctx.feed(ctx, &Instruction::I64ExtendI32U)?;
-        rctx.feed(ctx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
-        rctx.feed(ctx, &Instruction::I64Or)?;
-        rctx.feed(ctx, &Instruction::F64ReinterpretI64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF00000000_u64 as i64))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &Instruction::F64ReinterpretI64)?;
         Ok(())
     }
 
     /// Unbox a NaN-boxed single-precision value from a double-precision register
     ///
     /// Extract the F32 value from the lower 32 bits of the NaN-boxed F64 value
-    fn unbox_f32<Context, E, RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &RC) -> Result<(), E> {
-        rctx.feed(ctx, &Instruction::I64ReinterpretF64)?;
-        rctx.feed(ctx, &Instruction::I32WrapI64)?;
-        rctx.feed(ctx, &Instruction::F32ReinterpretI32)?;
-        Ok(())
-    }
-        // Reinterpret F64 as I64, wrap to I32 (takes lower 32 bits), reinterpret as F32
-        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::I64ReinterpretF64)?;
-        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::I32WrapI64)?;
-        Fed { reactor: &rctx, rctx }.instruction(ctx, &Instruction::F32ReinterpretI32)?;
+    fn unbox_f32<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize) -> Result<(), E> {
+        rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::F32ReinterpretI32)?;
         Ok(())
     }
 
@@ -1203,49 +1111,42 @@ where
     ///
     /// Note: a_lo * b_lo produces at most 64 bits, so it doesn't directly contribute
     /// to the high 64 bits, only through carries.
-    fn emit_mulh_signed(&mut self, ctx: &mut Context, src1: u32, src2: u32, rctx: usize) -> Result<(), E> {
-        let temps = MulhTemps::new(self.temps_start());
-        let instrs = mulh_signed(src1, src2, temps);
-        for instr in instrs {
-            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
-        }
-        Ok(())
-    }
-
-    /// Helper to compute high 64 bits of unsigned 64x64 -> 128-bit multiplication
-    fn emit_mulh_unsigned(&mut self, ctx: &mut Context, src1: u32, src2: u32, rctx: usize) -> Result<(), E> {
-        let temps = MulhTemps::new(self.temps_start());
-        let instrs = mulh_unsigned(src1, src2, temps);
-        for instr in instrs {
-            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
-        }
-        Ok(())
-    }
-
-    /// Helper to compute high 64 bits of signed-unsigned 64x64 -> 128-bit multiplication
-    fn emit_mulh_signed_unsigned(
-        &mut self,
-        ctx: &mut Context,
-        src1: u32,
-        src2: u32,
+    fn emit_mulh_signed<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self, ctx: &mut Context, rctx: &RC, tail_idx: usize, src1: u32, src2: u32,
     ) -> Result<(), E> {
-        let temps = MulhTemps::new(self.temps_start());
-        let instrs = mulh_signed_unsigned(src1, src2, temps);
-        for instr in instrs {
-            Fed { reactor: &rctx, rctx }.instruction(ctx, &instr)?;
+        let temps = MulhTemps::new(self.temps_start(rctx.layout()));
+        for instr in mulh_signed(src1, src2, temps) {
+            rctx.feed(ctx, tail_idx, &instr)?;
         }
         Ok(())
     }
 
-    /// Finalize the function
-    pub fn seal(&mut self, ctx: &mut Context, rctx: usize) -> Result<(), E> {
-        rctx.seal_fn(ctx, &Instruction::Unreachable)
+    fn emit_mulh_unsigned<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self, ctx: &mut Context, rctx: &RC, tail_idx: usize, src1: u32, src2: u32,
+    ) -> Result<(), E> {
+        let temps = MulhTemps::new(self.temps_start(rctx.layout()));
+        for instr in mulh_unsigned(src1, src2, temps) {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        Ok(())
     }
 
-    /// Get the reactor (consumes self)
-    pub fn into_reactor(self) -> Reactor<Context, E, F, P> {
-        rctx
+    fn emit_mulh_signed_unsigned<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self, ctx: &mut Context, rctx: &RC, tail_idx: usize, src1: u32, src2: u32,
+    ) -> Result<(), E> {
+        let temps = MulhTemps::new(self.temps_start(rctx.layout()));
+        for instr in mulh_signed_unsigned(src1, src2, temps) {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        Ok(())
     }
+
+    pub fn seal<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self, ctx: &mut Context, rctx: &RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)
+    }
+
 }
 
 impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>> Default
@@ -1317,7 +1218,34 @@ mod tests {
     use super::*;
     use rv_asm::{Inst, Xlen};
     use wasm_encoder::Function;
-    use yecta::TagIdx;
+    use yecta::{LocalPool, Reactor, TagIdx};
+    use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
+
+    fn make_rctx<'a>(reactor: &'a mut Reactor<(), Infallible, Function, LocalPool>)
+        -> ReactorAdapter<'a, (), Infallible, Function, LocalPool>
+    {
+        use yecta::{Mark, TableIdx, TypeIdx};
+        let layout = yecta::LocalLayout::empty();
+        let mark = Mark { slot_count: 0, total_locals: 0 };
+        static T: TableIdx = TableIdx(0);
+        let pool = yecta::Pool { handler: &T, ty: TypeIdx(0) };
+        ReactorAdapter { reactor, layout, locals_mark: mark, pool, escape_tag: None }
+    }
+
+    macro_rules! translate_ok {
+        ($recompiler:expr, $ctx:expr, $inst:expr, $pc:expr) => {
+            translate_ok!($recompiler, $ctx, $inst, $pc, IsCompressed::No)
+        };
+        ($recompiler:expr, $ctx:expr, $inst:expr, $pc:expr, $compressed:expr) => {{
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor);
+            $recompiler.setup_traps(&mut rctx);
+            $recompiler.translate_instruction(
+                $ctx, &mut rctx, $inst, $pc, $compressed,
+                &mut |a| Function::new(a.collect::<Vec<_>>()),
+            ).is_ok()
+        }};
+    }
 
     #[test]
     fn test_recompiler_creation() {
@@ -1339,13 +1267,7 @@ mod tests {
             src1: rv_asm::Reg(0),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1360,13 +1282,7 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1382,13 +1298,7 @@ mod tests {
             base: rv_asm::Reg(2),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1403,13 +1313,7 @@ mod tests {
             base: rv_asm::Reg(2),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1425,13 +1329,7 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1447,13 +1345,7 @@ mod tests {
             src2: rv_asm::Reg(2),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1469,13 +1361,7 @@ mod tests {
             src2: rv_asm::FReg(3),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -1488,13 +1374,7 @@ mod tests {
             RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
         let mut ctx = ();
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, is_compressed, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000, is_compressed));
     }
 
     #[test]
@@ -1509,13 +1389,7 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst1, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst1, 0x1000));
 
         // addi x2, x0, 3
         let inst2 = Inst::Addi {
@@ -1523,13 +1397,7 @@ mod tests {
             dest: rv_asm::Reg(2),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst2, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst2, 0x1004));
 
         // add x3, x1, x2  (should compute 5 + 3 = 8)
         let inst3 = Inst::Add {
@@ -1537,13 +1405,7 @@ mod tests {
             src1: rv_asm::Reg(1),
             src2: rv_asm::Reg(2),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst3, 0x1008, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst3, 0x1008));
     }
 
     #[test]
@@ -1556,9 +1418,10 @@ mod tests {
         // Simple program: addi x1, x0, 5 (0x00500093)
         let bytes = [0x93, 0x00, 0x50, 0x00]; // Little-endian
 
-        let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| {
-            Function::new(a.collect::<Vec<_>>())
-        });
+        let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+        let mut rctx = make_rctx(&mut reactor);
+        recompiler.setup_traps(&mut rctx);
+        let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| Function::new(a.collect::<Vec<_>>()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 4); // Should have translated 4 bytes
     }
@@ -1573,9 +1436,10 @@ mod tests {
         // c.addi x1, 5 (0x0095) - compressed instruction
         let bytes = [0x95, 0x00];
 
-        let result = recompiler.translate_bytes(&mut ctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| {
-            Function::new(a.collect::<Vec<_>>())
-        });
+        let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+        let mut rctx = make_rctx(&mut reactor);
+        recompiler.setup_traps(&mut rctx);
+        let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| Function::new(a.collect::<Vec<_>>()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 2); // Should have translated 2 bytes
     }
@@ -1616,13 +1480,7 @@ mod tests {
             src1: rv_asm::Reg(0),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint_inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint_inst, 0x1000));
 
         // Should not have collected any hints since tracking is disabled
         assert_eq!(recompiler.get_hints().len(), 0);
@@ -1633,8 +1491,6 @@ mod tests {
         // Test HINT tracking when explicitly enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             true,  // track_hints
             false, // enable_rv64
@@ -1647,13 +1503,7 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint1, 0x1000));
 
         // Translate another HINT: addi x0, x0, 2
         let hint2 = Inst::Addi {
@@ -1661,13 +1511,7 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint2, 0x1004));
 
         // Should have collected both hints
         let hints = recompiler.get_hints();
@@ -1682,8 +1526,6 @@ mod tests {
         // Test that regular ADDI instructions are not tracked as HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             true,  // track_hints
             false, // enable_rv64
@@ -1696,17 +1538,7 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(
-                    &mut ctx,
-                    &regular_addi,
-                    0x1000,
-                    IsCompressed::No,
-                    &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                )
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &regular_addi, 0x1000));
 
         // Should not be tracked as a HINT
         assert_eq!(recompiler.get_hints().len(), 0);
@@ -1717,13 +1549,7 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1004));
 
         // Should only have the HINT
         let hints = recompiler.get_hints();
@@ -1736,8 +1562,6 @@ mod tests {
         // Test clearing collected HINTs
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             true,  // track_hints
             false, // enable_rv64
@@ -1750,13 +1574,7 @@ mod tests {
             dest: rv_asm::Reg(0),
             src1: rv_asm::Reg(0),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1000));
         assert_eq!(recompiler.get_hints().len(), 1);
 
         // Clear hints
@@ -1777,36 +1595,18 @@ mod tests {
         };
 
         // Initially disabled
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1000));
         assert_eq!(recompiler.get_hints().len(), 0);
 
         // Enable tracking
         recompiler.set_hint_tracking(true);
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1004));
         assert_eq!(recompiler.get_hints().len(), 1);
 
         // Disable tracking (should clear existing hints)
         recompiler.set_hint_tracking(false);
         assert_eq!(recompiler.get_hints().len(), 0);
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &hint, 0x1008, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1008));
         assert_eq!(recompiler.get_hints().len(), 0);
     }
     #[test]
@@ -1814,8 +1614,6 @@ mod tests {
         // Test the actual pattern used in rv-corpus test files
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             true,  // track_hints
             false, // enable_rv64
@@ -1830,13 +1628,7 @@ mod tests {
                 src1: rv_asm::Reg(0),
             };
             let pc = 0x1000 + (test_case as u32 * 4);
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint, pc, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, pc));
         }
 
         // Verify all test case markers were collected
@@ -1855,8 +1647,6 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-                None,
                 0x1000,
                 true,  // track_hints
                 false, // enable_rv64
@@ -1865,12 +1655,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |hint: &HintInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 collected.push(*hint);
             };
 
@@ -1882,26 +1667,14 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint1, 0x1000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint1, 0x1000));
 
             let hint2 = Inst::Addi {
                 imm: rv_asm::Imm::new_i32(2),
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint2, 0x1004));
 
             // Drop recompiler before checking results
         }
@@ -1923,8 +1696,6 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-                None,
                 0x1000,
                 true,  // track_hints
                 false, // enable_rv64
@@ -1933,12 +1704,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |hint: &HintInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 callback_hints.push(*hint);
             };
 
@@ -1950,13 +1716,7 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint, 0x2000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x2000));
 
             // Clear callback and get tracked hints before dropping
             recompiler.clear_hint_callback();
@@ -1982,8 +1742,6 @@ mod tests {
 
         {
             let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-                None,
                 0x1000,
                 true,  // track_hints
                 false, // enable_rv64
@@ -1992,12 +1750,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |hint: &HintInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 collected.push(hint.value);
             };
 
@@ -2010,13 +1763,7 @@ mod tests {
             };
 
             // First HINT should invoke callback
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1000));
 
             // Clear callback
             recompiler.clear_hint_callback();
@@ -2027,13 +1774,7 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint2, 0x1004, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint2, 0x1004));
 
             // Drop recompiler
         }
@@ -2057,12 +1798,7 @@ mod tests {
             // Tracking is disabled by default
             let mut callback = |hint: &HintInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 assert_eq!(hint.value, 99);
                 callback_values.push(hint.value);
             };
@@ -2074,13 +1810,7 @@ mod tests {
                 dest: rv_asm::Reg(0),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &hint, 0x1000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1000));
 
             // Get hints before dropping
             assert_eq!(recompiler.get_hints().len(), 0);
@@ -2104,12 +1834,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |_hint: &HintInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 invoked = true;
             };
 
@@ -2121,17 +1846,7 @@ mod tests {
                 dest: rv_asm::Reg(1),
                 src1: rv_asm::Reg(0),
             };
-            assert!(
-                recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &regular_addi,
-                        0x1000,
-                        IsCompressed::No,
-                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                    )
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &regular_addi, 0x1000));
 
             // Drop recompiler
         }
@@ -2153,12 +1868,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |hint: &HintInfo,
                                 user_ctx: &mut (),
-                                cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                cb: &mut HintContext<'_, (), Infallible>| {
                 hint_values.push(hint.value);
                 // Generate a NOP instruction for each HINT
                 cb.emit(user_ctx, &Instruction::Nop).ok();
@@ -2174,15 +1884,7 @@ mod tests {
                     src1: rv_asm::Reg(0),
                 };
                 assert!(
-                    recompiler
-                        .translate_instruction(
-                            &mut ctx,
-                            &hint,
-                            0x1000 + (i as u32 * 4),
-                            IsCompressed::No,
-                            &mut |a| Function::new(a.collect::<Vec<_>>())
-                        )
-                        .is_ok()
+                    translate_ok!(&mut recompiler, &mut ctx, &hint, 0x1000 + (i as u32 * 4))
                 );
             }
 
@@ -2209,12 +1911,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |ecall: &EcallInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 ecall_pcs.push(ecall.pc);
             };
 
@@ -2222,13 +1919,7 @@ mod tests {
 
             // Translate an ECALL instruction
             let ecall = Inst::Ecall;
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &ecall, 0x2000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &ecall, 0x2000));
 
             // Drop recompiler
         }
@@ -2251,12 +1942,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |ebreak: &EbreakInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 ebreak_pcs.push(ebreak.pc);
             };
 
@@ -2264,13 +1950,7 @@ mod tests {
 
             // Translate an EBREAK instruction
             let ebreak = Inst::Ebreak;
-            assert!(
-                recompiler
-                    .translate_instruction(&mut ctx, &ebreak, 0x3000, IsCompressed::No, &mut |a| {
-                        Function::new(a.collect::<Vec<_>>())
-                    })
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &ebreak, 0x3000));
 
             // Drop recompiler
         }
@@ -2293,12 +1973,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |_ecall: &EcallInfo,
                                 user_ctx: &mut (),
-                                cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                cb: &mut HintContext<'_, (), Infallible>| {
                 ecall_count += 1;
                 // Generate a NOP instruction for each ECALL
                 cb.emit(user_ctx, &Instruction::Nop).ok();
@@ -2311,11 +1986,7 @@ mod tests {
                 let ecall = Inst::Ecall;
                 let pc = 0x1000 + (i * 4);
                 assert!(
-                    recompiler
-                        .translate_instruction(&mut ctx, &ecall, pc, IsCompressed::No, &mut |a| {
-                            Function::new(a.collect::<Vec<_>>())
-                        })
-                        .is_ok()
+                    translate_ok!(&mut recompiler, &mut ctx, &ecall, pc)
                 );
             }
 
@@ -2337,12 +2008,7 @@ mod tests {
             let mut ctx = ();
             let mut callback = |_ebreak: &EbreakInfo,
                                 user_ctx: &mut (),
-                                cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                cb: &mut HintContext<'_, (), Infallible>| {
                 ebreak_count += 1;
                 // Generate a NOP instruction for each EBREAK
                 cb.emit(user_ctx, &Instruction::Nop).ok();
@@ -2355,11 +2021,7 @@ mod tests {
                 let ebreak = Inst::Ebreak;
                 let pc = 0x2000 + (i * 4);
                 assert!(
-                    recompiler
-                        .translate_instruction(&mut ctx, &ebreak, pc, IsCompressed::No, &mut |a| {
-                            Function::new(a.collect::<Vec<_>>())
-                        })
-                        .is_ok()
+                    translate_ok!(&mut recompiler, &mut ctx, &ebreak, pc)
                 );
             }
 
@@ -2382,23 +2044,13 @@ mod tests {
             let mut ctx = ();
             let mut ecall_cb = |_ecall: &EcallInfo,
                                 _: &mut (),
-                                _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                _cb: &mut HintContext<'_, (), Infallible>| {
                 ecall_count += 1;
             };
 
             let mut ebreak_cb = |_ebreak: &EbreakInfo,
                                  _: &mut (),
-                                 _cb: &mut HintContext<
-                '_,
-                (),
-                Infallible,
-                Reactor<(), Infallible, Function>,
-            >| {
+                                 _cb: &mut HintContext<'_, (), Infallible>| {
                 ebreak_count += 1;
             };
 
@@ -2406,56 +2058,16 @@ mod tests {
             recompiler.set_ebreak_callback(&mut ebreak_cb);
 
             // First ECALL and EBREAK should invoke callbacks
-            assert!(
-                recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &Inst::Ecall,
-                        0x1000,
-                        IsCompressed::No,
-                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                    )
-                    .is_ok()
-            );
-            assert!(
-                recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &Inst::Ebreak,
-                        0x1004,
-                        IsCompressed::No,
-                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                    )
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &Inst::Ecall, 0x1000));
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &Inst::Ebreak, 0x1004));
 
             // Clear callbacks
             recompiler.clear_ecall_callback();
             recompiler.clear_ebreak_callback();
 
             // Second ECALL and EBREAK should not invoke callbacks (will use default behavior)
-            assert!(
-                recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &Inst::Ecall,
-                        0x1008,
-                        IsCompressed::No,
-                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                    )
-                    .is_ok()
-            );
-            assert!(
-                recompiler
-                    .translate_instruction(
-                        &mut ctx,
-                        &Inst::Ebreak,
-                        0x100c,
-                        IsCompressed::No,
-                        &mut |a| { Function::new(a.collect::<Vec<_>>()) }
-                    )
-                    .is_ok()
-            );
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &Inst::Ecall, 0x1008));
+            assert!(translate_ok!(&mut recompiler, &mut ctx, &Inst::Ebreak, 0x100c));
 
             // Drop recompiler
         }
@@ -2468,8 +2080,6 @@ mod tests {
     fn test_rv64_instructions() {
         // Test RV64 instructions when RV64 is enabled
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             false, // track_hints
             true,  // enable_rv64
@@ -2482,13 +2092,7 @@ mod tests {
             dest: rv_asm::Reg(1),
             src1: rv_asm::Reg(2),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &addiw, 0x1000));
 
         // Test ADDW (Add Word)
         let addw = Inst::AddW {
@@ -2496,13 +2100,7 @@ mod tests {
             src1: rv_asm::Reg(4),
             src2: rv_asm::Reg(5),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &addw, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &addw, 0x1004));
 
         // Test SLLIW (Shift Left Logical Word Immediate)
         let slliw = Inst::SlliW {
@@ -2510,13 +2108,7 @@ mod tests {
             dest: rv_asm::Reg(6),
             src1: rv_asm::Reg(7),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &slliw, 0x1008, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &slliw, 0x1008));
 
         // Test LWU (Load Word Unsigned)
         let lwu = Inst::Lwu {
@@ -2524,13 +2116,7 @@ mod tests {
             dest: rv_asm::Reg(8),
             base: rv_asm::Reg(9),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &lwu, 0x100c, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &lwu, 0x100c));
 
         // Test LD (Load Double-word)
         let ld = Inst::Ld {
@@ -2538,13 +2124,7 @@ mod tests {
             dest: rv_asm::Reg(10),
             base: rv_asm::Reg(11),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &ld, 0x1010, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &ld, 0x1010));
 
         // Test SD (Store Double-word)
         let sd = Inst::Sd {
@@ -2552,13 +2132,7 @@ mod tests {
             base: rv_asm::Reg(12),
             src: rv_asm::Reg(13),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &sd, 0x1014, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &sd, 0x1014));
     }
 
     #[test]
@@ -2577,21 +2151,13 @@ mod tests {
 
         // When RV64 is disabled, we emit Unreachable, which should still succeed
         // but the generated code will trap if executed
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &addiw, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &addiw, 0x1000));
     }
     #[test]
     fn test_rv64_with_memory64() {
         // Test RV64 with memory64 enabled
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             false, // track_hints
             true,  // enable_rv64
@@ -2604,13 +2170,7 @@ mod tests {
             dest: rv_asm::Reg(10),
             base: rv_asm::Reg(11),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &ld, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &ld, 0x1000));
 
         // Test SD with memory64
         let sd = Inst::Sd {
@@ -2618,21 +2178,13 @@ mod tests {
             base: rv_asm::Reg(12),
             src: rv_asm::Reg(13),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &sd, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &sd, 0x1004));
     }
     #[test]
     fn test_rv64_mulh_instructions() {
         // Test RV64 multiply-high instructions (Mulh, Mulhu, Mulhsu)
 
         let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
             0x1000,
             false, // track_hints
             true,  // enable_rv64
@@ -2645,13 +2197,7 @@ mod tests {
             src1: rv_asm::Reg(2),
             src2: rv_asm::Reg(3),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &mulh, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &mulh, 0x1000));
 
         // Test MULHU (unsigned x unsigned)
         let mulhu = Inst::Mulhu {
@@ -2659,13 +2205,7 @@ mod tests {
             src1: rv_asm::Reg(5),
             src2: rv_asm::Reg(6),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &mulhu, 0x1004, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &mulhu, 0x1004));
 
         // Test MULHSU (signed x unsigned)
         let mulhsu = Inst::Mulhsu {
@@ -2673,13 +2213,7 @@ mod tests {
             src1: rv_asm::Reg(8),
             src2: rv_asm::Reg(9),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &mulhsu, 0x1008, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &mulhsu, 0x1008));
 
         // Verify that writing to x0 is properly ignored
         let mulh_x0 = Inst::Mulh {
@@ -2687,13 +2221,7 @@ mod tests {
             src1: rv_asm::Reg(2),
             src2: rv_asm::Reg(3),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &mulh_x0, 0x100c, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &mulh_x0, 0x100c));
     }
     #[cfg(false)]
     #[test]
@@ -2707,13 +2235,7 @@ mod tests {
             src: rv_asm::FReg(2),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_ls, 0x1000, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_ls, 0x1000));
 
         // Test FCVT.LU.S (float to unsigned i64)
         let fcvt_lus = Inst::FcvtLuS {
@@ -2721,13 +2243,7 @@ mod tests {
             src: rv_asm::FReg(4),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_lus, 0x1004, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_lus, 0x1004));
 
         // Test FCVT.S.L (signed i64 to float)
         let fcvt_sl = Inst::FcvtSL {
@@ -2735,13 +2251,7 @@ mod tests {
             src: rv_asm::Reg(6),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_sl, 0x1008, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_sl, 0x1008));
 
         // Test FCVT.S.LU (unsigned i64 to float)
         let fcvt_slu = Inst::FcvtSLu {
@@ -2749,13 +2259,7 @@ mod tests {
             src: rv_asm::Reg(8),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_slu, 0x100c, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_slu, 0x100c));
 
         // Test FCVT.L.D (double to signed i64)
         let fcvt_ld = Inst::FcvtLD {
@@ -2763,13 +2267,7 @@ mod tests {
             src: rv_asm::FReg(10),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_ld, 0x1010, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_ld, 0x1010));
 
         // Test FCVT.LU.D (double to unsigned i64)
         let fcvt_lud = Inst::FcvtLuD {
@@ -2777,13 +2275,7 @@ mod tests {
             src: rv_asm::FReg(12),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_lud, 0x1014, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_lud, 0x1014));
 
         // Test FCVT.D.L (signed i64 to double)
         let fcvt_dl = Inst::FcvtDL {
@@ -2791,13 +2283,7 @@ mod tests {
             src: rv_asm::Reg(14),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_dl, 0x1018, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_dl, 0x1018));
 
         // Test FCVT.D.LU (unsigned i64 to double)
         let fcvt_dlu = Inst::FcvtDLu {
@@ -2805,39 +2291,21 @@ mod tests {
             src: rv_asm::Reg(16),
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fcvt_dlu, 0x101c, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fcvt_dlu, 0x101c));
 
         // Test FMV.X.D (double register to integer register)
         let fmv_xd = Inst::FmvXD {
             dest: rv_asm::Reg(17),
             src: rv_asm::FReg(18),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fmv_xd, 0x1020, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fmv_xd, 0x1020));
 
         // Test FMV.D.X (integer register to double register)
         let fmv_dx = Inst::FmvDX {
             dest: rv_asm::FReg(19),
             src: rv_asm::Reg(20),
         };
-        assert!(
-            recompiler
-                .translate_instruction(&fmv_dx, 0x1024, IsCompressed::No, &mut |a| Function::new(
-                    a.collect::<Vec<_>>()
-                ))
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &fmv_dx, 0x1024));
 
         // Verify that writing to x0 is properly ignored (for conversion to integer)
         let fcvt_ls_x0 = Inst::FcvtLS {
@@ -2846,40 +2314,22 @@ mod tests {
             rm: rv_asm::RoundingMode::RoundToNearestTiesToEven,
         };
         assert!(
-            recompiler
-                .translate_instruction(&fcvt_ls_x0, 0x1028, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
+            translate_ok!(&mut recompiler, &mut ctx, &fcvt_ls_x0, 0x1028)
         );
     }
 
     #[test]
     fn test_base_func_offset() {
-        // Test that base_func_offset can be set and retrieved
+        // base_func_offset lives on the ReactorContext (rctx), not the recompiler.
+        let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+        let mut rctx = make_rctx(&mut reactor);
 
-        let mut recompiler =
-            RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_base_pc(0x1000);
-        let _ctx = ();
+        // Default should be 0.
+        assert_eq!(rctx.base_func_offset(), 0);
 
-        // Default should be 0
-        assert_eq!(recompiler.base_func_offset(), 0);
-
-        // Set to a new value
-        recompiler.set_base_func_offset(15);
-        assert_eq!(recompiler.base_func_offset(), 15);
-
-        // Create with offset using new_with_all_config
-        let recompiler2 = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_all_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            None,
-            0x1000,
-            25, // base_func_offset
-            false,
-            false,
-            false,
-        );
-        assert_eq!(recompiler2.base_func_offset(), 25);
+        // Set to a new value.
+        rctx.set_base_func_offset(15);
+        assert_eq!(rctx.base_func_offset(), 15);
     }
 
     #[test]
@@ -2919,24 +2369,13 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
     fn test_jal_with_speculative_calls_enabled() {
         // Test JAL instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            Some(EscapeTag {
-                tag: TagIdx(0),
-                ty: TypeIdx(0),
-            }),
             0x1000,
         );
         recompiler.set_speculative_calls(true);
@@ -2949,13 +2388,7 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -2963,11 +2396,6 @@ mod tests {
         // Test JAL with dest != x1 (not an ABI-compliant call)
         // Should NOT use speculative calls even when enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            Some(EscapeTag {
-                tag: TagIdx(0),
-                ty: TypeIdx(0),
-            }),
             0x1000,
         );
         recompiler.set_speculative_calls(true);
@@ -2979,24 +2407,13 @@ mod tests {
             dest: rv_asm::Reg(5), // t0, not ra
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
     fn test_jalr_with_speculative_calls_enabled() {
         // Test JALR instruction with speculative calls enabled
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            Some(EscapeTag {
-                tag: TagIdx(0),
-                ty: TypeIdx(0),
-            }),
             0x1000,
         );
         recompiler.set_speculative_calls(true);
@@ -3009,13 +2426,7 @@ mod tests {
             dest: rv_asm::Reg(1), // ra = x1
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -3034,13 +2445,7 @@ mod tests {
         };
 
         // Should still work, just uses non-speculative path
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
@@ -3048,11 +2453,6 @@ mod tests {
         // Test ABI-compliant return: jalr x0, ra, 0
         // This should be detected as a return and use ret() to throw the escape tag
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            Some(EscapeTag {
-                tag: TagIdx(0),
-                ty: TypeIdx(0),
-            }),
             0x1000,
         );
         recompiler.set_speculative_calls(true);
@@ -3066,24 +2466,13 @@ mod tests {
             dest: rv_asm::Reg(0), // x0 (no link)
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 
     #[test]
     fn test_non_abi_return_with_speculative_calls() {
         // Test non-ABI return patterns that should NOT use ret()
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new_with_config(
-            { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: yecta::TypeIdx(0) } },
-            Some(EscapeTag {
-                tag: TagIdx(0),
-                ty: TypeIdx(0),
-            }),
             0x1000,
         );
         recompiler.set_speculative_calls(true);
@@ -3096,13 +2485,7 @@ mod tests {
             dest: rv_asm::Reg(0),
         };
 
-        assert!(
-            recompiler
-                .translate_instruction(&mut ctx, &inst, 0x1000, IsCompressed::No, &mut |a| {
-                    Function::new(a.collect::<Vec<_>>())
-                })
-                .is_ok()
-        );
+        assert!(translate_ok!(&mut recompiler, &mut ctx, &inst, 0x1000));
     }
 }
 
