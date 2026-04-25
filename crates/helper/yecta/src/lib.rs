@@ -848,9 +848,6 @@ struct Entry<F> {
     locals_virtual: BTreeSet<u32>,
     skip_depth: usize,
     block_frames: Vec<bool>, // true = taken-if frame (End should be skipped), false = normal
-    /// Per-function one-slot peephole buffer.  Holds at most one static
-    /// instruction awaiting possible combination with the next instruction.
-    peephole: Option<Instruction<'static>>,
     /// Set to `true` once the function body has been terminated (via
     /// `seal_to`, `seal_for_split`, or the `jmp` cycle path).  `drain_fns`
     /// uses this to emit `unreachable; end` for any functions that were never
@@ -1095,7 +1092,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             locals_virtual: BTreeSet::new(),
             skip_depth: 0,
             block_frames: Vec::new(),
-            peephole: None,
             sealed: false,
         });
         Ok(())
@@ -1124,9 +1120,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             }
             lock.len() - 1
         };
-        // Step 2: flush peephole — no lock held.
-        self.flush_peephole(tail_idx, ctx)?;
-        // Step 3: compute the reachable set via per-entry locks (no global lock).
+        // Step 2: compute the reachable set via per-entry locks (no global lock).
         let reachable = self.transitive_preds_of(tail_idx);
         // Step 4: acquire the global lock once and operate on all reachable entries.
         let mut lock = self.lock_global();
@@ -1267,12 +1261,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 let f = &mut lock[k_idx as usize];
                 _ = take(&mut f.preds);
                 f.transitive_preds = None; // invalidate after severing preds
-                // Flush per-entry peephole before emitting ReturnCall.
-                if let Some(prev) = f.peephole.take() {
-                    f.function.instruction(ctx, &prev)?;
-                    f.inst_count += 1;
-                    Self::update_shadow_stack(f, &prev);
-                }
                 // Drain deferred stores: emit the flag-guarded unconditional flush.
                 // We can't borrow `self.local_pool` and `f` simultaneously so we
                 // drain into a local vec first.
@@ -1306,6 +1294,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 // Close the function body's implicit outer block.
                 f.function.instruction(ctx, &Instruction::End)?;
                 f.sealed = true;
+            }
+            // Purge the sealed functions from the lens queue.
+            drop(lock);  // release global lock before acquiring lens lock
+            {
+                let mut lens = self.lens.lock();
+                for bucket in lens.iter_mut() {
+                    bucket.retain(|fi| !pred_transitive.contains(fi));
+                }
             }
         } else {
             self.add_pred(succ, pred);
@@ -1433,7 +1429,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         pool: Pool<'_, Context, E>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
@@ -1512,7 +1507,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         params: u32,
         tag: EscapeTag,
     ) -> Result<(), E> {
-        self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         let EscapeTag {
             tag: TagIdx(tag_idx),
@@ -1833,7 +1827,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         target: FuncIdx,
         params: u32,
     ) -> Result<(), E> {
-        self.flush_peephole(target_idx, ctx)?;
         // Use the per-entry transitive predecessor cache instead of a BFS.
         let reachable = self.transitive_preds_of(target_idx).clone();
         for x in reachable {
@@ -1859,119 +1852,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         Ok(())
     }
 
-    /// Feed one instruction to one specific entry, applying the per-entry peephole.
-    ///
-    /// The peephole state is updated atomically under one lock acquisition.
-    /// After releasing the lock, any previously-buffered instruction and/or
-    /// the current instruction are forwarded to `feed_one`.
     fn feed_to_entry(&self, ctx: &mut Context, idx: usize, instruction: &Instruction<'_>) -> Result<(), E> {
-        // Step 1: atomically check/update the per-entry peephole.
-        let (prev_to_flush, current_buffered) = {
-            let mut func = self.lock_entry(idx, false);
-            let elide = match (&func.peephole, instruction) {
-                (Some(Instruction::LocalGet(_)), Instruction::Drop) => true,
-                (Some(Instruction::I32Const(0)), Instruction::I32Add) => true,
-                (Some(Instruction::I32Const(1)), Instruction::I32Mul) => true,
-                _ => false,
-            };
-            if elide {
-                func.peephole = None;
-                return Ok(());
-            }
-            let prev = func.peephole.take();
-            let static_insn = Self::to_static_insn(instruction);
-            let buffered = static_insn.is_some();
-            func.peephole = static_insn;
-            (prev, buffered)
-        }; // lock released here
-        // Step 2: emit previously-buffered instruction (if any).
-        if let Some(prev) = prev_to_flush {
-            self.feed_one(ctx, idx, &prev)?;
-        }
-        // Step 3: emit current instruction if it was not buffered.
-        if !current_buffered {
-            self.feed_one(ctx, idx, instruction)?;
-        }
-        Ok(())
-    }
-
-    /// Flush the per-entry peephole for every entry reachable from `target`.
-    fn flush_peephole(&self, target: usize, ctx: &mut Context) -> Result<(), E> {
-        let reachable = self.transitive_preds_of(target).clone();
-        for FuncIdx(idx) in reachable {
-            let prev = {
-                let mut func = self.lock_entry(idx as usize, false);
-                func.peephole.take()
-            };
-            if let Some(prev) = prev {
-                self.feed_one(ctx, idx as usize, &prev)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Convert an instruction to a `'static` version for peephole buffering.
-    /// Returns `None` for instructions that cannot be trivially made static.
-    fn to_static_insn(insn: &Instruction<'_>) -> Option<Instruction<'static>> {
-        match insn {
-            Instruction::LocalGet(n) => Some(Instruction::LocalGet(*n)),
-            Instruction::LocalSet(n) => Some(Instruction::LocalSet(*n)),
-            Instruction::LocalTee(n) => Some(Instruction::LocalTee(*n)),
-            Instruction::GlobalGet(n) => Some(Instruction::GlobalGet(*n)),
-            Instruction::GlobalSet(n) => Some(Instruction::GlobalSet(*n)),
-            Instruction::I32Const(v) => Some(Instruction::I32Const(*v)),
-            Instruction::I64Const(v) => Some(Instruction::I64Const(*v)),
-            Instruction::I32Add => Some(Instruction::I32Add),
-            Instruction::I32Sub => Some(Instruction::I32Sub),
-            Instruction::I32Mul => Some(Instruction::I32Mul),
-            Instruction::I32And => Some(Instruction::I32And),
-            Instruction::I32Or => Some(Instruction::I32Or),
-            Instruction::I32Xor => Some(Instruction::I32Xor),
-            Instruction::I32Shl => Some(Instruction::I32Shl),
-            Instruction::I32ShrS => Some(Instruction::I32ShrS),
-            Instruction::I32ShrU => Some(Instruction::I32ShrU),
-            Instruction::I32Eq => Some(Instruction::I32Eq),
-            Instruction::I32Ne => Some(Instruction::I32Ne),
-            Instruction::I32LtS => Some(Instruction::I32LtS),
-            Instruction::I32LtU => Some(Instruction::I32LtU),
-            Instruction::I32GtS => Some(Instruction::I32GtS),
-            Instruction::I32GtU => Some(Instruction::I32GtU),
-            Instruction::I32LeS => Some(Instruction::I32LeS),
-            Instruction::I32LeU => Some(Instruction::I32LeU),
-            Instruction::I32GeS => Some(Instruction::I32GeS),
-            Instruction::I32GeU => Some(Instruction::I32GeU),
-            Instruction::I32Eqz => Some(Instruction::I32Eqz),
-            Instruction::I64Add => Some(Instruction::I64Add),
-            Instruction::I64Sub => Some(Instruction::I64Sub),
-            Instruction::I64Mul => Some(Instruction::I64Mul),
-            Instruction::I64And => Some(Instruction::I64And),
-            Instruction::I64Or => Some(Instruction::I64Or),
-            Instruction::I64Xor => Some(Instruction::I64Xor),
-            Instruction::I64Shl => Some(Instruction::I64Shl),
-            Instruction::I64ShrS => Some(Instruction::I64ShrS),
-            Instruction::I64ShrU => Some(Instruction::I64ShrU),
-            Instruction::I64Eq => Some(Instruction::I64Eq),
-            Instruction::I64Ne => Some(Instruction::I64Ne),
-            Instruction::I64LtS => Some(Instruction::I64LtS),
-            Instruction::I64LtU => Some(Instruction::I64LtU),
-            Instruction::I64GtS => Some(Instruction::I64GtS),
-            Instruction::I64GtU => Some(Instruction::I64GtU),
-            Instruction::I64LeS => Some(Instruction::I64LeS),
-            Instruction::I64LeU => Some(Instruction::I64LeU),
-            Instruction::I64GeS => Some(Instruction::I64GeS),
-            Instruction::I64GeU => Some(Instruction::I64GeU),
-            Instruction::I64Eqz => Some(Instruction::I64Eqz),
-            Instruction::I32WrapI64 => Some(Instruction::I32WrapI64),
-            Instruction::I64ExtendI32S => Some(Instruction::I64ExtendI32S),
-            Instruction::I64ExtendI32U => Some(Instruction::I64ExtendI32U),
-            Instruction::Drop => Some(Instruction::Drop),
-            Instruction::Return => Some(Instruction::Return),
-            Instruction::Unreachable => Some(Instruction::Unreachable),
-            Instruction::Nop => Some(Instruction::Nop),
-            Instruction::End => Some(Instruction::End),
-            Instruction::Else => Some(Instruction::Else),
-            _ => None,
-        }
+        self.feed_one(ctx, idx, instruction)
     }
 
     /// Per-entry instruction dispatch with shadow-stack constant folding.
@@ -2344,16 +2226,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         &self,
         ctx: &mut Context,
         entry: &mut Entry<F>,
-        idx: usize,
+        _idx: usize,
         insn: &Instruction<'_>,
     ) -> Result<(), E> {
-        let pops = Self::stack_pops(insn);
-        // Call-like instructions consume an unknown number of arguments that
-        // stack_pops cannot determine without the function signature.  Flush
-        // the entire shadow stack so those arguments are concretely on the
-        // WASM stack before the call is emitted.
-        let pops = if pops == 0 {
-            let is_call = matches!(
+        // Flush the entire const_stack whenever the instruction interacts with
+        // the value stack (pushes, pops, or is a call).  This keeps the
+        // invariant that no deferred constant sits below a concrete runtime
+        // value on the abstract stack.
+        let needs_flush = Self::stack_pops(insn) > 0
+            || Self::stack_pushes(insn) > 0
+            || matches!(
                 insn,
                 Instruction::Call(_)
                     | Instruction::CallIndirect { .. }
@@ -2362,41 +2244,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     | Instruction::CallRef(_)
                     | Instruction::ReturnCallRef(_)
             );
-            if is_call {
-                entry.const_stack.len() // flush everything
-            } else {
-                return Ok(());
-            }
-        } else {
-            pops
-        };
 
-        let len = entry.const_stack.len();
-        let start = len.saturating_sub(pops);
-
-        // Check if there are any deferred consts to materialize in range.
-        let has_deferred = entry.const_stack[start..len].iter().any(|s| s.is_some());
-
-        if !has_deferred {
+        if !needs_flush || entry.const_stack.iter().all(|s| s.is_none()) {
             return Ok(());
         }
 
-        // We need to emit deferred consts in order (bottom to top of the window).
-        // But the WASM stack grows left-to-right, so we emit in order.
-        // The slots at `start..len` correspond to the bottommost to topmost stack positions.
-        // None slots are already on the WASM stack; Some slots need emitting.
-        // We can only emit in stack order. If there's a None below a Some, we have
-        // a gap. In that case, we can only materialize from the top contiguous Some group.
-        for i in start..len {
-            if let Some((v, ty)) = entry.const_stack[i] {
-                let insn = match ty {
+        for slot in &mut entry.const_stack {
+            if let Some((v, ty)) = *slot {
+                let emit_insn = match ty {
                     ValType::I32 => Instruction::I32Const(v as i32),
                     ValType::I64 => Instruction::I64Const(v as i64),
                     _ => Instruction::I64Const(v as i64),
                 };
-                entry.function.instruction(ctx, &insn)?;
+                entry.function.instruction(ctx, &emit_insn)?;
                 entry.inst_count += 1;
-                entry.const_stack[i] = None; // now emitted to WASM stack
+                *slot = None;
             }
         }
         Ok(())
@@ -2518,7 +2380,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
 
             Instruction::LocalGet(_) => 0,
             Instruction::LocalSet(_) => 1,
-            Instruction::LocalTee(_) => 0,
+            Instruction::LocalTee(_) => 1,
 
             Instruction::GlobalSet(_) => 1,
             Instruction::GlobalGet(_) => 0,
@@ -2879,7 +2741,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         ctx: &mut Context,
         instruction: &Instruction<'_>,
     ) -> Result<(), E> {
-        self.flush_peephole(tail_idx, ctx)?;
         self.flush_bundles(ctx, tail_idx)?;
         self.flush_const_stacks_reachable(ctx, tail_idx)?;
         let ifs = self.lock_entry(tail_idx,true).if_stmts;
@@ -2901,6 +2762,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             func.block_frames.clear();
             // Invalidate transitive cache after severing preds.
             func.transitive_preds = None;
+        }
+        // Purge sealed indices from the lens queue so that future `next_with`
+        // calls cannot pick up already-sealed functions as predecessors.
+        // (Without this, instructions emitted to a successor function are also
+        // written into already-sealed functions, producing invalid WASM bodies.)
+        {
+            let mut lens = self.lens.lock();
+            for bucket in lens.iter_mut() {
+                bucket.retain(|fi| !reachable.contains(fi));
+            }
         }
         Ok(())
     }

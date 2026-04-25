@@ -1116,11 +1116,15 @@ impl X86Recompiler {
             })?;
 
             if undecidable_option.is_none() {
+                let name = alloc::format!("{:?}", inst.mnemonic());
+                self.unsupported_insns.insert(name);
                 rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
             }
 
             dec.set_ip(inst_rip + 1);
         }
+        // Seal any functions not explicitly terminated by a branch/call.
+        let _ = rctx.seal_remaining(ctx);
         Ok(())
     }
 

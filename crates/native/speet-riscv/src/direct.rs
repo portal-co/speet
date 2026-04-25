@@ -85,6 +85,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         } else {
             rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
+            // RV32 + memory64: extend i32 address to i64.
+            if self.use_memory64 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+            }
         }
 
         // Apply address mapping if provided (for paging support)
@@ -353,6 +357,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         } else {
             rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
+            // RV32 + memory64: extend i32 address to i64.
+            if self.use_memory64 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+            }
         }
 
         // Apply address mapping if provided (for paging support)
@@ -502,6 +510,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(ctx, rctx, tail_idx, offset)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
+        if self.use_memory64 && !self.enable_rv64 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+        }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -570,6 +581,9 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(base)))?;
         self.emit_imm(ctx, rctx, tail_idx, offset)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Add)?;
+        if self.use_memory64 && !self.enable_rv64 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+        }
 
         // Apply address mapping if provided (for paging support)
         if let Some(mapper) = self.mapper_callback.as_mut() {
@@ -839,7 +853,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             IsCompressed::No => 2,
         };
         let tail_idx = self.init_function(ctx, rctx, pc, inst_len, 8, f)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32Const(pc as i32))?;
+        self.emit_int_const(ctx, rctx, tail_idx, pc as i32)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::pc_local()))?;
 
         // Fire instruction trap (if installed).
@@ -995,6 +1009,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // Tee ra into load_addr_scratch_local so the trap can inspect it.
                     let scratch = self.load_addr_scratch_local(rctx.layout());
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(Reg(1))))?;
+                    // rv32+memory64: scratch is i64, extend before tee.
+                    if !self.enable_rv64 && self.use_memory64 {
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                    }
                     rctx.feed(ctx, tail_idx, &Instruction::LocalTee(scratch))?;
                     rctx.feed(ctx, tail_idx, &Instruction::Drop)?; // balance the stack
                     let jalr_ret_info = JumpInfo::indirect(pc as u64, scratch, JumpKind::Return);
@@ -1200,9 +1218,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     } else {
                         rctx.feed(ctx, tail_idx, &Instruction::I32Const(0xFFFFFFFE_u32 as i32))?;
                         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
+                        // rv32+memory64: scratch is i64, so extend before tee.
+                        if self.use_memory64 {
+                            rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                        }
                     }
                     let scratch = self.load_addr_scratch_local(rctx.layout());
                     rctx.feed(ctx, tail_idx, &Instruction::LocalTee(scratch))?;
+                    // PC is i32 for rv32, i64 for rv64.  After the rv32+memory64
+                    // extend the tee leaves i64 on the stack; wrap back to i32 for PC.
+                    if !self.enable_rv64 && self.use_memory64 {
+                        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                    }
                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::pc_local()))?;
                     // Jump trap: dest==1 → IndirectCall; dest==0 without base==ra → IndirectJump
                     let jalr_kind = if dest.0 == 1 {
@@ -2186,6 +2213,10 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     let addr_type = self.addr_val_type();
                     let load_addr = self.load_addr_scratch_local(rctx.layout());
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(*addr)))?;
+                    // rv32+memory64: load_addr is i64, extend before tee.
+                    if !self.enable_rv64 && self.use_memory64 {
+                        rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                    }
                     // Tee address for alias check in emit_lr.
                     rctx.feed(ctx, tail_idx, &Instruction::LocalTee(load_addr))?;
                     emit_lr(

@@ -613,7 +613,7 @@ where
             let layout = rctx.layout_mut();
             layout.append(32, int_type); // x0-x31 (params 0-31)
             layout.append(32, ValType::F64); // f0-f31 (params 32-63)
-            layout.append(1, ValType::I32); // PC (param 64)
+            layout.append(1, int_type); // PC (param 64)
             layout.append(1, int_type); // expected_RA (param 65)
         }
         rctx.declare_trap_params();

@@ -64,6 +64,9 @@ pub struct X86Recompiler {
     enable_speculative_calls: bool,
     /// Optional slot assigner: controls which RIPs get function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
+    /// Mnemonics that had no translation and fell back to `unreachable`.
+    /// Cleared by [`clear_unsupported`](Self::clear_unsupported).
+    unsupported_insns: alloc::collections::BTreeSet<alloc::string::String>,
 }
 
 impl X86Recompiler {
@@ -94,7 +97,19 @@ impl X86Recompiler {
             hints: Vec::new(),
             enable_speculative_calls: false,
             slot_assigner: None,
+            unsupported_insns: alloc::collections::BTreeSet::new(),
         }
+    }
+
+    /// Returns the set of instruction mnemonics that had no translation and
+    /// fell back to `unreachable` during the most recent `translate_bytes` call.
+    pub fn unsupported_insns(&self) -> &alloc::collections::BTreeSet<alloc::string::String> {
+        &self.unsupported_insns
+    }
+
+    /// Clear the unsupported-instruction tracking set.
+    pub fn clear_unsupported(&mut self) {
+        self.unsupported_insns.clear();
     }
 
     /// Install a slot assigner to control which guest RIPs receive WASM function slots.
