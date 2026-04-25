@@ -575,12 +575,12 @@ where
         rctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(String, u32)>,
     ) -> BinaryUnit<F> {
-        // Build the uniform function type: all params are i64 (x86-64 GPRs,
-        // PC, flags, temps are all i64 or i32, but each function shares the
-        // same total_params-wide signature).
-        let total_params = rctx.locals_mark().total_locals;
-        let param_types: alloc::vec::Vec<ValType> =
-            (0..total_params).map(|_| ValType::I64).collect();
+        // Build the uniform function type matching setup_traps():
+        // 16 x i64 GPRs, 1 x i32 PC, 5 x i32 flags, 4 x i64 temps.
+        let mut param_types: alloc::vec::Vec<ValType> = alloc::vec::Vec::with_capacity(Self::BASE_PARAMS as usize);
+        param_types.extend((0..16).map(|_| ValType::I64));
+        param_types.extend((0..6).map(|_| ValType::I32));
+        param_types.extend((0..4).map(|_| ValType::I64));
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
         let base = rctx.base_func_offset();

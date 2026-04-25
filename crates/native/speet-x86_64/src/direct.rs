@@ -81,9 +81,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ReturnAddres
         sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
         sink.instruction(ctx, &Instruction::I64Sub)?;
 
-        // Convert to function index (divide by 1 for x86_64, similar to rip_to_func_idx)
-        // For x86_64, each function is 1 byte aligned (unlike RISC-V which is 2-byte aligned)
-        sink.instruction(ctx, &Instruction::I32WrapI64)?;
+        // Keep this as i64: indirect jump plumbing expects architecture state words.
         Ok(())
     }
 }
@@ -98,7 +96,6 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Retu
         sink.instruction(ctx, &Instruction::LocalGet(23))?;
         sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
         sink.instruction(ctx, &Instruction::I64Sub)?;
-        sink.instruction(ctx, &Instruction::I32WrapI64)?;
         Ok(())
     }
 }
@@ -472,14 +469,16 @@ impl X86Recompiler {
                 | OpKind::Immediate16
                 | OpKind::Immediate32
                 | OpKind::Immediate64
-                | OpKind::Immediate8to32 => {
+                | OpKind::Immediate8to32
+                | OpKind::Immediate8to64 => {
                     self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
                     let imm = inst.immediate64() as i64;
                     self.emit_i64_const(ctx, rctx, tail_idx, imm)?;
                     let size_bits = match op1 {
                         OpKind::Immediate8 => 8, OpKind::Immediate16 => 16,
                         OpKind::Immediate8to32 | OpKind::Immediate32 => 32,
-                        OpKind::Immediate64 => 64, _ => 64,
+                        OpKind::Immediate8to64 | OpKind::Immediate64 => 64,
+                        _ => 64,
                     };
                     self.emit_memory_store(ctx, rctx, tail_idx, size_bits)?;
                     return Ok(Some(()));
@@ -516,7 +515,8 @@ impl X86Recompiler {
             | OpKind::Immediate16
             | OpKind::Immediate32
             | OpKind::Immediate64
-            | OpKind::Immediate8to32 => Operand::Imm(inst.immediate64() as i64),
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64 => Operand::Imm(inst.immediate64() as i64),
             OpKind::Register => {
                 if let Some((r_local, r_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) {
                     Operand::RegWithSize(r_local, r_size, bit)
@@ -645,6 +645,7 @@ impl X86Recompiler {
                             OpKind::Immediate8 => 8,
                             OpKind::Immediate16 => 16,
                             OpKind::Immediate8to32 => 32,
+                            OpKind::Immediate8to64 => 64,
                             OpKind::Immediate32 => 32,
                             OpKind::Immediate64 => 64,
                             OpKind::Register => {
@@ -659,6 +660,25 @@ impl X86Recompiler {
                         self.handle_memory_rmw(ctx, rctx, tail_idx, &inst, size_bits, |this, ctx, rctx, tail_idx| {
                             this.emit_i64_add(ctx, rctx, tail_idx)
                         })
+                    } else if inst.op0_kind() == OpKind::Register && inst.op1_kind() == OpKind::Memory {
+                        if let Some((dst, dst_size, _z, dst_bit_offset)) = Self::resolve_reg(inst.op0_register()) {
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+                            self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                            self.emit_memory_load(ctx, rctx, tail_idx, dst_size, false)?;
+                            self.emit_i64_add(ctx, rctx, tail_idx)?;
+                            if dst_size == 64 && dst_bit_offset == 0 {
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                            } else if dst_size == 32 {
+                                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                            } else {
+                                self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                            }
+                            Ok(Some(()))
+                        } else {
+                            Ok(None)
+                        }
                     } else {
                         self.handle_binary(ctx, rctx, tail_idx, &inst, |this, ctx, rctx, tail_idx, src, dst, dst_size, dst_bit_offset| {
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
@@ -671,6 +691,71 @@ impl X86Recompiler {
                                     }
                                 }
                                 this.emit_i64_add(ctx, rctx, tail_idx)?;
+                                if dst_size == 64 && dst_bit_offset == 0 {
+                                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
+                                } else if dst_size == 32 {
+                                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
+                                } else {
+                                    this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                }
+                            },
+                        )
+                    }
+                }
+                Mnemonic::Sub => {
+                    if inst.op0_kind() == OpKind::Memory {
+                        let size_bits = match inst.op1_kind() {
+                            OpKind::Immediate8 => 8,
+                            OpKind::Immediate16 => 16,
+                            OpKind::Immediate8to32 => 32,
+                            OpKind::Immediate8to64 => 64,
+                            OpKind::Immediate32 => 32,
+                            OpKind::Immediate64 => 64,
+                            OpKind::Register => {
+                                if let Some((_, r_size, _, _)) = Self::resolve_reg(inst.op1_register()) {
+                                    r_size
+                                } else {
+                                    64
+                                }
+                            }
+                            _ => 64,
+                        };
+                        self.handle_memory_rmw(ctx, rctx, tail_idx, &inst, size_bits, |this, ctx, rctx, tail_idx| {
+                            this.emit_i64_sub(ctx, rctx, tail_idx)
+                        })
+                    } else if inst.op0_kind() == OpKind::Register && inst.op1_kind() == OpKind::Memory {
+                        if let Some((dst, dst_size, _z, dst_bit_offset)) = Self::resolve_reg(inst.op0_register()) {
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+                            self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                            self.emit_memory_load(ctx, rctx, tail_idx, dst_size, false)?;
+                            self.emit_i64_sub(ctx, rctx, tail_idx)?;
+                            if dst_size == 64 && dst_bit_offset == 0 {
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                            } else if dst_size == 32 {
+                                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                            } else {
+                                self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                            }
+                            Ok(Some(()))
+                        } else {
+                            Ok(None)
+                        }
+                    } else {
+                        self.handle_binary(ctx, rctx, tail_idx, &inst, |this, ctx, rctx, tail_idx, src, dst, dst_size, dst_bit_offset| {
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+                                match src {
+                                    Operand::Imm(i) => this.emit_i64_const(ctx, rctx, tail_idx, i)?,
+                                    Operand::Reg(r) => rctx.feed(ctx, tail_idx, &Instruction::LocalGet(r))?,
+                                    Operand::RegWithSize(r, sz, bit) => {
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(r))?;
+                                        this.emit_mask_shift_for_read(ctx, rctx, tail_idx, sz, bit)?;
+                                    }
+                                }
+                                this.emit_i64_sub(ctx, rctx, tail_idx)?;
                                 if dst_size == 64 && dst_bit_offset == 0 {
                                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                                 } else if dst_size == 32 {
@@ -823,41 +908,109 @@ impl X86Recompiler {
                     )
                 }
                 Mnemonic::Mov => {
-                    self.handle_binary(ctx, rctx, tail_idx, &inst, |this, ctx, rctx, tail_idx, src, dst, dst_size, dst_bit_offset| {
-                            match inst.op1_kind() {
-                                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => {
-                                    if let Operand::Imm(i) = src {
-                                        this.emit_i64_const(ctx, rctx, tail_idx, i)?;
+                    if inst.op0_kind() == OpKind::Memory {
+                        match inst.op1_kind() {
+                            OpKind::Immediate8
+                            | OpKind::Immediate16
+                            | OpKind::Immediate32
+                            | OpKind::Immediate64
+                            | OpKind::Immediate8to32 => {
+                                let size_bits = match inst.op1_kind() {
+                                    OpKind::Immediate8 => 8,
+                                    OpKind::Immediate16 => 16,
+                                    OpKind::Immediate8to32 | OpKind::Immediate32 => 32,
+                                    OpKind::Immediate64 => 64,
+                                    _ => 64,
+                                };
+                                self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                                self.emit_i64_const(ctx, rctx, tail_idx, inst.immediate64() as i64)?;
+                                self.emit_memory_store(ctx, rctx, tail_idx, size_bits)?;
+                                Ok(Some(()))
+                            }
+                            OpKind::Register => {
+                                if let Some((src_local, src_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) {
+                                    self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
+                                    if bit > 0 {
+                                        self.emit_mask_shift_for_read(ctx, rctx, tail_idx, src_size, bit)?;
                                     }
+                                    match src_size {
+                                        8 => {
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                        }
+                                        16 => {
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFF))?;
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                        }
+                                        _ => {}
+                                    }
+                                    self.emit_memory_store(ctx, rctx, tail_idx, src_size)?;
+                                    Ok(Some(()))
+                                } else {
+                                    Ok(None)
+                                }
+                            }
+                            _ => Ok(None),
+                        }
+                    } else {
+                        if let (OpKind::Register, Some((dst, dst_size, _z, dst_bit_offset))) =
+                            (inst.op0_kind(), Self::resolve_reg(inst.op0_register()))
+                        {
+                            let src_supported = match inst.op1_kind() {
+                                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => {
+                                    self.emit_i64_const(ctx, rctx, tail_idx, inst.immediate64() as i64)?;
+                                    true
                                 }
                                 OpKind::Register => {
-                                    match src {
-                                        Operand::Reg(r) => rctx.feed(ctx, tail_idx, &Instruction::LocalGet(r))?,
-                                        Operand::RegWithSize(r, sz, bit) => {
-                                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(r))?;
-                                            this.emit_mask_shift_for_read(ctx, rctx, tail_idx, sz, bit)?;
+                                    if let Some((src_local, src_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) {
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
+                                        if bit > 0 {
+                                            self.emit_mask_shift_for_read(ctx, rctx, tail_idx, src_size, bit)?;
                                         }
-                                        _ => return rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+                                        match src_size {
+                                            8 => {
+                                                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
+                                                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                            }
+                                            16 => {
+                                                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFF))?;
+                                                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                            }
+                                            _ => {}
+                                        }
+                                        true
+                                    } else {
+                                        false
                                     }
                                 }
                                 OpKind::Memory => {
-                                    this.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
-                                    this.emit_memory_load(ctx, rctx, tail_idx, dst_size, false)?;
+                                    self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                                    self.emit_memory_load(ctx, rctx, tail_idx, dst_size, false)?;
+                                    true
                                 }
-                                _ => return rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
-                            }
-                            if dst_size == 64 && dst_bit_offset == 0 {
-                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
-                            } else if dst_size == 32 {
-                                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
-                                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
-                                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
+                                _ => false,
+                            };
+                            if !src_supported {
+                                Ok(None)
                             } else {
-                                this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                if dst_size == 64 && dst_bit_offset == 0 {
+                                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                                } else if dst_size == 32 {
+                                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                    rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                                } else {
+                                    self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                                }
+                                Ok(Some(()))
                             }
-                        },
-                    )
+                        } else {
+                            Ok(None)
+                        }
+                    }
                 }
+                Mnemonic::Nop => Ok(Some(())),
                 Mnemonic::Lea => {
                     if inst.op0_kind() != OpKind::Register || inst.op1_kind() != OpKind::Memory {
                         Ok(None)
@@ -1169,7 +1322,6 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::LocalTee(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::ZF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
@@ -1237,7 +1389,6 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::LocalTee(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::ZF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
@@ -1249,7 +1400,6 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(23))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64LtU)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::CF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
