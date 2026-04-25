@@ -12,6 +12,7 @@ rv-asm.workspace = true
 speet-riscv = { path = "../../native/speet-riscv" }
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-module-builder = { path = "../../os/speet-module-builder" }
+speet-linker = { path = "../../os/speet-linker" }
 speet-memory = { path = "../../helper/speet-memory" }
 wasm-encoder.workspace = true
 wasmparser = { version = "0.240.0", features = ["validate"] }
