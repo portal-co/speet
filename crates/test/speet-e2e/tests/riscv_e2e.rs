@@ -647,104 +647,1474 @@ macro_rules! link_c {
     };
 }
 
-// ── RISCV corpus smoke tests ──────────────────────────────────────────────────
+// @generated-tests-begin
 
-smoke!(smoke_rv32_mul_no_eh,   "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
-smoke!(smoke_rv32_mul_eh,      "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
-smoke!(smoke_rv32_br_no_eh,    "rv32im/02_branches",        arch=Arch::Rv32, Eh::None);
-smoke!(smoke_rv32_br_eh,       "rv32im/02_branches",        arch=Arch::Rv32, Eh::With);
-smoke!(smoke_rv32_ls_no_eh,    "rv32im/03_loads_stores",    arch=Arch::Rv32, Eh::None);
-smoke!(smoke_rv32_ls_eh,       "rv32im/03_loads_stores",    arch=Arch::Rv32, Eh::With);
-smoke!(smoke_rv32_sh_no_eh,    "rv32im/04_shifts",          arch=Arch::Rv32, Eh::None);
-smoke!(smoke_rv32_sh_eh,       "rv32im/04_shifts",          arch=Arch::Rv32, Eh::With);
-smoke!(smoke_rv32_imm_no_eh,   "rv32im/05_immediate_ops",   arch=Arch::Rv32, Eh::None);
-smoke!(smoke_rv32_imm_eh,      "rv32im/05_immediate_ops",   arch=Arch::Rv32, Eh::With);
-smoke!(smoke_rv64_arith_no_eh, "rv64im/01_basic_arith",     arch=Arch::Rv64, Eh::None);
-smoke!(smoke_rv64_arith_eh,    "rv64im/01_basic_arith",     arch=Arch::Rv64, Eh::With);
-smoke!(smoke_rv64_word_no_eh,  "rv64im/02_word_ops",        arch=Arch::Rv64, Eh::None);
-smoke!(smoke_rv64_word_eh,     "rv64im/02_word_ops",        arch=Arch::Rv64, Eh::With);
-smoke!(smoke_rv64_ls_no_eh,    "rv64im/03_loads_stores",    arch=Arch::Rv64, Eh::None);
-smoke!(smoke_rv64_ls_eh,       "rv64im/03_loads_stores",    arch=Arch::Rv64, Eh::With);
-smoke!(smoke_rv64_sh_no_eh,    "rv64im/04_shifts",          arch=Arch::Rv64, Eh::None);
-smoke!(smoke_rv64_sh_eh,       "rv64im/04_shifts",          arch=Arch::Rv64, Eh::With);
-smoke!(smoke_rv64_mul_no_eh,   "rv64im/05_multiply_divide", arch=Arch::Rv64, Eh::None);
-smoke!(smoke_rv64_mul_eh,      "rv64im/05_multiply_divide", arch=Arch::Rv64, Eh::With);
+// ── Corpus smoke tests ──────────────────────────────────────────────────────────
 
-// ── RISCV C smoke tests ───────────────────────────────────────────────────────
+smoke!(smoke_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None);
+smoke!(smoke_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With);
+smoke!(smoke_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None);
+smoke!(smoke_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With);
+smoke!(smoke_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None);
+smoke!(smoke_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With);
+smoke!(smoke_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None);
+smoke!(smoke_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With);
 
-smoke_c!(smoke_rv32_c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None);
-smoke_c!(smoke_rv32_c_arith_eh,    env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With);
-smoke_c!(smoke_rv64_c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
-smoke_c!(smoke_rv64_c_arith_eh,    env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
+// ── C smoke tests ───────────────────────────────────────────────────────────────
 
-// ── x86_64 C smoke tests (corpus-equivalent: compile C programs) ──────────────
+smoke_c!(smoke_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None);
+smoke_c!(smoke_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With);
+smoke_c!(smoke_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
+smoke_c!(smoke_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
+smoke_c!(smoke_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None);
+smoke_c!(smoke_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With);
 
-smoke_c!(smoke_x86_c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None);
-smoke_c!(smoke_x86_c_arith_eh,    env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With);
+// ── Corpus run tests ────────────────────────────────────────────────────────────
 
-// ── RISCV run tests ───────────────────────────────────────────────────────────
+run!(run_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None);
+run!(run_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With);
+run!(run_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None);
+run!(run_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With);
+run!(run_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None);
+run!(run_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With);
+run!(run_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None);
+run!(run_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With);
+run!(run_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
+run!(run_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
+run!(run_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None);
+run!(run_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With);
+run!(run_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None);
+run!(run_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With);
+run!(run_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None);
+run!(run_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With);
+run!(run_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None);
+run!(run_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With);
 
-run!(run_rv32_mul_no_eh,   "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
-run!(run_rv32_mul_eh,      "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
-run!(run_rv32_br_no_eh,    "rv32im/02_branches",        arch=Arch::Rv32, Eh::None);
-run!(run_rv32_br_eh,       "rv32im/02_branches",        arch=Arch::Rv32, Eh::With);
-run!(run_rv64_arith_no_eh, "rv64im/01_basic_arith",     arch=Arch::Rv64, Eh::None);
-run!(run_rv64_arith_eh,    "rv64im/01_basic_arith",     arch=Arch::Rv64, Eh::With);
+// ── C run tests ─────────────────────────────────────────────────────────────────
 
-// ── C run tests ───────────────────────────────────────────────────────────────
+run_c!(run_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None);
+run_c!(run_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With);
+run_c!(run_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
+run_c!(run_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
+run_c!(run_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None);
+run_c!(run_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With);
 
-run_c!(run_rv32_c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None);
-run_c!(run_rv32_c_arith_eh,    env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With);
-run_c!(run_rv64_c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
-run_c!(run_rv64_c_arith_eh,    env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
-run_c!(run_x86_c_arith_no_eh,  env="E2E_X86_ARITH",  arch=Arch::X86_64, Eh::None);
-run_c!(run_x86_c_arith_eh,     env="E2E_X86_ARITH",  arch=Arch::X86_64, Eh::With);
+// ── Corpus-corpus link tests ────────────────────────────────────────────────────
 
-// ── Same-arch linkage tests ───────────────────────────────────────────────────
-
-link!(link_rv32_rv32_no_eh,
-    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="start_0"),
-     ("rv32im/02_branches",        arch=Arch::Rv32, entry="start_1")],
+link!(link_rv32d_01_x_rv32f_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
     Eh::None);
-link!(link_rv32_rv32_eh,
-    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="start_0"),
-     ("rv32im/02_branches",        arch=Arch::Rv32, entry="start_1")],
+link!(link_rv32d_01_x_rv32f_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32fd_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32fd_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_02_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_02_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_03_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_03_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_04_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_04_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_05_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_05_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_06_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_06_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_07_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_07_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32i_zicsr_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32i_zicsr_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32im_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32im_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv32ima_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv32ima_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv64d_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv64d_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv64i_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv64i_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32d_01_x_rv64im_01_no_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32d_01_x_rv64im_01_eh,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32fd_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32fd_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_02_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_02_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_03_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_03_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_04_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_04_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_05_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_05_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_06_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_06_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_07_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_07_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32i_zicsr_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32i_zicsr_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32im_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32im_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv32ima_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv32ima_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv64d_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv64d_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv64i_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv64i_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32f_01_x_rv64im_01_no_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32f_01_x_rv64im_01_eh,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_02_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_02_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_03_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_03_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_04_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_04_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_05_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_05_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_06_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_06_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_07_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_07_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32i_zicsr_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32i_zicsr_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32im_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32im_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv32ima_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv32ima_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv64d_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv64d_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv64i_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv64i_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32fd_01_x_rv64im_01_no_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32fd_01_x_rv64im_01_eh,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_02_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_02_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_03_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_03_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_04_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_04_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_05_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_05_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_06_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_06_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_07_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_07_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32i_zicsr_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32im_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32im_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv32ima_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv32ima_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv64d_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv64d_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv64i_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv64i_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_01_x_rv64im_01_no_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_01_x_rv64im_01_eh,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_03_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_03_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_04_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_04_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_05_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_05_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_06_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_06_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_07_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_07_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32i_zicsr_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32im_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32im_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv32ima_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv32ima_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv64d_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv64d_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv64i_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv64i_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_02_x_rv64im_01_no_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_02_x_rv64im_01_eh,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32i_04_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32i_04_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32i_05_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32i_05_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32i_06_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32i_06_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32i_07_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32i_07_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32i_zicsr_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32im_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32im_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv32ima_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv32ima_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv64d_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv64d_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv64i_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv64i_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_03_x_rv64im_01_no_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_03_x_rv64im_01_eh,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32i_05_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32i_05_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32i_06_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32i_06_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32i_07_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32i_07_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32i_zicsr_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32im_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32im_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv32ima_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv32ima_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv64d_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv64d_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv64i_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv64i_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_04_x_rv64im_01_no_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_04_x_rv64im_01_eh,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv32i_06_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv32i_06_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv32i_07_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv32i_07_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv32i_zicsr_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv32im_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv32im_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv32ima_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv32ima_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv64d_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv64d_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv64i_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv64i_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_05_x_rv64im_01_no_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_05_x_rv64im_01_eh,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv32i_07_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv32i_07_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv32i_zicsr_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv32im_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv32im_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv32ima_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv32ima_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv64d_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv64d_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv64i_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv64i_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_06_x_rv64im_01_no_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_06_x_rv64im_01_eh,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv32i_zicsr_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv32i_zicsr_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv32im_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv32im_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv32ima_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv32ima_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv64d_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv64d_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv64i_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv64i_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_07_x_rv64im_01_no_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_07_x_rv64im_01_eh,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_zicsr_01_x_rv32im_01_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_zicsr_01_x_rv32im_01_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_zicsr_01_x_rv32ima_01_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_zicsr_01_x_rv32ima_01_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_zicsr_01_x_rv64d_01_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_zicsr_01_x_rv64d_01_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_zicsr_01_x_rv64i_01_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_zicsr_01_x_rv64i_01_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32i_zicsr_01_x_rv64im_01_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32i_zicsr_01_x_rv64im_01_eh,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32im_01_x_rv32ima_01_no_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link!(link_rv32im_01_x_rv32ima_01_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link!(link_rv32im_01_x_rv64d_01_no_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32im_01_x_rv64d_01_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32im_01_x_rv64i_01_no_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32im_01_x_rv64i_01_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32im_01_x_rv64im_01_no_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32im_01_x_rv64im_01_eh,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32ima_01_x_rv64d_01_no_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32ima_01_x_rv64d_01_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32ima_01_x_rv64i_01_no_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32ima_01_x_rv64i_01_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv32ima_01_x_rv64im_01_no_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv32ima_01_x_rv64im_01_eh,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv64d_01_x_rv64i_01_no_eh,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv64d_01_x_rv64i_01_eh,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv64d_01_x_rv64im_01_no_eh,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv64d_01_x_rv64im_01_eh,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link!(link_rv64i_01_x_rv64im_01_no_eh,
+    [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link!(link_rv64i_01_x_rv64im_01_eh,
+    [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
     Eh::With);
 
-// ── Mixed-arch linkage: RV32 + RV64 ──────────────────────────────────────────
+// ── Corpus-C link tests ─────────────────────────────────────────────────────────
 
-link!(link_rv32_rv64_no_eh,
-    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="rv32_start"),
-     ("rv64im/01_basic_arith",     arch=Arch::Rv64, entry="rv64_start")],
+link_c!(link_rv32d_01_x_rv32c_arith_no_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
     Eh::None);
-link!(link_rv32_rv64_eh,
-    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="rv32_start"),
-     ("rv64im/01_basic_arith",     arch=Arch::Rv64, entry="rv64_start")],
+link_c!(link_rv32d_01_x_rv32c_arith_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32d_01_x_rv64c_arith_no_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32d_01_x_rv64c_arith_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32d_01_x_x86c_arith_no_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32d_01_x_x86c_arith_eh,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32f_01_x_rv32c_arith_no_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32f_01_x_rv32c_arith_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32f_01_x_rv64c_arith_no_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32f_01_x_rv64c_arith_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32f_01_x_x86c_arith_no_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32f_01_x_x86c_arith_eh,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32fd_01_x_rv32c_arith_no_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32fd_01_x_rv32c_arith_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32fd_01_x_rv64c_arith_no_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32fd_01_x_rv64c_arith_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32fd_01_x_x86c_arith_no_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32fd_01_x_x86c_arith_eh,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_01_x_rv32c_arith_no_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_01_x_rv32c_arith_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_01_x_rv64c_arith_no_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_01_x_rv64c_arith_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_01_x_x86c_arith_no_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_01_x_x86c_arith_eh,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_02_x_rv32c_arith_no_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_02_x_rv32c_arith_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_02_x_rv64c_arith_no_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_02_x_rv64c_arith_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_02_x_x86c_arith_no_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_02_x_x86c_arith_eh,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_03_x_rv32c_arith_no_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_03_x_rv32c_arith_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_03_x_rv64c_arith_no_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_03_x_rv64c_arith_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_03_x_x86c_arith_no_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_03_x_x86c_arith_eh,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_04_x_rv32c_arith_no_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_04_x_rv32c_arith_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_04_x_rv64c_arith_no_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_04_x_rv64c_arith_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_04_x_x86c_arith_no_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_04_x_x86c_arith_eh,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_05_x_rv32c_arith_no_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_05_x_rv32c_arith_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_05_x_rv64c_arith_no_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_05_x_rv64c_arith_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_05_x_x86c_arith_no_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_05_x_x86c_arith_eh,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_06_x_rv32c_arith_no_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_06_x_rv32c_arith_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_06_x_rv64c_arith_no_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_06_x_rv64c_arith_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_06_x_x86c_arith_no_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_06_x_x86c_arith_eh,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_07_x_rv32c_arith_no_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_07_x_rv32c_arith_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_07_x_rv64c_arith_no_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_07_x_rv64c_arith_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_07_x_x86c_arith_no_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_07_x_x86c_arith_eh,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_zicsr_01_x_rv32c_arith_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_zicsr_01_x_rv32c_arith_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_zicsr_01_x_rv64c_arith_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_zicsr_01_x_rv64c_arith_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32i_zicsr_01_x_x86c_arith_no_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32i_zicsr_01_x_x86c_arith_eh,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32im_01_x_rv32c_arith_no_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32im_01_x_rv32c_arith_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32im_01_x_rv64c_arith_no_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32im_01_x_rv64c_arith_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32im_01_x_x86c_arith_no_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32im_01_x_x86c_arith_eh,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32ima_01_x_rv32c_arith_no_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32ima_01_x_rv32c_arith_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32ima_01_x_rv64c_arith_no_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32ima_01_x_rv64c_arith_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32ima_01_x_x86c_arith_no_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32ima_01_x_x86c_arith_eh,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64d_01_x_rv32c_arith_no_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64d_01_x_rv32c_arith_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64d_01_x_rv64c_arith_no_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64d_01_x_rv64c_arith_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64d_01_x_x86c_arith_no_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64d_01_x_x86c_arith_eh,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64i_01_x_rv32c_arith_no_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64i_01_x_rv32c_arith_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64i_01_x_rv64c_arith_no_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64i_01_x_rv64c_arith_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64i_01_x_x86c_arith_no_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64i_01_x_x86c_arith_eh,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64im_01_x_rv32c_arith_no_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64im_01_x_rv32c_arith_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64im_01_x_rv64c_arith_no_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64im_01_x_rv64c_arith_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64im_01_x_x86c_arith_no_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64im_01_x_x86c_arith_eh,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
     Eh::With);
 
-// ── Mixed-arch linkage: RISCV + x86_64 (C programs) ─────────────────────────
+// ── C-C link tests ──────────────────────────────────────────────────────────────
 
-link_c!(link_rv32_x86_no_eh,
-    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32,   entry="rv32_start"),
-     ("E2E_X86_ARITH",             is_corpus=false, arch=Arch::X86_64, entry="x86_start")],
+link_c!(link_rv32c_arith_x_rv64c_arith_no_eh,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
     Eh::None);
-link_c!(link_rv32_x86_eh,
-    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32,   entry="rv32_start"),
-     ("E2E_X86_ARITH",             is_corpus=false, arch=Arch::X86_64, entry="x86_start")],
+link_c!(link_rv32c_arith_x_rv64c_arith_eh,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv32c_arith_x_x86c_arith_no_eh,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv32c_arith_x_x86c_arith_eh,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::With);
+link_c!(link_rv64c_arith_x_x86c_arith_no_eh,
+    [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    Eh::None);
+link_c!(link_rv64c_arith_x_x86c_arith_eh,
+    [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
     Eh::With);
 
-// ── Three-arch linkage: RV32 + RV64 + x86_64 ─────────────────────────────────
-
-link_c!(link_rv32_rv64_x86_no_eh,
-    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32,   entry="rv32_fn"),
-     ("rv64im/01_basic_arith",     is_corpus=true,  arch=Arch::Rv64,   entry="rv64_fn"),
-     ("E2E_X86_ARITH",             is_corpus=false, arch=Arch::X86_64, entry="x86_fn")],
-    Eh::None);
-link_c!(link_rv32_rv64_x86_eh,
-    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32,   entry="rv32_fn"),
-     ("rv64im/01_basic_arith",     is_corpus=true,  arch=Arch::Rv64,   entry="rv64_fn"),
-     ("E2E_X86_ARITH",             is_corpus=false, arch=Arch::X86_64, entry="x86_fn")],
-    Eh::With);
+// @generated-tests-end
 
 #[test]
 fn debug_rv32_c_arith() {
