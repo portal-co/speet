@@ -1124,12 +1124,12 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let reachable = self.transitive_preds_of(tail_idx);
         // Step 4: acquire the global lock once and operate on all reachable entries.
         let mut lock = self.lock_global();
-        let ifs = lock[tail_idx].if_stmts;
         // Flush const stacks (needs mut entry access through the global lock).
         for &FuncIdx(fi) in &reachable {
             self.flush_const_stack(ctx, &mut lock[fi as usize], fi as usize)?;
         }
         for &FuncIdx(idx) in &reachable {
+            let ifs = lock[idx as usize].if_stmts; // each entry closes its own open If frames
             lock[idx as usize]
                 .function
                 .instruction(ctx, &Instruction::Unreachable)?;
@@ -1152,6 +1152,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             // Invalidate transitive cache after severing preds.
             lock[idx as usize].transitive_preds = None;
         }
+        // Remove sealed entries from every live entry's preds set.
+        for (i, entry) in lock.iter_mut().enumerate() {
+            if reachable.contains(&FuncIdx(i as u32)) { continue; }
+            let before = entry.preds.len();
+            entry.preds.retain(|fi| !reachable.contains(fi));
+            if entry.preds.len() != before {
+                entry.transitive_preds = None;
+            }
+        }
+        drop(lock);
         // Clear stale predecessor assignments in the lens queue.
         self.lens.lock().clear();
         Ok(())
@@ -1244,7 +1254,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         pred: FuncIdx,
         params: u32,
     ) -> Result<(), E> {
-        let ifs = self.total_ifs(pred);
         let FuncIdx(pred_idx) = pred;
         // Use the per-entry transitive predecessor cache for the cycle check.
         let cycle = self.transitive_preds_of(pred_idx as usize).contains(&succ);
@@ -1288,6 +1297,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 }
                 f.function
                     .instruction(ctx, &Instruction::ReturnCall(wasm_func_idx))?;
+                let ifs = f.if_stmts; // each entry closes its own open If frames
                 for _ in 0..ifs {
                     f.function.instruction(ctx, &Instruction::End)?;
                 }
@@ -1301,6 +1311,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 let mut lens = self.lens.lock();
                 for bucket in lens.iter_mut() {
                     bucket.retain(|fi| !pred_transitive.contains(fi));
+                }
+            }
+            // Remove sealed entries from every live entry's preds set so future
+            // transitive_preds_of traversals cannot walk into sealed ancestors.
+            {
+                let mut lock = self.lock_global();
+                for (i, entry) in lock.iter_mut().enumerate() {
+                    if pred_transitive.contains(&FuncIdx(i as u32)) { continue; }
+                    let before = entry.preds.len();
+                    entry.preds.retain(|fi| !pred_transitive.contains(fi));
+                    if entry.preds.len() != before {
+                        entry.transitive_preds = None;
+                    }
                 }
             }
         } else {
@@ -1859,10 +1882,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     /// Per-entry instruction dispatch with shadow-stack constant folding.
     fn feed_one(&self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
         let mut func = self.lock_entry(idx,false);
+        assert!(
+            !func.sealed,
+            "feed to already-sealed function entry {idx}: \
+             predecessors were not cleaned up from preds sets of live entries after seal"
+        );
         // Skip mode: drop instructions until skip_depth returns to 0.
         if func.skip_depth > 0 {
             match insn {
-                Instruction::If(_) | Instruction::Block(_) | Instruction::Loop(_) => {
+                Instruction::If(_) => {
+                    func.skip_depth += 1;
+                    // increment_if_stmts_for_predecessors already counted this If,
+                    // but it won't be emitted — correct the count.
+                    func.if_stmts = func.if_stmts.saturating_sub(1);
+                }
+                Instruction::Block(_) | Instruction::Loop(_) => {
                     func.skip_depth += 1;
                 }
                 Instruction::End => {
@@ -2165,6 +2199,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     Some(Some((v, _))) if v != 0 => {
                         // Known-true: don't emit If; inline the then-body and
                         // skip the else-body via skip_depth.
+                        // Decrement this entry's if_stmts — it was incremented by
+                        // increment_if_stmts_for_predecessors but the If won't be emitted.
+                        entry.if_stmts = entry.if_stmts.saturating_sub(1);
                         entry.const_stack.pop(); // consume condition
                         entry.block_frames.push(true); // TakenIf
                         return true; // Don't emit If
@@ -2295,7 +2332,30 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             | Instruction::F32Sqrt
             | Instruction::F64Abs
             | Instruction::F64Neg
-            | Instruction::F64Sqrt => 1,
+            | Instruction::F64Sqrt
+            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
+            | Instruction::I32TruncF32S
+            | Instruction::I32TruncF32U
+            | Instruction::I32TruncF64S
+            | Instruction::I32TruncF64U
+            | Instruction::I64TruncF32S
+            | Instruction::I64TruncF32U
+            | Instruction::I64TruncF64S
+            | Instruction::I64TruncF64U
+            | Instruction::F32ConvertI32S
+            | Instruction::F32ConvertI32U
+            | Instruction::F32ConvertI64S
+            | Instruction::F32ConvertI64U
+            | Instruction::F64ConvertI32S
+            | Instruction::F64ConvertI32U
+            | Instruction::F64ConvertI64S
+            | Instruction::F64ConvertI64U
+            | Instruction::F32DemoteF64
+            | Instruction::F64PromoteF32
+            | Instruction::I32ReinterpretF32
+            | Instruction::I64ReinterpretF64
+            | Instruction::F32ReinterpretI32
+            | Instruction::F64ReinterpretI64 => 1,
 
             // Binary ops
             Instruction::I32Add
@@ -2452,7 +2512,30 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             | Instruction::F32Sqrt
             | Instruction::F64Abs
             | Instruction::F64Neg
-            | Instruction::F64Sqrt => 1,
+            | Instruction::F64Sqrt
+            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
+            | Instruction::I32TruncF32S
+            | Instruction::I32TruncF32U
+            | Instruction::I32TruncF64S
+            | Instruction::I32TruncF64U
+            | Instruction::I64TruncF32S
+            | Instruction::I64TruncF32U
+            | Instruction::I64TruncF64S
+            | Instruction::I64TruncF64U
+            | Instruction::F32ConvertI32S
+            | Instruction::F32ConvertI32U
+            | Instruction::F32ConvertI64S
+            | Instruction::F32ConvertI64U
+            | Instruction::F64ConvertI32S
+            | Instruction::F64ConvertI32U
+            | Instruction::F64ConvertI64S
+            | Instruction::F64ConvertI64U
+            | Instruction::F32DemoteF64
+            | Instruction::F64PromoteF32
+            | Instruction::I32ReinterpretF32
+            | Instruction::I64ReinterpretF64
+            | Instruction::F32ReinterpretI32
+            | Instruction::F64ReinterpretI64 => 1,
 
             // Binary ops: consume 2, push 1
             Instruction::I32Add
@@ -2743,10 +2826,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     ) -> Result<(), E> {
         self.flush_bundles(ctx, tail_idx)?;
         self.flush_const_stacks_reachable(ctx, tail_idx)?;
-        let ifs = self.lock_entry(tail_idx,true).if_stmts;
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
             let mut func = self.lock_entry(idx as usize,false);
+            let ifs = func.if_stmts; // each entry closes its own open If frames
             func.function.instruction(ctx, instruction)?;
             for _ in 0..ifs {
                 func.function.instruction(ctx, &Instruction::End)?;
@@ -2771,6 +2854,24 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             let mut lens = self.lens.lock();
             for bucket in lens.iter_mut() {
                 bucket.retain(|fi| !reachable.contains(fi));
+            }
+        }
+        // Remove sealed entries from every live entry's `preds` set and
+        // invalidate its transitive-predecessor cache.  Without this, a future
+        // `transitive_preds_of(live)` can still walk into a sealed ancestor and
+        // `feed_to` would attempt to emit instructions into an already-sealed
+        // function body.
+        {
+            let mut lock = self.lock_global();
+            for (i, entry) in lock.iter_mut().enumerate() {
+                if reachable.contains(&FuncIdx(i as u32)) {
+                    continue; // already handled in the sealing loop above
+                }
+                let before = entry.preds.len();
+                entry.preds.retain(|fi| !reachable.contains(fi));
+                if entry.preds.len() != before {
+                    entry.transitive_preds = None;
+                }
             }
         }
         Ok(())
@@ -2873,7 +2974,11 @@ where
     /// so the WASM validator sees a properly terminated function body.
     pub fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
         for entry in self.fns.get_mut().iter_mut().filter(|e| !e.sealed) {
+            let ifs = entry.if_stmts;
             entry.function.instruction(ctx, &Instruction::Unreachable)?;
+            for _ in 0..ifs {
+                entry.function.instruction(ctx, &Instruction::End)?;
+            }
             entry.function.instruction(ctx, &Instruction::End)?;
             entry.sealed = true;
         }

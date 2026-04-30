@@ -6,7 +6,11 @@ description.workspace = true
 license-file.workspace = true
 
 
+[features]
+logging = ["dep:log"]
+
 [dependencies]
+log = { version = "0.4", optional = true }
 wasm-encoder.workspace = true
 yecta = {path = "../../helper/yecta"}
 rv-asm.workspace = true

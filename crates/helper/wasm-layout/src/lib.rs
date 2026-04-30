@@ -45,6 +45,59 @@
 //! [`LocalLayout::iter`] yields all `(count, ValType)` pairs in insertion
 //! order.  [`LocalLayout::iter_since`] yields only the pairs added after a
 //! given [`Mark`], suitable for passing to `wasm_encoder::Function::new`.
+//!
+//! ## Cell system
+//!
+//! A **cell** identifies a unique combination of WASM function-type parameters
+//! and non-parameter locals.  Cells enable trap implementations to allocate
+//! per-function scratch locals that are deduplicated across functions with the
+//! same signature, and to look up those locals by a stable [`CellIdx`] handle
+//! rather than recomputing indices.
+//!
+//! ### Registration
+//!
+//! [`CellRegistry`] maps signatures to [`CellIdx`] handles.  Two registration
+//! paths exist:
+//!
+//! - **Host-keyed** ([`CellRegistry::register`]): called *after* all params and
+//!   locals have been appended to the layout.  Extracts params via
+//!   `layout.iter_before(&mark)` and locals via `layout.iter_since(&mark)`.
+//!   Used by native arch recompilers (RISC-V, x86-64).
+//!
+//! - **Guest-keyed** ([`CellRegistry::register_for_guest`]): called *before*
+//!   `declare_locals` — as soon as the parsed guest function type and declared
+//!   locals are known.  Used by the WASM frontend where functions are not
+//!   addressed by guest PC.
+//!
+//! ### Protocol (host-keyed, three phases)
+//!
+//! ```ignore
+//! // Phase 1 — once per recompiler instance:
+//! recompiler.setup_traps(&mut rctx);      // arch params → trap.declare_params → mark
+//!
+//! // Phase 2 — once per function (inside init_function):
+//! rctx.layout_mut().rewind(&mark);        // discard previous function's locals
+//! rctx.layout_mut().append(…);           // arch non-param locals
+//! rctx.declare_trap_locals();             // trap appends its per-function locals
+//! let cell = rctx.alloc_cell();           // register → CellIdx
+//!
+//! // Phase 3 — firing:
+//! rctx.on_instruction(&info, ctx)?;       // trap fires, resolves locals via cell
+//! rctx.on_jump(&info, ctx)?;
+//! ```
+//!
+//! ### Resolving indices
+//!
+//! Traps store [`LocalSlot`] handles from their `declare_params` / `declare_locals`
+//! calls.  They resolve absolute WASM local indices at fire-time via:
+//!
+//! ```ignore
+//! let idx = trap_ctx.layout().local(self.my_slot, 0);
+//! trap_ctx.emit(ctx, &Instruction::LocalGet(idx))?;
+//! ```
+//!
+//! Both param and local slots live in the same layout (params first, then locals),
+//! so `local(slot, n)` returns the correct absolute index without any extra offset.
 
 #![no_std]
 

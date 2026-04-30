@@ -260,6 +260,9 @@ pub struct RiscVRecompiler<
     /// Optional slot assigner: controls which PCs get function slots and maps
     /// PCs to sequential slot indices.  When `None`, the legacy formula is used.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
+    /// Total number of WASM function slots in the translated binary.
+    /// Set by `translate_bytes` after a pre-scan; used to clamp OOB slot indices to `None`.
+    total_func_count: Option<u32>,
 }
 
 impl<'cb, 'ctx, Context, E, F> RiscVRecompiler<'cb, 'ctx, Context, E, F>
@@ -299,6 +302,7 @@ where
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             slot_assigner: None,
+            total_func_count: None,
         }
     }
 
@@ -734,12 +738,18 @@ where
     /// Returns `None` when the PC is omitted from the slot assigner (true slot
     /// omission); callers should emit `unreachable` at the jump site.
     fn pc_to_func_idx(&self, pc: u64) -> Option<FuncIdx> {
-        if let Some(gate) = &self.slot_assigner {
-            gate.slot_for_pc(pc).map(FuncIdx)
+        let idx = if let Some(gate) = &self.slot_assigner {
+            gate.slot_for_pc(pc).map(FuncIdx)?
         } else {
             let offset_pc = pc.wrapping_sub(self.base_pc);
-            Some(FuncIdx((offset_pc / 2) as u32))
+            FuncIdx((offset_pc / 2) as u32)
+        };
+        if let Some(total) = self.total_func_count {
+            if idx.0 >= total {
+                return None;
+            }
         }
+        Some(idx)
     }
 
     /// Initialize a function for a single instruction at the given PC
@@ -761,6 +771,7 @@ where
         _pc: u32,
         _inst_len: u32,
         num_temps: u32,
+        len: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
     ) -> Result<usize, E> {
         let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
@@ -786,7 +797,7 @@ where
         self.addr_scratch_slot = addr_scratch_slot;
         let locals: alloc::vec::Vec<_> = rctx.layout().iter_since(&mark).collect();
         let mut locals_iter = locals.into_iter();
-        let tail_idx = rctx.next_with(ctx, f(&mut locals_iter), 2)?;
+        let tail_idx = rctx.next_with(ctx, f(&mut locals_iter), len)?;
         Ok(tail_idx)
     }
 

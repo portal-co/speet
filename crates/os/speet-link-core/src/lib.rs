@@ -36,7 +36,7 @@ pub mod unit;
 mod tests;
 
 // Flat re-exports for the most commonly used items.
-pub use context::{BaseContext, FedContext, ReactorContext, ReactorAdapter};
+pub use context::{BaseContext, FedContext, ReactorContext, ReactorAdapter, TrapReactorAdapter};
 pub use layout::{FuncLayout, FuncSlot};
 pub use linker::LinkerPlugin;
 pub use recompiler::Recompile;

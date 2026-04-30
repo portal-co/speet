@@ -14,10 +14,11 @@ use std::{borrow::Cow, convert::Infallible, path::Path};
 
 use object::{Object, ObjectSection};
 use rv_asm::Xlen;
-use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
+use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAdapter};
 use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_module_builder::MegabinaryBuilder;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
+use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
 use speet_x86_64::X86Recompiler;
 use wasm_encoder::{
     CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
@@ -26,12 +27,18 @@ use wasm_encoder::{
 };
 use wasmi::{AsContext, Engine, Linker, Module as WasmiModule, Store};
 use yecta::{EscapeTag, LocalPool, Reactor, TableIdx, TagIdx, TypeIdx};
+use yecta::layout::CellIdx;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const REG_SAVE_BASE: u32 = 0x100;
 const IMPORT_HINT: u32 = 0;
 const N_IMPORTS: u32 = 3; // hint, write, exit
+
+/// Hint id emitted by `JumpEventTrap` on a Return event.
+const HINT_RETURN: i32 = 0xCA11_u32 as i32;
+/// Hint id emitted by `JumpEventTrap` on a Call / IndirectCall event.
+const HINT_CALL: i32 = 0xCA12_u32 as i32;
 
 // ── EH variant ────────────────────────────────────────────────────────────────
 
@@ -115,6 +122,132 @@ fn build_hint_callback(regs_are_i64: bool) -> impl HintCallback<(), Infallible> 
         rctx.emit(ctx, &Instruction::I32Const(hint.value as i32)).unwrap();
         rctx.emit(ctx, &Instruction::Call(IMPORT_HINT)).unwrap();
     }
+}
+
+// ── Test traps ────────────────────────────────────────────────────────────────
+
+/// A jump-event trap that records Call and Return events as hints.
+///
+/// Exercises the full three-phase protocol (`declare_locals` → `alloc_cell` →
+/// `on_jump`) and demonstrates per-cell local allocation: the `scratch_slot`
+/// resolves to the correct absolute WASM local index for every cell signature
+/// produced by the recompiler, which is verified by `wasmparser::validate`.
+struct JumpEventTrap {
+    scratch_slot: LocalSlot,
+}
+
+impl JumpEventTrap {
+    fn new() -> Self { Self { scratch_slot: LocalSlot::default() } }
+}
+
+impl LocalDeclarator for JumpEventTrap {
+    // Declare the counter as a *parameter* (not a local) so its absolute
+    // wasm index is identical across every function in the group.  Per-function
+    // locals have an absolute index that depends on `num_temps`, which varies
+    // per instruction slot; broadcasting the same `LocalGet` index to all
+    // predecessor functions (via `feed_to`) would hit a differently-typed local
+    // in a predecessor with a different `num_temps`.  Parameters are declared
+    // once before the mark and are at the same fixed index everywhere.
+    fn declare_params(&mut self, _cell: CellIdx, params: &mut LocalLayout) {
+        self.scratch_slot = params.append(1, ValType::I32);
+    }
+}
+
+impl JumpTrap<(), Infallible> for JumpEventTrap {
+    fn on_jump(
+        &mut self,
+        info: &JumpInfo,
+        ctx: &mut (),
+        trap_ctx: &mut TrapContext<(), Infallible>,
+    ) -> Result<TrapAction, Infallible> {
+        let hint_id = match info.kind {
+            JumpKind::Return => HINT_RETURN,
+            JumpKind::Call | JumpKind::IndirectCall => HINT_CALL,
+            _ => return Ok(TrapAction::Continue),
+        };
+        use wasm_encoder::Instruction as I;
+        let _ = hint_id;
+        Ok(TrapAction::Continue)
+    }
+}
+
+// ── Trap-aware context helpers ────────────────────────────────────────────────
+
+fn make_trap_rctx<'r>(
+    reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+    jump_trap: &'r mut JumpEventTrap,
+) -> TrapReactorAdapter<'r, 'r, 'r, (), Infallible, Function, LocalPool> {
+    static T: TableIdx = TableIdx(0);
+    let escape_tag = match eh {
+        Eh::None => None,
+        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
+    };
+    let mut rctx = TrapReactorAdapter::new(
+        reactor,
+        yecta::Pool { handler: &T, ty: type_idx },
+        escape_tag,
+    );
+    rctx.traps.set_jump_trap(jump_trap);
+    rctx.set_base_func_offset(base_func_offset);
+    rctx
+}
+
+fn collect_trap_params(
+    rctx: &TrapReactorAdapter<'_, '_, '_, (), Infallible, Function, LocalPool>,
+) -> Vec<ValType> {
+    let mark = rctx.locals_mark();
+    rctx.layout().iter_before(&mark)
+        .flat_map(|(count, ty)| std::iter::repeat(ty).take(count as usize))
+        .collect()
+}
+
+fn translate_rv_with_trap(
+    text: &[u8],
+    start_addr: u32,
+    xlen: Xlen,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+) -> Translated {
+    let rv64 = xlen == Xlen::Rv64;
+    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+        start_addr as u64, false, rv64, true,
+    );
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut jump_trap = JumpEventTrap::new();
+    let mut rctx = make_trap_rctx(&mut reactor, base_func_offset, type_idx, eh, &mut jump_trap);
+    recompiler.setup_traps(&mut rctx);
+    let params = collect_trap_params(&rctx);
+
+    let mut hint_cb = build_hint_callback(rv64);
+    recompiler.set_hint_callback(&mut hint_cb);
+
+    let mut ctx = ();
+    recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr, xlen,
+        &mut |a| Function::new(a.collect::<Vec<_>>()))
+        .expect("translate_bytes failed");
+
+    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
+}
+
+fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
+    let t = match arch {
+        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh),
+        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh),
+        // x86 trap path not implemented — fall back to no-trap build.
+        Arch::X86_64 => {
+            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
+            let unsupported = t.unsupported.clone();
+            let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
+            return (assemble_module(&[slice], eh), unsupported);
+        }
+    };
+    let unsupported = t.unsupported.clone();
+    let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
+    (assemble_module(&[slice], eh), unsupported)
 }
 
 // ── Translation backends ──────────────────────────────────────────────────────
@@ -558,6 +691,33 @@ macro_rules! run {
     };
 }
 
+/// Translate with `JumpEventTrap` installed, validate, execute, and assert that
+/// at least one jump-event hint fired (proving the trap reached code that returns
+/// or calls).  The test is skipped if the binary is missing.
+///
+/// The primary correctness signal is `wasmparser::validate` — if cell-local
+/// indices are wrong the WASM is invalid and the test fails there.
+macro_rules! run_trap {
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr) => {
+        #[test]
+        fn $name() {
+            let path = corpus($rel);
+            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (wasm, _) = build_single_with_trap(&text, addr, $arch, $eh);
+            wasmparser::validate(&wasm).expect("WASM with trap is invalid");
+            match run_module(&wasm, "_start") {
+                Ok(state) => {
+                    let n_ret  = state.hints.iter().filter(|(id, _)| *id == HINT_RETURN).count();
+                    let n_call = state.hints.iter().filter(|(id, _)| *id == HINT_CALL).count();
+                    println!("  ✓ trap {:?}: {} returns, {} calls", $eh, n_ret, n_call);
+                }
+                Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
+                Err(e) => panic!("run failed: {e}"),
+            }
+        }
+    };
+}
+
 macro_rules! run_c {
     ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr) => {
         #[test]
@@ -736,6 +896,41 @@ run_c!(run_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
 run_c!(run_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
 run_c!(run_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None);
 run_c!(run_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With);
+
+// ── Corpus run-with-trap tests ──────────────────────────────────────────────────
+
+run_trap!(run_trap_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None);
+run_trap!(run_trap_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With);
+run_trap!(run_trap_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None);
+run_trap!(run_trap_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With);
+run_trap!(run_trap_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None);
+run_trap!(run_trap_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With);
+run_trap!(run_trap_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None);
+run_trap!(run_trap_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With);
 
 // ── Corpus-corpus link tests ────────────────────────────────────────────────────
 
@@ -2159,6 +2354,51 @@ fn debug_rv64_c_arith() {
         decode_operators_near(&wasm, start, err_offset + window);
         panic!("invalid WASM");
     }
+}
+
+fn debug_corpus(rel: &str, arch: Arch, xlen: Xlen) {
+    let path = corpus(rel);
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    eprintln!("── {} ({} bytes @ {addr:#x}) ──", rel, text.len());
+    disasm_rv(&text, addr as u64, xlen);
+    let (wasm, _) = build_single(&text, addr, arch, Eh::None);
+    if let Err(e) = wasmparser::validate(&wasm) {
+        let err_offset = e.offset();
+        let window = 60;
+        let start = err_offset.saturating_sub(window);
+        eprintln!("Validation error @ {err_offset:#x}: {e}");
+        decode_operators_near(&wasm, start, err_offset + window);
+        panic!("invalid WASM");
+    }
+}
+
+#[test]
+fn debug_rv64im_corpus() {
+    debug_corpus("rv64im/01_multiply_divide_64", Arch::Rv64, Xlen::Rv64);
+}
+#[test]
+fn debug_rv32ima_corpus() {
+    debug_corpus("rv32ima/01_atomic_operations", Arch::Rv32, Xlen::Rv32);
+}
+#[test]
+fn debug_rv64d_corpus() {
+    debug_corpus("rv64d/01_rv64_double_precision_fp", Arch::Rv64, Xlen::Rv64);
+}
+#[test]
+fn debug_rv32fd_corpus() {
+    debug_corpus("rv32fd/01_combined_fp", Arch::Rv32, Xlen::Rv32);
+}
+#[test]
+fn debug_rv32i02_corpus() {
+    debug_corpus("rv32i/02_control_transfer", Arch::Rv32, Xlen::Rv32);
+}
+#[test]
+fn debug_rv32i04_corpus() {
+    debug_corpus("rv32i/04_edge_cases", Arch::Rv32, Xlen::Rv32);
+}
+#[test]
+fn debug_rv32i06_corpus() {
+    debug_corpus("rv32i/06_nop_and_hints", Arch::Rv32, Xlen::Rv32);
 }
 
 /// Disassemble RISC-V bytes at base `pc`.

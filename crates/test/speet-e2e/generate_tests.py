@@ -95,6 +95,15 @@ def run_corpus(ident, rel, arch):
         return [f'run!(run_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
     return both_eh(f)
 
+def run_trap_corpus(ident, rel, arch):
+    """Generate run_trap! tests. Only for integer-only archs where the trap
+    can fire (FP/Atomic/Zicsr binaries may hit unreachable before any jump,
+    but will still validate — the validate assertion is the key correctness
+    check regardless)."""
+    def f(suf, eh):
+        return [f'run_trap!(run_trap_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
+    return both_eh(f)
+
 def smoke_c(ident, env, arch):
     def f(suf, eh):
         return [f'smoke_c!(smoke_{ident}_{suf}, env="{env}", arch={arch}, {eh});']
@@ -176,6 +185,12 @@ for entry in c_objects:
     rc_lines.extend(run_c(*entry))
 out += section("C run tests", rc_lines)
 
+# Run with trap – corpus (all binaries; validates cell-local indices)
+rt_lines = []
+for entry in corpus:
+    rt_lines.extend(run_trap_corpus(*entry))
+out += section("Corpus run-with-trap tests", rt_lines)
+
 # Link – corpus × corpus (all unique pairs)
 lcc_lines = []
 for a, b in combinations(corpus, 2):
@@ -220,8 +235,9 @@ TEST_FILE.write_text(new_src)
 print(f"Wrote {len(generated.splitlines())} generated lines to {TEST_FILE}")
 
 # Print a quick summary
-n_smoke  = sum(1 for l in generated.splitlines() if l.startswith("smoke!(") or l.startswith("smoke_c!("))
-n_run    = sum(1 for l in generated.splitlines() if l.startswith("run!(") or l.startswith("run_c!("))
-n_link   = sum(1 for l in generated.splitlines() if l.startswith("link!(") or l.startswith("link_c!("))
+n_smoke    = sum(1 for l in generated.splitlines() if l.startswith("smoke!(") or l.startswith("smoke_c!("))
+n_run      = sum(1 for l in generated.splitlines() if l.startswith("run!(") or l.startswith("run_c!("))
+n_run_trap = sum(1 for l in generated.splitlines() if l.startswith("run_trap!("))
+n_link     = sum(1 for l in generated.splitlines() if l.startswith("link!(") or l.startswith("link_c!("))
 print(f"  {len(corpus)} corpus binaries, {len(c_objects)} C objects")
-print(f"  smoke: {n_smoke}  run: {n_run}  link: {n_link}")
+print(f"  smoke: {n_smoke}  run: {n_run}  run_trap: {n_run_trap}  link: {n_link}")

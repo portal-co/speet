@@ -18,13 +18,28 @@
 //! surfaced as the associated type `FnType`.  This lets [`Recompile::drain_unit`]
 //! return `BinaryUnit<RC::FnType>` without the recompiler needing to know
 //! `F` directly.
+//!
+//! ## Context hierarchy
+//!
+//! Three concrete context types exist, in increasing capability order:
+//!
+//! | Type | Traps | Cells | Reactor ownership |
+//! |------|-------|-------|-------------------|
+//! | [`ReactorAdapter`] | no-op | `CellIdx(0)` always | borrowed |
+//! | [`TrapReactorAdapter`] | full | real `CellRegistry` | borrowed |
+//! | `LinkerInner` (speet-linker) | full | real `CellRegistry` | **owned** |
+//!
+//! Use `ReactorAdapter` for simple smoke tests and benchmarks that install no
+//! traps and do not inspect cells.  Use `TrapReactorAdapter` whenever a trap
+//! is installed or correct per-cell local allocation is required (e.g. the e2e
+//! trap tests).  Use `LinkerInner` for production multi-binary linking.
 
 use alloc::vec::Vec;
-use speet_traps::{InstructionInfo, JumpInfo, TrapAction};
+use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
-use yecta::layout::CellIdx;
+use yecta::layout::{CellIdx, CellRegistry};
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
 
@@ -530,5 +545,226 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Co
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.rctx.feed(ctx, self.tail_idx, insn)
+    }
+}
+
+// ── TrapReactorAdapter ────────────────────────────────────────────────────────
+
+/// A [`ReactorContext`] with a borrowed reactor **and** full trap + cell support.
+///
+/// This sits between [`ReactorAdapter`] (no traps, no real cell allocation) and
+/// `LinkerInner` (owned reactor, production multi-binary flow):
+///
+/// - Install traps via `rctx.traps.set_instruction_trap(…)` /
+///   `rctx.traps.set_jump_trap(…)` **before** calling the recompiler's
+///   `setup_traps`.
+/// - After translation the `cell_registry` contains one entry per unique
+///   `(params, locals)` combination encountered.
+///
+/// ## Three-phase protocol (same as `LinkerInner`)
+///
+/// **Phase 1** — `setup_traps` (arch recompiler):
+/// ```ignore
+/// recompiler.setup_traps(&mut rctx);   // appends arch params, calls declare_trap_params, places mark
+/// ```
+///
+/// **Phase 2** — per function (`init_function` inside the recompiler):
+/// ```ignore
+/// rctx.layout_mut().rewind(&mark);
+/// rctx.layout_mut().append(…);         // arch non-param locals
+/// rctx.declare_trap_locals();           // trap appends its locals
+/// let cell = rctx.alloc_cell();         // registers (params, locals) → CellIdx
+/// ```
+///
+/// **Phase 3** — firing (inside `translate_instruction` / jump sites):
+/// ```ignore
+/// rctx.on_instruction(&info, ctx)?;
+/// rctx.on_jump(&info, ctx)?;
+/// ```
+pub struct TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    /// The underlying reactor (borrowed, not owned).
+    pub reactor: &'r mut Reactor<Context, E, F, P>,
+    /// Pluggable instruction-level and jump-level trap hooks.
+    pub traps: TrapConfig<'cb, 'ctx, Context, E>,
+    /// Unified layout: arch params + trap params, then per-function locals.
+    pub layout: LocalLayout,
+    /// Mark placed after all parameter slots.
+    pub locals_mark: Mark,
+    /// Indirect-call pool handler and type.
+    pub pool: Pool<'r, Context, E>,
+    /// Optional escape tag for exception-based control flow.
+    pub escape_tag: Option<EscapeTag>,
+    /// Registry mapping unique `(params, locals)` signatures to [`CellIdx`] handles.
+    pub cell_registry: CellRegistry,
+}
+
+impl<'r, 'cb, 'ctx, Context, E, F, P> TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    /// Create a new `TrapReactorAdapter` with empty traps and a fresh cell registry.
+    ///
+    /// Install traps on `rctx.traps` before calling `setup_traps` on the recompiler.
+    pub fn new(
+        reactor: &'r mut Reactor<Context, E, F, P>,
+        pool: Pool<'r, Context, E>,
+        escape_tag: Option<EscapeTag>,
+    ) -> Self {
+        Self {
+            reactor,
+            traps: TrapConfig::new(),
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            pool,
+            escape_tag,
+            cell_registry: CellRegistry::default(),
+        }
+    }
+}
+
+impl<'r, 'cb, 'ctx, Context, E, F, P> InstructionSink<Context, E>
+    for TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
+        self.reactor.tail().instruction(ctx, insn)
+    }
+}
+
+impl<'r, 'cb, 'ctx, Context, E, F, P> BaseContext<Context, E>
+    for TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    fn layout(&self) -> &LocalLayout { &self.layout }
+    fn layout_mut(&mut self) -> &mut LocalLayout { &mut self.layout }
+    fn locals_mark(&self) -> Mark { self.locals_mark }
+    fn set_locals_mark(&mut self, mark: Mark) { self.locals_mark = mark; }
+
+    fn base_func_offset(&self) -> u32 { self.reactor.base_func_offset() }
+    fn set_base_func_offset(&mut self, n: u32) { self.reactor.set_base_func_offset(n); }
+
+    fn declare_trap_params(&mut self) {
+        self.traps.declare_params(CellIdx(0), &mut self.layout);
+    }
+    fn declare_trap_locals(&mut self) {
+        self.traps.declare_locals(CellIdx(0), &mut self.layout);
+    }
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+        self.traps.declare_locals(cell, &mut self.layout);
+    }
+    fn alloc_cell(&mut self) -> CellIdx {
+        let mark = self.locals_mark;
+        self.cell_registry.register(
+            self.layout.iter_before(&mark),
+            self.layout.iter_since(&mark),
+        )
+    }
+    fn on_instruction(
+        &mut self,
+        info: &InstructionInfo,
+        ctx: &mut Context,
+    ) -> Result<TrapAction, E> {
+        let layout = &self.layout as *const LocalLayout;
+        // SAFETY: layout is borrowed immutably; self.traps and self.reactor are disjoint fields.
+        let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
+        self.traps.on_instruction(info, ctx, &mut *self.reactor, layout_ref)
+    }
+    fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E> {
+        let layout = &self.layout as *const LocalLayout;
+        let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
+        self.traps.on_jump(info, ctx, &mut *self.reactor, layout_ref)
+    }
+}
+
+impl<'r, 'cb, 'ctx, Context, E, F, P> ReactorContext<Context, E>
+    for TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend + yecta::LocalPoolApi,
+{
+    type FnType = F;
+
+    fn fn_count(&self) -> usize { self.reactor.fn_count() }
+    fn drain_fns(&mut self) -> Vec<F> { self.reactor.drain_fns() }
+    fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
+        self.reactor.seal_remaining(ctx)
+    }
+
+    fn next_with(&mut self, ctx: &mut Context, f: F, len: u32) -> Result<usize, E> {
+        self.reactor.next_with(ctx, f, len)?;
+        Ok(self.reactor.fn_count() - 1)
+    }
+    fn feed(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+        Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, insn)
+    }
+    fn jmp(&self, ctx: &mut Context, tail_idx: usize, target: FuncIdx, params: u32) -> Result<(), E> {
+        self.reactor.jmp(tail_idx, ctx, target, params)
+    }
+    fn seal_fn(&self, ctx: &mut Context, tail_idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
+        self.reactor.seal_to(tail_idx, ctx, insn)
+    }
+
+    fn pool(&self) -> Pool<'_, Context, E> { self.pool }
+    fn escape_tag(&self) -> Option<EscapeTag> { self.escape_tag }
+    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) { self.escape_tag = tag; }
+
+    fn ji(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        params: u32,
+        fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
+        target: yecta::Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&dyn yecta::Snippet<Context, E>>,
+    ) -> Result<(), E> {
+        self.reactor.ji(ctx, params, fixups, target, call, pool, condition, tail_idx)
+    }
+    fn ji_with_params(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        params: yecta::JumpCallParams<'_, Context, E>,
+    ) -> Result<(), E> {
+        self.reactor.ji_with_params(ctx, params, tail_idx)
+    }
+    fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
+        self.reactor.ret(tail_idx, ctx, params, tag)
+    }
+
+    fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {
+        self.reactor.with_local_pool(|p| f(p as &mut dyn yecta::LocalPoolApi))
+    }
+    fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
+        self.reactor.flush_bundles(ctx, tail_idx)
+    }
+    fn flush_for_load(
+        &self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.flush_bundles_for_load(ctx, addr_local, addr_type, tail_idx)
+    }
+    fn feed_lazy(
+        &self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        val_type: ValType,
+        insn: &Instruction<'static>,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
     }
 }
