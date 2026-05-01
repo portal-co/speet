@@ -52,6 +52,10 @@
 //! if self.traps.on_jump(&info, ctx, &mut reactor, &self.layout)? == TrapAction::Skip {
 //!     return Ok(());
 //! }
+//! // when building JumpCallParams for a conditional branch:
+//! if let Some(hook) = self.traps.make_condition_hook(ConditionInfo { source_pc, target_pc }) {
+//!     params = params.with_condition_hook(&hook);
+//! }
 //! ```
 //!
 //! ## Local / parameter layout
@@ -69,6 +73,7 @@
 use yecta::layout::CellIdx;
 use yecta::{EmitSink, LocalAllocator, LocalLayout};
 
+use crate::cond::{ConditionHookWrapper, ConditionInfo, ConditionTrap, fire_via_trap_ctx};
 use crate::context::TrapContext;
 use crate::insn::{InstructionInfo, InstructionTrap, TrapAction};
 use crate::jump::{JumpInfo, JumpTrap};
@@ -77,10 +82,10 @@ use crate::jump::{JumpInfo, JumpTrap};
 
 /// The configuration object a recompiler embeds.
 ///
-/// Holds an optional [`InstructionTrap`] and an optional [`JumpTrap`].  All
-/// methods are no-ops when no trap is installed.  The arch recompiler owns
-/// the [`LocalLayout`] and passes it when calling the declare and firing
-/// methods.
+/// Holds an optional [`InstructionTrap`], an optional [`JumpTrap`], and an
+/// optional [`ConditionTrap`].  All methods are no-ops when no trap is
+/// installed.  The arch recompiler owns the [`LocalLayout`] and passes it when
+/// calling the declare and firing methods.
 ///
 /// ## Lifetimes
 ///
@@ -89,6 +94,7 @@ use crate::jump::{JumpInfo, JumpTrap};
 pub struct TrapConfig<'cb, 'ctx, Context, E> {
     insn_trap: Option<&'cb mut (dyn InstructionTrap<Context, E> + 'ctx)>,
     jump_trap: Option<&'cb mut (dyn JumpTrap<Context, E> + 'ctx)>,
+    cond_trap: Option<&'cb mut (dyn ConditionTrap<Context, E> + 'ctx)>,
 }
 
 impl<'cb, 'ctx, Context, E> Default for TrapConfig<'cb, 'ctx, Context, E> {
@@ -103,6 +109,7 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         Self {
             insn_trap: None,
             jump_trap: None,
+            cond_trap: None,
         }
     }
 
@@ -129,6 +136,23 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         self.jump_trap = Some(trap);
     }
 
+    /// Install a condition trap.
+    ///
+    /// The condition trap fires after the condition `i32` is on the WASM
+    /// stack, before `if`/`br_if`.  Use
+    /// [`make_condition_hook`](Self::make_condition_hook) at each conditional
+    /// branch site to obtain a [`ConditionHookWrapper`] that can be attached
+    /// to [`yecta::JumpCallParams`] via `with_condition_hook`.
+    ///
+    /// See [`set_instruction_trap`](Self::set_instruction_trap) for the
+    /// post-install protocol.
+    pub fn set_condition_trap(
+        &mut self,
+        trap: &'cb mut (dyn ConditionTrap<Context, E> + 'ctx),
+    ) {
+        self.cond_trap = Some(trap);
+    }
+
     /// Remove the instruction trap.
     ///
     /// After clearing a trap, the recompiler must rebuild the layout from
@@ -144,6 +168,14 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
     /// re-setup requirement.
     pub fn clear_jump_trap(&mut self) {
         self.jump_trap = None;
+    }
+
+    /// Remove the condition trap.
+    ///
+    /// See [`clear_instruction_trap`](Self::clear_instruction_trap) for the
+    /// re-setup requirement.
+    pub fn clear_condition_trap(&mut self) {
+        self.cond_trap = None;
     }
 
     // ── Phase 1: declare params ───────────────────────────────────────────
@@ -162,6 +194,9 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         if let Some(t) = self.jump_trap.as_mut() {
             t.declare_params(cell, layout);
         }
+        if let Some(t) = self.cond_trap.as_mut() {
+            t.declare_params(cell, layout);
+        }
     }
 
     // ── Phase 2: declare locals ───────────────────────────────────────────
@@ -178,6 +213,9 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
             t.declare_locals(cell, layout);
         }
         if let Some(t) = self.jump_trap.as_mut() {
+            t.declare_locals(cell, layout);
+        }
+        if let Some(t) = self.cond_trap.as_mut() {
             t.declare_locals(cell, layout);
         }
     }
@@ -241,5 +279,54 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
                 .skip_snippet(info, ctx, &mut trap_ctx2)?;
         }
         Ok(action)
+    }
+
+    /// Build a [`ConditionHookWrapper`] for the given branch site.
+    ///
+    /// Returns `Some(wrapper)` when a condition trap is installed; `None`
+    /// otherwise.  The wrapper implements [`yecta::Snippet`] and should be
+    /// attached to [`yecta::JumpCallParams`] via
+    /// [`with_condition_hook`](yecta::JumpCallParams::with_condition_hook).
+    ///
+    /// # Example (arch recompiler)
+    ///
+    /// ```ignore
+    /// let info = ConditionInfo { source_pc: rip, target_pc: Some(target) };
+    /// let params = JumpCallParams::conditional_jump(target_func, n_params, &cond_snip, pool);
+    /// let params = if let Some(hook) = self.traps.make_condition_hook(info) {
+    ///     params.with_condition_hook(&hook)
+    /// } else {
+    ///     params
+    /// };
+    /// rctx.ji_with_params(ctx, tail_idx, params)?;
+    /// ```
+    pub fn make_condition_hook(
+        &self,
+        info: ConditionInfo,
+    ) -> Option<ConditionHookWrapper<'_, Context, E>> {
+        self.cond_trap
+            .as_deref()
+            .map(|trap| ConditionHookWrapper { info, trap })
+    }
+
+    /// Fire the condition trap directly via a [`TrapContext`].
+    ///
+    /// Used by the WASM frontend, which emits instructions through an
+    /// [`EmitSink`] rather than through yecta's `JumpCallParams` mechanism.
+    ///
+    /// Does nothing when no condition trap is installed.
+    pub fn on_condition_direct(
+        &self,
+        info: &ConditionInfo,
+        ctx: &mut Context,
+        sink: &mut dyn EmitSink<Context, E>,
+        layout: &dyn LocalAllocator,
+    ) -> Result<(), E> {
+        let trap = match self.cond_trap.as_deref() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        let mut trap_ctx = TrapContext::new(sink, layout);
+        fire_via_trap_ctx(trap, info, ctx, &mut trap_ctx)
     }
 }

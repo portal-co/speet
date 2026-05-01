@@ -12,6 +12,7 @@ wasm-encoder = { workspace = true }
 wax-core     = { workspace = true }
 speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-traps = { path = "../../helper/speet-traps" }
 
 [dev-dependencies]
 speet-linker = { path = "../../os/speet-linker" }

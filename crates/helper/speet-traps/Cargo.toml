@@ -7,4 +7,5 @@ license-file.workspace = true
 
 [dependencies]
 wasm-encoder.workspace = true
+wax-core = { workspace = true }
 yecta = { path = "../yecta" }

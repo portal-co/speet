@@ -500,6 +500,11 @@ pub struct JumpCallParams<'a, Context, E> {
     pub pool: Pool<'a, Context, E>,
     /// If Some, make the jump/call conditional on this snippet.
     pub condition: Option<&'a (dyn Snippet<Context, E> + 'a)>,
+    /// If Some, emitted after the condition snippet but before the `if`
+    /// instruction.  Must leave exactly one `i32` on the stack (the possibly
+    /// transformed condition value).  Only meaningful when `condition` is
+    /// `Some`; ignored for unconditional jumps.
+    pub condition_hook: Option<&'a (dyn Snippet<Context, E> + 'a)>,
 }
 
 impl<'a, Context, E> JumpCallParams<'a, Context, E> {
@@ -517,6 +522,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             call: None,
             pool,
             condition: None,
+            condition_hook: None,
         }
     }
 
@@ -540,6 +546,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             call: Some(escape_tag),
             pool,
             condition: None,
+            condition_hook: None,
         }
     }
 
@@ -563,6 +570,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             call: None,
             pool,
             condition: Some(condition),
+            condition_hook: None,
         }
     }
 
@@ -584,6 +592,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             call: None,
             pool,
             condition: None,
+            condition_hook: None,
         }
     }
 
@@ -606,6 +615,20 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// * `condition` - Snippet that evaluates the condition (non-zero = true)
     pub fn with_condition(mut self, condition: &'a (dyn Snippet<Context, E> + 'a)) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    /// Attach a condition hook that fires after the condition snippet but
+    /// before the `if` instruction.
+    ///
+    /// The hook may emit any sequence of WASM instructions but **must** leave
+    /// exactly one `i32` on the stack — the (possibly transformed) condition
+    /// that the `if` will consume.  Ignored when `condition` is `None`.
+    ///
+    /// # Arguments
+    /// * `hook` - Snippet emitted between the condition snippet and `if`
+    pub fn with_condition_hook(mut self, hook: &'a (dyn Snippet<Context, E> + 'a)) -> Self {
+        self.condition_hook = Some(hook);
         self
     }
 
@@ -1571,9 +1594,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             call,
             pool,
             condition,
+            condition_hook,
         } = params;
 
-        self.ji(
+        self.ji_internal(
             ctx,
             param_count,
             &fixups,
@@ -1581,6 +1605,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             call,
             pool,
             condition,
+            condition_hook,
             tail_idx,
         )
     }
@@ -1614,6 +1639,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
+        self.ji_internal(ctx, params, fixups, target, call, pool, condition, None, tail_idx)
+    }
+
+    fn ji_internal(
+        &self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        target: Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        tail_idx: usize,
+    ) -> Result<(), E> {
         self.flush_bundles(ctx, tail_idx)?;
         // Track if statements for conditional branches
         if condition.is_some() {
@@ -1623,11 +1663,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         match call {
             Some(escape_tag) => {
                 self.emit_conditional_call(
-                    ctx, params, fixups, target, escape_tag, pool, condition, tail_idx,
+                    ctx, params, fixups, target, escape_tag, pool, condition, condition_hook,
+                    tail_idx,
                 )?;
             }
             None => {
-                self.emit_conditional_jump(ctx, params, fixups, target, pool, condition, tail_idx)?;
+                self.emit_conditional_jump(
+                    ctx, params, fixups, target, pool, condition, condition_hook, tail_idx,
+                )?;
             }
         }
         Ok(())
@@ -1713,10 +1756,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         escape_tag: EscapeTag,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            if let Some(hook) = condition_hook {
+                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            }
             self.feed_to(
                 tail_idx,
                 ctx,
@@ -1743,14 +1790,17 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         target: Target<Context, E>,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         match target {
             Target::Static { func } => {
-                self.emit_static_jump(ctx, params, fixups, func, condition, tail_idx)
+                self.emit_static_jump(ctx, params, fixups, func, condition, condition_hook, tail_idx)
             }
             Target::Dynamic { idx } => {
-                self.emit_dynamic_jump(ctx, params, fixups, idx, pool, condition, tail_idx)
+                self.emit_dynamic_jump(
+                    ctx, params, fixups, idx, pool, condition, condition_hook, tail_idx,
+                )
             }
         }
     }
@@ -1763,10 +1813,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         func: FuncIdx,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            if let Some(hook) = condition_hook {
+                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            }
             self.feed_to(
                 tail_idx,
                 ctx,
@@ -1798,10 +1852,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         idx: &(dyn Snippet<Context, E> + '_),
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond_snippet) = condition {
             cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            if let Some(hook) = condition_hook {
+                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            }
             self.feed_to(
                 tail_idx,
                 ctx,

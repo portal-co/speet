@@ -17,7 +17,18 @@
 //! - **Instruction filtering**: suppress entire classes of instructions by
 //!   returning [`TrapAction::Skip`].
 //!
-//! ## 2. Jump traps — [`JumpTrap`]
+//! ## 2. Condition traps — [`ConditionTrap`]
+//!
+//! Fire after the condition `i32` is pushed onto the WASM stack but *before*
+//! `if`/`br_if` is emitted.  Use cases:
+//!
+//! - **Backtracking**: call a host `decide(i32) -> i32` import that can
+//!   override the branch decision for replay or fuzzing.
+//! - **Branch logging**: `local.tee` + call a WASM import to record every
+//!   branch outcome without changing the result.
+//! - **Condition flipping**: emit `i32.eqz` to force the opposite branch.
+//!
+//! ## 3. Jump traps — [`JumpTrap`]
 //!
 //! Fire before every control-flow transfer (branch, call, return, indirect
 //! jump).  Use cases:
@@ -112,6 +123,7 @@
 
 extern crate alloc;
 
+pub mod cond;
 pub mod config;
 pub mod context;
 pub mod hardening;
@@ -122,6 +134,7 @@ pub mod security;
 pub mod tracing;
 
 // Flat re-exports for the most commonly used items.
+pub use cond::{ConditionHookWrapper, ConditionInfo, ConditionTrap};
 pub use config::TrapConfig;
 pub use context::TrapContext;
 pub use hardening::RopDetectTrap;

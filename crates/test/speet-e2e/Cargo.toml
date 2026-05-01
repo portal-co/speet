@@ -20,3 +20,4 @@ wasm-encoder.workspace = true
 wasmparser = { version = "0.240.0", features = ["validate"] }
 yecta = { path = "../../helper/yecta" }
 wasm-layout = { path = "../../helper/wasm-layout" }
+speet-wasm = { path = "../../managed/speet-wasm" }

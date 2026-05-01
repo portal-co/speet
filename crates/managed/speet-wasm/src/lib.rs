@@ -49,6 +49,7 @@ use speet_link_core::{
 use speet_memory::{
     AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter, StoreKind,
 };
+use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use wasm_layout::{CellIdx, LocalLayout, LocalSlot, Mark};
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
@@ -158,6 +159,10 @@ pub struct WasmFrontend<Context, E, F = Function> {
     /// Declared locals in the guest are shifted to make room for the injected
     /// parameters immediately after the original parameters.
     pub injected_params: Vec<ValType>,
+    /// Optional condition trap. When installed, it fires after the condition
+    /// `i32` is on the WASM stack but before every `if` and `br_if` instruction
+    /// is emitted.  The trap may emit instructions to transform the condition.
+    cond_trap: Option<Box<dyn ConditionTrap<Context, E>>>,
 }
 
 impl<Context, E, F> WasmFrontend<Context, E, F> {
@@ -185,7 +190,31 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             fn_creator,
             injected_params: Vec::new(),
             fn_type_param_layouts: BTreeMap::new(),
+            cond_trap: None,
         }
+    }
+
+    /// Install a condition trap.
+    ///
+    /// The trap fires after the condition `i32` is on the WASM stack but before
+    /// every `if` and `br_if` instruction is emitted.  It may emit instructions
+    /// to transform the condition value (e.g. `i32.eqz` to flip the branch, or
+    /// a `call $import` for runtime backtracking).
+    pub fn set_condition_trap(&mut self, trap: Box<dyn ConditionTrap<Context, E>>) {
+        self.cond_trap = Some(trap);
+    }
+
+    /// Remove the condition trap.
+    pub fn clear_condition_trap(&mut self) {
+        self.cond_trap = None;
+    }
+
+    /// Take all compiled `(function, type)` pairs, leaving the internal buffer empty.
+    ///
+    /// Useful in tests and one-shot translation flows where the full
+    /// [`drain_unit`](Self::drain_unit) pipeline is not needed.
+    pub fn take_compiled(&mut self) -> Vec<(F, FuncType)> {
+        core::mem::take(&mut self.compiled)
     }
 
     /// Return memory information parsed during the last [`translate_module`](Self::translate_module) call.
@@ -1305,6 +1334,29 @@ where
                 } else {
                     out.instruction(ctx, &Instruction::MemoryFill(memory_index))?;
                 }
+            }
+
+            // ── Condition-trap interception ───────────────────────────────
+            //
+            // For `if` and `br_if` the condition i32 is already on the stack
+            // (pushed by the preceding instruction).  If a condition trap is
+            // installed we fire it here so it can observe or transform the
+            // value before the branching instruction consumes it.
+            Operator::If { blockty } => {
+                if let Some(ref trap) = self.cond_trap {
+                    let info = ConditionInfo { source_pc: 0, target_pc: None };
+                    trap.on_condition(&info, ctx, &mut |c, instr| out.instruction(c, instr))?;
+                }
+                let insn = Instruction::try_from(Operator::If { blockty: *blockty })
+                    .unwrap_or(Instruction::Unreachable);
+                out.instruction(ctx, &insn)?;
+            }
+            Operator::BrIf { relative_depth } => {
+                if let Some(ref trap) = self.cond_trap {
+                    let info = ConditionInfo { source_pc: 0, target_pc: None };
+                    trap.on_condition(&info, ctx, &mut |c, instr| out.instruction(c, instr))?;
+                }
+                out.instruction(ctx, &Instruction::BrIf(*relative_depth))?;
             }
 
             // ── Pass-through ──────────────────────────────────────────────

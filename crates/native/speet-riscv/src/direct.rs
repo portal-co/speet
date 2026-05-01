@@ -1247,6 +1247,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         call: Some(escape_tag),
                         pool: rctx.pool(),
                         condition: None,
+                        condition_hook: None,
                     };
 
                     // Emit the speculative call using yecta's ji_with_params API
