@@ -1741,8 +1741,8 @@ mod tests {
         // No-op mapper closure wrapper that satisfies LocalDeclarator.
         struct NoopMapper;
         impl LocalDeclarator for NoopMapper {}
-        impl MapperCallback<(), TestError, Function> for NoopMapper {
-            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>) -> Result<(), TestError> { Ok(()) }
+        impl MapperCallback<(), TestError> for NoopMapper {
+            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError>) -> Result<(), TestError> { Ok(()) }
         }
 
         let mut module = Module::new();
@@ -1775,7 +1775,7 @@ mod tests {
         let bytes = module.finish();
 
         // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
-        let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
+        let mapper: Box<dyn MapperCallback<(), TestError>> = Box::new(ChunkedMapper {
             page_size: 0x10000,
             inner: NoopMapper,
         });
@@ -1917,8 +1917,8 @@ mod tests {
         // No-op mapper closure wrapper that satisfies LocalDeclarator.
         struct NoopMapper;
         impl LocalDeclarator for NoopMapper {}
-        impl MapperCallback<(), TestError, Function> for NoopMapper {
-            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError, Function>) -> Result<(), TestError> { Ok(()) }
+        impl MapperCallback<(), TestError> for NoopMapper {
+            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError>) -> Result<(), TestError> { Ok(()) }
         }
 
         let mut module = Module::new();
@@ -1952,7 +1952,7 @@ mod tests {
         module.section(&codes);
         let bytes = module.finish();
 
-        let mapper: Box<dyn MapperCallback<(), TestError, Function>> = Box::new(ChunkedMapper {
+        let mapper: Box<dyn MapperCallback<(), TestError>> = Box::new(ChunkedMapper {
             page_size: 0x10000,
             inner: NoopMapper,
         });
