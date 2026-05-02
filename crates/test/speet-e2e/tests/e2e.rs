@@ -1,638 +1,28 @@
-//! End-to-end recompiler tests for RISC-V and x86-64.
+//! End-to-end recompiler tests: native ISAs (RISC-V, x86-64) and managed WASM.
 //!
-//! Three test kinds, each with two exception-handling variants:
+//! Three test kinds for native binaries, each with two exception-handling variants:
 //!
 //! - **smoke** — translate → assemble → `wasmparser::validate` only
 //! - **run**   — translate → assemble → execute in wasmi
 //! - **link**  — two binaries (possibly different arches) merged via
 //!               `MegabinaryBuilder` → assemble → execute
 //!
+//! Three additional test kinds for WASM-frontend binaries:
+//!
+//! - **wasm_smoke**         — translate via `WasmFrontend` → `wasmparser::validate`
+//! - **wasm_run**           — translate → validate → execute
+//! - **wasm_run_cond_trap** — translate with `HookConditionTrap` → run with decide host fn
+//!
 //! C programs are compiled by `build.rs` (requires a suitable clang).
 //! Tests that need compiled C objects are skipped when the object is absent.
 
-use std::{borrow::Cow, convert::Infallible, path::Path};
+#[path = "harness/mod.rs"]
+mod harness;
 
-use object::{Object, ObjectSection};
+use harness::*;
 use rv_asm::Xlen;
-use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAdapter};
-use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
-use speet_module_builder::MegabinaryBuilder;
-use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
-use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
-use speet_x86_64::X86Recompiler;
-use wasm_encoder::{
-    CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
-    FunctionSection, ImportSection, MemorySection, MemoryType, Module, RefType, TableSection,
-    TableType, TagSection, TagType, TypeSection, ValType,
-};
-use wasmi::{AsContext, Engine, Linker, Module as WasmiModule, Store};
-use yecta::{EscapeTag, LocalPool, Reactor, TableIdx, TagIdx, TypeIdx};
-use yecta::layout::CellIdx;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const REG_SAVE_BASE: u32 = 0x100;
-const IMPORT_HINT: u32 = 0;
-const N_IMPORTS: u32 = 3; // hint, write, exit
-
-/// Hint id emitted by `JumpEventTrap` on a Return event.
-const HINT_RETURN: i32 = 0xCA11_u32 as i32;
-/// Hint id emitted by `JumpEventTrap` on a Call / IndirectCall event.
-const HINT_CALL: i32 = 0xCA12_u32 as i32;
-
-// ── EH variant ────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Eh { None, With }
-
-// ── Architecture ──────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Arch { Rv32, Rv64, X86_64 }
-
-// ── Harness state ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct RegSnapshot { regs: [i32; 32] }
-impl RegSnapshot {
-    fn reg(&self, name: &str) -> i32 {
-        self.regs[abi_reg_index(name).expect("unknown register")]
-    }
-}
-
-struct HostState {
-    hints: Vec<(i32, RegSnapshot)>,
-    stdout: Vec<u8>,
-    exit_code: Option<i32>,
-}
-impl HostState {
-    fn new() -> Self { Self { hints: Vec::new(), stdout: Vec::new(), exit_code: None } }
-}
-
-// ── ReactorAdapter helpers ────────────────────────────────────────────────────
-
-fn make_rctx<'r>(
-    reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-) -> ReactorAdapter<'r, (), Infallible, Function, LocalPool> {
-    static T: TableIdx = TableIdx(0);
-    let escape_tag = match eh {
-        Eh::None => None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
-    };
-    let mut rctx = ReactorAdapter {
-        reactor,
-        layout:      yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        pool:        yecta::Pool { handler: &T, ty: type_idx },
-        escape_tag,
-    };
-    rctx.set_base_func_offset(base_func_offset);
-    rctx
-}
-
-fn collect_rv_params(rctx: &ReactorAdapter<'_, (), Infallible, Function, LocalPool>) -> Vec<ValType> {
-    let mark = rctx.locals_mark();
-    rctx.layout().iter_before(&mark)
-        .flat_map(|(count, ty)| std::iter::repeat(ty).take(count as usize))
-        .collect()
-}
-
-// ── RISCV hint callback ───────────────────────────────────────────────────────
-
-/// Build a hint callback that saves x0–x31 to `REG_SAVE_BASE` then calls the
-/// hint import.  With memory64 all addresses are i64.  When `regs_are_i64` is
-/// true (RV64) each register value is truncated via `i32.wrap_i64` before the
-/// 32-bit store so the `RegSnapshot.regs` slice always holds 32-bit values.
-fn build_hint_callback(regs_are_i64: bool) -> impl HintCallback<(), Infallible> {
-    move |hint: &HintInfo, ctx: &mut (), rctx: &mut speet_riscv::HintContext<(), Infallible>| {
-        use wasm_encoder::{Instruction, MemArg};
-        let mem = MemArg { memory_index: 0, align: 2, offset: 0 };
-        for i in 0u32..32 {
-            // memory64: addresses are i64
-            rctx.emit(ctx, &Instruction::I64Const((REG_SAVE_BASE + i * 4) as i64)).unwrap();
-            rctx.emit(ctx, &Instruction::LocalGet(i)).unwrap();
-            if regs_are_i64 {
-                rctx.emit(ctx, &Instruction::I32WrapI64).unwrap();
-            }
-            rctx.emit(ctx, &Instruction::I32Store(mem)).unwrap();
-        }
-        rctx.emit(ctx, &Instruction::I32Const(hint.value as i32)).unwrap();
-        rctx.emit(ctx, &Instruction::Call(IMPORT_HINT)).unwrap();
-    }
-}
-
-// ── Test traps ────────────────────────────────────────────────────────────────
-
-/// A jump-event trap that records Call and Return events as hints.
-///
-/// Exercises the full three-phase protocol (`declare_locals` → `alloc_cell` →
-/// `on_jump`) and demonstrates per-cell local allocation: the `scratch_slot`
-/// resolves to the correct absolute WASM local index for every cell signature
-/// produced by the recompiler, which is verified by `wasmparser::validate`.
-struct JumpEventTrap {
-    scratch_slot: LocalSlot,
-}
-
-impl JumpEventTrap {
-    fn new() -> Self { Self { scratch_slot: LocalSlot::default() } }
-}
-
-impl LocalDeclarator for JumpEventTrap {
-    // Declare the counter as a *parameter* (not a local) so its absolute
-    // wasm index is identical across every function in the group.  Per-function
-    // locals have an absolute index that depends on `num_temps`, which varies
-    // per instruction slot; broadcasting the same `LocalGet` index to all
-    // predecessor functions (via `feed_to`) would hit a differently-typed local
-    // in a predecessor with a different `num_temps`.  Parameters are declared
-    // once before the mark and are at the same fixed index everywhere.
-    fn declare_params(&mut self, _cell: CellIdx, params: &mut LocalLayout) {
-        self.scratch_slot = params.append(1, ValType::I32);
-    }
-}
-
-impl JumpTrap<(), Infallible> for JumpEventTrap {
-    fn on_jump(
-        &mut self,
-        info: &JumpInfo,
-        ctx: &mut (),
-        trap_ctx: &mut TrapContext<(), Infallible>,
-    ) -> Result<TrapAction, Infallible> {
-        let hint_id = match info.kind {
-            JumpKind::Return => HINT_RETURN,
-            JumpKind::Call | JumpKind::IndirectCall => HINT_CALL,
-            _ => return Ok(TrapAction::Continue),
-        };
-        use wasm_encoder::Instruction as I;
-        let _ = hint_id;
-        Ok(TrapAction::Continue)
-    }
-}
-
-// ── Trap-aware context helpers ────────────────────────────────────────────────
-
-fn make_trap_rctx<'r>(
-    reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-    jump_trap: &'r mut JumpEventTrap,
-) -> TrapReactorAdapter<'r, 'r, 'r, (), Infallible, Function, LocalPool> {
-    static T: TableIdx = TableIdx(0);
-    let escape_tag = match eh {
-        Eh::None => None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
-    };
-    let mut rctx = TrapReactorAdapter::new(
-        reactor,
-        yecta::Pool { handler: &T, ty: type_idx },
-        escape_tag,
-    );
-    rctx.traps.set_jump_trap(jump_trap);
-    rctx.set_base_func_offset(base_func_offset);
-    rctx
-}
-
-fn collect_trap_params(
-    rctx: &TrapReactorAdapter<'_, '_, '_, (), Infallible, Function, LocalPool>,
-) -> Vec<ValType> {
-    let mark = rctx.locals_mark();
-    rctx.layout().iter_before(&mark)
-        .flat_map(|(count, ty)| std::iter::repeat(ty).take(count as usize))
-        .collect()
-}
-
-fn translate_rv_with_trap(
-    text: &[u8],
-    start_addr: u32,
-    xlen: Xlen,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-) -> Translated {
-    let rv64 = xlen == Xlen::Rv64;
-    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        start_addr as u64, false, rv64, true,
-    );
-    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut jump_trap = JumpEventTrap::new();
-    let mut rctx = make_trap_rctx(&mut reactor, base_func_offset, type_idx, eh, &mut jump_trap);
-    recompiler.setup_traps(&mut rctx);
-    let params = collect_trap_params(&rctx);
-
-    let mut hint_cb = build_hint_callback(rv64);
-    recompiler.set_hint_callback(&mut hint_cb);
-
-    let mut ctx = ();
-    recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr, xlen,
-        &mut |a| Function::new(a.collect::<Vec<_>>()))
-        .expect("translate_bytes failed");
-
-    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
-}
-
-fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
-    let t = match arch {
-        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh),
-        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh),
-        // x86 trap path not implemented — fall back to no-trap build.
-        Arch::X86_64 => {
-            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
-            let unsupported = t.unsupported.clone();
-            let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
-            return (assemble_module(&[slice], eh), unsupported);
-        }
-    };
-    let unsupported = t.unsupported.clone();
-    let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
-    (assemble_module(&[slice], eh), unsupported)
-}
-
-// ── Translation backends ──────────────────────────────────────────────────────
-
-/// Result of translating one binary.
-struct Translated {
-    fns: Vec<Function>,
-    params: Vec<ValType>,
-    /// Unsupported mnemonics (x86_64 only; empty for RISCV).
-    unsupported: Vec<String>,
-}
-
-fn translate_rv(
-    text: &[u8],
-    start_addr: u32,
-    xlen: Xlen,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-) -> Translated {
-    let rv64 = xlen == Xlen::Rv64;
-    let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-        start_addr as u64, false, rv64, true, // use_memory64 = true
-    );
-    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
-    recompiler.setup_traps(&mut rctx);
-    let params = collect_rv_params(&rctx);
-
-    let mut hint_cb = build_hint_callback(rv64);
-    recompiler.set_hint_callback(&mut hint_cb);
-
-    let mut ctx = ();
-    recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr, xlen,
-        &mut |a| Function::new(a.collect::<Vec<_>>()))
-        .expect("translate_bytes failed");
-
-    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
-}
-
-fn translate_x86(
-    text: &[u8],
-    rip: u64,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-) -> Translated {
-    let mut recompiler = X86Recompiler::new_with_base_rip(rip);
-    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
-    recompiler.setup_traps(&mut rctx);
-    let params = collect_rv_params(&rctx);
-
-    let mut ctx = ();
-    recompiler.translate_bytes(&mut ctx, &mut rctx, text, rip,
-        &mut |a| Function::new(a.collect::<Vec<_>>()))
-        .expect("translate_bytes failed");
-
-    let unsupported: Vec<String> = recompiler.unsupported_insns().iter().cloned().collect();
-    Translated { fns: rctx.drain_fns(), params, unsupported }
-}
-
-fn translate(
-    text: &[u8],
-    start_addr: u64,
-    arch: Arch,
-    base_func_offset: u32,
-    type_idx: TypeIdx,
-    eh: Eh,
-) -> Translated {
-    match arch {
-        Arch::Rv32  => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh),
-        Arch::Rv64  => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh),
-        Arch::X86_64 => translate_x86(text, start_addr, base_func_offset, type_idx, eh),
-    }
-}
-
-// ── Module assembly ───────────────────────────────────────────────────────────
-
-struct BinarySlice {
-    fns:   Vec<Function>,
-    params: Vec<ValType>,
-    start_func_idx: u32,
-    entry_name: String,
-}
-
-fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
-    // Collect unique param-type signatures.
-    let mut unique_params: Vec<Vec<ValType>> = Vec::new();
-    for s in slices {
-        if !unique_params.iter().any(|p| p == &s.params) {
-            unique_params.push(s.params.clone());
-        }
-    }
-    let type_idx_of = |params: &Vec<ValType>| -> u32 {
-        unique_params.iter().position(|p| p == params).unwrap() as u32
-    };
-    let n_rv_types = unique_params.len() as u32;
-    let hint_ty_idx  = n_rv_types;
-    let write_ty_idx = n_rv_types + 1;
-
-    let mut types = TypeSection::new();
-    for p in &unique_params {
-        types.ty().function(p.clone(), []);
-    }
-    types.ty().function([ValType::I32], []);
-    types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
-
-    let mut imports = ImportSection::new();
-    imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(hint_ty_idx));
-    imports.import("env", "write",        wasm_encoder::EntityType::Function(write_ty_idx));
-    imports.import("env", "exit",         wasm_encoder::EntityType::Function(hint_ty_idx));
-
-    let mut funcs = FunctionSection::new();
-    for s in slices {
-        let ti = type_idx_of(&s.params);
-        for _ in &s.fns { funcs.function(ti); }
-    }
-
-    let total_fns: u32 = slices.iter().map(|s| s.fns.len() as u32).sum();
-    let table_size = N_IMPORTS + total_fns;
-    let mut tables = TableSection::new();
-    tables.table(TableType {
-        element_type: RefType::FUNCREF,
-        minimum: table_size as u64, maximum: Some(table_size as u64),
-        table64: true, shared: false,
-    });
-
-    let mut mems = MemorySection::new();
-    mems.memory(MemoryType {
-        minimum: 64, maximum: None, memory64: true, shared: false, page_size_log2: None,
-    });
-
-    let mut tags = TagSection::new();
-    if eh == Eh::With {
-        for i in 0..n_rv_types {
-            tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: i });
-        }
-    }
-
-    let mut exports = ExportSection::new();
-    exports.export("memory", ExportKind::Memory, 0);
-    for s in slices {
-        exports.export(&s.entry_name, ExportKind::Func, s.start_func_idx);
-    }
-
-    let all_indices: Vec<u32> = (N_IMPORTS..N_IMPORTS + total_fns).collect();
-    let mut elems = ElementSection::new();
-    elems.active(Some(0), &ConstExpr::i64_const(N_IMPORTS as i64),
-        Elements::Functions(Cow::Borrowed(&all_indices)));
-
-    let mut code = CodeSection::new();
-    for s in slices { for f in &s.fns { code.function(f); } }
-
-    let mut module = Module::new();
-    module.section(&types);
-    module.section(&imports);
-    module.section(&funcs);
-    module.section(&tables);
-    module.section(&mems);
-    if eh == Eh::With && n_rv_types > 0 { module.section(&tags); }
-    module.section(&exports);
-    module.section(&elems);
-    module.section(&code);
-    module.finish()
-}
-
-// ── High-level module builders ────────────────────────────────────────────────
-
-fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
-    match arch {
-        Arch::Rv32 | Arch::Rv64 => {
-            let xlen = if arch == Arch::Rv64 { Xlen::Rv64 } else { Xlen::Rv32 };
-            let recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
-                addr, false, xlen == Xlen::Rv64, false,
-            );
-            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
-            recompiler.setup_traps(&mut rctx);
-            collect_rv_params(&rctx)
-        }
-        Arch::X86_64 => {
-            let recompiler = X86Recompiler::new_with_base_rip(addr);
-            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
-            recompiler.setup_traps(&mut rctx);
-            collect_rv_params(&rctx)
-        }
-    }
-}
-
-fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
-    let unsupported = t.unsupported.clone();
-    let slice = BinarySlice {
-        params: t.params, fns: t.fns,
-        start_func_idx: N_IMPORTS, entry_name: "_start".into(),
-    };
-    (assemble_module(&[slice], eh), unsupported)
-}
-
-/// Spec for one binary inside a linked module.
-struct LinkSpec<'a> {
-    text:       &'a [u8],
-    start_addr: u64,
-    arch:       Arch,
-    entry:      &'static str,
-}
-
-fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
-    // Pre-compute unique param signatures for stable TypeIdx assignment.
-    let mut unique_params: Vec<Vec<ValType>> = Vec::new();
-    for s in specs {
-        let p = dry_run_params(s.arch, s.start_addr);
-        if !unique_params.iter().any(|q| q == &p) { unique_params.push(p); }
-    }
-    let type_idx_of_params = |p: &Vec<ValType>| -> TypeIdx {
-        TypeIdx(unique_params.iter().position(|q| q == p).unwrap() as u32)
-    };
-
-    let mut builder = MegabinaryBuilder::<Function>::new();
-    let mut slices: Vec<BinarySlice> = Vec::new();
-    let mut running_offset = N_IMPORTS;
-    let mut all_unsupported: Vec<String> = Vec::new();
-
-    for s in specs {
-        let p = dry_run_params(s.arch, s.start_addr);
-        let type_idx = type_idx_of_params(&p);
-        let t = translate(s.text, s.start_addr, s.arch, running_offset, type_idx, eh);
-
-        if !t.unsupported.is_empty() {
-            all_unsupported.extend(t.unsupported.iter().cloned());
-        }
-
-        let n = t.fns.len() as u32;
-        let start_func_idx = running_offset;
-        let func_type = FuncType::from_val_types(&t.params, &[]);
-        let unit = BinaryUnit {
-            base_func_offset: running_offset,
-            entry_points: vec![(s.entry.to_string(), start_func_idx)],
-            func_types: vec![func_type; n as usize],
-            fns: t.fns,
-            data_segments: vec![],
-            data_init_fn: None,
-        };
-        builder.on_unit(unit);
-        slices.push(BinarySlice {
-            fns: vec![], params: t.params,
-            start_func_idx, entry_name: s.entry.to_string(),
-        });
-        running_offset += n;
-    }
-
-    // Redistribute fns from builder output back into slices.
-    let output = builder.finish();
-    let mut fn_iter = output.fns.into_iter();
-    for (i, s) in specs.iter().enumerate() {
-        let start = slices[i].start_func_idx - N_IMPORTS;
-        let end = if i + 1 < specs.len() {
-            slices[i + 1].start_func_idx - N_IMPORTS
-        } else {
-            running_offset - N_IMPORTS
-        };
-        slices[i].fns = fn_iter.by_ref().take((end - start) as usize).collect();
-    }
-
-    (assemble_module(&slices, eh), all_unsupported)
-}
-
-// ── Wasmi execution ───────────────────────────────────────────────────────────
-
-fn run_module(wasm: &[u8], entry: &str) -> Result<HostState, String> {
-    let engine = Engine::default();
-    let mut store = Store::new(&engine, HostState::new());
-    let mut linker: Linker<HostState> = Linker::new(&engine);
-
-    linker.func_wrap("env", "__speet_hint",
-        |mut caller: wasmi::Caller<'_, HostState>, id: i32| {
-            let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
-            let mut regs = [0i32; 32];
-            {
-                let data = mem.data(caller.as_context());
-                let base = REG_SAVE_BASE as usize;
-                for (i, r) in regs.iter_mut().enumerate() {
-                    let off = base + i * 4;
-                    *r = i32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-                }
-            }
-            caller.data_mut().hints.push((id, RegSnapshot { regs }));
-        }).map_err(|e| e.to_string())?;
-
-    linker.func_wrap("env", "write",
-        |mut caller: wasmi::Caller<'_, HostState>, fd: i32, ptr: i32, len: i32| -> i32 {
-            if fd == 1 || fd == 2 {
-                let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
-                let mut buf = vec![0u8; len as usize];
-                let _ = mem.read(caller.as_context(), ptr as usize, &mut buf);
-                caller.data_mut().stdout.extend_from_slice(&buf);
-            }
-            len
-        }).map_err(|e| e.to_string())?;
-
-    linker.func_wrap("env", "exit",
-        |mut caller: wasmi::Caller<'_, HostState>, code: i32| {
-            caller.data_mut().exit_code = Some(code);
-        }).map_err(|e| e.to_string())?;
-
-    let module = WasmiModule::new(&engine, wasm).map_err(|e| e.to_string())?;
-    let instance = linker.instantiate_and_start(&mut store, &module)
-        .map_err(|e| e.to_string())?;
-
-    let func = instance.get_func(&mut store, entry).ok_or("no entry export")?;
-    let ty = func.ty(&store);
-    let params: Vec<wasmi::Val> = ty.params().iter().map(|vt| match vt {
-        wasmi::ValType::I32 => wasmi::Val::I32(0),
-        wasmi::ValType::I64 => wasmi::Val::I64(0),
-        wasmi::ValType::F32 => wasmi::Val::F32(wasmi::F32::from_bits(0)),
-        wasmi::ValType::F64 => wasmi::Val::F64(wasmi::F64::from_bits(0)),
-        _ => panic!("unexpected param type"),
-    }).collect();
-    let mut results = vec![wasmi::Val::I32(0); ty.results().len()];
-    let _ = func.call(&mut store, &params, &mut results);
-    Ok(store.into_data())
-}
-
-// ── ELF / object helpers ──────────────────────────────────────────────────────
-
-fn load_text(path: &Path) -> Option<(Vec<u8>, u64)> {
-    if !path.exists() {
-        eprintln!("Skipping: not found at {path:?}");
-        return None;
-    }
-    let bytes = std::fs::read(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let obj = object::File::parse(&*bytes)
-        .unwrap_or_else(|e| panic!("parse ELF {}: {e}", path.display()));
-    let sec = obj.section_by_name(".text")
-        .unwrap_or_else(|| panic!("no .text in {}", path.display()));
-    let data = sec.data()
-        .unwrap_or_else(|e| panic!("read .text from {}: {e}", path.display()))
-        .to_vec();
-    if data.is_empty() { return None; }
-    Some((data, sec.address()))
-}
-
-fn corpus(rel: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../test-data/rv-corpus").join(rel)
-}
-
-fn c_obj(path_env: &str) -> Option<std::path::PathBuf> {
-    let p = std::env::var(path_env).unwrap_or_default();
-    if p.is_empty() { return None; }
-    let p = std::path::PathBuf::from(p);
-    if p.exists() { Some(p) } else { None }
-}
-
-fn abi_reg_index(name: &str) -> Option<usize> {
-    match name {
-        "x0"|"zero"=>Some(0),"x1"|"ra"=>Some(1),"x2"|"sp"=>Some(2),
-        "x3"|"gp"=>Some(3),"x4"|"tp"=>Some(4),"x5"|"t0"=>Some(5),
-        "x6"|"t1"=>Some(6),"x7"|"t2"=>Some(7),"x8"|"s0"|"fp"=>Some(8),
-        "x9"|"s1"=>Some(9),"x10"|"a0"=>Some(10),"x11"|"a1"=>Some(11),
-        "x12"|"a2"=>Some(12),"x13"|"a3"=>Some(13),"x14"|"a4"=>Some(14),
-        "x15"|"a5"=>Some(15),"x16"|"a6"=>Some(16),"x17"|"a7"=>Some(17),
-        "x18"|"s2"=>Some(18),"x19"|"s3"=>Some(19),"x20"|"s4"=>Some(20),
-        "x21"|"s5"=>Some(21),"x22"|"s6"=>Some(22),"x23"|"s7"=>Some(23),
-        "x24"|"s8"=>Some(24),"x25"|"s9"=>Some(25),"x26"|"s10"=>Some(26),
-        "x27"|"s11"=>Some(27),"x28"|"t3"=>Some(28),"x29"|"t4"=>Some(29),
-        "x30"|"t5"=>Some(30),"x31"|"t6"=>Some(31),_=>None,
-    }
-}
-
-// ── Report unsupported instructions ──────────────────────────────────────────
-
-fn report_unsupported(unsupported: &[String], context: &str) {
-    if !unsupported.is_empty() {
-        eprintln!(
-            "  [x86_64 unsupported in {context}]: {}",
-            unsupported.join(", ")
-        );
-    }
-}
-
-// ── Test macros ───────────────────────────────────────────────────────────────
+// ── Native test macros ────────────────────────────────────────────────────────
 
 macro_rules! smoke {
     ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr) => {
@@ -663,7 +53,8 @@ macro_rules! smoke_c {
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
-            println!("  ✓ {} ({:?}) — {} bytes", path.file_name().unwrap().to_string_lossy(), $eh, wasm.len());
+            println!("  ✓ {} ({:?}) — {} bytes",
+                path.file_name().unwrap().to_string_lossy(), $eh, wasm.len());
         }
     };
 }
@@ -691,12 +82,6 @@ macro_rules! run {
     };
 }
 
-/// Translate with `JumpEventTrap` installed, validate, execute, and assert that
-/// at least one jump-event hint fired (proving the trap reached code that returns
-/// or calls).  The test is skipped if the binary is missing.
-///
-/// The primary correctness signal is `wasmparser::validate` — if cell-local
-/// indices are wrong the WASM is invalid and the test fails there.
 macro_rules! run_trap {
     ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr) => {
         #[test]
@@ -803,6 +188,60 @@ macro_rules! link_c {
                     Err(e) => panic!("run {} failed: {e}", spec.entry),
                 }
             }
+        }
+    };
+}
+
+// ── WASM-frontend test macros ─────────────────────────────────────────────────
+
+/// Translate `$builder` through `WasmFrontend` with optional mapper and/or
+/// condition trap, then validate the output with `wasmparser`.
+macro_rules! wasm_smoke {
+    ($name:ident, $builder:expr, mapper = $mapper:expr, cond_trap = $cond_trap:expr) => {
+        #[test]
+        fn $name() {
+            let input = $builder;
+            let cfg = WasmTranslateConfig { mapper: $mapper, cond_trap: $cond_trap };
+            let wasm = translate_wasm(&input, cfg, &[]);
+            assert!(!wasm.is_empty());
+            wasmparser::validate(&wasm).expect("WasmFrontend output is invalid");
+            println!("  ✓ wasm_smoke {} — {} bytes", stringify!($name), wasm.len());
+        }
+    };
+}
+
+/// Translate `$builder` through `WasmFrontend`, validate, and execute entry
+/// `$entry` in wasmi.  Mapper and/or condition trap are optional.
+macro_rules! wasm_run {
+    ($name:ident, $builder:expr, entry = $entry:expr, mapper = $mapper:expr, cond_trap = $cond_trap:expr) => {
+        #[test]
+        fn $name() {
+            let input = $builder;
+            let cfg = WasmTranslateConfig { mapper: $mapper, cond_trap: $cond_trap };
+            let wasm = translate_wasm(&input, cfg, &[($entry, 0)]);
+            wasmparser::validate(&wasm).expect("WasmFrontend output is invalid");
+            run_module(&wasm, $entry)
+                .unwrap_or_else(|e| panic!("wasm_run {} failed: {e}", stringify!($name)));
+            println!("  ✓ wasm_run {}", stringify!($name));
+        }
+    };
+}
+
+/// Translate `$builder` with a `HookConditionTrap` (decide import at index 0),
+/// call entry `$entry` with `input = $input` using `$decide_fn` as the host
+/// decide implementation, and assert the return value equals `$expected`.
+macro_rules! wasm_run_cond_trap {
+    ($name:ident, $builder:expr, entry = $entry:expr,
+     input = $input:expr, decide_fn = $decide_fn:expr, expected = $expected:expr) => {
+        #[test]
+        fn $name() {
+            let input_wasm = $builder;
+            let wasm = translate_wasm_with_decide_import(&input_wasm, $entry);
+            wasmparser::validate(&wasm).expect("WasmFrontend cond_trap output is invalid");
+            let result = run_wasm_with_decide(&wasm, $entry, $input, $decide_fn);
+            assert_eq!(result, $expected,
+                "wasm_run_cond_trap {}: expected {} got {}", stringify!($name), $expected, result);
+            println!("  ✓ wasm_run_cond_trap {} = {}", stringify!($name), result);
         }
     };
 }
@@ -2309,21 +1748,67 @@ link_c!(link_rv64c_arith_x_x86c_arith_eh,
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
     Eh::With);
 
+// ── WASM smoke tests ────────────────────────────────────────────────────────────
+
+wasm_smoke!(smoke_wasm_arith_no_mapper_no_cond_trap, wasm_arith(), mapper = None, cond_trap = None);
+wasm_smoke!(smoke_wasm_arith_no_mapper_with_flip_trap, wasm_arith(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_smoke!(smoke_wasm_arith_with_mapper_no_cond_trap, wasm_arith(), mapper = Some(make_test_mapper()), cond_trap = None);
+wasm_smoke!(smoke_wasm_arith_with_mapper_with_flip_trap, wasm_arith(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_smoke!(smoke_wasm_branches_no_mapper_no_cond_trap, wasm_branches(), mapper = None, cond_trap = None);
+wasm_smoke!(smoke_wasm_branches_no_mapper_with_flip_trap, wasm_branches(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_smoke!(smoke_wasm_branches_with_mapper_no_cond_trap, wasm_branches(), mapper = Some(make_test_mapper()), cond_trap = None);
+wasm_smoke!(smoke_wasm_branches_with_mapper_with_flip_trap, wasm_branches(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_smoke!(smoke_wasm_memory_rw_no_mapper_no_cond_trap, wasm_memory_rw(), mapper = None, cond_trap = None);
+wasm_smoke!(smoke_wasm_memory_rw_no_mapper_with_flip_trap, wasm_memory_rw(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_smoke!(smoke_wasm_memory_rw_with_mapper_no_cond_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = None);
+wasm_smoke!(smoke_wasm_memory_rw_with_mapper_with_flip_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+
+// ── WASM run tests ──────────────────────────────────────────────────────────────
+
+wasm_run!(run_wasm_arith_no_mapper_no_cond_trap, wasm_arith(), entry = "compute",
+    mapper = None, cond_trap = None);
+wasm_run!(run_wasm_arith_no_mapper_with_flip_trap, wasm_arith(), entry = "compute",
+    mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_run!(run_wasm_arith_with_mapper_no_cond_trap, wasm_arith(), entry = "compute",
+    mapper = Some(make_test_mapper()), cond_trap = None);
+wasm_run!(run_wasm_arith_with_mapper_with_flip_trap, wasm_arith(), entry = "compute",
+    mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_run!(run_wasm_branches_no_mapper_no_cond_trap, wasm_branches(), entry = "test",
+    mapper = None, cond_trap = None);
+wasm_run!(run_wasm_branches_no_mapper_with_flip_trap, wasm_branches(), entry = "test",
+    mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_run!(run_wasm_branches_with_mapper_no_cond_trap, wasm_branches(), entry = "test",
+    mapper = Some(make_test_mapper()), cond_trap = None);
+wasm_run!(run_wasm_branches_with_mapper_with_flip_trap, wasm_branches(), entry = "test",
+    mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+wasm_run!(run_wasm_memory_rw_no_mapper_no_cond_trap, wasm_memory_rw(), entry = "roundtrip",
+    mapper = None, cond_trap = None);
+wasm_run!(run_wasm_memory_rw_no_mapper_with_flip_trap, wasm_memory_rw(), entry = "roundtrip",
+    mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+
+// ── WASM condition-trap hook tests ──────────────────────────────────────────────
+
+wasm_run_cond_trap!(run_wasm_branches_hook_passthrough, wasm_branches(), entry = "test",
+    input = 1, decide_fn = |v| v, expected = 1);
+wasm_run_cond_trap!(run_wasm_branches_hook_passthrough_zero, wasm_branches(), entry = "test",
+    input = 0, decide_fn = |v| v, expected = 0);
+wasm_run_cond_trap!(run_wasm_branches_hook_override_false, wasm_branches(), entry = "test",
+    input = 1, decide_fn = |_| 0, expected = 0);
+wasm_run_cond_trap!(run_wasm_branches_hook_override_true, wasm_branches(), entry = "test",
+    input = 0, decide_fn = |_| 1, expected = 1);
+
 // @generated-tests-end
+
+// ── Debug / diagnostic helpers ────────────────────────────────────────────────
 
 #[test]
 fn debug_rv32_c_arith() {
     let path = match c_obj("E2E_RV32_ARITH") { Some(p) => p, None => return };
     let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-
-    // Disassemble the RISCV .text section — linear and conservative.
     eprintln!("── RV32 .text linear disassembly ({} bytes @ {addr:#x}) ──", text.len());
     disasm_rv(&text, addr as u64, Xlen::Rv32);
     disasm_rv_conservative(&text, addr as u64, Xlen::Rv32);
-
     let (wasm, _) = build_single(&text, addr, Arch::Rv32, Eh::None);
-
-    // Decode operators near the error using wasmparser.
     if let Err(e) = wasmparser::validate(&wasm) {
         let err_offset = e.offset();
         let window = 40;
@@ -2339,11 +1824,9 @@ fn debug_rv32_c_arith() {
 fn debug_rv64_c_arith() {
     let path = match c_obj("E2E_RV64_ARITH") { Some(p) => p, None => return };
     let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-
     eprintln!("── RV64 .text disassembly ({} bytes @ {addr:#x}) ──", text.len());
     disasm_rv(&text, addr as u64, Xlen::Rv64);
     disasm_rv_conservative(&text, addr as u64, Xlen::Rv64);
-
     let (wasm, _) = build_single(&text, addr, Arch::Rv64, Eh::None);
     if let Err(e) = wasmparser::validate(&wasm) {
         let err_offset = e.offset();
@@ -2373,39 +1856,20 @@ fn debug_corpus(rel: &str, arch: Arch, xlen: Xlen) {
 }
 
 #[test]
-fn debug_rv64im_corpus() {
-    debug_corpus("rv64im/01_multiply_divide_64", Arch::Rv64, Xlen::Rv64);
-}
+fn debug_rv64im_corpus() { debug_corpus("rv64im/01_multiply_divide_64", Arch::Rv64, Xlen::Rv64); }
 #[test]
-fn debug_rv32ima_corpus() {
-    debug_corpus("rv32ima/01_atomic_operations", Arch::Rv32, Xlen::Rv32);
-}
+fn debug_rv32ima_corpus() { debug_corpus("rv32ima/01_atomic_operations", Arch::Rv32, Xlen::Rv32); }
 #[test]
-fn debug_rv64d_corpus() {
-    debug_corpus("rv64d/01_rv64_double_precision_fp", Arch::Rv64, Xlen::Rv64);
-}
+fn debug_rv64d_corpus() { debug_corpus("rv64d/01_rv64_double_precision_fp", Arch::Rv64, Xlen::Rv64); }
 #[test]
-fn debug_rv32fd_corpus() {
-    debug_corpus("rv32fd/01_combined_fp", Arch::Rv32, Xlen::Rv32);
-}
+fn debug_rv32fd_corpus() { debug_corpus("rv32fd/01_combined_fp", Arch::Rv32, Xlen::Rv32); }
 #[test]
-fn debug_rv32i02_corpus() {
-    debug_corpus("rv32i/02_control_transfer", Arch::Rv32, Xlen::Rv32);
-}
+fn debug_rv32i02_corpus() { debug_corpus("rv32i/02_control_transfer", Arch::Rv32, Xlen::Rv32); }
 #[test]
-fn debug_rv32i04_corpus() {
-    debug_corpus("rv32i/04_edge_cases", Arch::Rv32, Xlen::Rv32);
-}
+fn debug_rv32i04_corpus() { debug_corpus("rv32i/04_edge_cases", Arch::Rv32, Xlen::Rv32); }
 #[test]
-fn debug_rv32i06_corpus() {
-    debug_corpus("rv32i/06_nop_and_hints", Arch::Rv32, Xlen::Rv32);
-}
+fn debug_rv32i06_corpus() { debug_corpus("rv32i/06_nop_and_hints", Arch::Rv32, Xlen::Rv32); }
 
-/// Disassemble RISC-V bytes at base `pc`.
-///
-/// When `conservative = true`, attempts to decode at every 2-byte boundary
-/// (matching the recompiler's conservative CFG reconstruction).  Otherwise,
-/// advances by the actual instruction width to produce a clean listing.
 fn disasm_rv(text: &[u8], pc: u64, xlen: Xlen) {
     disasm_rv_inner(text, pc, xlen, false);
 }
@@ -2421,19 +1885,17 @@ fn disasm_rv_inner(text: &[u8], pc: u64, xlen: Xlen, conservative: bool) {
     while i + 2 <= text.len() {
         let lo = u16::from_le_bytes([text[i], text[i + 1]]);
         if lo & 0x3 != 0x3 {
-            // 16-bit compressed
             match Inst::decode_compressed(lo, xlen) {
                 Ok(inst) => eprintln!("  {:#010x}  {:04x}          {inst}", pc + i as u64, lo),
                 Err(_)   => eprintln!("  {:#010x}  {:04x}          <bad-c>", pc + i as u64, lo),
             }
             i += 2;
         } else {
-            // 32-bit
             if i + 4 > text.len() { break; }
             let word = u32::from_le_bytes([text[i], text[i+1], text[i+2], text[i+3]]);
             match Inst::decode(word, xlen) {
                 Ok((inst, _)) => eprintln!("  {:#010x}  {:08x}  {inst}", pc + i as u64, word),
-                Err(_)         => eprintln!("  {:#010x}  {:08x}  <bad>",  pc + i as u64, word),
+                Err(_)        => eprintln!("  {:#010x}  {:08x}  <bad>",  pc + i as u64, word),
             }
             i += if conservative { 2 } else { 4 };
         }
@@ -2445,10 +1907,8 @@ fn decode_operators_near(wasm: &[u8], from: usize, to: usize) {
     for payload in Parser::new(0).parse_all(wasm) {
         let Ok(payload) = payload else { continue };
         if let Payload::CodeSectionEntry(body) = payload {
-            // Print local declarations for any function that overlaps [from, to].
             let body_range = body.range();
             if body_range.end < from || body_range.start > to { continue; }
-
             eprintln!("  -- function body [{:#x}..{:#x}]", body_range.start, body_range.end);
             if let Ok(locals_reader) = body.get_locals_reader() {
                 let mut local_idx = 0u32;
@@ -2458,16 +1918,13 @@ fn decode_operators_near(wasm: &[u8], from: usize, to: usize) {
                     local_idx += count;
                 }
             }
-
             let Ok(reader) = body.get_operators_reader() else { continue };
             let mut ops = reader;
             loop {
                 let pos = ops.original_position();
                 match ops.read() {
                     Ok(op) => {
-                        if pos >= from && pos <= to {
-                            eprintln!("  [{pos:#06x}] {op:?}");
-                        }
+                        if pos >= from && pos <= to { eprintln!("  [{pos:#06x}] {op:?}"); }
                         if pos > to { break; }
                     }
                     Err(_) => break,

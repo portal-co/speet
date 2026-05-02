@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the test-invocation section of tests/riscv_e2e.rs.
+"""Generate the test-invocation section of tests/e2e.rs.
 
 Run from the repo root or from crates/test/speet-e2e/:
     python3 crates/test/speet-e2e/generate_tests.py
@@ -8,7 +8,7 @@ The script rewrites everything between the sentinel comments
     // @generated-tests-begin
 and
     // @generated-tests-end
-inside tests/riscv_e2e.rs, leaving the rest of the file untouched.
+inside tests/e2e.rs, leaving the rest of the file untouched.
 """
 
 import os
@@ -30,7 +30,7 @@ else:
     sys.exit("Could not locate repo root (looking for test-data/rv-corpus)")
 
 CORPUS_DIR = repo_root / "test-data" / "rv-corpus"
-TEST_FILE  = SCRIPT_DIR / "tests" / "riscv_e2e.rs"
+TEST_FILE  = SCRIPT_DIR / "tests" / "e2e.rs"
 
 # ── Discover corpus binaries ──────────────────────────────────────────────────
 
@@ -74,6 +74,30 @@ c_objects: list[tuple[str, str, str]] = [
     ("x86c_arith",   "E2E_X86_ARITH",  "Arch::X86_64"),
 ]
 
+# ── WASM fixtures ─────────────────────────────────────────────────────────────
+#
+# Each entry: (ident, builder_expr, entry_name, has_branches, has_memory)
+#
+#   has_branches — fixture contains if/br_if; condition-trap tests are generated
+#   has_memory   — fixture uses linear memory; mapper+run tests are skipped
+#                  (page table not initialised at runtime)
+
+WASM_FIXTURES: list[tuple[str, str, str, bool, bool]] = [
+    ("arith",     "wasm_arith()",     "compute",   False, False),
+    ("branches",  "wasm_branches()",  "test",      True,  False),
+    ("memory_rw", "wasm_memory_rw()", "roundtrip", False, True),
+]
+
+MAPPER_VARIANTS: list[tuple[str, str]] = [
+    ("no_mapper",    "None"),
+    ("with_mapper",  "Some(make_test_mapper())"),
+]
+
+COND_TRAP_VARIANTS: list[tuple[str, str]] = [
+    ("no_cond_trap",   "None"),
+    ("with_flip_trap", "Some(Box::new(FlipConditionTrap))"),
+]
+
 # ── Code builders ─────────────────────────────────────────────────────────────
 
 EH_VARIANTS = [("no_eh", "Eh::None"), ("eh", "Eh::With")]
@@ -96,10 +120,6 @@ def run_corpus(ident, rel, arch):
     return both_eh(f)
 
 def run_trap_corpus(ident, rel, arch):
-    """Generate run_trap! tests. Only for integer-only archs where the trap
-    can fire (FP/Atomic/Zicsr binaries may hit unreachable before any jump,
-    but will still validate — the validate assertion is the key correctness
-    check regardless)."""
     def f(suf, eh):
         return [f'run_trap!(run_trap_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
     return both_eh(f)
@@ -153,6 +173,35 @@ def link_c_pair(a, b):
             f'    {eh});',
         ]
     return both_eh(f)
+
+# ── WASM test generators ──────────────────────────────────────────────────────
+
+def wasm_smoke_fixture(ident, builder, mapper_suf, mapper_expr, trap_suf, trap_expr):
+    name = f"smoke_wasm_{ident}_{mapper_suf}_{trap_suf}"
+    return [f'wasm_smoke!({name}, {builder}, mapper = {mapper_expr}, cond_trap = {trap_expr});']
+
+def wasm_run_fixture(ident, builder, entry, mapper_suf, mapper_expr, trap_suf, trap_expr):
+    name = f"run_wasm_{ident}_{mapper_suf}_{trap_suf}"
+    return [
+        f'wasm_run!({name}, {builder}, entry = "{entry}",',
+        f'    mapper = {mapper_expr}, cond_trap = {trap_expr});',
+    ]
+
+def wasm_cond_trap_tests(ident, builder, entry):
+    """Generate hook-cond-trap run tests (only for fixtures with branches)."""
+    lines = []
+    for decide_name, decide_fn, inp, expected in [
+        ("passthrough", "|v| v", 1, 1),
+        ("passthrough_zero", "|v| v", 0, 0),
+        ("override_false", "|_| 0", 1, 0),
+        ("override_true",  "|_| 1", 0, 1),
+    ]:
+        name = f"run_wasm_{ident}_hook_{decide_name}"
+        lines += [
+            f'wasm_run_cond_trap!({name}, {builder}, entry = "{entry}",',
+            f'    input = {inp}, decide_fn = {decide_fn}, expected = {expected});',
+        ]
+    return lines
 
 # ── Assemble all generated lines ──────────────────────────────────────────────
 
@@ -210,6 +259,34 @@ for a, b in combinations(c_objects, 2):
     lCC_lines.extend(link_c_pair(a, b))
 out += section("C-C link tests", lCC_lines)
 
+# WASM smoke – all fixtures × all mapper variants × all cond_trap variants
+wsmoke_lines = []
+for (ident, builder, entry, has_branches, has_memory) in WASM_FIXTURES:
+    for (mapper_suf, mapper_expr) in MAPPER_VARIANTS:
+        for (trap_suf, trap_expr) in COND_TRAP_VARIANTS:
+            wsmoke_lines.extend(wasm_smoke_fixture(
+                ident, builder, mapper_suf, mapper_expr, trap_suf, trap_expr))
+out += section("WASM smoke tests", wsmoke_lines)
+
+# WASM run – all fixtures × all mapper variants × all cond_trap variants
+# Skip mapper+run for fixtures with memory (page table not initialised at runtime).
+wrun_lines = []
+for (ident, builder, entry, has_branches, has_memory) in WASM_FIXTURES:
+    for (mapper_suf, mapper_expr) in MAPPER_VARIANTS:
+        if has_memory and mapper_suf != "no_mapper":
+            continue  # mapper runtime requires initialised page table
+        for (trap_suf, trap_expr) in COND_TRAP_VARIANTS:
+            wrun_lines.extend(wasm_run_fixture(
+                ident, builder, entry, mapper_suf, mapper_expr, trap_suf, trap_expr))
+out += section("WASM run tests", wrun_lines)
+
+# WASM cond-trap hook tests (only for fixtures with branches)
+wcond_lines = []
+for (ident, builder, entry, has_branches, has_memory) in WASM_FIXTURES:
+    if has_branches:
+        wcond_lines.extend(wasm_cond_trap_tests(ident, builder, entry))
+out += section("WASM condition-trap hook tests", wcond_lines)
+
 generated = "\n".join(out).rstrip() + "\n"
 
 # ── Splice into the test file ─────────────────────────────────────────────────
@@ -235,9 +312,13 @@ TEST_FILE.write_text(new_src)
 print(f"Wrote {len(generated.splitlines())} generated lines to {TEST_FILE}")
 
 # Print a quick summary
-n_smoke    = sum(1 for l in generated.splitlines() if l.startswith("smoke!(") or l.startswith("smoke_c!("))
-n_run      = sum(1 for l in generated.splitlines() if l.startswith("run!(") or l.startswith("run_c!("))
-n_run_trap = sum(1 for l in generated.splitlines() if l.startswith("run_trap!("))
-n_link     = sum(1 for l in generated.splitlines() if l.startswith("link!(") or l.startswith("link_c!("))
-print(f"  {len(corpus)} corpus binaries, {len(c_objects)} C objects")
-print(f"  smoke: {n_smoke}  run: {n_run}  run_trap: {n_run_trap}  link: {n_link}")
+n_smoke      = sum(1 for l in generated.splitlines() if l.startswith("smoke!(") or l.startswith("smoke_c!("))
+n_run        = sum(1 for l in generated.splitlines() if l.startswith("run!(") or l.startswith("run_c!("))
+n_run_trap   = sum(1 for l in generated.splitlines() if l.startswith("run_trap!("))
+n_link       = sum(1 for l in generated.splitlines() if l.startswith("link!(") or l.startswith("link_c!("))
+n_wasm_smoke = sum(1 for l in generated.splitlines() if l.startswith("wasm_smoke!("))
+n_wasm_run   = sum(1 for l in generated.splitlines() if l.startswith("wasm_run!(") and "cond_trap" not in l.split("wasm_run!(")[1].split(",")[0])
+n_wasm_cond  = sum(1 for l in generated.splitlines() if l.startswith("wasm_run_cond_trap!("))
+print(f"  {len(corpus)} corpus binaries, {len(c_objects)} C objects, {len(WASM_FIXTURES)} WASM fixtures")
+print(f"  native  — smoke: {n_smoke}  run: {n_run}  run_trap: {n_run_trap}  link: {n_link}")
+print(f"  wasm    — smoke: {n_wasm_smoke}  run: {n_wasm_run}  cond_trap: {n_wasm_cond}")
