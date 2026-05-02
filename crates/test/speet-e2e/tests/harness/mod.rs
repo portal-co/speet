@@ -625,7 +625,7 @@ pub fn translate_wasm(
         frontend.set_condition_trap(trap);
     }
 
-    let mut linker: speet_linker::Linker<'_, '_, (), BinaryReaderError, Function> =
+    let mut linker: speet_linker::Linker<'_, '_, (), BinaryReaderError> =
         speet_linker::Linker::new();
     frontend.translate_module(&mut (), &mut linker, input)
         .expect("WasmFrontend::translate_module failed");
@@ -697,7 +697,7 @@ pub fn translate_wasm_with_decide_import(input: &[u8], entry_name: &str) -> Vec<
         WasmFrontend::with_wasm_encoder_fn(per_memory, 0, IndexOffsets::default());
     frontend.set_condition_trap(Box::new(HookConditionTrap { decide_fn_idx: 0 }));
 
-    let mut linker: speet_linker::Linker<'_, '_, (), BinaryReaderError, Function> =
+    let mut linker: speet_linker::Linker<'_, '_, (), BinaryReaderError> =
         speet_linker::Linker::new();
     frontend.translate_module(&mut (), &mut linker, input)
         .expect("WasmFrontend::translate_module failed");

@@ -1,7 +1,21 @@
 use rabbitizer::{InstrCategory, Instruction};
+use speet_link_core::ReactorAdapter;
 use speet_mips::{BreakInfo, CallbackContext, MipsRecompiler, SyscallInfo};
 use wasm_encoder::Function;
-use yecta::Reactor;
+use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
+
+fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>)
+    -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool>
+{
+    static T: TableIdx = TableIdx(0);
+    ReactorAdapter {
+        reactor,
+        layout: yecta::LocalLayout::empty(),
+        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        escape_tag: None,
+    }
+}
 
 #[test]
 fn test_basic_arithmetic() {
@@ -12,8 +26,11 @@ fn test_basic_arithmetic() {
     let add_instruction = Instruction::new(0x012A4020, 0x1000, InstrCategory::CPU); // add $t0, $t1, $t2
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &add_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &add_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -28,8 +45,11 @@ fn test_immediate_instructions() {
     let addi_instruction = Instruction::new(0x212A002A, 0x1000, InstrCategory::CPU); // addi $t0, $t1, 42
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &addi_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &addi_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -40,22 +60,23 @@ fn test_load_store() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
 
+    let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
+
     // Test LW instruction: lw $t0, 4($t1)
     let lw_instruction = Instruction::new(0x8D2A0004, 0x1000, InstrCategory::CPU); // lw $t0, 4($t1)
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &lw_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &lw_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test SW instruction: sw $t0, 4($t1)
     let sw_instruction = Instruction::new(0xAD2A0004, 0x1000, InstrCategory::CPU); // sw $t0, 4($t1)
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &sw_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &sw_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -66,62 +87,55 @@ fn test_branch_instructions() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
 
+    let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
+
     // Test BEQ instruction: beq $t0, $t1, target
     let beq_instruction = Instruction::new(0x11290004, 0x1000, InstrCategory::CPU); // beq $t0, $t1, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &beq_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &beq_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test BNE instruction: bne $t0, $t1, target
     let bne_instruction = Instruction::new(0x15290004, 0x1000, InstrCategory::CPU); // bne $t0, $t1, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &bne_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &bne_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test BLEZ instruction: blez $t0, target
     let blez_instruction = Instruction::new(0x19200004, 0x1000, InstrCategory::CPU); // blez $t0, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &blez_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &blez_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test BGTZ instruction: bgtz $t0, target
     let bgtz_instruction = Instruction::new(0x1D200004, 0x1000, InstrCategory::CPU); // bgtz $t0, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &bgtz_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &bgtz_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test BLTZ instruction: bltz $t0, target
     let bltz_instruction = Instruction::new(0x05200004, 0x1000, InstrCategory::CPU); // bltz $t0, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &bltz_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &bltz_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test BGEZ instruction: bgez $t0, target
     let bgez_instruction = Instruction::new(0x05210004, 0x1000, InstrCategory::CPU); // bgez $t0, 4
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &bgez_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &bgez_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -140,8 +154,11 @@ fn test_jump_instructions() {
     );
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &j_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &j_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -155,12 +172,7 @@ fn test_syscall_callback() {
     let mut syscall_called = false;
     let mut syscall_callback = |_: &SyscallInfo,
                                 _ctx: &mut (),
-                                _: &mut CallbackContext<
-        '_,
-        (),
-        core::convert::Infallible,
-        Reactor<(), core::convert::Infallible, wasm_encoder::Function>,
-    >| {
+                                _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
         syscall_called = true;
     };
 
@@ -170,8 +182,11 @@ fn test_syscall_callback() {
     let syscall_instruction = Instruction::new(0x0000000C, 0x1000, InstrCategory::CPU); // syscall
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &syscall_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &syscall_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -187,12 +202,7 @@ fn test_break_callback() {
     let mut break_called = false;
     let mut break_callback = |_: &BreakInfo,
                               _ctx: &mut (),
-                              _: &mut CallbackContext<
-        '_,
-        (),
-        core::convert::Infallible,
-        Reactor<(), core::convert::Infallible, wasm_encoder::Function>,
-    >| {
+                              _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
         break_called = true;
     };
 
@@ -202,8 +212,11 @@ fn test_break_callback() {
     let break_instruction = Instruction::new(0x000048CD, 0x1000, InstrCategory::CPU); // break 0x123
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &break_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &break_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -216,22 +229,23 @@ fn test_logical_operations() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
 
+    let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
+
     // Test AND instruction: and $t0, $t1, $t2
     let and_instruction = Instruction::new(0x012A4024, 0x1000, InstrCategory::CPU); // and $t0, $t1, $t2
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &and_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &and_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test OR instruction: or $t0, $t1, $t2
     let or_instruction = Instruction::new(0x012A4025, 0x1000, InstrCategory::CPU); // or $t0, $t1, $t2
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &or_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &or_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -246,8 +260,11 @@ fn test_shift_operations() {
     let sll_instruction = Instruction::new(0x000A4080, 0x1000, InstrCategory::CPU); // sll $t0, $t1, 2
 
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     recompiler
-        .translate_instruction(&mut ctx, &sll_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &sll_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -258,22 +275,23 @@ fn test_multiplication_division() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
 
+    let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
+
     // Test MULT instruction: mult $t0, $t1
     let mult_instruction = Instruction::new(0x01090018, 0x1000, InstrCategory::CPU); // mult $t0, $t1
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &mult_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &mult_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test DIV instruction: div $t0, $t1
     let div_instruction = Instruction::new(0x0109001A, 0x1000, InstrCategory::CPU); // div $t0, $t1
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &div_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &div_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
@@ -284,22 +302,23 @@ fn test_hi_lo_operations() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
 
+    let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
+
     // Test MFHI instruction: mfhi $t0
     let mfhi_instruction = Instruction::new(0x00001010, 0x1000, InstrCategory::CPU); // mfhi $t0
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &mfhi_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &mfhi_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();
 
     // Test MFLO instruction: mflo $t0
     let mflo_instruction = Instruction::new(0x00001012, 0x1000, InstrCategory::CPU); // mflo $t0
-
-    let mut ctx = ();
     recompiler
-        .translate_instruction(&mut ctx, &mflo_instruction, &mut |locals| {
+        .translate_instruction(&mut ctx, &mut rctx, &mflo_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .unwrap();

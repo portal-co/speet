@@ -17,6 +17,9 @@ speet-link-core = { path = "../../os/speet-link-core" }
 
 [dev-dependencies]
 object = "0.36"
+yecta = { path = "../../helper/yecta" }
+speet-link-core = { path = "../../os/speet-link-core" }
+wasm-encoder = { workspace = true }
 
 [features]
 default = []

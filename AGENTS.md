@@ -124,3 +124,64 @@ silently corrupt module.
 Do not merge the two passes into one or lazily compute `base_func_offset`
 during emission — cross-binary index resolution requires the layout to be final
 before any body is emitted.
+
+---
+
+## 6. Unified entity index pre-declaration (`EntityIndexSpace`)
+
+**Code:** `crates/os/speet-link-core/src/layout.rs` (`IndexSpace`, `EntityIndexSpace`)
+**Doc:** `docs/entity-index-space.md` §1–§4
+
+`FuncLayout` has been replaced by `EntityIndexSpace`, which applies the same two-pass
+discipline to all five WASM entity kinds: types, functions, memories, tables, and tags.
+Pass 1 (registration) freezes absolute indices for every entity kind before any body is
+emitted.  Pass 2 (emission) reads those indices directly.
+
+`MegabinaryBuilder` no longer self-assigns indices; it consumes them from the frozen
+`EntityIndexSpace`.  `FuncSchedule` carries an `EntityIndexSpace` instead of a bare
+`FuncLayout`.
+
+Do not add entity declarations inside emit closures — that would make indices unknown
+during cross-binary reference resolution.
+
+---
+
+## 7. `FuncSignature`: injected params mirror as returns
+
+**Code:** `crates/helper/wasm-layout/src/lib.rs` (`FuncSignature`)
+**Doc:** `docs/func-signature.md` §2–§5
+
+`FuncSignature` pairs a `LocalLayout` (params) with a `Vec<ValType>` of return types.
+The returns are exactly the injected/trap params — those declared after the
+`injected_start` mark — mirrored back.  Arch params are not returned; they travel forward
+via `return_call`.
+
+This gives every translated function the type `(arch_params + injected) -> (injected)`.
+At `call` sites the caller pops the returned injected values back into its own locals,
+preserving trap state (e.g. `RopDetectTrap` depth counter) across speculative calls and
+WASM-frontend direct calls without exception-based unwinding.
+
+`LinkerInner` holds a `FuncSignature` instead of a bare `LocalLayout`.
+`TrapConfig::declare_params` receives `&mut FuncSignature`.
+
+Do not move injected params back to `()` returns — that breaks call-site trap-state
+preservation for both native speculative calls and the WASM frontend.
+
+---
+
+## 8. Per-emit-closure `Reactor` creation (base-reactor context split)
+
+**Code:** `crates/os/speet-linker/src/lib.rs` (`LinkerInner`),
+`crates/os/speet-link-core/src/context.rs` (`ReactorContext`)
+**Doc:** `docs/reactor-context-split.md` §1–§4
+
+`LinkerInner` no longer owns a `Reactor`.  Each native-recompiler emit closure creates
+a `Reactor` on the stack, wraps it in a `ReactorContext` alongside a borrow of
+`LinkerInner`, and drops it via `drain_unit` at the closure's end.  WASM-frontend emit
+closures use `LinkerInner` directly (as `BaseContext`) without constructing a reactor.
+
+The dichotomy between native and WASM frontends is now value-level (reactor constructed
+or not) rather than type-level (two different context implementations).
+
+Do not add a `Reactor` field back to `LinkerInner` — that reintroduces the hard
+native-vs-WASM dichotomy and prevents per-recompile reactor lifecycle management.

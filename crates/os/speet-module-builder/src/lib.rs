@@ -743,7 +743,7 @@ mod tests {
         type SchedErr = Infallible;
 
         let mut linker =
-            Linker::<(), SchedErr, Function, LocalPool, MegabinaryBuilder<Function>>::with_plugin(
+            Linker::<(), SchedErr, MegabinaryBuilder<Function>>::with_plugin(
                 MegabinaryBuilder::new(),
             );
 

@@ -37,7 +37,7 @@ mod tests;
 
 // Flat re-exports for the most commonly used items.
 pub use context::{BaseContext, FedContext, ReactorContext, ReactorAdapter, TrapReactorAdapter};
-pub use layout::{FuncLayout, FuncSlot};
+pub use layout::{EntityIndexSpace, FuncLayout, FuncSlot, IndexSlot, IndexSpace};
 pub use linker::LinkerPlugin;
 pub use recompiler::Recompile;
 pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};

@@ -74,7 +74,10 @@
 #![no_std]
 
 pub mod layout;
-pub use layout::{LocalAllocator, LocalDeclarator, LocalLayout, LocalSlot, Mark};
+pub use layout::{
+    CellIdx, CellRegistry, CellSignature, FuncSignature, LocalAllocator, LocalDeclarator,
+    LocalLayout, LocalSlot, Mark,
+};
 pub use wax_core::build::ConstPeek;
 
 pub mod slots;

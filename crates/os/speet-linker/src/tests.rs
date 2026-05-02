@@ -30,7 +30,7 @@ mod unit_tests {
 
     #[test]
     fn func_schedule_correct_count_succeeds() {
-        let mut linker: Linker<(), SchedErr, Function> = Linker::with_plugin(());
+        let mut linker: Linker<(), SchedErr> = Linker::with_plugin(());
         let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
         schedule.push(2, |_, _| dummy_unit_fn(2, 0));
         linker.execute_schedule(schedule, &mut ()); // must not panic
@@ -39,7 +39,7 @@ mod unit_tests {
     #[test]
     #[should_panic(expected = "declared 2 fns but emit produced 1")]
     fn func_schedule_wrong_count_panics() {
-        let mut linker: Linker<(), SchedErr, Function> = Linker::with_plugin(());
+        let mut linker: Linker<(), SchedErr> = Linker::with_plugin(());
         let mut schedule: FuncSchedule<(), SchedErr, Function> = FuncSchedule::new();
         // Declare 2 but emit 1 — should panic.
         schedule.push(2, |_, _| dummy_unit_fn(1, 0));

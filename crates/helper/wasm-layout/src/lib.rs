@@ -625,3 +625,77 @@ impl core::fmt::Debug for LocalLayout {
             .finish()
     }
 }
+
+// ── FuncSignature ─────────────────────────────────────────────────────────────
+
+/// A recompiler's canonical function type: params (arch + injected) paired
+/// with return types that mirror the injected portion back.
+///
+/// See `docs/func-signature.md` for the full design rationale.
+///
+/// ## Layout invariant
+///
+/// `params` contains two contiguous regions separated by `injected_start`:
+///
+/// ```text
+/// [0 .. injected_start.total_locals)  ← arch params (not returned)
+/// [injected_start.total_locals .. N)  ← injected/trap params (mirrored in returns)
+/// ```
+///
+/// `returns` is derived from the injected region at [`seal`](Self::seal) time
+/// and is always equal to the flat types of the slots appended after
+/// `injected_start`.
+pub struct FuncSignature {
+    /// Full param layout: arch params first, then injected/trap params.
+    pub params: LocalLayout,
+    /// Return types — the injected/trap param types, mirrored back.
+    pub returns: Vec<ValType>,
+    /// Mark at the start of the injected region within `params`.
+    pub injected_start: Mark,
+}
+
+impl FuncSignature {
+    /// Create an empty signature with no arch params and no injected params.
+    pub fn empty() -> Self {
+        let params = LocalLayout::empty();
+        let injected_start = params.mark();
+        Self { params, returns: Vec::new(), injected_start }
+    }
+
+    /// Finalise the signature after all injected/trap params have been appended.
+    ///
+    /// Derives `returns` as the flat `ValType` sequence of every slot appended
+    /// after `injected_start`.
+    pub fn seal(params: LocalLayout, injected_start: Mark) -> Self {
+        let returns: Vec<ValType> = params
+            .iter_since(&injected_start)
+            .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
+            .collect();
+        Self { params, returns, injected_start }
+    }
+
+    /// Number of injected params (equals number of return values).
+    #[inline]
+    pub fn injected_count(&self) -> u32 {
+        self.params.total_locals() - self.injected_start.total_locals
+    }
+
+    /// Iterate over all parameter `ValType`s in declaration order
+    /// (arch params first, then injected params).
+    pub fn params_val_types(&self) -> impl Iterator<Item = ValType> + '_ {
+        self.params
+            .iter()
+            .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
+    }
+
+    /// The return types (injected params mirrored back).
+    #[inline]
+    pub fn returns(&self) -> &[ValType] {
+        &self.returns
+    }
+
+    /// Iterate over the injected-param slots (those after `injected_start`).
+    pub fn injected_slots(&self) -> impl Iterator<Item = (u32, ValType)> + '_ {
+        self.params.iter_since(&self.injected_start)
+    }
+}

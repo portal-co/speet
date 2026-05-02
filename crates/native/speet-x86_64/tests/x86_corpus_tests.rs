@@ -19,10 +19,25 @@
 //! `.s` source changes, then commit the updated `.elf`.
 
 use object::{Object, ObjectSection};
+use speet_link_core::ReactorAdapter;
 use speet_x86_64::X86Recompiler;
 use std::convert::Infallible;
 use std::{fs, path::Path};
 use wasm_encoder::Function;
+use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
+
+fn make_rctx(reactor: &mut Reactor<(), Infallible, Function, LocalPool>)
+    -> ReactorAdapter<'_, (), Infallible, Function, LocalPool>
+{
+    static T: TableIdx = TableIdx(0);
+    ReactorAdapter {
+        reactor,
+        layout: yecta::LocalLayout::empty(),
+        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        escape_tag: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,12 +72,14 @@ fn test_corpus_file(elf_path: &Path) {
         elf_path.display()
     );
 
-    let mut recompiler: X86Recompiler<'_, '_, (), Infallible, Function> =
-        X86Recompiler::new_with_base_rip(load_addr);
+    let mut recompiler = X86Recompiler::new_with_base_rip(load_addr);
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
 
     recompiler
-        .translate_bytes(&mut ctx, &text, load_addr, &mut |locals| {
+        .translate_bytes(&mut ctx, &mut rctx, &text, load_addr, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
         })
         .expect("translate_bytes failed");

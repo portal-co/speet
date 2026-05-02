@@ -20,10 +20,25 @@
 
 use object::{Object, ObjectSection};
 use rabbitizer::{InstrCategory, Instruction};
+use speet_link_core::ReactorAdapter;
 use speet_mips::MipsRecompiler;
 use std::convert::Infallible;
 use std::{fs, path::Path};
 use wasm_encoder::Function;
+use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
+
+fn make_rctx(reactor: &mut Reactor<(), Infallible, Function, LocalPool>)
+    -> ReactorAdapter<'_, (), Infallible, Function, LocalPool>
+{
+    static T: TableIdx = TableIdx(0);
+    ReactorAdapter {
+        reactor,
+        layout: yecta::LocalLayout::empty(),
+        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        escape_tag: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,6 +70,9 @@ fn recompile_mips_text(text: &[u8], base_pc: u32) -> usize {
     let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
         MipsRecompiler::new_with_base_pc(base_pc);
     let mut ctx = ();
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    recompiler.setup_traps(&mut rctx);
     let mut count = 0usize;
 
     let words = text.len() / 4;
@@ -69,7 +87,7 @@ fn recompile_mips_text(text: &[u8], base_pc: u32) -> usize {
         let pc = base_pc.wrapping_add(offset as u32);
         let inst = Instruction::new(word, pc, InstrCategory::CPU);
         recompiler
-            .translate_instruction(&mut ctx, &inst, &mut |locals| {
+            .translate_instruction(&mut ctx, &mut rctx, &inst, &mut |locals| {
                 Function::new(locals.collect::<Vec<_>>())
             })
             .expect("translate_instruction failed");

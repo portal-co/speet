@@ -33,7 +33,7 @@
 //!     IndexOffsets { func: 10, global: 0, table: 0 },
 //!     Box::new(|locals| Function::new(locals)),
 //! );
-//! let mut linker: Linker<_, _, Function> = Linker::new();
+//! let mut linker: Linker<_, _> = Linker::new();
 //! frontend.translate_module(&mut ctx, &mut linker, &wasm_bytes)?;
 //!
 //! let unit = frontend.drain_unit(&mut linker, entry_points);
@@ -51,7 +51,7 @@ use speet_memory::{
 };
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
-use wasm_layout::{CellIdx, LocalLayout, LocalSlot, Mark};
+use wasm_layout::{FuncSignature, LocalLayout, LocalSlot};
 use wasmparser::{CompositeInnerType, DataKind, FunctionBody, Operator, Parser, Payload};
 use wax_core::build::InstructionSink;
 
@@ -142,11 +142,12 @@ pub struct WasmFrontend<Context, E, F = Function> {
     offsets: IndexOffsets,
     /// Factory that constructs an output function from its local-variable list.
     fn_creator: Box<dyn Fn(Vec<(u32, ValType)>) -> F>,
-    /// Cache of (params-layout snapshot, params_mark) per unique guest function type.
+    /// Cache of [`FuncSignature`] per unique guest function type (keyed on the
+    /// *extended* type after injected params are appended).
     ///
     /// Populated lazily in `translate_fn`; cleared at the start of each
     /// `translate_module` call (traps may change between calls).
-    fn_type_param_layouts: BTreeMap<FuncType, (LocalLayout, Mark)>,
+    fn_type_signatures: BTreeMap<FuncType, FuncSignature>,
     /// Extra parameters injected into every translated function.
     ///
     /// Each type here is appended to both the parameter list **and** the result
@@ -189,7 +190,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             offsets,
             fn_creator,
             injected_params: Vec::new(),
-            fn_type_param_layouts: BTreeMap::new(),
+            fn_type_signatures: BTreeMap::new(),
             cond_trap: None,
         }
     }
@@ -215,6 +216,36 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
     /// [`drain_unit`](Self::drain_unit) pipeline is not needed.
     pub fn take_compiled(&mut self) -> Vec<(F, FuncType)> {
         core::mem::take(&mut self.compiled)
+    }
+
+    /// Drain compiled functions and metadata into a [`BinaryUnit`] using only
+    /// [`BaseContext`] methods.
+    ///
+    /// This is a convenience variant of [`Recompile::drain_unit`] for callers
+    /// that hold a `&mut dyn BaseContext` (e.g. a [`Linker`](speet_linker::Linker)
+    /// that does not own a reactor).  It does not call any reactor emission
+    /// methods and is safe to call when no reactor is present.
+    pub fn drain_unit_base(
+        &mut self,
+        ctx: &mut (dyn BaseContext<Context, E> + '_),
+        entry_points: Vec<(String, u32)>,
+    ) -> BinaryUnit<F> {
+        let base = ctx.base_func_offset();
+        let collected: Vec<(F, FuncType)> = core::mem::take(&mut self.compiled);
+        let n = collected.len() as u32;
+        let (fns, func_types): (Vec<F>, Vec<FuncType>) = collected.into_iter().unzip();
+        let data_segments = core::mem::take(&mut self.data_segs);
+        let data_init_fn = self.data_init_fn_result.take();
+        self.data_init_ops.clear();
+        ctx.advance_base_func_offset(n);
+        BinaryUnit {
+            fns,
+            base_func_offset: base,
+            entry_points,
+            func_types,
+            data_segments,
+            data_init_fn,
+        }
     }
 
     /// Return memory information parsed during the last [`translate_module`](Self::translate_module) call.
@@ -316,8 +347,8 @@ where
         let mut fn_type_indices: Vec<u32> = Vec::new();
         let mut code_fn_idx: usize = 0;
 
-        // Clear the per-type layout cache: traps may have changed since last call.
-        self.fn_type_param_layouts.clear();
+        // Clear the per-type signature cache: traps may have changed since last call.
+        self.fn_type_signatures.clear();
 
         self.memory_infos.clear();
         self.data_segs.clear();
@@ -461,24 +492,27 @@ where
         let init_guest_params: Vec<ValType> = init_fn_type.params_val_types().collect();
         let init_guest_results: Vec<ValType> = init_fn_type.results_val_types().collect();
 
-        let (params_snap, params_mark) = match self.fn_type_param_layouts.get(&init_fn_type) {
-            Some(entry) => entry.clone(),
+        let sig = match self.fn_type_signatures.get(&init_fn_type) {
+            Some(s) => s.params.clone(),
             None => {
                 *base_ctx.layout_mut() = LocalLayout::empty();
+                // For the data-init function every param is injected (no arch params).
+                let injected_start = base_ctx.layout().mark();
                 if n_injected > 0 {
                     base_ctx.layout_mut().append(n_injected, ValType::I32);
                 }
                 base_ctx.declare_trap_params();
                 let mark = base_ctx.layout().mark();
                 base_ctx.set_locals_mark(mark);
-                let snap = base_ctx.layout().clone();
-                self.fn_type_param_layouts
-                    .insert(init_fn_type, (snap.clone(), mark));
-                (snap, mark)
+                let params_snap = base_ctx.layout().clone();
+                let sig = FuncSignature::seal(params_snap.clone(), injected_start);
+                self.fn_type_signatures.insert(init_fn_type, sig);
+                params_snap
             }
         };
 
-        *base_ctx.layout_mut() = params_snap;
+        let params_mark = sig.mark();
+        *base_ctx.layout_mut() = sig;
         base_ctx.set_locals_mark(params_mark);
 
         // Pre-allocate a cell for the data-init function.  It has no guest
@@ -605,26 +639,36 @@ where
 
         // -- Params layout snapshot (cached per function type) -------------
         // Params are implicit in WASM (not in Function::new locals list).
-        // We cache the (layout snapshot, mark) per unique extended function type
-        // so that trap params are only declared once per type.
-        let param_count = func_type.params_val_types().count() as u32; // extended count
-        let (params_snap, params_mark) = match self.fn_type_param_layouts.get(&func_type) {
-            Some(entry) => entry.clone(),
+        // We cache a FuncSignature per unique extended function type so that
+        // trap params are only declared once per type.
+        //
+        // injected_start is placed after the original (arch) guest params and
+        // before any injected/trap params, matching the FuncSignature invariant.
+        let params_snap: LocalLayout = match self.fn_type_signatures.get(&func_type) {
+            Some(s) => s.params.clone(),
             None => {
                 *base_ctx.layout_mut() = LocalLayout::empty();
-                if param_count > 0 {
-                    base_ctx.layout_mut().append(param_count, ValType::I32);
+                // Arch (original guest) params come first.
+                if orig_param_count > 0 {
+                    base_ctx.layout_mut().append(orig_param_count, ValType::I32);
+                }
+                // Mark before injected/trap params.
+                let injected_start = base_ctx.layout().mark();
+                // Injected params (threaded through every call site).
+                if n_injected > 0 {
+                    base_ctx.layout_mut().append(n_injected, ValType::I32);
                 }
                 base_ctx.declare_trap_params();
                 let mark = base_ctx.layout().mark();
                 base_ctx.set_locals_mark(mark);
-                let snap = base_ctx.layout().clone();
-                self.fn_type_param_layouts
-                    .insert(func_type.clone(), (snap.clone(), mark));
-                (snap, mark)
+                let params_snap = base_ctx.layout().clone();
+                let sig = FuncSignature::seal(params_snap.clone(), injected_start);
+                self.fn_type_signatures.insert(func_type.clone(), sig);
+                params_snap
             }
         };
 
+        let params_mark = params_snap.mark();
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
 
@@ -1673,7 +1717,7 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1693,7 +1737,7 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1721,7 +1765,7 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1789,7 +1833,7 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1823,13 +1867,13 @@ mod tests {
             IndexOffsets::default(),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
 
         assert_eq!(linker.base_func_offset(), 0);
-        let unit = frontend.drain_unit(&mut linker, alloc::vec![]);
+        let unit = frontend.drain_unit_base(&mut linker, alloc::vec![]);
         assert_eq!(unit.base_func_offset, 0);
         assert_eq!(unit.fns.len(), 1);
         assert_eq!(unit.data_segments.len(), 1);
@@ -1856,7 +1900,7 @@ mod tests {
             Box::new(|locals| Function::new(locals)),
         );
 
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1900,7 +1944,7 @@ mod tests {
             0,
             IndexOffsets::default(),
         );
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();
@@ -1965,7 +2009,7 @@ mod tests {
             0,
             IndexOffsets::default(),
         );
-        let mut linker: Linker<'_, '_, (), TestError, Function> = Linker::new();
+        let mut linker: Linker<'_, '_, (), TestError> = Linker::new();
         frontend
             .translate_module(&mut (), &mut linker, &bytes)
             .unwrap();

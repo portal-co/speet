@@ -1,57 +1,98 @@
-//! [`FuncLayout`] — pre-declared function index ranges for multi-binary modules.
+//! [`IndexSpace`] and [`EntityIndexSpace`] — pre-declared index ranges for all
+//! five WASM entity kinds in multi-binary modules.
+//!
+//! See `docs/entity-index-space.md` for the full design rationale.
 
 #![allow(unused)]
 extern crate alloc;
 use alloc::vec::Vec;
 
-/// Handle to a declared function range inside a [`FuncLayout`].
+/// Handle to a declared range within a single [`IndexSpace`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FuncSlot(pub u32);
+pub struct IndexSlot(pub u32);
 
-/// Pre-declared function index layout for a multi-binary WASM module.
+/// Pre-declared index space for one WASM entity kind.
 ///
-/// Built during the **registration phase** of [`FuncSchedule`](crate::schedule::FuncSchedule):
-/// each binary calls [`append`](Self::append) with its function count, receiving a
-/// [`FuncSlot`] handle.  Once all binaries are registered the layout is final and
-/// [`base`](Self::base) returns absolute WASM function indices suitable for
-/// constructing [`IndexOffsets`] before any translation begins.
-pub struct FuncLayout {
+/// Built during the **registration phase** of
+/// [`FuncSchedule`](crate::schedule::FuncSchedule): each binary calls
+/// [`append`](Self::append) to declare how many entities it will produce,
+/// receiving an [`IndexSlot`] handle whose base index is immediately known.
+///
+/// Once all binaries are registered the space is frozen and
+/// [`base`](Self::base) returns absolute WASM indices before any emission
+/// begins.
+#[derive(Default)]
+pub struct IndexSpace {
     counts: Vec<u32>,
     bases:  Vec<u32>,
     total:  u32,
 }
 
-impl FuncLayout {
-    /// Create an empty layout (no slots declared).
+impl IndexSpace {
+    /// Create an empty space (no slots declared).
     pub fn empty() -> Self {
         Self { counts: Vec::new(), bases: Vec::new(), total: 0 }
     }
 
-    /// Declare a binary that will produce `count` functions.
+    /// Declare a range of `count` contiguous indices.
     ///
     /// Returns a slot whose base immediately follows all previously declared
-    /// slots.  Calling this repeatedly builds a contiguous, non-overlapping
-    /// index range for each binary.
-    pub fn append(&mut self, count: u32) -> FuncSlot {
-        let slot = FuncSlot(self.counts.len() as u32);
+    /// slots.
+    pub fn append(&mut self, count: u32) -> IndexSlot {
+        let slot = IndexSlot(self.counts.len() as u32);
         self.bases.push(self.total);
         self.counts.push(count);
         self.total += count;
         slot
     }
 
-    /// Absolute WASM function index of the first function in `slot`.
-    pub fn base(&self, slot: FuncSlot) -> u32 {
+    /// Absolute WASM index of the first element in `slot`.
+    pub fn base(&self, slot: IndexSlot) -> u32 {
         self.bases[slot.0 as usize]
     }
 
-    /// Declared function count for `slot`.
-    pub fn count(&self, slot: FuncSlot) -> u32 {
+    /// Declared count for `slot`.
+    pub fn count(&self, slot: IndexSlot) -> u32 {
         self.counts[slot.0 as usize]
     }
 
-    /// Total declared function count across all slots.
+    /// Total declared count across all slots.
     pub fn total(&self) -> u32 {
         self.total
     }
 }
+
+/// Unified pre-declaration covering all five WASM entity kinds.
+///
+/// See `docs/entity-index-space.md`.
+#[derive(Default)]
+pub struct EntityIndexSpace {
+    pub types:     IndexSpace,
+    pub functions: IndexSpace,
+    pub memories:  IndexSpace,
+    pub tables:    IndexSpace,
+    pub tags:      IndexSpace,
+}
+
+impl EntityIndexSpace {
+    pub fn empty() -> Self {
+        Self {
+            types:     IndexSpace::empty(),
+            functions: IndexSpace::empty(),
+            memories:  IndexSpace::empty(),
+            tables:    IndexSpace::empty(),
+            tags:      IndexSpace::empty(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy aliases — kept during the migration; will be removed once all call
+// sites are updated to EntityIndexSpace.
+// ---------------------------------------------------------------------------
+
+/// Alias for [`IndexSlot`] — use `IndexSlot` in new code.
+pub type FuncSlot = IndexSlot;
+
+/// Alias for [`IndexSpace`] — use `IndexSpace` in new code.
+pub type FuncLayout = IndexSpace;

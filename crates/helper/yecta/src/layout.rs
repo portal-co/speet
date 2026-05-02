@@ -5,4 +5,7 @@
 //! local-variable layout management (e.g. `speet-wasm`) don't have to pull in
 //! the full yecta reactor.
 
-pub use wasm_layout::{LocalAllocator, LocalDeclarator, LocalLayout, LocalSlot, Mark, CellIdx, CellSignature, CellRegistry};
+pub use wasm_layout::{
+    CellIdx, CellRegistry, CellSignature, FuncSignature, LocalAllocator, LocalDeclarator,
+    LocalLayout, LocalSlot, Mark,
+};
