@@ -983,8 +983,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // See SPECULATIVE_CALLS.md and set_speculative_calls() docs for the full pattern
                     let escape_tag = rctx.escape_tag().unwrap();
                     let Some(target_func) = self.pc_to_func_idx(target_pc) else {
-                        // Target is omitted — unreachable in a correctly analyzed binary.
-                        rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                        rctx.oob_jump(ctx, tail_idx, target_pc, rctx.locals_mark().total_locals)?;
                         return Ok(());
                     };
 

@@ -719,7 +719,7 @@ where
     fn jump_to_pc<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&mut self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize, target_pc: u32, params: u32,  ) -> Result<(), E> {
         match self.pc_to_func_idx(target_pc) {
             Some(target_func) => rctx.jmp(ctx, tail_idx, target_func, params),
-            None => rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable),
+            None => rctx.oob_jump(ctx, tail_idx, target_pc as u64, params),
         }
     }
 
@@ -838,7 +838,7 @@ where
 
         // Use ji with condition for branch taken path
         let Some(target_func) = self.pc_to_func_idx(target_pc) else {
-            rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
+            rctx.oob_jump(ctx, tail_idx, target_pc as u64, rctx.locals_mark().total_locals)?;
             return Ok(());
         };
         let target = Target::Static { func: target_func };

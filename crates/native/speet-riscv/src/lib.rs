@@ -973,7 +973,7 @@ where
     fn jump_to_pc<RC: ReactorContext<Context, E> + ?Sized>(&self, ctx: &mut Context, rctx: &RC, tail_idx: usize, target_pc: u64, params: u32) -> Result<(), E> {
         match self.pc_to_func_idx(target_pc) {
             Some(target_func) => rctx.jmp(ctx, tail_idx, target_func, params),
-            None => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            None => rctx.oob_jump(ctx, tail_idx, target_pc, params),
         }
     }
 

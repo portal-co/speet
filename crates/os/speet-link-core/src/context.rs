@@ -116,6 +116,15 @@ pub trait BaseContext<Context, E> {
     /// Returns [`TrapAction::Continue`] when no trap is installed.
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E>;
 
+    /// WASM local index of the `target_pc: i64` parameter appended by
+    /// [`declare_trap_params`](Self::declare_trap_params).
+    ///
+    /// Returns `None` on adapters that do not inject the target-pc param
+    /// (e.g. [`ReactorAdapter`] used in simple unit tests).
+    fn target_pc_local(&self) -> Option<u32> {
+        None
+    }
+
     /// Allocate (or retrieve) a [`CellIdx`] for the current function's
     /// (params, locals) signature.
     ///
@@ -273,6 +282,24 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
     /// dyn-object-safe.  All current uses are side-effectful seeding calls
     /// (`seed_i32` / `seed_i64`) that return no value.
     fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi));
+
+    /// Emit an out-of-bounds jump to the lookup stub when the static target PC
+    /// is not in the compiled set.
+    ///
+    /// If OOB dispatch is configured (via `oob_config` in `LinkerInner`), emits:
+    /// 1. `flush_bundles` to drain lazy stores.
+    /// 2. For each param 0..`params`, emit `local.get p`; at position
+    ///    `target_pc_local`, emit `i64.const target_pc` instead.
+    /// 3. `return_call $lookup_stub_func_idx`.
+    ///
+    /// Falls back to `unreachable` if no OOB config is set.
+    fn oob_jump(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        target_pc: u64,
+        params: u32,
+    ) -> Result<(), E>;
 
     /// Flush all pending lazy store bundles (used by FENCE/SYNC handlers).
     ///
@@ -474,6 +501,16 @@ where
         tail_idx: usize,
     ) -> Result<(), E> {
         self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
+    }
+
+    fn oob_jump(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        _target_pc: u64,
+        _params: u32,
+    ) -> Result<(), E> {
+        Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
     }
 }
 
@@ -766,5 +803,16 @@ where
         tail_idx: usize,
     ) -> Result<(), E> {
         self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
+    }
+
+    fn oob_jump(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        _target_pc: u64,
+        _params: u32,
+    ) -> Result<(), E> {
+        // TrapReactorAdapter has no OobConfig; fall back to unreachable.
+        Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
     }
 }

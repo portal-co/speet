@@ -1443,7 +1443,7 @@ impl X86Recompiler {
             }
         }
         let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
-            rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+            rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
             return Ok(Some(()));
         };
         rctx.jmp(ctx, tail_idx, target_func_idx, rctx.locals_mark().total_locals)?;
@@ -1471,7 +1471,7 @@ impl X86Recompiler {
             }
         }
         let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
-            rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+            rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
             return Ok(Some(()));
         };
         let condition = ConditionSnippet { condition_type };
@@ -1492,7 +1492,7 @@ impl X86Recompiler {
         if use_speculative {
             let escape_tag = rctx.escape_tag().unwrap();
             let Some(target_func) = self.rip_to_func_idx(rctx, target) else {
-                rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
                 return Ok(Some(()));
             };
 
@@ -1526,7 +1526,7 @@ impl X86Recompiler {
                 }
             }
             let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
-                rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
                 return Ok(Some(()));
             };
             rctx.jmp(ctx, tail_idx, target_func_idx, rctx.locals_mark().total_locals)?;

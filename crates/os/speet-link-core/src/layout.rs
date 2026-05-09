@@ -62,7 +62,7 @@ impl IndexSpace {
     }
 }
 
-/// Unified pre-declaration covering all five WASM entity kinds.
+/// Unified pre-declaration covering all six WASM entity kinds.
 ///
 /// See `docs/entity-index-space.md`.
 #[derive(Default)]
@@ -72,6 +72,7 @@ pub struct EntityIndexSpace {
     pub memories:  IndexSpace,
     pub tables:    IndexSpace,
     pub tags:      IndexSpace,
+    pub globals:   IndexSpace,
 }
 
 impl EntityIndexSpace {
@@ -82,6 +83,7 @@ impl EntityIndexSpace {
             memories:  IndexSpace::empty(),
             tables:    IndexSpace::empty(),
             tags:      IndexSpace::empty(),
+            globals:   IndexSpace::empty(),
         }
     }
 }

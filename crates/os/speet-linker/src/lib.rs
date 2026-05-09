@@ -39,8 +39,8 @@ use yecta::{
 pub use speet_link_core::linker::LinkerPlugin;
 pub use speet_link_core::{
     BaseContext, BinaryUnit, DataSegment, EntityIndexSpace, FuncLayout, FuncSlot, FuncType,
-    IndexSlot, IndexSpace, MemWidth, ParamSource, Place, ReactorAdapter, ReactorContext, Recompile,
-    SavePair, ShimSpec, TrapReactorAdapter, emit_shim,
+    IndexSlot, IndexSpace, MemWidth, OobConfig, ParamSource, Place, ReactorAdapter, ReactorContext,
+    Recompile, SavePair, ShimSpec, TrapReactorAdapter, emit_shim,
 };
 
 // ── LinkerInner ───────────────────────────────────────────────────────────────
@@ -72,10 +72,15 @@ pub struct LinkerInner<'cb, 'ctx, Context, E> {
     pub escape_tag: Option<EscapeTag>,
     /// Registry mapping unique `(params, locals)` signatures to [`CellIdx`] handles.
     pub cell_registry: CellRegistry,
-    /// Pre-declared index space for all five WASM entity kinds.
+    /// Pre-declared index space for all six WASM entity kinds.
     ///
     /// See `docs/entity-index-space.md`.
     pub entity_space: EntityIndexSpace,
+    /// WASM local index of the `target_pc: i64` parameter injected by
+    /// [`declare_trap_params`](BaseContext::declare_trap_params).
+    pub target_pc_local: u32,
+    /// OOB jump dispatch config; `None` means OOB → `unreachable`.
+    pub oob_config: Option<OobConfig>,
 }
 
 // ── BaseContext for LinkerInner ───────────────────────────────────────────────
@@ -106,6 +111,12 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
     }
 
     fn declare_trap_params(&mut self) {
+        // Inject `target_pc: i64` only when OOB dispatch is configured.
+        // This keeps the WASM frontend (and any other non-OOB path) unaffected.
+        if self.oob_config.is_some() {
+            let slot = self.layout.append(1, ValType::I64);
+            self.target_pc_local = self.layout.base(slot);
+        }
         self.injected_start = self.layout.mark();
         self.traps.declare_params(CellIdx(0), &mut self.layout);
     }
@@ -133,6 +144,9 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
     }
     fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
         self.traps.declare_locals(cell, &mut self.layout);
+    }
+    fn target_pc_local(&self) -> Option<u32> {
+        self.oob_config.as_ref().map(|_| self.target_pc_local)
     }
     // on_instruction / on_jump: LinkerInner has no reactor, so traps cannot
     // emit instructions.  Real firing happens through ReactorHandle.
@@ -315,6 +329,31 @@ where
         self.reactor.with_local_pool(|p| f(p as &mut dyn yecta::LocalPoolApi))
     }
 
+    fn oob_jump(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        target_pc: u64,
+        params: u32,
+    ) -> Result<(), E> {
+        self.reactor.flush_bundles(ctx, tail_idx)?;
+        let Some(oob) = &self.base.oob_config else {
+            return Fed { reactor: &*self.reactor, tail_idx }
+                .instruction(ctx, &Instruction::Unreachable);
+        };
+        let tpc_local = self.base.target_pc_local;
+        let lookup_stub = oob.lookup_stub_func_idx;
+        let mut sink = Fed { reactor: &*self.reactor, tail_idx };
+        for p in 0..params {
+            if p == tpc_local {
+                sink.instruction(ctx, &Instruction::I64Const(target_pc as i64))?;
+            } else {
+                sink.instruction(ctx, &Instruction::LocalGet(p))?;
+            }
+        }
+        sink.instruction(ctx, &Instruction::ReturnCall(lookup_stub))
+    }
+
     fn flush_bundles(&self, ctx: &mut Context, tail_idx: usize) -> Result<(), E> {
         self.reactor.flush_bundles(ctx, tail_idx)
     }
@@ -399,6 +438,8 @@ impl<'cb, 'ctx, Context, E, Plugin> Linker<'cb, 'ctx, Context, E, Plugin>
                 escape_tag: None,
                 cell_registry: CellRegistry::new(),
                 entity_space: EntityIndexSpace::empty(),
+                target_pc_local: 0,
+                oob_config: None,
             },
             plugin,
         }
