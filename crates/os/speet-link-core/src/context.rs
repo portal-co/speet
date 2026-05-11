@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Fed, FuncIdx, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 use yecta::layout::{CellIdx, CellRegistry};
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
@@ -90,17 +90,25 @@ pub trait BaseContext<Context, E> {
     /// **Phase 1** — let installed traps append their parameter groups to the
     /// internal layout.
     ///
+    /// `extra` is an additional [`LocalDeclarator`] (e.g. a mapper) whose
+    /// `declare_params` runs before the trap chain.  Pass `&mut ()` when there
+    /// is no mapper.
+    ///
     /// Call this after the arch recompiler has appended its own parameter
     /// groups to `layout_mut()`, then call [`set_locals_mark`](Self::set_locals_mark)
     /// with `layout().mark()` to record the total parameter count.
-    fn declare_trap_params(&mut self);
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator);
 
     /// **Phase 2** — let installed traps append their per-function local groups
     /// to the internal layout.
     ///
+    /// `extra` is an additional [`LocalDeclarator`] (e.g. a mapper) whose
+    /// `declare_locals` runs before the trap chain.  Pass `&mut ()` when there
+    /// is no mapper.
+    ///
     /// Call this after the arch recompiler has appended its own per-function
     /// locals and before building the output function.
-    fn declare_trap_locals(&mut self);
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator);
 
     /// Fire the instruction trap (if any).
     ///
@@ -174,11 +182,14 @@ pub trait BaseContext<Context, E> {
     /// so that traps receive the semantically correct cell rather than the
     /// `CellIdx(0)` placeholder.
     ///
-    /// The default delegates to `declare_trap_locals` (preserving the
+    /// `extra` is forwarded the same way as in
+    /// [`declare_trap_locals`](Self::declare_trap_locals).
+    ///
+    /// The default delegates to `declare_trap_locals(extra)` (preserving the
     /// placeholder behaviour for contexts that do not override it).
-    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
         let _ = cell;
-        self.declare_trap_locals();
+        self.declare_trap_locals(extra);
     }
 }
 
@@ -392,8 +403,8 @@ where
     }
 
     // No traps — no-op.
-    fn declare_trap_params(&mut self) {}
-    fn declare_trap_locals(&mut self) {}
+    fn declare_trap_params(&mut self, _extra: &mut dyn LocalDeclarator) {}
+    fn declare_trap_locals(&mut self, _extra: &mut dyn LocalDeclarator) {}
     fn on_instruction(
         &mut self,
         _info: &InstructionInfo,
@@ -689,13 +700,16 @@ where
     fn base_func_offset(&self) -> u32 { self.reactor.base_func_offset() }
     fn set_base_func_offset(&mut self, n: u32) { self.reactor.set_base_func_offset(n); }
 
-    fn declare_trap_params(&mut self) {
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) {
+        extra.declare_params(CellIdx(0), &mut self.layout);
         self.traps.declare_params(CellIdx(0), &mut self.layout);
     }
-    fn declare_trap_locals(&mut self) {
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
+        extra.declare_locals(CellIdx(0), &mut self.layout);
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
     }
-    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
+        extra.declare_locals(cell, &mut self.layout);
         self.traps.declare_locals(cell, &mut self.layout);
     }
     fn alloc_cell(&mut self) -> CellIdx {

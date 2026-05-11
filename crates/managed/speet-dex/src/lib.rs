@@ -706,7 +706,7 @@ where
         if max_regs > 0 {
             rctx.layout_mut().append(max_regs, ValType::I32);
         }
-        rctx.declare_trap_params();
+        rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
@@ -786,7 +786,7 @@ where
         rctx.layout_mut().rewind(&mark);
         self.scratch_slot = rctx.layout_mut().append(1, ValType::I32);
         self.scratch_i64_slot = rctx.layout_mut().append(1, ValType::I64);
-        rctx.declare_trap_locals();
+        rctx.declare_trap_locals(&mut ());
         let _cell = rctx.alloc_cell();
         let fn_type = f(&mut rctx.layout().iter_since(&mark).collect::<alloc::vec::Vec<_>>().into_iter());
         rctx.next_with(ctx, fn_type, depth)

@@ -42,13 +42,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
-use yecta::{EscapeTag, Fed, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry}};
+use yecta::{EscapeTag, Fed, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry}};
 pub mod cfg;
 pub mod direct;
+use speet_memory::MapperCallback;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
     InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
 };
+
 /// x86-64 to WebAssembly recompiler.
 ///
 /// Each instance manages a single [`yecta::Reactor`] and translates one
@@ -56,9 +58,12 @@ use speet_traps::{
 /// (one function per instruction) via [`direct::translate_bytes`].
 ///
 /// # Type parameters
-/// - `Context` / `E` / `F` – forwarded to the underlying [`yecta::Reactor`].
-/// - `P` – the local-pool backend (defaults to [`yecta::LocalPool`]).
-pub struct X86Recompiler {
+/// - `'cb` — lifetime of the borrowed mapper callback.
+/// - `'ctx` — lifetime of data captured inside the mapper callback.
+/// - `Context` / `E` – forwarded to the underlying [`yecta::Reactor`].
+///
+/// The function-sink type `F` is a per-method generic (not on the struct).
+pub struct X86Recompiler<'cb, 'ctx, Context, E> {
     base_rip: u64,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
@@ -67,23 +72,26 @@ pub struct X86Recompiler {
     /// Mnemonics that had no translation and fell back to `unreachable`.
     /// Cleared by [`clear_unsupported`](Self::clear_unsupported).
     unsupported_insns: alloc::collections::BTreeSet<alloc::string::String>,
+    /// Optional virtual-to-physical address mapper callback.
+    pub mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
 }
 
-impl X86Recompiler {
+impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
     /// Returns the function-index base used by the underlying reactor.
     ///
     /// All WASM function indices emitted during translation are offset by
     /// this value, allowing multiple recompilers to share a single WASM
     /// module without index collisions.
-    pub fn base_func_offset<Context, E, F>(&self, ctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+    pub fn base_func_offset<F>(&self, ctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
         ctx.base_func_offset()
     }
 
     /// Sets the function-index base.  Must be called before translation
     /// to ensure correct inter-function references.
-    pub fn set_base_func_offset<Context, E, F>(&mut self, ctx: &mut dyn ReactorContext<Context, E, FnType = F>, offset: u32) {
+    pub fn set_base_func_offset<F>(&mut self, ctx: &mut dyn ReactorContext<Context, E, FnType = F>, offset: u32) {
         ctx.set_base_func_offset(offset);
     }
+
     /// Create a new recompiler with `base_rip = 0`.
     pub fn new() -> Self {
         Self::new_with_base_rip(0)
@@ -98,6 +106,7 @@ impl X86Recompiler {
             enable_speculative_calls: false,
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
+            mapper_callback: None,
         }
     }
 
@@ -147,12 +156,12 @@ impl X86Recompiler {
     }
 
     /// Set the escape tag used for exception-based control flow in speculative calls
-    pub fn set_escape_tag<Context, E, F>(&mut self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tag: Option<EscapeTag>) {
+    pub fn set_escape_tag<F>(&mut self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tag: Option<EscapeTag>) {
         rctx.set_escape_tag(tag);
     }
 
     /// Get the current escape tag
-    pub fn get_escape_tag<Context, E, F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Option<EscapeTag> {
+    pub fn get_escape_tag<F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> Option<EscapeTag> {
         rctx.escape_tag()
     }
 
@@ -161,35 +170,49 @@ impl X86Recompiler {
         Self::EXPECTED_RA_LOCAL
     }
 
-    fn emit_i64_const<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: i64) -> Result<(), E> {
+    /// Install a virtual-to-physical address mapper callback.
+    ///
+    /// The mapper's `declare_params` / `declare_locals` will be called via
+    /// the `extra` parameter of `declare_trap_params` / `declare_trap_locals`
+    /// during `setup_traps` / `init_function`.
+    pub fn set_mapper_callback(&mut self, mapper: &'cb mut (dyn MapperCallback<Context, E> + 'ctx)) {
+        self.mapper_callback = Some(mapper);
+    }
+
+    /// Remove any previously installed mapper callback.
+    pub fn clear_mapper_callback(&mut self) {
+        self.mapper_callback = None;
+    }
+
+    fn emit_i64_const<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: i64) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(value))
     }
 
-    fn emit_i64_add<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_add<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Add)
     }
-    fn emit_i64_sub<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_sub<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Sub)
     }
-    fn emit_i64_mul<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_mul<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Mul)
     }
-    fn emit_i64_and<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_and<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64And)
     }
-    fn emit_i64_or<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_or<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Or)
     }
-    fn emit_i64_xor<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_xor<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Xor)
     }
-    fn emit_i64_shl<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_shl<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Shl)
     }
-    fn emit_i64_shr_u<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_shr_u<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)
     }
-    fn emit_i64_shr_s<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn emit_i64_shr_s<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)
     }
 
@@ -208,35 +231,28 @@ impl X86Recompiler {
     /// + expected_RA (i64) = 26.
     pub const BASE_PARAMS: u32 = 26;
 
-    /// Install an instruction trap.
-    pub fn set_instruction_trap<'cb, 'ctx, Context, E, F>(
+    /// **Phase 1** — register trap parameters and compute `total_params`.
+    ///
+    /// `extra` is forwarded to [`declare_trap_params`](BaseContext::declare_trap_params)
+    /// and is called before the trap chain.  Pass `&mut ()` when there is no mapper
+    /// whose params need to be injected.
+    pub fn setup_traps<F>(
         &self,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
-        trap: &'cb mut (dyn InstructionTrap<Context, E> + 'ctx),
-    ) {
-        // This now requires access to the TrapConfig which is in the context.
-        // But ReactorContext doesn't have a way to set traps directly.
-        // Wait, maybe I should add it to ReactorContext or LinkerInner?
-        // Actually, LinkerInner HAS pub traps.
-        // But if we only have &mut dyn ReactorContext, we can't access .traps.
-        // I might need to add set_instruction_trap to ReactorContext trait.
-        unimplemented!("Traps must be set on the Linker/ReactorContext provider directly")
-    }
-
-    /// **Phase 1** — register trap parameters and compute `total_params`.
-    pub fn setup_traps<Context, E, F>(&self, rctx: &mut dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+        extra: &mut dyn LocalDeclarator,
+    ) -> u32 {
         rctx.layout_mut().append(16, wasm_encoder::ValType::I64);
         rctx.layout_mut().append(1, wasm_encoder::ValType::I32);
         rctx.layout_mut().append(5, wasm_encoder::ValType::I32);
         rctx.layout_mut().append(4, wasm_encoder::ValType::I64);
-        rctx.declare_trap_params();
+        rctx.declare_trap_params(extra);
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
     }
 
     /// The current total wasm function parameter count.
-    pub fn total_params<Context, E, F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
+    pub fn total_params<F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>) -> u32 {
         rctx.locals_mark().total_locals
     }
 
@@ -332,33 +348,33 @@ impl X86Recompiler {
         }
     }
 
-    fn set_zf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+    fn set_zf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))
     }
 
-    fn set_sf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+    fn set_sf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))
     }
 
-    fn set_cf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+    fn set_cf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::CF_LOCAL))
     }
 
-    fn set_of<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+    fn set_of<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))
     }
 
-    fn set_pf<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
+    fn set_pf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
-    fn compute_parity<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
+    fn compute_parity<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize) -> Result<(), E> {
         // Assume value is on stack (i64)
         // Extract lowest byte: value & 0xFF
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
@@ -375,7 +391,7 @@ impl X86Recompiler {
     }
 
     // Helper to set flags after arithmetic operation
-    fn set_flags_after_operation<Context, E, F>(
+    fn set_flags_after_operation<F>(
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -424,8 +440,8 @@ impl X86Recompiler {
         Ok(())
     }
 
-    fn emit_memory_load<Context, E, F>(
-        &self,
+    pub(crate) fn emit_memory_load<F>(
+        &mut self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
         tail_idx: usize,
@@ -433,6 +449,14 @@ impl X86Recompiler {
         signed: bool,
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
+        // Invoke mapper if installed (transforms virtual → physical address on stack).
+        if let Some(mapper) = self.mapper_callback.as_deref_mut() {
+            use speet_link_core::context::FedContext;
+            use speet_memory::CallbackContext;
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
+            mapper.call(ctx, &mut callback_ctx)?;
+        }
         match (size_bits, signed) {
             (8, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load8S(MemArg  { offset: 0, align: 0, memory_index: 0 })),
             (8, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load8U(MemArg  { offset: 0, align: 0, memory_index: 0 })),
@@ -445,8 +469,22 @@ impl X86Recompiler {
         }
     }
 
-    fn emit_memory_store<Context, E, F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, size_bits: u32) -> Result<(), E> {
+    pub(crate) fn emit_memory_store<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        size_bits: u32,
+    ) -> Result<(), E> {
         use wasm_encoder::MemArg;
+        // Invoke mapper if installed (transforms virtual → physical address on stack).
+        if let Some(mapper) = self.mapper_callback.as_deref_mut() {
+            use speet_link_core::context::FedContext;
+            use speet_memory::CallbackContext;
+            let mut fed = FedContext::new(rctx, tail_idx);
+            let mut callback_ctx = CallbackContext::new(&mut fed);
+            mapper.call(ctx, &mut callback_ctx)?;
+        }
         match size_bits {
             8  => rctx.feed(ctx, tail_idx, &Instruction::I64Store8(MemArg  { offset: 0, align: 0, memory_index: 0 })),
             16 => rctx.feed(ctx, tail_idx, &Instruction::I64Store16(MemArg { offset: 0, align: 1, memory_index: 0 })),
@@ -456,7 +494,7 @@ impl X86Recompiler {
         }
     }
 
-    fn emit_mask_shift_for_read<Context, E, F>(
+    fn emit_mask_shift_for_read<F>(
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -483,7 +521,7 @@ impl X86Recompiler {
         Ok(())
     }
 
-    fn emit_subreg_write_rmw<Context, E, F>(
+    fn emit_subreg_write_rmw<F>(
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -553,8 +591,8 @@ use speet_link_core::{
 };
 use wasm_encoder::ValType;
 
-impl<Context, E, F> Recompile<Context, E, F>
-    for X86Recompiler
+impl<'cb, 'ctx, Context, E, F> Recompile<Context, E, F>
+    for X86Recompiler<'cb, 'ctx, Context, E>
 where
     F: InstructionSink<Context, E>,
 {

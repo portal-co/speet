@@ -620,7 +620,7 @@ where
             layout.append(1, int_type); // PC (param 64)
             layout.append(1, int_type); // expected_RA (param 65)
         }
-        rctx.declare_trap_params();
+        rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
@@ -782,7 +782,7 @@ where
         let addr_scratch_slot = rctx.layout_mut().append(1, addr_type);
         let pool_addr_slot = rctx.layout_mut().append(Self::N_POOL_ADDR, addr_type);
         let pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
-        rctx.declare_trap_locals();
+        rctx.declare_trap_locals(&mut ());
         let _cell = rctx.alloc_cell();
         let pool_addr_start = rctx.layout().base(pool_addr_slot);
         let pool_i64_start = rctx.layout().base(pool_i64_slot);

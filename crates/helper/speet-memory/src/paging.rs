@@ -44,6 +44,12 @@ pub enum PageTableBase {
     Local(u32),
     /// Value loaded from a wasm global variable.
     Global(u32),
+    /// Sentinel: the address will arrive as a WASM function parameter.
+    ///
+    /// Mapper structs replace this with `Local(resolved_idx)` during
+    /// `declare_params`.  Calling `emit_load` while this variant is still
+    /// present panics — it means `declare_params` was never called.
+    Param,
 }
 
 impl From<u64> for PageTableBase {
@@ -73,6 +79,9 @@ impl PageTableBase {
             }
             PageTableBase::Global(idx) => {
                 cb.emit(ctx, &Instruction::GlobalGet(*idx))?;
+            }
+            PageTableBase::Param => {
+                panic!("PageTableBase::Param was not replaced by declare_params");
             }
         }
         Ok(())
@@ -148,6 +157,18 @@ pub struct StandardPageTableMapper {
 }
 
 impl LocalDeclarator for StandardPageTableMapper {
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        let val_type = if self.use_i64 { ValType::I64 } else { ValType::I32 };
+        if matches!(self.page_table_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.page_table_base = PageTableBase::Local(layout.base(slot));
+        }
+        if matches!(self.security_dir_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.security_dir_base = PageTableBase::Local(layout.base(slot));
+        }
+    }
+
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
@@ -279,6 +300,18 @@ pub struct StandardPageTableMapper32 {
 }
 
 impl LocalDeclarator for StandardPageTableMapper32 {
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        let val_type = if self.use_i64 { ValType::I64 } else { ValType::I32 };
+        if matches!(self.page_table_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.page_table_base = PageTableBase::Local(layout.base(slot));
+        }
+        if matches!(self.security_dir_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.security_dir_base = PageTableBase::Local(layout.base(slot));
+        }
+    }
+
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
@@ -439,6 +472,18 @@ pub struct MultilevelPageTableMapper {
 }
 
 impl LocalDeclarator for MultilevelPageTableMapper {
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        let val_type = if self.use_i64 { ValType::I64 } else { ValType::I32 };
+        if matches!(self.l3_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.l3_base = PageTableBase::Local(layout.base(slot));
+        }
+        if matches!(self.security_dir_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.security_dir_base = PageTableBase::Local(layout.base(slot));
+        }
+    }
+
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
@@ -602,6 +647,18 @@ pub struct MultilevelPageTableMapper32 {
 }
 
 impl LocalDeclarator for MultilevelPageTableMapper32 {
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        let val_type = if self.use_i64 { ValType::I64 } else { ValType::I32 };
+        if matches!(self.l3_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.l3_base = PageTableBase::Local(layout.base(slot));
+        }
+        if matches!(self.security_dir_base, PageTableBase::Param) {
+            let slot = layout.append(1, val_type);
+            self.security_dir_base = PageTableBase::Local(layout.base(slot));
+        }
+    }
+
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));

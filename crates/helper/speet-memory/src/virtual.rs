@@ -8,59 +8,102 @@
 //! `VirtualMemory` is the fix: call [`VirtualMemory::register`] in Phase 1 to
 //! reserve one WASM memory (and optionally one mutable global for the page-table
 //! base address).  Pass the resolved indices to the mapper constructors in
-//! Phase 2 via [`VirtualMemory::memory_idx`] and [`VirtualMemory::page_table_base`].
+//! Phase 2 via [`VirtualMemory::memory_idx`] and
+//! [`VirtualMemory::page_table_base_deferred`].
 //!
-//! ## Example
+//! ## Example — global base
 //!
 //! ```ignore
 //! // Phase 1 — reserve indices.
-//! let vm = VirtualMemory::register(&mut entity_space, true /* global base */);
+//! let vm = VirtualMemory::register(&mut entity_space, BaseKind::Global);
 //!
 //! // Phase 2 — construct mapper with resolved indices.
-//! let mem_idx  = vm.memory_idx(&entity_space);
-//! let pg_base  = vm.page_table_base(&entity_space, 0x1000_0000);
 //! let sec_base = PageTableBase::Constant(0x2000_0000);
-//! let mut mapper = standard_page_table_mapper(pg_base, sec_base, mem_idx, true);
+//! let mut mapper = vm.standard_mapper(&entity_space, sec_base, true);
 //! mapper.declare_locals(&mut rctx.layout_mut());
 //! recompiler.set_mapper_callback(&mut mapper);
 //!
 //! // Phase 2 — declare the memory and optional global in MegabinaryBuilder.
 //! // IMPORTANT: declarations must happen in the same order as register() calls.
-//! builder.declare_memory(MemoryType { minimum: 16, .. MemoryType::default() });
+//! builder.declare_memory(MemoryType { minimum: 16, ..MemoryType::default() });
 //! if vm.global_slot.is_some() {
-//!     builder.declare_global(GlobalType { val_type: ValType::I64, mutable: true, shared: false },
-//!                            ConstExpr::i64_const(0));
+//!     builder.declare_global(
+//!         GlobalType { val_type: ValType::I64, mutable: true, shared: false },
+//!         ConstExpr::i64_const(0),
+//!     );
 //! }
+//! ```
+//!
+//! ## Example — param base
+//!
+//! ```ignore
+//! // Phase 1 — reserve indices (no global needed).
+//! let vm = VirtualMemory::register(&mut entity_space, BaseKind::Param);
+//!
+//! // Phase 2 — construct mapper.  declare_params() replaces PageTableBase::Param.
+//! let sec_base = PageTableBase::Constant(0x2000_0000);
+//! let mut mapper = vm.standard_mapper(&entity_space, sec_base, true);
+//! // mapper.declare_params() is called by the linker via LocalDeclarator chain.
+//! recompiler.set_mapper_callback(&mut mapper);
 //! ```
 
 use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
-use crate::paging::PageTableBase;
+use crate::paging::{
+    PageTableBase, StandardPageTableMapper, StandardPageTableMapper32,
+    MultilevelPageTableMapper, MultilevelPageTableMapper32,
+    standard_page_table_mapper, standard_page_table_mapper_32,
+    multilevel_page_table_mapper, multilevel_page_table_mapper_32,
+};
+
+// ── BaseKind ───────────────────────────────────────────────────────────────────
+
+/// Specifies where the page-table base address comes from at runtime.
+///
+/// Passed to [`VirtualMemory::register`] to control whether a WASM global is
+/// reserved, and what [`PageTableBase`] variant is produced in Phase 2.
+#[derive(Clone, Copy, Debug)]
+pub enum BaseKind {
+    /// Compile-time constant; the value is baked directly into instructions.
+    Constant(u64),
+    /// Runtime value stored in a WASM mutable global (reserved in Phase 1).
+    Global,
+    /// Runtime value that arrives as a WASM function parameter injected by the
+    /// linker's `LocalDeclarator` chain.  [`PageTableBase::Param`] is produced
+    /// and replaced with `Local(idx)` when `declare_params` is called.
+    Param,
+}
+
+// ── VirtualMemory ──────────────────────────────────────────────────────────────
 
 /// Tracks pre-declared WASM memory (and optional global) for one guest virtual
 /// address space.
 ///
 /// Created in Phase 1 via [`register`](Self::register); provides resolved
-/// indices in Phase 2 via [`memory_idx`](Self::memory_idx) and
-/// [`page_table_base`](Self::page_table_base).
+/// indices in Phase 2 via [`memory_idx`](Self::memory_idx),
+/// [`page_table_base_deferred`](Self::page_table_base_deferred), and the
+/// factory mapper methods.
 #[derive(Clone, Copy, Debug)]
 pub struct VirtualMemory {
     /// Pre-declared WASM memory slot.
     pub memory_slot: IndexSlot,
     /// Pre-declared global slot for the page-table base address, if any.
     pub global_slot: Option<IndexSlot>,
+    /// How the page-table base address is supplied at runtime.
+    pub base_kind: BaseKind,
 }
 
 impl VirtualMemory {
-    /// Register one WASM memory (and optionally one mutable global) in Phase 1.
+    /// Register one WASM memory (and, when `base_kind` is `Global`, one mutable
+    /// global) in Phase 1.
     ///
     /// * `entity_space` — the linker's pre-declaration index space.
-    /// * `with_global_base` — if `true`, also reserves one mutable `i64`
-    ///   global to hold the page-table base address at runtime.  Set to
-    ///   `false` when the base address is a compile-time constant.
-    pub fn register(entity_space: &mut EntityIndexSpace, with_global_base: bool) -> Self {
+    /// * `base_kind` — controls whether a global is reserved and which
+    ///   [`PageTableBase`] variant is produced in Phase 2.
+    pub fn register(entity_space: &mut EntityIndexSpace, base_kind: BaseKind) -> Self {
         let memory_slot = entity_space.memories.append(1);
-        let global_slot = with_global_base.then(|| entity_space.globals.append(1));
-        Self { memory_slot, global_slot }
+        let global_slot = matches!(base_kind, BaseKind::Global)
+            .then(|| entity_space.globals.append(1));
+        Self { memory_slot, global_slot, base_kind }
     }
 
     /// Resolved WASM memory index (Phase 2).
@@ -77,16 +120,87 @@ impl VirtualMemory {
 
     /// Build a [`PageTableBase`] for use with the page-table mapper constructors.
     ///
-    /// If a global was registered, returns `PageTableBase::Global(idx)`.
-    /// Otherwise returns `PageTableBase::Constant(fallback)`.
-    pub fn page_table_base(
+    /// * `BaseKind::Constant(c)` → `PageTableBase::Constant(c)`
+    /// * `BaseKind::Global`      → `PageTableBase::Global(resolved_idx)`
+    /// * `BaseKind::Param`       → `PageTableBase::Param` (sentinel; must be
+    ///   resolved via `declare_params` before `emit_load` is called)
+    pub fn page_table_base_deferred(&self, entity_space: &EntityIndexSpace) -> PageTableBase {
+        match self.base_kind {
+            BaseKind::Constant(c) => PageTableBase::Constant(c),
+            BaseKind::Global => {
+                let idx = self.global_idx(entity_space)
+                    .expect("VirtualMemory registered without Global but base_kind is Global");
+                PageTableBase::Global(idx)
+            }
+            BaseKind::Param => PageTableBase::Param,
+        }
+    }
+
+    // ── Factory methods ────────────────────────────────────────────────────────
+
+    /// Build a [`StandardPageTableMapper`] with the resolved memory index and
+    /// page-table base from this `VirtualMemory`.
+    ///
+    /// `security_directory_base` and `use_i64` are passed through unchanged.
+    pub fn standard_mapper(
         &self,
         entity_space: &EntityIndexSpace,
-        fallback: u64,
-    ) -> PageTableBase {
-        match self.global_idx(entity_space) {
-            Some(g) => PageTableBase::Global(g),
-            None    => PageTableBase::Constant(fallback),
-        }
+        security_directory_base: impl Into<PageTableBase>,
+        use_i64: bool,
+    ) -> StandardPageTableMapper {
+        standard_page_table_mapper(
+            self.page_table_base_deferred(entity_space),
+            security_directory_base,
+            self.memory_idx(entity_space),
+            use_i64,
+        )
+    }
+
+    /// Build a [`StandardPageTableMapper32`] with the resolved memory index and
+    /// page-table base from this `VirtualMemory`.
+    pub fn standard_mapper_32(
+        &self,
+        entity_space: &EntityIndexSpace,
+        security_directory_base: impl Into<PageTableBase>,
+        use_i64: bool,
+    ) -> StandardPageTableMapper32 {
+        standard_page_table_mapper_32(
+            self.page_table_base_deferred(entity_space),
+            security_directory_base,
+            self.memory_idx(entity_space),
+            use_i64,
+        )
+    }
+
+    /// Build a [`MultilevelPageTableMapper`] with the resolved memory index and
+    /// L3-table base from this `VirtualMemory`.
+    pub fn multilevel_mapper(
+        &self,
+        entity_space: &EntityIndexSpace,
+        security_directory_base: impl Into<PageTableBase>,
+        use_i64: bool,
+    ) -> MultilevelPageTableMapper {
+        multilevel_page_table_mapper(
+            self.page_table_base_deferred(entity_space),
+            security_directory_base,
+            self.memory_idx(entity_space),
+            use_i64,
+        )
+    }
+
+    /// Build a [`MultilevelPageTableMapper32`] with the resolved memory index
+    /// and L3-table base from this `VirtualMemory`.
+    pub fn multilevel_mapper_32(
+        &self,
+        entity_space: &EntityIndexSpace,
+        security_directory_base: impl Into<PageTableBase>,
+        use_i64: bool,
+    ) -> MultilevelPageTableMapper32 {
+        multilevel_page_table_mapper_32(
+            self.page_table_base_deferred(entity_space),
+            security_directory_base,
+            self.memory_idx(entity_space),
+            use_i64,
+        )
     }
 }

@@ -103,3 +103,58 @@ where
         self(ctx, callback_ctx)
     }
 }
+
+// ── StackedMapper ──────────────────────────────────────────────────────────────
+
+/// Composes two [`MapperCallback`]s in series: the outer mapper runs first,
+/// then the inner mapper refines the address further.
+///
+/// `chunk_size` is the minimum of the two component chunk sizes (with `None`
+/// treated as the identity, i.e. "no constraint").
+///
+/// `LocalDeclarator` delegates to both components — outer first, then inner.
+pub struct StackedMapper<Outer, Inner> {
+    pub outer: Outer,
+    pub inner: Inner,
+}
+
+impl<Outer: LocalDeclarator, Inner: LocalDeclarator> LocalDeclarator
+    for StackedMapper<Outer, Inner>
+{
+    #[inline]
+    fn declare_params(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        self.outer.declare_params(cell, layout);
+        self.inner.declare_params(cell, layout);
+    }
+
+    #[inline]
+    fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
+        self.outer.declare_locals(cell, layout);
+        self.inner.declare_locals(cell, layout);
+    }
+}
+
+impl<Context, E, Outer, Inner> MapperCallback<Context, E>
+    for StackedMapper<Outer, Inner>
+where
+    Outer: MapperCallback<Context, E>,
+    Inner: MapperCallback<Context, E>,
+{
+    #[inline]
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E>,
+    ) -> Result<(), E> {
+        self.outer.call(ctx, callback_ctx)?;
+        self.inner.call(ctx, callback_ctx)
+    }
+
+    #[inline]
+    fn chunk_size(&self) -> Option<u64> {
+        match (self.outer.chunk_size(), self.inner.chunk_size()) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(a.min(b)),
+        }
+    }
+}

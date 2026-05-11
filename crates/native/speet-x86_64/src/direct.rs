@@ -4,7 +4,7 @@ use wasm_encoder::Instruction;
 use wax_core::build::InstructionSink;
 use wax_core::build::InstructionSource;
 use yecta::layout::CellIdx;
-use yecta::{FuncIdx, JumpCallParams};
+use yecta::{FuncIdx, JumpCallParams, LocalDeclarator};
 
 use iced_x86::{Decoder, DecoderOptions, Instruction as IxInst, Mnemonic, OpKind, Register};
 
@@ -122,7 +122,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
             }
@@ -130,7 +130,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -139,13 +139,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -154,19 +154,19 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -176,20 +176,20 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -200,13 +200,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -216,7 +216,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::CF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
                     ),
                 )?;
             }
@@ -224,13 +224,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::CF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Or)?;
@@ -239,14 +239,14 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::CF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::ZF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -256,7 +256,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::CF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -265,7 +265,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
             }
@@ -273,7 +273,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::SF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -282,7 +282,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
             }
@@ -290,7 +290,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::OF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -299,7 +299,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::PF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::PF_LOCAL,
                     ),
                 )?;
             }
@@ -307,7 +307,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::PF_LOCAL,
+                        X86Recompiler::<'_, '_, Context, E>::PF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -317,8 +317,8 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
     }
 }
 
-impl X86Recompiler {
-    fn rip_to_func_idx<Context, E, F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>, rip: u64) -> Option<FuncIdx> {
+impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
+    fn rip_to_func_idx<F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>, rip: u64) -> Option<FuncIdx> {
         if let Some(gate) = &self.slot_assigner {
             gate.slot_for_pc(rip).map(FuncIdx)
         } else {
@@ -326,8 +326,8 @@ impl X86Recompiler {
         }
     }
 
-    fn init_function<Context, E, F>(
-        &self,
+    fn init_function<F>(
+        &mut self,
         ctx: &mut Context,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         _rip: u64,
@@ -338,13 +338,18 @@ impl X86Recompiler {
     ) -> Result<usize, E> {
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
-        rctx.declare_trap_locals();
+        let mut unit = ();
+        let extra: &mut dyn LocalDeclarator = match self.mapper_callback.as_deref_mut() {
+            Some(m) => m,
+            None => &mut unit,
+        };
+        rctx.declare_trap_locals(extra);
         let _cell = rctx.alloc_cell();
         let fn_type = f(&mut rctx.layout().iter_since(&mark).collect::<alloc::vec::Vec<_>>().into_iter());
         rctx.next_with(ctx, fn_type, inst_len)
     }
 
-    fn emit_memory_address<Context, E, F>(
+    fn emit_memory_address<F>(
         &self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -403,7 +408,7 @@ impl X86Recompiler {
         Ok(())
     }
 
-    fn handle_memory_rmw<Context, E, F, Op>(
+    fn handle_memory_rmw<F, Op>(
         &mut self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -449,7 +454,7 @@ impl X86Recompiler {
         Ok(Some(()))
     }
 
-    fn handle_binary<Context, E, F, T>(
+    fn handle_binary<F, T>(
         &mut self,
         ctx: &mut Context,
         rctx: &dyn ReactorContext<Context, E, FnType = F>,
@@ -600,7 +605,7 @@ impl X86Recompiler {
         }
     }
 
-    pub fn translate_bytes<Context, E, F>(
+    pub fn translate_bytes<F>(
         &mut self,
         ctx: &mut Context,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
@@ -1188,25 +1193,25 @@ impl X86Recompiler {
                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::CF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::CF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::PF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::PF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(2))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::ZF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(6))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::SF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(7))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::OF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(11))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
@@ -1234,35 +1239,35 @@ impl X86Recompiler {
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(1))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::CF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::CF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(2))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(1))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::PF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(6))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(1))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::ZF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(7))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(1))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::SF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))?;
                     rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(11))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64Const(1))?;
                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                     rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::OF_LOCAL))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))?;
                     Ok(Some(()))
                 }
                 _ => Ok(None),
@@ -1281,7 +1286,7 @@ impl X86Recompiler {
         Ok(())
     }
 
-    fn handle_test<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_test<F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let src = match inst.op1_kind() {
             OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => Operand::Imm(inst.immediate64() as i64),
             OpKind::Register => {
@@ -1322,14 +1327,14 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::LocalTee(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::ZF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::SF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))?;
         self.set_cf(ctx, rctx, tail_idx, false)?;
         self.set_of(ctx, rctx, tail_idx, false)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
@@ -1340,11 +1345,11 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::PF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))?;
         Ok(Some(()))
     }
 
-    fn handle_cmp<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_cmp<F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let src = match inst.op1_kind() {
             OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate8to32 => Operand::Imm(inst.immediate64() as i64),
             OpKind::Register => {
@@ -1389,18 +1394,18 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::LocalTee(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::ZF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::SF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(23))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64LtU)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::CF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::CF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
@@ -1416,7 +1421,7 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::OF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFF))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
@@ -1425,11 +1430,11 @@ impl X86Recompiler {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(X86Recompiler::PF_LOCAL))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))?;
         Ok(Some(()))
     }
 
-    fn handle_jmp<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_jmp<F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let target = match inst.op0_kind() {
             OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => (inst.ip() as i64 + inst.near_branch64() as i64) as u64,
             _ => return Ok(None),
@@ -1450,7 +1455,7 @@ impl X86Recompiler {
         Ok(Some(()))
     }
 
-    fn handle_conditional_jump<Context, E, F>(
+    fn handle_conditional_jump<F>(
         &self,
         ctx: &mut Context,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
@@ -1480,7 +1485,7 @@ impl X86Recompiler {
         Ok(Some(()))
     }
 
-    fn handle_call<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_call<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let return_addr = inst.next_ip();
         let target = match inst.op0_kind() {
             OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => (inst.ip() as i64 + inst.near_branch64() as i64) as u64,
@@ -1506,7 +1511,7 @@ impl X86Recompiler {
 
             let expected_ra_snippet = ExpectedRaSnippet { return_addr };
             let params = yecta::JumpCallParams::call(target_func, rctx.locals_mark().total_locals, escape_tag, rctx.pool())
-                .with_fixup(X86Recompiler::EXPECTED_RA_LOCAL, &expected_ra_snippet);
+                .with_fixup(Self::EXPECTED_RA_LOCAL, &expected_ra_snippet);
             rctx.ji_with_params(ctx, tail_idx, params)?;
             return Ok(Some(()));
         } else {
@@ -1534,7 +1539,7 @@ impl X86Recompiler {
         }
     }
 
-    fn handle_ret<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_ret<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let stack_cleanup = if inst.op_count() > 0 { match inst.op0_kind() { OpKind::Immediate16 | OpKind::Immediate32 => inst.immediate16() as u64, _ => 0 } } else { 0 };
         let use_speculative = self.enable_speculative_calls && rctx.escape_tag().is_some();
 
@@ -1542,7 +1547,7 @@ impl X86Recompiler {
             let escape_tag = rctx.escape_tag().unwrap();
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
             self.emit_memory_load(ctx, rctx, tail_idx, 64, false)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(X86Recompiler::EXPECTED_RA_LOCAL))?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::EXPECTED_RA_LOCAL))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
             rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
@@ -1576,7 +1581,7 @@ impl X86Recompiler {
         }
     }
 
-    fn handle_push<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_push<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let (operand_size, stack_decrement) = match inst.op0_kind() {
             OpKind::Register => {
                 if let Some((_, reg_size, _, _)) = Self::resolve_reg(inst.op0_register()) {
@@ -1614,7 +1619,7 @@ impl X86Recompiler {
         Ok(Some(()))
     }
 
-    fn handle_pop<Context, E, F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_pop<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let (operand_size, stack_increment) = match inst.op0_kind() {
             OpKind::Register => {
                 if let Some((_, reg_size, _, _)) = Self::resolve_reg(inst.op0_register()) {

@@ -308,7 +308,7 @@ pub fn translate_x86(
     let mut recompiler = X86Recompiler::new_with_base_rip(rip);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ());
     let params = collect_rv_params(&rctx);
 
     let mut ctx = ();
@@ -438,7 +438,7 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
             let recompiler = X86Recompiler::new_with_base_rip(addr);
             let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
             let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
-            recompiler.setup_traps(&mut rctx);
+            recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
     }

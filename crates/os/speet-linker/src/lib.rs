@@ -32,7 +32,7 @@ use yecta::FuncSignature;
 use wax_core::build::InstructionSink;
 use yecta::layout::CellIdx;
 use yecta::{
-    EscapeTag, Fed, FuncIdx, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor,
+    EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor,
     layout::CellRegistry,
 };
 
@@ -110,7 +110,7 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
         self.base_func_offset = n;
     }
 
-    fn declare_trap_params(&mut self) {
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) {
         // Inject `target_pc: i64` only when OOB dispatch is configured.
         // This keeps the WASM frontend (and any other non-OOB path) unaffected.
         if self.oob_config.is_some() {
@@ -118,9 +118,11 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
             self.target_pc_local = self.layout.base(slot);
         }
         self.injected_start = self.layout.mark();
+        extra.declare_params(CellIdx(0), &mut self.layout);
         self.traps.declare_params(CellIdx(0), &mut self.layout);
     }
-    fn declare_trap_locals(&mut self) {
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
+        extra.declare_locals(CellIdx(0), &mut self.layout);
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
     }
     fn alloc_cell(&mut self) -> CellIdx {
@@ -142,7 +144,8 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
             guest_locals.iter().copied(),
         )
     }
-    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
+        extra.declare_locals(cell, &mut self.layout);
         self.traps.declare_locals(cell, &mut self.layout);
     }
     fn target_pc_local(&self) -> Option<u32> {
@@ -233,8 +236,8 @@ where
         self.reactor.set_base_func_offset(n);
     }
 
-    fn declare_trap_params(&mut self) { self.base.declare_trap_params(); }
-    fn declare_trap_locals(&mut self) { self.base.declare_trap_locals(); }
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) { self.base.declare_trap_params(extra); }
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) { self.base.declare_trap_locals(extra); }
     fn alloc_cell(&mut self) -> CellIdx { self.base.alloc_cell() }
     fn alloc_cell_for_guest(
         &mut self,
@@ -244,8 +247,8 @@ where
     ) -> CellIdx {
         self.base.alloc_cell_for_guest(guest_params, guest_results, guest_locals)
     }
-    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
-        self.base.declare_trap_locals_with_cell(cell);
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
+        self.base.declare_trap_locals_with_cell(cell, extra);
     }
 
     fn on_instruction(
@@ -458,16 +461,16 @@ impl<'cb, 'ctx, Context, E, Plugin> BaseContext<Context, E>
     fn set_locals_mark(&mut self, mark: Mark) { self.inner.set_locals_mark(mark); }
     fn base_func_offset(&self) -> u32 { self.inner.base_func_offset() }
     fn set_base_func_offset(&mut self, n: u32) { self.inner.set_base_func_offset(n); }
-    fn declare_trap_params(&mut self) { self.inner.declare_trap_params(); }
-    fn declare_trap_locals(&mut self) { self.inner.declare_trap_locals(); }
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) { self.inner.declare_trap_params(extra); }
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) { self.inner.declare_trap_locals(extra); }
     fn alloc_cell(&mut self) -> CellIdx { self.inner.alloc_cell() }
     fn alloc_cell_for_guest(
         &mut self, gp: &[ValType], gr: &[ValType], gl: &[(u32, ValType)],
     ) -> CellIdx {
         self.inner.alloc_cell_for_guest(gp, gr, gl)
     }
-    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx) {
-        self.inner.declare_trap_locals_with_cell(cell);
+    fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
+        self.inner.declare_trap_locals_with_cell(cell, extra);
     }
     fn on_instruction(&mut self, info: &InstructionInfo, ctx: &mut Context) -> Result<TrapAction, E> {
         self.inner.on_instruction(info, ctx)

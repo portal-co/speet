@@ -444,7 +444,7 @@ where
         rctx.layout_mut().append(32, gpr_type);
         rctx.layout_mut().append(2, gpr_type);
         rctx.layout_mut().append(1, ValType::I32);
-        rctx.declare_trap_params();
+        rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
         mark.total_locals
@@ -562,7 +562,7 @@ where
         self.addr_scratch_slot = rctx.layout_mut().append(1, ValType::I32);
         self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
         self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
-        rctx.declare_trap_locals();
+        rctx.declare_trap_locals(&mut ());
         let _cell = rctx.alloc_cell();
         let pool_i32_start = rctx.layout().base(self.pool_i32_slot);
         let pool_i64_start = rctx.layout().base(self.pool_i64_slot);

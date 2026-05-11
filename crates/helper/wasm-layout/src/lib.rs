@@ -614,6 +614,8 @@ pub trait LocalDeclarator {
     fn declare_locals(&mut self, cell: CellIdx, locals: &mut LocalLayout) {}
 }
 
+impl LocalDeclarator for () {}
+
 impl core::fmt::Debug for LocalLayout {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()

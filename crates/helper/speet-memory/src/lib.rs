@@ -45,7 +45,7 @@ pub mod paging;
 pub mod r#virtual;
 
 pub use layout::{LocalLayout, LocalSlot};
-pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback};
+pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback, StackedMapper};
 pub use yecta::LocalDeclarator;
 pub use mem::{AddressWidth, IntWidth, LoadKind, MemoryEmitter, StoreKind};
 pub use paging::{
@@ -53,4 +53,4 @@ pub use paging::{
     StandardPageTableMapper, StandardPageTableMapper32, multilevel_page_table_mapper,
     multilevel_page_table_mapper_32, standard_page_table_mapper, standard_page_table_mapper_32,
 };
-pub use r#virtual::VirtualMemory;
+pub use r#virtual::{BaseKind, VirtualMemory};
