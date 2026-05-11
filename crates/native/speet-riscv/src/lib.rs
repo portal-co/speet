@@ -71,7 +71,8 @@ use yecta::{
 // Re-export the shared memory/mapper abstractions so existing users do not
 // need to change their import paths.
 pub use speet_memory::{
-    CallbackContext, MapperCallback, PageMapLocals, PageTableBase, multilevel_page_table_mapper,
+    AddressMapper, AddressWidth, CallbackContext, DirectMemory, IntWidth, LoadKind, MapperCallback,
+    MemoryAccess, PageMapLocals, PageTableBase, StoreKind, multilevel_page_table_mapper,
     multilevel_page_table_mapper_32, standard_page_table_mapper, standard_page_table_mapper_32,
 };
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
@@ -227,9 +228,11 @@ pub struct RiscVRecompiler<
     /// Optional callback for EBREAK instructions
     ebreak_callback:
         Option<&'cb mut (dyn EbreakCallback<Context, E> + 'ctx)>,
-    /// Optional callback for address mapping (paging support - see PAGING.md)
-    mapper_callback:
-        Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
+    /// Optional memory access implementation (mapper + load/store).
+    ///
+    /// Replaces the old `mapper_callback`.  The implementation's
+    /// `declare_locals` will be called during `init_function`.
+    memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -293,7 +296,7 @@ where
             hint_callback: None,
             ecall_callback: None,
             ebreak_callback: None,
-            mapper_callback: None,
+            memory_access: None,
             enable_rv64,
             use_memory64,
             enable_speculative_calls: false,
@@ -519,44 +522,22 @@ where
         self.ebreak_callback = None;
     }
 
-    /// Set an address mapping callback for paging support
+    /// Set the memory access implementation (mapper + load/store).
     ///
-    /// When a mapper is set, it will be invoked for every memory load/store operation
-    /// to translate virtual addresses to physical addresses. The callback receives the
-    /// virtual address on the WebAssembly stack and should leave the physical address
-    /// on the stack.
-    ///
-    /// See PAGING.md for detailed documentation on the paging system.
+    /// When set, every load/store will be routed through the implementation's
+    /// `emit_load` / `emit_store_addr` / `emit_store_insn` methods rather than
+    /// directly emitting `memory_index: 0` instructions.
     ///
     /// # Arguments
-    /// * `callback` - A mutable reference to a closure or function that performs address translation
-    ///
-    /// # Example
-    /// ```ignore
-    /// # use speet_riscv::{RiscVRecompiler, MapperContext};
-    /// # use wasm_encoder::Instruction;
-    ///
-    /// let mut ctx = ();
-    /// let mut my_mapper = |ctx: &mut MapperContext<_, _>| {
-    ///     // Example: Simple page table lookup
-    ///     // Input: virtual address on stack
-    ///     // Output: physical address on stack
-    ///     Ok(())
-    /// };
-    /// recompiler.set_mapper_callback(&mut my_mapper);
-    /// ```
-    pub fn set_mapper_callback(
-        &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E> + 'ctx),
-    ) {
-        self.mapper_callback = Some(callback);
+    /// * `ma` - A boxed [`MemoryAccess`] implementation.
+    pub fn set_memory_access(&mut self, ma: alloc::boxed::Box<dyn MemoryAccess<Context, E>>) {
+        self.memory_access = Some(ma);
     }
 
-    /// Clear the address mapping callback
-    ///
-    /// Removes any previously set mapper callback, returning to identity mapping.
-    pub fn clear_mapper_callback(&mut self) {
-        self.mapper_callback = None;
+    /// Clear the memory access implementation, returning to direct memory
+    /// access with `memory_index: 0` and no address mapping.
+    pub fn clear_memory_access(&mut self) {
+        self.memory_access = None;
     }
 
     /// Set the memory ordering mode for load/store emission.
@@ -782,7 +763,14 @@ where
         let addr_scratch_slot = rctx.layout_mut().append(1, addr_type);
         let pool_addr_slot = rctx.layout_mut().append(Self::N_POOL_ADDR, addr_type);
         let pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
-        rctx.declare_trap_locals(&mut ());
+        {
+            let mut unit = ();
+            let extra: &mut dyn yecta::LocalDeclarator = match self.memory_access.as_deref_mut() {
+                Some(m) => m as &mut dyn yecta::LocalDeclarator,
+                None => &mut unit,
+            };
+            rctx.declare_trap_locals(extra);
+        }
         let _cell = rctx.alloc_cell();
         let pool_addr_start = rctx.layout().base(pool_addr_slot);
         let pool_i64_start = rctx.layout().base(pool_i64_slot);

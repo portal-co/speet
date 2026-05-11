@@ -10,3 +10,4 @@ wasm-encoder.workspace = true
 wax-core.workspace = true
 yecta = { path = "../yecta" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-ordering = { path = "../speet-ordering" }

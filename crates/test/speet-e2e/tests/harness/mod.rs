@@ -10,7 +10,7 @@ use object::{Object, ObjectSection};
 use rv_asm::Xlen;
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAdapter};
 use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
-use speet_memory::{AddressWidth, MapperCallback};
+use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
 use speet_module_builder::MegabinaryBuilder;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
 use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
@@ -595,7 +595,7 @@ pub fn run_module(wasm: &[u8], entry: &str) -> Result<HostState, String> {
 // ── WasmFrontend helpers ──────────────────────────────────────────────────────
 
 pub struct WasmTranslateConfig {
-    pub mapper:    Option<Box<dyn MapperCallback<(), BinaryReaderError>>>,
+    pub mapper:    Option<Box<dyn MemoryAccess<(), BinaryReaderError>>>,
     pub cond_trap: Option<Box<dyn ConditionTrap<(), BinaryReaderError>>>,
 }
 
@@ -612,10 +612,9 @@ pub fn translate_wasm(
     cfg: WasmTranslateConfig,
     entry_exports: &[(&str, u32)], // (export_name, fn_index_in_output)
 ) -> Vec<u8> {
-    let mapper = cfg.mapper;
     let per_memory = vec![GuestMemoryConfig {
         addr_width: AddressWidth::W32,
-        mapper,
+        memory_access: cfg.mapper,
     }];
 
     let mut frontend: WasmFrontend<(), BinaryReaderError> =
@@ -691,7 +690,7 @@ pub fn translate_wasm(
 pub fn translate_wasm_with_decide_import(input: &[u8], entry_name: &str) -> Vec<u8> {
     let per_memory = vec![GuestMemoryConfig {
         addr_width: AddressWidth::W32,
-        mapper: Option::None,
+        memory_access: Option::None,
     }];
     let mut frontend: WasmFrontend<(), BinaryReaderError> =
         WasmFrontend::with_wasm_encoder_fn(per_memory, 0, IndexOffsets::default());
@@ -778,13 +777,18 @@ pub fn run_wasm_with_decide(
 /// Return a `standard_page_table_mapper` suitable for smoke tests (validates
 /// structural correctness of mapper-annotated WASM; page table not initialised
 /// at runtime).
-pub fn make_test_mapper() -> Box<dyn MapperCallback<(), BinaryReaderError>> {
+pub fn make_test_mapper() -> Box<dyn MemoryAccess<(), BinaryReaderError>> {
     use speet_memory::{standard_page_table_mapper, PageTableBase};
-    Box::new(standard_page_table_mapper(
-        PageTableBase::Constant(0x0),
-        PageTableBase::Constant(0x0),
+    Box::new(DirectMemory::new(
+        standard_page_table_mapper(
+            PageTableBase::Constant(0x0),
+            PageTableBase::Constant(0x0),
+            0,
+            false,
+        ),
         0,
-        false,
+        AddressWidth::W32,
+        IntWidth::I32,
     ))
 }
 

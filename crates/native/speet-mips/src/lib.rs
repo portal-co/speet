@@ -56,7 +56,11 @@ use yecta::{
     SlotAssigner, TableIdx, Target, TypeIdx, layout::{CellIdx, CellRegistry},
 };
 // Re-export the shared memory/mapper and ordering abstractions.
-pub use speet_memory::{CallbackContext, MapperCallback};
+pub use speet_memory::{
+    AddressMapper, AddressWidth, CallbackContext, DirectMemory, IntWidth, MapperCallback,
+    MemoryAccess,
+    mem::{LoadKind, StoreKind},
+};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 use speet_traps::{
     InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
@@ -225,8 +229,8 @@ pub struct MipsRecompiler<
     syscall_callback: Option<&'cb mut (dyn SyscallCallback<Context, E, F> + 'ctx)>,
     /// Optional callback for BREAK instructions
     break_callback: Option<&'cb mut (dyn BreakCallback<Context, E, F> + 'ctx)>,
-    /// Optional callback for address mapping (paging support)
-    mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
+    /// Optional memory access implementation (address mapping + load/store emission)
+    memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
     /// Whether to enable MIPS64 instruction support (disabled by default)
     enable_mips64: bool,
     /// Memory ordering mode for load/store emission.
@@ -280,7 +284,7 @@ where
             base_pc,
             syscall_callback: None,
             break_callback: None,
-            mapper_callback: None,
+            memory_access: None,
             enable_mips64,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
@@ -361,20 +365,20 @@ where
         self.break_callback = None;
     }
 
-    /// Set an address mapping callback for paging support
+    /// Set a memory access implementation for address mapping and load/store emission.
     ///
-    /// When a mapper is set, it will be invoked for every memory load/store operation
-    /// to translate virtual addresses to physical addresses.
-    pub fn set_mapper_callback(
+    /// When set, `DirectMemory` (or any `MemoryAccess` impl) will handle virtual-to-physical
+    /// address translation and the actual WASM load/store instructions.
+    pub fn set_memory_access(
         &mut self,
-        callback: &'cb mut (dyn MapperCallback<Context, E> + 'ctx),
+        ma: alloc::boxed::Box<dyn MemoryAccess<Context, E>>,
     ) {
-        self.mapper_callback = Some(callback);
+        self.memory_access = Some(ma);
     }
 
-    /// Clear the address mapping callback
-    pub fn clear_mapper_callback(&mut self) {
-        self.mapper_callback = None;
+    /// Clear the memory access implementation.
+    pub fn clear_memory_access(&mut self) {
+        self.memory_access = None;
     }
 
     /// Set the memory ordering mode for load/store emission.
@@ -562,7 +566,12 @@ where
         self.addr_scratch_slot = rctx.layout_mut().append(1, ValType::I32);
         self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
         self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
-        rctx.declare_trap_locals(&mut ());
+        let mut unit = ();
+        let extra: &mut dyn yecta::LocalDeclarator = match self.memory_access.as_deref_mut() {
+            Some(m) => m as &mut dyn yecta::LocalDeclarator,
+            None => &mut unit,
+        };
+        rctx.declare_trap_locals(extra);
         let _cell = rctx.alloc_cell();
         let pool_i32_start = rctx.layout().base(self.pool_i32_slot);
         let pool_i64_start = rctx.layout().base(self.pool_i64_slot);
@@ -1178,10 +1187,16 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I8S)?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // load byte (signed) -> i32
@@ -1219,10 +1234,16 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I8U)?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // load byte unsigned -> i32
@@ -1259,10 +1280,16 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I16S)?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // load halfword signed -> i32
@@ -1299,10 +1326,16 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I16U)?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // load halfword unsigned -> i32
@@ -1338,10 +1371,23 @@ where
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
-                if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                    mapper.call(ctx, &mut callback_ctx)?;
+                if let Some(ma) = self.memory_access.as_deref_mut() {
+                    use speet_ordering::EagerMemorySink;
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_addr(ctx, &mut sink)?;
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    if ma.needs_wrap_for_narrow_store(StoreKind::I8) {
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    }
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_insn(ctx, &mut sink, StoreKind::I8)?;
+                    }
+                    return Ok(());
                 }
 
                 // value to store: wrap to i32 then store 8 bits
@@ -1389,10 +1435,23 @@ where
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
-                if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                    mapper.call(ctx, &mut callback_ctx)?;
+                if let Some(ma) = self.memory_access.as_deref_mut() {
+                    use speet_ordering::EagerMemorySink;
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_addr(ctx, &mut sink)?;
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    if ma.needs_wrap_for_narrow_store(StoreKind::I16) {
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    }
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_insn(ctx, &mut sink, StoreKind::I16)?;
+                    }
+                    return Ok(());
                 }
 
                 // value to store: wrap to i32 then store 16 bits
@@ -1442,11 +1501,16 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    // invoke mapper callback if present (virtual -> physical)
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I32S)?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // perform memory load: always load 32-bit, sign-extend to 64 if MIPS64
@@ -1484,10 +1548,23 @@ where
                 self.emit_add(ctx, rctx, tail_idx)?;
 
                 // invoke mapper callback if present (virtual -> physical)
-                if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                    mapper.call(ctx, &mut callback_ctx)?;
+                if let Some(ma) = self.memory_access.as_deref_mut() {
+                    use speet_ordering::EagerMemorySink;
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_addr(ctx, &mut sink)?;
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    if ma.needs_wrap_for_narrow_store(StoreKind::I32) {
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    }
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_insn(ctx, &mut sink, StoreKind::I32)?;
+                    }
+                    return Ok(());
                 }
 
                 // value to store: if MIPS64 wrap to i32 then store 32-bit
@@ -1541,10 +1618,13 @@ where
                     self.emit_add(ctx, rctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
                         let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_load(ctx, &mut sink, LoadKind::I64)?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     // perform 64-bit memory load
@@ -1583,10 +1663,21 @@ where
                     self.emit_add(ctx, rctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
+                        {
+                            let mut fed = FedContext::new(rctx, tail_idx);
+                            let mut sink = EagerMemorySink::new(&mut fed);
+                            ma.emit_store_addr(ctx, &mut sink)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                        // StoreKind::I64 never needs wrapping
+                        {
+                            let mut fed = FedContext::new(rctx, tail_idx);
+                            let mut sink = EagerMemorySink::new(&mut fed);
+                            ma.emit_store_insn(ctx, &mut sink, StoreKind::I64)?;
+                        }
+                        return Ok(());
                     }
 
                     // store 64-bit value directly
@@ -1774,10 +1865,30 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
+                        {
+                            let mut fed = FedContext::new(rctx, tail_idx);
+                            let mut sink = EagerMemorySink::new(&mut fed);
+                            ma.emit_store_addr(ctx, &mut sink)?;
+                        }
+                        let load_addr = self.load_addr_scratch_local(rctx.layout());
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(load_addr))?;
+                        emit_lr(
+                            ctx,
+                            rctx,
+                            RmwWidth::W32,
+                            self.atomic_opts,
+                            load_addr,
+                            ValType::I32,
+                            speet_ordering::MemOrder::Strong,
+                            tail_idx,
+                        )?;
+                        if self.enable_mips64 {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     let load_addr = self.load_addr_scratch_local(rctx.layout());
@@ -1811,10 +1922,36 @@ where
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
-                if let Some(mapper) = self.mapper_callback.as_mut() {
-                    let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                    mapper.call(ctx, &mut callback_ctx)?;
+                if let Some(ma) = self.memory_access.as_deref_mut() {
+                    use speet_ordering::EagerMemorySink;
+                    {
+                        let mut fed = FedContext::new(rctx, tail_idx);
+                        let mut sink = EagerMemorySink::new(&mut fed);
+                        ma.emit_store_addr(ctx, &mut sink)?;
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    if ma.needs_wrap_for_narrow_store(StoreKind::I32) {
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    }
+                    emit_sc(
+                        ctx,
+                        rctx,
+                        RmwWidth::W32,
+                        self.atomic_opts,
+                        self.mem_order,
+                        tail_idx,
+                    )?;
+                    // SC always succeeds: write 1 into rt
+                    if rt != GprO32::zero {
+                        let one: WasmInstruction<'static> = if self.enable_mips64 {
+                            WasmInstruction::I64Const(1)
+                        } else {
+                            WasmInstruction::I32Const(1)
+                        };
+                        rctx.feed(ctx, tail_idx, &one)?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    }
+                    return Ok(());
                 }
 
                 // Value to store: rt (truncated to i32 if MIPS64)
@@ -1859,10 +1996,27 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
+                        {
+                            let mut fed = FedContext::new(rctx, tail_idx);
+                            let mut sink = EagerMemorySink::new(&mut fed);
+                            ma.emit_store_addr(ctx, &mut sink)?;
+                        }
+                        let load_addr = self.load_addr_scratch_local(rctx.layout());
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(load_addr))?;
+                        emit_lr(
+                            ctx,
+                            rctx,
+                            RmwWidth::W64,
+                            self.atomic_opts,
+                            load_addr,
+                            ValType::I32,
+                            speet_ordering::MemOrder::Strong,
+                            tail_idx,
+                        )?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        return Ok(());
                     }
 
                     let load_addr = self.load_addr_scratch_local(rctx.layout());
@@ -1895,10 +2049,29 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
-                    if let Some(mapper) = self.mapper_callback.as_mut() {
-                        let mut fed = FedContext::new(rctx, tail_idx);
-                        let mut callback_ctx = CallbackContext::new(&mut fed);
-                        mapper.call(ctx, &mut callback_ctx)?;
+                    if let Some(ma) = self.memory_access.as_deref_mut() {
+                        use speet_ordering::EagerMemorySink;
+                        {
+                            let mut fed = FedContext::new(rctx, tail_idx);
+                            let mut sink = EagerMemorySink::new(&mut fed);
+                            ma.emit_store_addr(ctx, &mut sink)?;
+                        }
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                        // StoreKind::I64 never needs wrapping
+                        emit_sc(
+                            ctx,
+                            rctx,
+                            RmwWidth::W64,
+                            self.atomic_opts,
+                            self.mem_order,
+                            tail_idx,
+                        )?;
+                        // SCD always succeeds: write 1 into rt
+                        if rt != GprO32::zero {
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(1))?;
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        }
+                        return Ok(());
                     }
 
                     rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;

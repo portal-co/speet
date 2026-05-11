@@ -11,6 +11,7 @@ wasmparser   = { workspace = true }
 wasm-encoder = { workspace = true }
 wax-core     = { workspace = true }
 speet-memory = { path = "../../helper/speet-memory" }
+speet-ordering = { path = "../../helper/speet-ordering" }
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-traps = { path = "../../helper/speet-traps" }
 

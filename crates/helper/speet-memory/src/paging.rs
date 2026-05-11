@@ -2,7 +2,7 @@
 //!
 //! Each function in this module is a *builder*: it takes the static
 //! configuration up-front and returns a struct that implements
-//! [`MapperCallback`].  The returned struct calls `declare_locals` to
+//! [`AddressMapper`].  The returned struct calls `declare_locals` to
 //! allocate its own scratch locals from a [`LocalLayout`], removing the
 //! need for callers to manage [`PageMapLocals`] manually.
 //!
@@ -14,24 +14,24 @@
 //!     true,                // use i64 (RV64 / memory64)
 //! );
 //! mapper.declare_locals(&mut layout);  // allocates 4 × i32 scratch locals
-//! recompiler.set_mapper_callback(&mut mapper);
+//! recompiler.set_memory_access(&mut mapper);
 //! ```
 //!
 //! # Scratch-local convention
 //!
 //! The mapper calls `declare_locals` to append four consecutive `i32` locals
 //! to the layout and stores them internally via [`PageMapLocals::consecutive`].
-//! Calling `call` before `declare_locals` will panic.
+//! Calling `translate` before `declare_locals` will panic.
 //!
 //! # Stack contract (all variants)
 //! * **Before**: virtual address (`i32` when `use_i64 = false`, `i64` when
 //!   `use_i64 = true`) is on the wasm value stack.
 //! * **After**: physical address of the same type is on the stack.
 
-use crate::mapper::{CallbackContext, MapperCallback};
+use crate::mapper::AddressMapper;
+use speet_ordering::MemorySink;
 use yecta::{LocalDeclarator, LocalLayout, layout::CellIdx};
 use wasm_encoder::{Instruction, MemArg, ValType};
-use wax_core::build::InstructionSink;
 
 // ── PageTableBase ──────────────────────────────────────────────────────────────
 
@@ -63,22 +63,22 @@ impl PageTableBase {
     pub fn emit_load<Context, E>(
         &self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E>,
+        sink: &mut dyn MemorySink<Context, E>,
         use_i64: bool,
     ) -> Result<(), E> {
         match self {
             PageTableBase::Constant(addr) => {
                 if use_i64 {
-                    cb.emit(ctx, &Instruction::I64Const(*addr as i64))?;
+                    sink.instruction(ctx, &Instruction::I64Const(*addr as i64))?;
                 } else {
-                    cb.emit(ctx, &Instruction::I32Const(*addr as i32))?;
+                    sink.instruction(ctx, &Instruction::I32Const(*addr as i32))?;
                 }
             }
             PageTableBase::Local(idx) => {
-                cb.emit(ctx, &Instruction::LocalGet(*idx))?;
+                sink.instruction(ctx, &Instruction::LocalGet(*idx))?;
             }
             PageTableBase::Global(idx) => {
-                cb.emit(ctx, &Instruction::GlobalGet(*idx))?;
+                sink.instruction(ctx, &Instruction::GlobalGet(*idx))?;
             }
             PageTableBase::Param => {
                 panic!("PageTableBase::Param was not replaced by declare_params");
@@ -167,39 +167,41 @@ impl LocalDeclarator for StandardPageTableMapper {
             let slot = layout.append(1, val_type);
             self.security_dir_base = PageTableBase::Local(layout.base(slot));
         }
+        let _ = cell;
     }
 
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+        let _ = cell;
     }
 }
 
-impl<Context, E> MapperCallback<Context, E>
+impl<Context, E> AddressMapper<Context, E>
     for StandardPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
     }
 
-    fn call(
+    fn translate(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E>,
+        sink: &mut dyn MemorySink<Context, E>,
     ) -> Result<(), E> {
-        let locals = self.locals.expect("declare_locals must be called before call");
+        let locals = self.locals.expect("declare_locals must be called before translate");
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
         if self.use_i64 {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.page_table_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.page_table_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -208,20 +210,20 @@ impl<Context, E> MapperCallback<Context, E>
                 }),
             )?;
 
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::LocalTee(ls0))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls0))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls1))?;
 
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.security_dir_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.security_dir_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -229,28 +231,28 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
 
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(48))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Or)?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(48))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Or)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
         } else {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
-            cb.emit(ctx, &Instruction::I32Const(16))?;
-            cb.emit(ctx, &Instruction::I32ShrU)?;
-            cb.emit(ctx, &Instruction::I32Const(3))?;
-            cb.emit(ctx, &Instruction::I32Shl)?;
-            self.page_table_base.emit_load(ctx, cb, false)?;
-            cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::I32Const(16))?;
+            sink.instruction(ctx, &Instruction::I32ShrU)?;
+            sink.instruction(ctx, &Instruction::I32Const(3))?;
+            sink.instruction(ctx, &Instruction::I32Shl)?;
+            self.page_table_base.emit_load(ctx, sink, false)?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -258,10 +260,10 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I32And)?;
-            cb.emit(ctx, &Instruction::I32Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I32Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I32And)?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
         }
         Ok(())
     }
@@ -269,7 +271,7 @@ impl<Context, E> MapperCallback<Context, E>
 
 /// Build a single-level 64 KiB page-table mapper.
 ///
-/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// Call [`AddressMapper::declare_locals`] on the returned struct before using
 /// it as a mapper callback.
 pub fn standard_page_table_mapper(
     page_table_base: impl Into<PageTableBase>,
@@ -310,39 +312,41 @@ impl LocalDeclarator for StandardPageTableMapper32 {
             let slot = layout.append(1, val_type);
             self.security_dir_base = PageTableBase::Local(layout.base(slot));
         }
+        let _ = cell;
     }
 
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+        let _ = cell;
     }
 }
 
-impl<Context, E> MapperCallback<Context, E>
+impl<Context, E> AddressMapper<Context, E>
     for StandardPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
     }
 
-    fn call(
+    fn translate(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E>,
+        sink: &mut dyn MemorySink<Context, E>,
     ) -> Result<(), E> {
-        let locals = self.locals.expect("declare_locals must be called before call");
+        let locals = self.locals.expect("declare_locals must be called before translate");
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
         if self.use_i64 {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.page_table_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.page_table_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -350,23 +354,23 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
+            sink.instruction(ctx, &Instruction::LocalTee(ls0))?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls1))?;
 
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Const(8))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Const(8))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls2))?;
 
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.security_dir_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.security_dir_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -374,27 +378,27 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::I64Const(24))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(24))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls2))?;
-            cb.emit(ctx, &Instruction::I64Or)?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::I64Const(24))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(24))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls2))?;
+            sink.instruction(ctx, &Instruction::I64Or)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
         } else {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
-            cb.emit(ctx, &Instruction::I32Const(16))?;
-            cb.emit(ctx, &Instruction::I32ShrU)?;
-            cb.emit(ctx, &Instruction::I32Const(2))?;
-            cb.emit(ctx, &Instruction::I32Shl)?;
-            self.page_table_base.emit_load(ctx, cb, false)?;
-            cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::I32Const(16))?;
+            sink.instruction(ctx, &Instruction::I32ShrU)?;
+            sink.instruction(ctx, &Instruction::I32Const(2))?;
+            sink.instruction(ctx, &Instruction::I32Shl)?;
+            self.page_table_base.emit_load(ctx, sink, false)?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -402,20 +406,20 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
+            sink.instruction(ctx, &Instruction::LocalTee(ls0))?;
 
-            cb.emit(ctx, &Instruction::I32Const(0xFF))?;
-            cb.emit(ctx, &Instruction::I32And)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
-            cb.emit(ctx, &Instruction::I32Const(8))?;
-            cb.emit(ctx, &Instruction::I32ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
+            sink.instruction(ctx, &Instruction::I32Const(0xFF))?;
+            sink.instruction(ctx, &Instruction::I32And)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls0))?;
+            sink.instruction(ctx, &Instruction::I32Const(8))?;
+            sink.instruction(ctx, &Instruction::I32ShrU)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls1))?;
 
-            cb.emit(ctx, &Instruction::I32Const(2))?;
-            cb.emit(ctx, &Instruction::I32Shl)?;
-            self.security_dir_base.emit_load(ctx, cb, false)?;
-            cb.emit(ctx, &Instruction::I32Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::I32Const(2))?;
+            sink.instruction(ctx, &Instruction::I32Shl)?;
+            self.security_dir_base.emit_load(ctx, sink, false)?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -423,17 +427,17 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I32Const(24))?;
-            cb.emit(ctx, &Instruction::I32ShrU)?;
-            cb.emit(ctx, &Instruction::I32Const(24))?;
-            cb.emit(ctx, &Instruction::I32Shl)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I32Or)?;
+            sink.instruction(ctx, &Instruction::I32Const(24))?;
+            sink.instruction(ctx, &Instruction::I32ShrU)?;
+            sink.instruction(ctx, &Instruction::I32Const(24))?;
+            sink.instruction(ctx, &Instruction::I32Shl)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I32Or)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I32Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I32And)?;
-            cb.emit(ctx, &Instruction::I32Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I32Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I32And)?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
         }
         Ok(())
     }
@@ -441,7 +445,7 @@ impl<Context, E> MapperCallback<Context, E>
 
 /// Build a single-level page-table mapper with 32-bit physical addresses.
 ///
-/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// Call [`AddressMapper::declare_locals`] on the returned struct before using
 /// it as a mapper callback.
 pub fn standard_page_table_mapper_32(
     page_table_base: impl Into<PageTableBase>,
@@ -482,44 +486,46 @@ impl LocalDeclarator for MultilevelPageTableMapper {
             let slot = layout.append(1, val_type);
             self.security_dir_base = PageTableBase::Local(layout.base(slot));
         }
+        let _ = cell;
     }
 
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+        let _ = cell;
     }
 }
 
-impl<Context, E> MapperCallback<Context, E>
+impl<Context, E> AddressMapper<Context, E>
     for MultilevelPageTableMapper
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
     }
 
-    fn call(
+    fn translate(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E>,
+        sink: &mut dyn MemorySink<Context, E>,
     ) -> Result<(), E> {
-        let locals = self.locals.expect("declare_locals must be called before call");
+        let locals = self.locals.expect("declare_locals must be called before translate");
         let lv = locals.vaddr;
         let [ls0, ls1, _] = locals.scratch;
 
         if self.use_i64 {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
 
             // Level 3 lookup
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(48))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.l3_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(48))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.l3_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -529,15 +535,15 @@ impl<Context, E> MapperCallback<Context, E>
             )?;
 
             // Level 2 lookup
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(32))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(32))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -547,15 +553,15 @@ impl<Context, E> MapperCallback<Context, E>
             )?;
 
             // Level 1 lookup
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -565,18 +571,18 @@ impl<Context, E> MapperCallback<Context, E>
             )?;
 
             // Security + final address
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls0))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.security_dir_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalTee(ls0))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls0))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.security_dir_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -584,17 +590,17 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64Const(48))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(48))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Or)?;
+            sink.instruction(ctx, &Instruction::I64Const(48))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(48))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Or)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
         } else {
             // 32-bit vaddr/paddr: delegate to the 32-bit single-level mapper
             let mut inner = StandardPageTableMapper32 {
@@ -604,7 +610,7 @@ impl<Context, E> MapperCallback<Context, E>
                 use_i64: false,
                 locals: self.locals,
             };
-            inner.call(ctx, cb)?;
+            inner.translate(ctx, sink)?;
         }
         Ok(())
     }
@@ -616,7 +622,7 @@ impl<Context, E> MapperCallback<Context, E>
 /// When `use_i64 = false` this delegates to
 /// [`standard_page_table_mapper_32`] (the 32-bit multi-level fallback).
 ///
-/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// Call [`AddressMapper::declare_locals`] on the returned struct before using
 /// it as a mapper callback.
 pub fn multilevel_page_table_mapper(
     l3_table_base: impl Into<PageTableBase>,
@@ -657,44 +663,46 @@ impl LocalDeclarator for MultilevelPageTableMapper32 {
             let slot = layout.append(1, val_type);
             self.security_dir_base = PageTableBase::Local(layout.base(slot));
         }
+        let _ = cell;
     }
 
     fn declare_locals(&mut self, cell: CellIdx, layout: &mut LocalLayout) {
         let slot = layout.append(4, ValType::I32);
         self.locals = Some(PageMapLocals::consecutive(layout.base(slot)));
+        let _ = cell;
     }
 }
 
-impl<Context, E> MapperCallback<Context, E>
+impl<Context, E> AddressMapper<Context, E>
     for MultilevelPageTableMapper32
 {
     fn chunk_size(&self) -> Option<u64> {
         Some(0x10000)
     }
 
-    fn call(
+    fn translate(
         &mut self,
         ctx: &mut Context,
-        cb: &mut CallbackContext<Context, E>,
+        sink: &mut dyn MemorySink<Context, E>,
     ) -> Result<(), E> {
-        let locals = self.locals.expect("declare_locals must be called before call");
+        let locals = self.locals.expect("declare_locals must be called before translate");
         let lv = locals.vaddr;
         let [ls0, ls1, ls2] = locals.scratch;
 
         if self.use_i64 {
-            cb.emit(ctx, &Instruction::LocalTee(lv))?;
+            sink.instruction(ctx, &Instruction::LocalTee(lv))?;
 
             // Level 3
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(48))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.l3_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(48))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.l3_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -702,18 +710,18 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
 
             // Level 2
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(32))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(32))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -721,18 +729,18 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
 
             // Level 1
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(16))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Const(2))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(16))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Const(2))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I32Load(MemArg {
                     offset: 0,
@@ -740,22 +748,22 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::LocalTee(ls0))?;
-            cb.emit(ctx, &Instruction::I64ExtendI32U)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls1))?;
+            sink.instruction(ctx, &Instruction::LocalTee(ls0))?;
+            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls1))?;
 
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls1))?;
-            cb.emit(ctx, &Instruction::I64Const(8))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::LocalSet(ls2))?;
-            cb.emit(ctx, &Instruction::I64Const(3))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            self.security_dir_base.emit_load(ctx, cb, true)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
-            cb.emit(
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls1))?;
+            sink.instruction(ctx, &Instruction::I64Const(8))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::LocalSet(ls2))?;
+            sink.instruction(ctx, &Instruction::I64Const(3))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            self.security_dir_base.emit_load(ctx, sink, true)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
+            sink.instruction(
                 ctx,
                 &Instruction::I64Load(MemArg {
                     offset: 0,
@@ -763,17 +771,17 @@ impl<Context, E> MapperCallback<Context, E>
                     memory_index: self.memory_index,
                 }),
             )?;
-            cb.emit(ctx, &Instruction::I64Const(56))?;
-            cb.emit(ctx, &Instruction::I64ShrU)?;
-            cb.emit(ctx, &Instruction::I64Const(24))?;
-            cb.emit(ctx, &Instruction::I64Shl)?;
-            cb.emit(ctx, &Instruction::LocalGet(ls2))?;
-            cb.emit(ctx, &Instruction::I64Or)?;
+            sink.instruction(ctx, &Instruction::I64Const(56))?;
+            sink.instruction(ctx, &Instruction::I64ShrU)?;
+            sink.instruction(ctx, &Instruction::I64Const(24))?;
+            sink.instruction(ctx, &Instruction::I64Shl)?;
+            sink.instruction(ctx, &Instruction::LocalGet(ls2))?;
+            sink.instruction(ctx, &Instruction::I64Or)?;
 
-            cb.emit(ctx, &Instruction::LocalGet(lv))?;
-            cb.emit(ctx, &Instruction::I64Const(0xFFFF))?;
-            cb.emit(ctx, &Instruction::I64And)?;
-            cb.emit(ctx, &Instruction::I64Add)?;
+            sink.instruction(ctx, &Instruction::LocalGet(lv))?;
+            sink.instruction(ctx, &Instruction::I64Const(0xFFFF))?;
+            sink.instruction(ctx, &Instruction::I64And)?;
+            sink.instruction(ctx, &Instruction::I64Add)?;
         } else {
             // 32-bit fallback: delegate to standard_page_table_mapper_32
             let mut inner = StandardPageTableMapper32 {
@@ -783,7 +791,7 @@ impl<Context, E> MapperCallback<Context, E>
                 use_i64: false,
                 locals: self.locals,
             };
-            inner.call(ctx, cb)?;
+            inner.translate(ctx, sink)?;
         }
         Ok(())
     }
@@ -794,7 +802,7 @@ impl<Context, E> MapperCallback<Context, E>
 /// When `use_i64 = false` this delegates to
 /// [`standard_page_table_mapper_32`].
 ///
-/// Call [`MapperCallback::declare_locals`] on the returned struct before using
+/// Call [`AddressMapper::declare_locals`] on the returned struct before using
 /// it as a mapper callback.
 pub fn multilevel_page_table_mapper_32(
     l3_table_base: impl Into<PageTableBase>,

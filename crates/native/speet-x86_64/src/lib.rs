@@ -45,7 +45,7 @@ use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry}};
 pub mod cfg;
 pub mod direct;
-use speet_memory::MapperCallback;
+use speet_memory::MemoryAccess;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
     InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,
@@ -58,12 +58,10 @@ use speet_traps::{
 /// (one function per instruction) via [`direct::translate_bytes`].
 ///
 /// # Type parameters
-/// - `'cb` — lifetime of the borrowed mapper callback.
-/// - `'ctx` — lifetime of data captured inside the mapper callback.
 /// - `Context` / `E` – forwarded to the underlying [`yecta::Reactor`].
 ///
 /// The function-sink type `F` is a per-method generic (not on the struct).
-pub struct X86Recompiler<'cb, 'ctx, Context, E> {
+pub struct X86Recompiler<Context, E> {
     base_rip: u64,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
@@ -72,11 +70,11 @@ pub struct X86Recompiler<'cb, 'ctx, Context, E> {
     /// Mnemonics that had no translation and fell back to `unreachable`.
     /// Cleared by [`clear_unsupported`](Self::clear_unsupported).
     unsupported_insns: alloc::collections::BTreeSet<alloc::string::String>,
-    /// Optional virtual-to-physical address mapper callback.
-    pub mapper_callback: Option<&'cb mut (dyn MapperCallback<Context, E> + 'ctx)>,
+    /// Optional memory access implementation (mapper + load/store).
+    memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
 }
 
-impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
+impl<Context, E> X86Recompiler<Context, E> {
     /// Returns the function-index base used by the underlying reactor.
     ///
     /// All WASM function indices emitted during translation are offset by
@@ -106,7 +104,7 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
             enable_speculative_calls: false,
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
-            mapper_callback: None,
+            memory_access: None,
         }
     }
 
@@ -170,18 +168,17 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
         Self::EXPECTED_RA_LOCAL
     }
 
-    /// Install a virtual-to-physical address mapper callback.
+    /// Install a memory access implementation (mapper + load/store).
     ///
-    /// The mapper's `declare_params` / `declare_locals` will be called via
-    /// the `extra` parameter of `declare_trap_params` / `declare_trap_locals`
-    /// during `setup_traps` / `init_function`.
-    pub fn set_mapper_callback(&mut self, mapper: &'cb mut (dyn MapperCallback<Context, E> + 'ctx)) {
-        self.mapper_callback = Some(mapper);
+    /// The implementation's `declare_params` / `declare_locals` will be
+    /// called during `setup_traps` / `init_function`.
+    pub fn set_memory_access(&mut self, ma: alloc::boxed::Box<dyn MemoryAccess<Context, E>>) {
+        self.memory_access = Some(ma);
     }
 
-    /// Remove any previously installed mapper callback.
-    pub fn clear_mapper_callback(&mut self) {
-        self.mapper_callback = None;
+    /// Remove any previously installed memory access implementation.
+    pub fn clear_memory_access(&mut self) {
+        self.memory_access = None;
     }
 
     fn emit_i64_const<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: i64) -> Result<(), E> {
@@ -233,18 +230,21 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     ///
-    /// `extra` is forwarded to [`declare_trap_params`](BaseContext::declare_trap_params)
-    /// and is called before the trap chain.  Pass `&mut ()` when there is no mapper
-    /// whose params need to be injected.
+    /// Calls `declare_trap_params` on the underlying context, forwarding
+    /// the installed memory access (if any) as the `extra` declarator.
     pub fn setup_traps<F>(
-        &self,
+        &mut self,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
-        extra: &mut dyn LocalDeclarator,
     ) -> u32 {
         rctx.layout_mut().append(16, wasm_encoder::ValType::I64);
         rctx.layout_mut().append(1, wasm_encoder::ValType::I32);
         rctx.layout_mut().append(5, wasm_encoder::ValType::I32);
         rctx.layout_mut().append(4, wasm_encoder::ValType::I64);
+        let mut unit = ();
+        let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
+            Some(m) => m as &mut dyn LocalDeclarator,
+            None => &mut unit,
+        };
         rctx.declare_trap_params(extra);
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
@@ -449,23 +449,34 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
         signed: bool,
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
-        // Invoke mapper if installed (transforms virtual → physical address on stack).
-        if let Some(mapper) = self.mapper_callback.as_deref_mut() {
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_memory::mem::LoadKind;
+            use speet_ordering::EagerMemorySink;
             use speet_link_core::context::FedContext;
-            use speet_memory::CallbackContext;
+            let kind = match (size_bits, signed) {
+                (8, true)   => LoadKind::I8S,
+                (8, false)  => LoadKind::I8U,
+                (16, true)  => LoadKind::I16S,
+                (16, false) => LoadKind::I16U,
+                (32, true)  => LoadKind::I32S,
+                (32, false) => LoadKind::I32U,
+                (64, _)     => LoadKind::I64,
+                _ => return rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            };
             let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
-        }
-        match (size_bits, signed) {
-            (8, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load8S(MemArg  { offset: 0, align: 0, memory_index: 0 })),
-            (8, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load8U(MemArg  { offset: 0, align: 0, memory_index: 0 })),
-            (16, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load16S(MemArg { offset: 0, align: 1, memory_index: 0 })),
-            (16, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load16U(MemArg { offset: 0, align: 1, memory_index: 0 })),
-            (32, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(MemArg { offset: 0, align: 2, memory_index: 0 })),
-            (32, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load32U(MemArg { offset: 0, align: 2, memory_index: 0 })),
-            (64, _) => rctx.feed(ctx, tail_idx, &Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 })),
-            _ => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_load(ctx, &mut sink, kind)
+        } else {
+            match (size_bits, signed) {
+                (8, true)   => rctx.feed(ctx, tail_idx, &Instruction::I64Load8S(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+                (8, false)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load8U(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+                (16, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load16S(MemArg { offset: 0, align: 1, memory_index: 0 })),
+                (16, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load16U(MemArg { offset: 0, align: 1, memory_index: 0 })),
+                (32, true)  => rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(MemArg { offset: 0, align: 2, memory_index: 0 })),
+                (32, false) => rctx.feed(ctx, tail_idx, &Instruction::I64Load32U(MemArg { offset: 0, align: 2, memory_index: 0 })),
+                (64, _)     => rctx.feed(ctx, tail_idx, &Instruction::I64Load(MemArg    { offset: 0, align: 3, memory_index: 0 })),
+                _           => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            }
         }
     }
 
@@ -477,20 +488,40 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
         size_bits: u32,
     ) -> Result<(), E> {
         use wasm_encoder::MemArg;
-        // Invoke mapper if installed (transforms virtual → physical address on stack).
-        if let Some(mapper) = self.mapper_callback.as_deref_mut() {
+        // Stack contract: [addr, value] — addr deeper, value on top.
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_memory::mem::StoreKind;
+            use speet_ordering::EagerMemorySink;
             use speet_link_core::context::FedContext;
-            use speet_memory::CallbackContext;
-            let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
-        }
-        match size_bits {
-            8  => rctx.feed(ctx, tail_idx, &Instruction::I64Store8(MemArg  { offset: 0, align: 0, memory_index: 0 })),
-            16 => rctx.feed(ctx, tail_idx, &Instruction::I64Store16(MemArg { offset: 0, align: 1, memory_index: 0 })),
-            32 => rctx.feed(ctx, tail_idx, &Instruction::I64Store32(MemArg { offset: 0, align: 2, memory_index: 0 })),
-            64 => rctx.feed(ctx, tail_idx, &Instruction::I64Store(MemArg   { offset: 0, align: 3, memory_index: 0 })),
-            _  => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            const STORE_TMP: u32 = 22;
+            let kind = match size_bits {
+                8  => StoreKind::I8,
+                16 => StoreKind::I16,
+                32 => StoreKind::I32,
+                64 => StoreKind::I64,
+                _  => return rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            };
+            // Save value (top of stack) to scratch local, map addr, restore value.
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(STORE_TMP))?;
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_addr(ctx, &mut sink)?;
+            }
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(STORE_TMP))?;
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_insn(ctx, &mut sink, kind)
+            }
+        } else {
+            match size_bits {
+                8  => rctx.feed(ctx, tail_idx, &Instruction::I64Store8(MemArg  { offset: 0, align: 0, memory_index: 0 })),
+                16 => rctx.feed(ctx, tail_idx, &Instruction::I64Store16(MemArg { offset: 0, align: 1, memory_index: 0 })),
+                32 => rctx.feed(ctx, tail_idx, &Instruction::I64Store32(MemArg { offset: 0, align: 2, memory_index: 0 })),
+                64 => rctx.feed(ctx, tail_idx, &Instruction::I64Store(MemArg   { offset: 0, align: 3, memory_index: 0 })),
+                _  => rctx.feed(ctx, tail_idx, &Instruction::Unreachable),
+            }
         }
     }
 
@@ -591,8 +622,8 @@ use speet_link_core::{
 };
 use wasm_encoder::ValType;
 
-impl<'cb, 'ctx, Context, E, F> Recompile<Context, E, F>
-    for X86Recompiler<'cb, 'ctx, Context, E>
+impl<Context, E, F> Recompile<Context, E, F>
+    for X86Recompiler<Context, E>
 where
     F: InstructionSink<Context, E>,
 {

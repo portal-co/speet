@@ -1,4 +1,5 @@
 use speet_link_core::FedContext;
+use speet_memory::mem::{LoadKind, StoreKind};
 use yecta::Fed;
 use crate::*;
 use rv_asm::AmoOp;
@@ -100,13 +101,26 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // Apply address mapping if provided (for paging support)
-        if let Some(mapper) = self.mapper_callback.as_mut() {
+        // ── MemoryAccess path ────────────────────────────────────────────────
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_ordering::EagerMemorySink;
+            let kind = match op {
+                LoadOp::I8  => LoadKind::I8S,
+                LoadOp::U8  => LoadKind::I8U,
+                LoadOp::I16 => LoadKind::I16S,
+                LoadOp::U16 => LoadKind::I16U,
+                LoadOp::I32 => LoadKind::I32S,
+                LoadOp::U32 => LoadKind::I32U,
+                LoadOp::I64 => LoadKind::I64,
+            };
             let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_load(ctx, &mut sink, kind)?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::reg_to_local(dest)))?;
+            return Ok(());
         }
 
+        // ── Default path (no MemoryAccess) ──────────────────────────────────
         // Save the effective address into the load-addr scratch local so that
         // emit_load can compare it against any pending lazy store addresses.
         let load_addr = self.load_addr_scratch_local(rctx.layout());
@@ -372,13 +386,33 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // Apply address mapping if provided (for paging support)
-        if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
+        // ── MemoryAccess path ────────────────────────────────────────────────
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_ordering::EagerMemorySink;
+            let kind = match op {
+                StoreOp::I8  => StoreKind::I8,
+                StoreOp::I16 => StoreKind::I16,
+                StoreOp::I32 => StoreKind::I32,
+                StoreOp::I64 => StoreKind::I64,
+            };
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_addr(ctx, &mut sink)?;
+            }
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
+            if ma.needs_wrap_for_narrow_store(kind) {
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+            }
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_insn(ctx, &mut sink, kind)?;
+            }
+            return Ok(());
         }
 
+        // ── Default path (no MemoryAccess) ──────────────────────────────────
         // Load value to store
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::reg_to_local(src)))?;
 
@@ -530,13 +564,21 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // Apply address mapping if provided (for paging support)
-        if let Some(mapper) = self.mapper_callback.as_mut() {
+        // ── MemoryAccess path ────────────────────────────────────────────────
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_ordering::EagerMemorySink;
+            let kind = match op {
+                FLoadOp::F32 => LoadKind::F32,
+                FLoadOp::F64 => LoadKind::F64,
+            };
             let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_load(ctx, &mut sink, kind)?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::freg_to_local(dest)))?;
+            return Ok(());
         }
 
+        // ── Default path (no MemoryAccess) ──────────────────────────────────
         // Save the effective address for alias checks.
         let load_addr = self.load_addr_scratch_local(rctx.layout());
         let addr_type = self.addr_val_type();
@@ -608,13 +650,28 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // Apply address mapping if provided (for paging support)
-        if let Some(mapper) = self.mapper_callback.as_mut() {
-            let mut fed = FedContext::new(rctx, tail_idx);
-            let mut callback_ctx = CallbackContext::new(&mut fed);
-            mapper.call(ctx, &mut callback_ctx)?;
+        // ── MemoryAccess path ────────────────────────────────────────────────
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            use speet_ordering::EagerMemorySink;
+            let kind = match op {
+                FStoreOp::F32 => StoreKind::F32,
+                FStoreOp::F64 => StoreKind::F64,
+            };
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_addr(ctx, &mut sink)?;
+            }
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
+            {
+                let mut fed = FedContext::new(rctx, tail_idx);
+                let mut sink = EagerMemorySink::new(&mut fed);
+                ma.emit_store_insn(ctx, &mut sink, kind)?;
+            }
+            return Ok(());
         }
 
+        // ── Default path (no MemoryAccess) ──────────────────────────────────
         // Load value to store
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::freg_to_local(src)))?;
 

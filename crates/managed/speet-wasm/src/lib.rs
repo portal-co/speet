@@ -13,22 +13,23 @@
 //!
 //! ```ignore
 //! use speet_wasm::{WasmFrontend, GuestMemoryConfig, IndexOffsets};
-//! use speet_memory::{AddressWidth, standard_page_table_mapper, PageTableBase};
+//! use speet_memory::{AddressWidth, DirectMemory, IntWidth, standard_page_table_mapper, PageTableBase};
 //! use speet_linker::Linker;
 //! use wasm_encoder::Function;
 //!
-//! let mapper: Box<dyn Fn() -> Box<dyn MapperCallback<(), BinaryReaderError, Function>>> =
-//!     Box::new(|| {
-//!         let mut m = standard_page_table_mapper(
+//! let memory_access: Box<dyn MemoryAccess<(), BinaryReaderError>> = Box::new(
+//!     DirectMemory::new(
+//!         standard_page_table_mapper(
 //!             PageTableBase::Constant(0x1000_0000),
 //!             PageTableBase::Constant(0x2000_0000),
 //!             0, false,
-//!         );
-//!         Box::new(m)
-//!     });
+//!         ),
+//!         0, AddressWidth::W32, IntWidth::I32,
+//!     )
+//! );
 //!
 //! let mut frontend = WasmFrontend::new(
-//!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, mapper: Some(mapper) }],
+//!     vec![GuestMemoryConfig { addr_width: AddressWidth::W32, memory_access: Some(memory_access) }],
 //!     0, // host_memory
 //!     IndexOffsets { func: 10, global: 0, table: 0 },
 //!     Box::new(|locals| Function::new(locals)),
@@ -46,9 +47,8 @@ use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use speet_link_core::{
     BaseContext, BinaryUnit, DataSegment, Recompile, context::ReactorContext, unit::FuncType,
 };
-use speet_memory::{
-    AddressWidth, CallbackContext, IntWidth, LoadKind, MapperCallback, MemoryEmitter, StoreKind,
-};
+use speet_memory::{AddressWidth, IntWidth, LoadKind, MemoryAccess, StoreKind};
+use speet_ordering::EagerMemorySink;
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 use wasm_layout::{FuncSignature, LocalLayout, LocalSlot};
@@ -65,9 +65,10 @@ use wax_core::build::InstructionSink;
 pub struct GuestMemoryConfig<Context, E> {
     /// Width of guest addresses for this memory.
     pub addr_width: AddressWidth,
-    /// Mapper that translates virtual → physical addresses.
-    /// The mapper declares its own scratch locals via `declare_locals`.
-    pub mapper: Option<Box<dyn MapperCallback<Context, E>>>,
+    /// Memory access implementation that owns address translation, memory
+    /// index, and load/store emission for this memory.
+    /// When `None`, identity mapping and host memory index 0 are used.
+    pub memory_access: Option<Box<dyn MemoryAccess<Context, E>>>,
 }
 
 // ── IndexOffsets ──────────────────────────────────────────────────────────────
@@ -321,7 +322,7 @@ where
     /// mapper or the mapper does not specify a chunk size.
     fn chunk_size_for_memory(&self, mem_idx: usize) -> Option<u64> {
         let cfg = self.per_memory.get(mem_idx)?;
-        cfg.mapper.as_ref()?.chunk_size()
+        cfg.memory_access.as_ref()?.chunk_size()
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -521,7 +522,7 @@ where
 
         // // Create one mapper instance, call declare_locals to allocate its scratch.
         for p in self.per_memory.iter_mut() {
-            if let Some(m) = p.mapper.as_deref_mut() {
+            if let Some(m) = p.memory_access.as_deref_mut() {
                 m.declare_locals(cell, base_ctx.layout_mut());
             }
         }
@@ -558,14 +559,13 @@ where
                 out.instruction(ctx, &Instruction::I32Const(guest_va as i32))?;
             }
 
-            // Call mapper if configured.
-            if let Some(m) = self
+            // Call memory access addr translation if configured.
+            if let Some(ma) = self
                 .per_memory
                 .get_mut(memory_idx)
-                .and_then(|cfg| cfg.mapper.as_deref_mut())
+                .and_then(|cfg| cfg.memory_access.as_deref_mut())
             {
-                let mut cb = CallbackContext::new(&mut out);
-                m.call(ctx, &mut cb)?;
+                ma.emit_store_addr(ctx, &mut EagerMemorySink::new(&mut out))?;
             }
 
             // memory.init seg_idx host_memory
@@ -698,15 +698,15 @@ where
         // Use the primary memory's (index 0) mapper and addr_width for this function.
         let addr_width = self.addr_width_for_memory(0);
 
-        // Mapper and loop scratch locals (only when a mapper is configured).
-        // loop_slot is appended first; mapper declares its own locals via declare_locals.
+        // Mapper and loop scratch locals (only when a memory_access is configured).
+        // loop_slot is appended first; memory_access declares its own locals via declare_locals.
         let mut p = self.per_memory.iter_mut();
         let mut loop_slot = None;
         let loop_slot = loop {
             let Some(p) = p.next() else {
                 break loop_slot; // unused
             };
-            if let Some(m) = p.mapper.as_deref_mut() {
+            if let Some(m) = p.memory_access.as_deref_mut() {
                 m.declare_locals(cell, base_ctx.layout_mut());
 
                 if let None = loop_slot {
@@ -823,7 +823,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I32S,
                 )?;
             }
@@ -837,7 +837,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I64,
                 )?;
             }
@@ -851,7 +851,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::F32,
                 )?;
             }
@@ -865,7 +865,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::F64,
                 )?;
             }
@@ -879,7 +879,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I8S,
                 )?;
             }
@@ -893,7 +893,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I8U,
                 )?;
             }
@@ -907,7 +907,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I16S,
                 )?;
             }
@@ -921,7 +921,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I16U,
                 )?;
             }
@@ -935,7 +935,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I8S,
                 )?;
             }
@@ -949,7 +949,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I8U,
                 )?;
             }
@@ -963,7 +963,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I16S,
                 )?;
             }
@@ -977,7 +977,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I16U,
                 )?;
             }
@@ -991,7 +991,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I32S,
                 )?;
             }
@@ -1005,7 +1005,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     LoadKind::I32U,
                 )?;
             }
@@ -1020,7 +1020,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I32,
                     IntWidth::I32,
                     base_scratch_idx,
@@ -1035,7 +1035,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I64,
                     IntWidth::I64,
                     base_scratch_idx,
@@ -1050,7 +1050,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::F32,
                     IntWidth::I32,
                     base_scratch_idx,
@@ -1065,7 +1065,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::F64,
                     IntWidth::I64,
                     base_scratch_idx,
@@ -1080,7 +1080,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I8,
                     IntWidth::I32,
                     base_scratch_idx,
@@ -1095,7 +1095,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I16,
                     IntWidth::I32,
                     base_scratch_idx,
@@ -1110,7 +1110,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I8,
                     IntWidth::I64,
                     base_scratch_idx,
@@ -1125,7 +1125,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I16,
                     IntWidth::I64,
                     base_scratch_idx,
@@ -1140,7 +1140,7 @@ where
                     memory_index,
                     self.per_memory
                         .get_mut(memarg.memory as usize)
-                        .and_then(|cfg| cfg.mapper.as_deref_mut()),
+                        .and_then(|cfg| cfg.memory_access.as_deref_mut()),
                     StoreKind::I32,
                     IntWidth::I64,
                     base_scratch_idx,
@@ -1268,7 +1268,7 @@ where
 
             // ── memory.copy → per-chunk loop (mapper required) ────────────
             Operator::MemoryCopy { src_mem, dst_mem } => {
-                if self.per_memory.iter().any(|a| a.mapper.is_some()) {
+                if self.per_memory.iter().any(|a| a.memory_access.is_some()) {
                     // Stack: [dst_va, src_va, len]
                     let chunk = self.chunk_size_for_memory(0).unwrap_or(0x10000) as i32;
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
@@ -1282,15 +1282,13 @@ where
                     out.instruction(ctx, &Instruction::BrIf(1))?;
                     // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(m) = self.per_memory[*dst_mem as usize].mapper.as_deref_mut() {
-                        let mut cb = CallbackContext::new(out);
-                        m.call(ctx, &mut cb)?;
+                    if let Some(ma) = self.per_memory[*dst_mem as usize].memory_access.as_deref_mut() {
+                        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
                     }
                     // physical src
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
-                    if let Some(m) = self.per_memory[*src_mem as usize].mapper.as_deref_mut() {
-                        let mut cb = CallbackContext::new(out);
-                        m.call(ctx, &mut cb)?;
+                    if let Some(ma) = self.per_memory[*src_mem as usize].memory_access.as_deref_mut() {
+                        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
                     }
                     // len = min(chunk, remaining_len)
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
@@ -1338,7 +1336,7 @@ where
 
             // ── memory.fill → per-chunk loop (mapper required) ────────────
             Operator::MemoryFill { mem } => {
-                if self.per_memory.iter().any(|a| a.mapper.is_some()) {
+                if self.per_memory.iter().any(|a| a.memory_access.is_some()) {
                     // Stack: [dst_va, val, len]
                     let chunk = self.chunk_size_for_memory(*mem as usize).unwrap_or(0x10000) as i32;
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
@@ -1351,9 +1349,8 @@ where
                     out.instruction(ctx, &Instruction::BrIf(1))?;
                     // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(m) = self.per_memory[*mem as usize].mapper.as_deref_mut() {
-                        let mut cb = CallbackContext::new(out);
-                        m.call(ctx, &mut cb)?;
+                    if let Some(ma) = self.per_memory[*mem as usize].memory_access.as_deref_mut() {
+                        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
                     }
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?; // val
                     // len = min(chunk, remaining)
@@ -1506,11 +1503,58 @@ fn emit_load<Context, E, F: InstructionSink<Context, E>>(
     addr_width: AddressWidth,
     int_width: IntWidth,
     memory_index: u32,
-    mapper: Option<&mut (dyn MapperCallback<Context, E> + '_)>,
+    memory_access: Option<&mut (dyn MemoryAccess<Context, E> + '_)>,
     kind: LoadKind,
 ) -> Result<(), E> {
-    let mut emitter = MemoryEmitter::new(addr_width, int_width, memory_index, mapper);
-    emitter.emit_load(ctx, out, kind)
+    // Step 1: address translation (wrap + mapper, or identity).
+    if let Some(ma) = memory_access {
+        // Use emit_store_addr for address-only translation (no insn emission).
+        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+    } else if addr_width == (AddressWidth::W64 { memory64: false }) {
+        out.instruction(ctx, &Instruction::I32WrapI64)?;
+    }
+
+    // Step 2: emit load instruction inline.
+    let mem64 = addr_width.memory64();
+    let int64 = int_width == IntWidth::I64;
+    let ma_arg = MemArg { offset: 0, align: 0, memory_index };
+    let load_instr = match kind {
+        LoadKind::I8S => {
+            if mem64 && int64 { Instruction::I64Load8S(ma_arg) } else { Instruction::I32Load8S(ma_arg) }
+        }
+        LoadKind::I8U => {
+            if mem64 && int64 { Instruction::I64Load8U(ma_arg) } else { Instruction::I32Load8U(ma_arg) }
+        }
+        LoadKind::I16S => {
+            if mem64 && int64 { Instruction::I64Load16S(ma_arg) } else { Instruction::I32Load16S(ma_arg) }
+        }
+        LoadKind::I16U => {
+            if mem64 && int64 { Instruction::I64Load16U(ma_arg) } else { Instruction::I32Load16U(ma_arg) }
+        }
+        LoadKind::I32S => {
+            if mem64 && int64 { Instruction::I64Load32S(ma_arg) } else { Instruction::I32Load(ma_arg) }
+        }
+        LoadKind::I32U => {
+            if mem64 { Instruction::I64Load32U(ma_arg) } else { Instruction::I32Load(ma_arg) }
+        }
+        LoadKind::I64 => Instruction::I64Load(ma_arg),
+        LoadKind::F32 => Instruction::F32Load(ma_arg),
+        LoadKind::F64 => Instruction::F64Load(ma_arg),
+    };
+    out.instruction(ctx, &load_instr)?;
+
+    // Step 3: post-load sign/zero-extend.
+    match kind {
+        LoadKind::I8S if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32S)?; }
+        LoadKind::I8U if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32U)?; }
+        LoadKind::I16S if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32S)?; }
+        LoadKind::I16U if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32U)?; }
+        LoadKind::I32S if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32S)?; }
+        LoadKind::I32U if !mem64 => { out.instruction(ctx, &Instruction::I64ExtendI32U)?; }
+        LoadKind::F32 => { out.instruction(ctx, &Instruction::F64PromoteF32)?; }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1520,7 +1564,7 @@ fn emit_store<Context, E, F: InstructionSink<Context, E>>(
     memarg: &wasmparser::MemArg,
     addr_width: AddressWidth,
     memory_index: u32,
-    mapper: Option<&mut (dyn MapperCallback<Context, E> + '_)>,
+    memory_access: Option<&mut (dyn MemoryAccess<Context, E> + '_)>,
     kind: StoreKind,
     int_width: IntWidth,
     base_scratch_idx: u32,
@@ -1535,11 +1579,13 @@ fn emit_store<Context, E, F: InstructionSink<Context, E>>(
             },
         };
 
+    // Save value, emit offset, translate address, restore value.
     out.instruction(ctx, &Instruction::LocalSet(scratch))?;
     emit_offset(ctx, out, memarg.offset, addr_width)?;
-    {
-        let mut emitter = MemoryEmitter::new(addr_width, int_width, memory_index, mapper);
-        emitter.emit_store_addr(ctx, out)?;
+    if let Some(ma) = memory_access {
+        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+    } else if addr_width == (AddressWidth::W64 { memory64: false }) {
+        out.instruction(ctx, &Instruction::I32WrapI64)?;
     }
     out.instruction(ctx, &Instruction::LocalGet(scratch))?;
 
@@ -1711,7 +1757,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets::default(),
@@ -1731,7 +1777,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets::default(),
@@ -1759,7 +1805,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets::default(),
@@ -1779,15 +1825,8 @@ mod tests {
     #[test]
     fn data_segment_chunked_with_mapper() {
         // 3 × 64 KiB at 0x10000 with a ChunkedMapper → 3 passive segments + init fn.
-        use speet_memory::ChunkedMapper;
+        use speet_memory::{ChunkedMapper, DirectMemory, IntWidth};
         use wasm_encoder::*;
-        use wasm_layout::LocalDeclarator;
-        // No-op mapper closure wrapper that satisfies LocalDeclarator.
-        struct NoopMapper;
-        impl LocalDeclarator for NoopMapper {}
-        impl MapperCallback<(), TestError> for NoopMapper {
-            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError>) -> Result<(), TestError> { Ok(()) }
-        }
 
         let mut module = Module::new();
         let mut types = TypeSection::new();
@@ -1818,16 +1857,15 @@ mod tests {
 
         let bytes = module.finish();
 
-        // Mapper factory that returns a ChunkedMapper with 64 KiB pages.
-        let mapper: Box<dyn MapperCallback<(), TestError>> = Box::new(ChunkedMapper {
-            page_size: 0x10000,
-            inner: NoopMapper,
-        });
+        // Memory access: DirectMemory wrapping a ChunkedMapper with 64 KiB pages.
+        let memory_access: Box<dyn MemoryAccess<(), TestError>> = Box::new(
+            DirectMemory::new(ChunkedMapper { page_size: 0x10000, inner: () }, 0, AddressWidth::W32, IntWidth::I32)
+        );
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: Some(mapper),
+                memory_access: Some(memory_access),
             }],
             0,
             IndexOffsets::default(),
@@ -1861,7 +1899,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets::default(),
@@ -1889,7 +1927,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError, Function> = WasmFrontend::new(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets {
@@ -1939,7 +1977,7 @@ mod tests {
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: None
+                memory_access: None
             }],
             0,
             IndexOffsets::default(),
@@ -1955,15 +1993,8 @@ mod tests {
     #[test]
     fn memory_copy_lowered_to_loop_with_mapper() {
         // memory.copy with a mapper should emit a block/loop, not a single instruction.
-        use speet_memory::ChunkedMapper;
+        use speet_memory::{ChunkedMapper, DirectMemory, IntWidth};
         use wasm_encoder::*;
-        use wasm_layout::LocalDeclarator;
-        // No-op mapper closure wrapper that satisfies LocalDeclarator.
-        struct NoopMapper;
-        impl LocalDeclarator for NoopMapper {}
-        impl MapperCallback<(), TestError> for NoopMapper {
-            fn call(&mut self, _ctx: &mut (), _cb: &mut CallbackContext<(), TestError>) -> Result<(), TestError> { Ok(()) }
-        }
 
         let mut module = Module::new();
         let mut types = TypeSection::new();
@@ -1996,15 +2027,14 @@ mod tests {
         module.section(&codes);
         let bytes = module.finish();
 
-        let mapper: Box<dyn MapperCallback<(), TestError>> = Box::new(ChunkedMapper {
-            page_size: 0x10000,
-            inner: NoopMapper,
-        });
+        let memory_access: Box<dyn MemoryAccess<(), TestError>> = Box::new(
+            DirectMemory::new(ChunkedMapper { page_size: 0x10000, inner: () }, 0, AddressWidth::W32, IntWidth::I32)
+        );
 
         let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
             alloc::vec![GuestMemoryConfig {
                 addr_width: AddressWidth::W32,
-                mapper: Some(mapper),
+                memory_access: Some(memory_access),
             }],
             0,
             IndexOffsets::default(),

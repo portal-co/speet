@@ -19,9 +19,12 @@
 //!
 //! // Phase 2 — construct mapper with resolved indices.
 //! let sec_base = PageTableBase::Constant(0x2000_0000);
-//! let mut mapper = vm.standard_mapper(&entity_space, sec_base, true);
-//! mapper.declare_locals(&mut rctx.layout_mut());
-//! recompiler.set_mapper_callback(&mut mapper);
+//! let mut mem = vm.standard_mapper(
+//!     &entity_space, sec_base, true,
+//!     AddressWidth::W64 { memory64: false }, IntWidth::I64,
+//! );
+//! mem.declare_locals(&mut rctx.layout_mut());
+//! recompiler.set_memory_access(Box::new(mem));
 //!
 //! // Phase 2 — declare the memory and optional global in MegabinaryBuilder.
 //! // IMPORTANT: declarations must happen in the same order as register() calls.
@@ -42,12 +45,17 @@
 //!
 //! // Phase 2 — construct mapper.  declare_params() replaces PageTableBase::Param.
 //! let sec_base = PageTableBase::Constant(0x2000_0000);
-//! let mut mapper = vm.standard_mapper(&entity_space, sec_base, true);
-//! // mapper.declare_params() is called by the linker via LocalDeclarator chain.
-//! recompiler.set_mapper_callback(&mut mapper);
+//! let mut mem = vm.standard_mapper(
+//!     &entity_space, sec_base, true,
+//!     AddressWidth::W64 { memory64: false }, IntWidth::I64,
+//! );
+//! // mem.declare_params() is called by the linker via LocalDeclarator chain.
+//! recompiler.set_memory_access(Box::new(mem));
 //! ```
 
 use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
+use crate::mem::{AddressWidth, IntWidth};
+use crate::mapper::DirectMemory;
 use crate::paging::{
     PageTableBase, StandardPageTableMapper, StandardPageTableMapper32,
     MultilevelPageTableMapper, MultilevelPageTableMapper32,
@@ -138,69 +146,79 @@ impl VirtualMemory {
 
     // ── Factory methods ────────────────────────────────────────────────────────
 
-    /// Build a [`StandardPageTableMapper`] with the resolved memory index and
-    /// page-table base from this `VirtualMemory`.
-    ///
-    /// `security_directory_base` and `use_i64` are passed through unchanged.
+    /// Build a [`DirectMemory`]`<`[`StandardPageTableMapper`]`>` with the
+    /// resolved memory index and page-table base from this `VirtualMemory`.
     pub fn standard_mapper(
         &self,
         entity_space: &EntityIndexSpace,
         security_directory_base: impl Into<PageTableBase>,
         use_i64: bool,
-    ) -> StandardPageTableMapper {
-        standard_page_table_mapper(
+        addr_width: AddressWidth,
+        int_width: IntWidth,
+    ) -> DirectMemory<StandardPageTableMapper> {
+        let mapper = standard_page_table_mapper(
             self.page_table_base_deferred(entity_space),
             security_directory_base,
             self.memory_idx(entity_space),
             use_i64,
-        )
+        );
+        DirectMemory::new(mapper, self.memory_idx(entity_space), addr_width, int_width)
     }
 
-    /// Build a [`StandardPageTableMapper32`] with the resolved memory index and
-    /// page-table base from this `VirtualMemory`.
+    /// Build a [`DirectMemory`]`<`[`StandardPageTableMapper32`]`>` with the
+    /// resolved memory index and page-table base from this `VirtualMemory`.
     pub fn standard_mapper_32(
         &self,
         entity_space: &EntityIndexSpace,
         security_directory_base: impl Into<PageTableBase>,
         use_i64: bool,
-    ) -> StandardPageTableMapper32 {
-        standard_page_table_mapper_32(
+        addr_width: AddressWidth,
+        int_width: IntWidth,
+    ) -> DirectMemory<StandardPageTableMapper32> {
+        let mapper = standard_page_table_mapper_32(
             self.page_table_base_deferred(entity_space),
             security_directory_base,
             self.memory_idx(entity_space),
             use_i64,
-        )
+        );
+        DirectMemory::new(mapper, self.memory_idx(entity_space), addr_width, int_width)
     }
 
-    /// Build a [`MultilevelPageTableMapper`] with the resolved memory index and
-    /// L3-table base from this `VirtualMemory`.
+    /// Build a [`DirectMemory`]`<`[`MultilevelPageTableMapper`]`>` with the
+    /// resolved memory index and L3-table base from this `VirtualMemory`.
     pub fn multilevel_mapper(
         &self,
         entity_space: &EntityIndexSpace,
         security_directory_base: impl Into<PageTableBase>,
         use_i64: bool,
-    ) -> MultilevelPageTableMapper {
-        multilevel_page_table_mapper(
+        addr_width: AddressWidth,
+        int_width: IntWidth,
+    ) -> DirectMemory<MultilevelPageTableMapper> {
+        let mapper = multilevel_page_table_mapper(
             self.page_table_base_deferred(entity_space),
             security_directory_base,
             self.memory_idx(entity_space),
             use_i64,
-        )
+        );
+        DirectMemory::new(mapper, self.memory_idx(entity_space), addr_width, int_width)
     }
 
-    /// Build a [`MultilevelPageTableMapper32`] with the resolved memory index
-    /// and L3-table base from this `VirtualMemory`.
+    /// Build a [`DirectMemory`]`<`[`MultilevelPageTableMapper32`]`>` with the
+    /// resolved memory index and L3-table base from this `VirtualMemory`.
     pub fn multilevel_mapper_32(
         &self,
         entity_space: &EntityIndexSpace,
         security_directory_base: impl Into<PageTableBase>,
         use_i64: bool,
-    ) -> MultilevelPageTableMapper32 {
-        multilevel_page_table_mapper_32(
+        addr_width: AddressWidth,
+        int_width: IntWidth,
+    ) -> DirectMemory<MultilevelPageTableMapper32> {
+        let mapper = multilevel_page_table_mapper_32(
             self.page_table_base_deferred(entity_space),
             security_directory_base,
             self.memory_idx(entity_space),
             use_i64,
-        )
+        );
+        DirectMemory::new(mapper, self.memory_idx(entity_space), addr_width, int_width)
     }
 }

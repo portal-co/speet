@@ -67,6 +67,7 @@
 
 use speet_link_core::ReactorContext;
 use wasm_encoder::{Instruction, MemArg, ValType};
+use wax_core::build::InstructionSink;
 
 // ── MemOrder ──────────────────────────────────────────────────────────────────
 
@@ -842,4 +843,182 @@ pub fn emit_fence<Context, E, RC: ReactorContext<Context, E> + ?Sized>(
     // Both Strong and Relaxed flush the bundle buffer.  Under Strong this is
     // always a no-op (empty buffer); under Relaxed it commits pending stores.
     rctx.flush_bundles(ctx, tail_idx)
+}
+
+// ── MemorySink ────────────────────────────────────────────────────────────────
+
+/// Object-safe sink for memory load/store emission.
+///
+/// Abstracts over two concrete implementations:
+///
+/// * [`ReactorMemorySink`] — delegates to the yecta reactor with lazy-store
+///   deferral and alias-check logic baked in; used by native recompilers.
+/// * [`EagerMemorySink`] — forwards every instruction directly to an
+///   underlying [`InstructionSink`] without deferral; used by `speet-wasm`.
+///
+/// The `tail_idx`, `order`, and `atomic` parameters that the free-function
+/// API requires are baked into the concrete impl at construction time so that
+/// callers (mappers, `DirectMemory`) need not carry them.
+pub trait MemorySink<Context, E>: InstructionSink<Context, E> {
+    /// Emit a store instruction.
+    ///
+    /// The stack at the call site must have `[mapped_address, value]` on top.
+    /// `addr_type` is the wasm type of the address operand (`I32` for
+    /// ordinary memory, `I64` for memory64).
+    ///
+    /// Integer stores may be deferred by the underlying reactor; float stores
+    /// are always emitted eagerly.
+    fn feed_store(
+        &mut self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E>;
+
+    /// Emit a load instruction, flushing any deferred stores that alias
+    /// `addr_local` first.
+    ///
+    /// The stack at the call site must have the load address on top (already
+    /// tee'd into `addr_local`).  `addr_type` is the wasm type of the address.
+    fn feed_load(
+        &mut self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E>;
+
+    /// Flush all deferred stores (equivalent to a `FENCE`/`SYNC`).
+    fn flush_all(&mut self, ctx: &mut Context) -> Result<(), E>;
+}
+
+// ── ReactorMemorySink ─────────────────────────────────────────────────────────
+
+/// [`MemorySink`] backed by a [`ReactorContext`].
+///
+/// Bakes in `tail_idx`, `order`, and `atomic` so that callers only supply the
+/// per-instruction arguments.
+pub struct ReactorMemorySink<'a, RC: ?Sized> {
+    /// The underlying reactor context.
+    pub rctx: &'a mut RC,
+    /// The function-local tail index forwarded to all reactor calls.
+    pub tail_idx: usize,
+    /// Controls eager vs. lazy store emission.
+    pub order: MemOrder,
+    /// Controls plain vs. atomic instruction substitution.
+    pub atomic: AtomicOpts,
+}
+
+impl<'a, RC: ?Sized> ReactorMemorySink<'a, RC> {
+    /// Construct a `ReactorMemorySink`.
+    #[inline]
+    pub fn new(rctx: &'a mut RC, tail_idx: usize, order: MemOrder, atomic: AtomicOpts) -> Self {
+        Self { rctx, tail_idx, order, atomic }
+    }
+}
+
+impl<Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Context, E>
+    for ReactorMemorySink<'_, RC>
+{
+    #[inline]
+    fn instruction(
+        &mut self,
+        ctx: &mut Context,
+        instruction: &Instruction<'_>,
+    ) -> Result<(), E> {
+        self.rctx.feed(ctx, self.tail_idx, instruction)
+    }
+}
+
+impl<Context, E, RC: ReactorContext<Context, E> + ?Sized> MemorySink<Context, E>
+    for ReactorMemorySink<'_, RC>
+{
+    #[inline]
+    fn feed_store(
+        &mut self,
+        ctx: &mut Context,
+        addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E> {
+        emit_store(ctx, self.rctx, self.order, self.atomic, addr_type, instr, self.tail_idx)
+    }
+
+    #[inline]
+    fn feed_load(
+        &mut self,
+        ctx: &mut Context,
+        addr_local: u32,
+        addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E> {
+        emit_load(ctx, self.rctx, addr_local, addr_type, self.atomic, instr, self.tail_idx)
+    }
+
+    #[inline]
+    fn flush_all(&mut self, ctx: &mut Context) -> Result<(), E> {
+        emit_fence(ctx, self.rctx, self.order, self.tail_idx)
+    }
+}
+
+// ── EagerMemorySink ───────────────────────────────────────────────────────────
+
+/// [`MemorySink`] backed by any [`InstructionSink`].
+///
+/// Every load and store is emitted immediately — no lazy deferral, no alias
+/// checks.  Used by `speet-wasm` where the underlying sink is a plain
+/// `InstructionSink` (not a reactor).
+pub struct EagerMemorySink<'a, F: ?Sized> {
+    /// The underlying instruction sink.
+    pub sink: &'a mut F,
+}
+
+impl<'a, F: ?Sized> EagerMemorySink<'a, F> {
+    /// Construct an `EagerMemorySink` wrapping any `InstructionSink`.
+    #[inline]
+    pub fn new(sink: &'a mut F) -> Self {
+        Self { sink }
+    }
+}
+
+impl<Context, E, F: InstructionSink<Context, E> + ?Sized> InstructionSink<Context, E>
+    for EagerMemorySink<'_, F>
+{
+    #[inline]
+    fn instruction(
+        &mut self,
+        ctx: &mut Context,
+        instruction: &Instruction<'_>,
+    ) -> Result<(), E> {
+        self.sink.instruction(ctx, instruction)
+    }
+}
+
+impl<Context, E, F: InstructionSink<Context, E> + ?Sized> MemorySink<Context, E>
+    for EagerMemorySink<'_, F>
+{
+    #[inline]
+    fn feed_store(
+        &mut self,
+        ctx: &mut Context,
+        _addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E> {
+        self.sink.instruction(ctx, &instr)
+    }
+
+    #[inline]
+    fn feed_load(
+        &mut self,
+        ctx: &mut Context,
+        _addr_local: u32,
+        _addr_type: ValType,
+        instr: Instruction<'static>,
+    ) -> Result<(), E> {
+        self.sink.instruction(ctx, &instr)
+    }
+
+    #[inline]
+    fn flush_all(&mut self, _ctx: &mut Context) -> Result<(), E> {
+        Ok(())
+    }
 }

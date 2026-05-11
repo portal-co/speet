@@ -52,7 +52,11 @@ use yecta::{
     TableIdx, Target, TypeIdx, layout::{CellIdx, CellRegistry},
 };
 
-pub use speet_memory::{CallbackContext, MapperCallback};
+pub use speet_memory::{
+    AddressMapper, AddressWidth, CallbackContext, DirectMemory, IntWidth, MapperCallback,
+    MemoryAccess,
+    mem::{LoadKind, StoreKind},
+};
 pub use speet_ordering::{AtomicOpts, MemOrder, RmwOp, RmwWidth};
 use speet_traps::{
     InstructionInfo, InstructionTrap, JumpInfo, JumpKind, JumpTrap, TrapAction, TrapConfig,

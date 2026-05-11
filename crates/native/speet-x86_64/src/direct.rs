@@ -122,7 +122,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
             }
@@ -130,7 +130,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -139,13 +139,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -154,19 +154,19 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -176,20 +176,20 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -200,13 +200,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Xor)?;
@@ -216,7 +216,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
+                        X86Recompiler::<Context, E>::CF_LOCAL,
                     ),
                 )?;
             }
@@ -224,13 +224,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
+                        X86Recompiler::<Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Or)?;
@@ -239,14 +239,14 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
+                        X86Recompiler::<Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::ZF_LOCAL,
+                        X86Recompiler::<Context, E>::ZF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -256,7 +256,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::CF_LOCAL,
+                        X86Recompiler::<Context, E>::CF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -265,7 +265,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
             }
@@ -273,7 +273,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::SF_LOCAL,
+                        X86Recompiler::<Context, E>::SF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -282,7 +282,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
             }
@@ -290,7 +290,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::OF_LOCAL,
+                        X86Recompiler::<Context, E>::OF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -299,7 +299,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::PF_LOCAL,
+                        X86Recompiler::<Context, E>::PF_LOCAL,
                     ),
                 )?;
             }
@@ -307,7 +307,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
                 sink.instruction(
                     ctx,
                     &Instruction::LocalGet(
-                        X86Recompiler::<'_, '_, Context, E>::PF_LOCAL,
+                        X86Recompiler::<Context, E>::PF_LOCAL,
                     ),
                 )?;
                 sink.instruction(ctx, &Instruction::I32Eqz)?;
@@ -317,7 +317,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ConditionSni
     }
 }
 
-impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
+impl<Context, E> X86Recompiler<Context, E> {
     fn rip_to_func_idx<F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>, rip: u64) -> Option<FuncIdx> {
         if let Some(gate) = &self.slot_assigner {
             gate.slot_for_pc(rip).map(FuncIdx)
@@ -339,8 +339,8 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
         let mut unit = ();
-        let extra: &mut dyn LocalDeclarator = match self.mapper_callback.as_deref_mut() {
-            Some(m) => m,
+        let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
+            Some(m) => m as &mut dyn LocalDeclarator,
             None => &mut unit,
         };
         rctx.declare_trap_locals(extra);
@@ -449,7 +449,10 @@ impl<'cb, 'ctx, Context, E> X86Recompiler<'cb, 'ctx, Context, E> {
             _ => return Ok(None),
         }
         operation(self, ctx, rctx, tail_idx)?;
+        // Stack: [result]. Save result, push addr, restore — WASM store wants [addr, value].
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(22))?;
         self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         self.emit_memory_store(ctx, rctx, tail_idx, size_bits)?;
         Ok(Some(()))
     }

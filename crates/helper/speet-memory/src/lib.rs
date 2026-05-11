@@ -14,20 +14,17 @@
 //! `Iterator<Item = (u32, ValType)>` so it can be fed directly to
 //! `reactor.next_with(ctx, f(&mut layout.iter()), len)`.
 //!
-//! ### [`CallbackContext`] / [`MapperCallback`]
+//! ### [`CallbackContext`] / [`MapperCallback`] / [`AddressMapper`]
 //! A generic wrapper around any `InstructionSink` that lets callbacks emit
 //! wasm instructions without knowing the concrete sink type.
-//! `MapperCallback` is the trait for virtual-to-physical address translation
-//! hooks.  Blanket impls are provided for `FnMut` closures.
+//! `AddressMapper` (aliased as `MapperCallback`) is the trait for
+//! virtual-to-physical address translation hooks.
 //!
-//! ### [`MemoryEmitter`]
-//! A helper that encodes the full address-computation + optional mapper call
-//! + load/store pattern into a pair of methods:
-//! [`MemoryEmitter::emit_load`] and [`MemoryEmitter::emit_store`].
-//! Callers supply the computed guest address (already on the wasm stack)
-//! and an `AddressWidth` flag; the emitter handles the width-dependent
-//! `I32Add`/`I64Add`, optional `I32WrapI64`, the mapper invocation, and
-//! finally the appropriately-typed wasm memory instruction.
+//! ### [`MemoryAccess`] / [`DirectMemory`]
+//! `MemoryAccess` is the high-level trait that owns a complete load/store
+//! sequence for a single memory region, combining the mapper, memory index,
+//! and address/integer width.  `DirectMemory<M>` is the standard
+//! implementation backed by any `AddressMapper`.
 //!
 //! ### Page-table helpers
 //! [`standard_page_table_mapper`], [`standard_page_table_mapper_32`],
@@ -45,9 +42,9 @@ pub mod paging;
 pub mod r#virtual;
 
 pub use layout::{LocalLayout, LocalSlot};
-pub use mapper::{CallbackContext, ChunkedMapper, MapperCallback, StackedMapper};
+pub use mapper::{AddressMapper, CallbackContext, ChunkedMapper, DirectMemory, MapperCallback, MemoryAccess, StackedMapper};
 pub use yecta::LocalDeclarator;
-pub use mem::{AddressWidth, IntWidth, LoadKind, MemoryEmitter, StoreKind};
+pub use mem::{AddressWidth, IntWidth, LoadKind, StoreKind};
 pub use paging::{
     MultilevelPageTableMapper, MultilevelPageTableMapper32, PageMapLocals, PageTableBase,
     StandardPageTableMapper, StandardPageTableMapper32, multilevel_page_table_mapper,
