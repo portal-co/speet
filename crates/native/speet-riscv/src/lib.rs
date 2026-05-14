@@ -51,6 +51,7 @@
 #![no_std]
 pub mod cfg;
 pub mod direct;
+pub mod interp;
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

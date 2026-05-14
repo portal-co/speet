@@ -7,4 +7,9 @@ license-file.workspace = true
 
 [dependencies]
 wasm-encoder.workspace = true
+wax-core.workspace = true
+yecta = { path = "../yecta" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-memory = { path = "../speet-memory" }
+speet-ordering = { path = "../speet-ordering" }
+speet-traps = { path = "../speet-traps" }
