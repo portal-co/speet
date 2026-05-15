@@ -58,7 +58,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use speet_link_core::{EntityIndexSpace, IndexSlot, OobConfig};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
@@ -204,42 +203,57 @@ impl OobInterp {
         Ok(data)
     }
 
-    /// Generate all interpreter functions using a [`InterpBodyBuilder`].
+    /// Generate all interpreter functions through caller-provided sinks.
     ///
-    /// Returns `(lookup_fn, Vec<interp_fns>, passive_data_bytes)` where
-    /// `interp_fns` contains the dispatch fn at index 0 followed by N handler fns.
+    /// The caller owns three sinks plus a slice of handler sinks — each may be
+    /// any `InstructionSink<C, E>` (typically `wasm_encoder::Function`, but any
+    /// `wax-core` sink works). This keeps the emitter fully backend-agnostic
+    /// and avoids any internal allocation of `Function` objects.
+    ///
+    /// `handler_sinks.len()` must equal `builder.num_handler_fns()`.
     ///
     /// Use [`register_with_builder`](Self::register_with_builder) in Phase 1 to
-    /// pre-allocate the correct number of function slots.
+    /// pre-allocate the correct number of function slots, then create one sink
+    /// per slot (lookup stub, dispatch fn, N handlers) before calling this.
+    ///
+    /// Returns the passive data bytes for the PC dispatch table.
     #[allow(clippy::too_many_arguments)]
-    pub fn emit_with_builder<C, E>(
+    pub fn emit_with_builder<C, E, S, D, H>(
         &self,
         entity_space: &EntityIndexSpace,
         oob: &OobConfig,
         entries: &[PcEntry],
         params: &[ValType],
-        returns: &[ValType],
+        _returns: &[ValType],
         type_idx: u32,
         table_idx: u32,
-        data_seg_idx: u32,
+        _data_seg_idx: u32,
         data_mem_idx: u32,
+        lookup_sink: &mut S,
+        dispatch_sink: &mut D,
+        handler_sinks: &mut [H],
         ctx: &mut C,
         ictx: &mut InterpBuildCtx<'_, C, E>,
         builder: &mut dyn InterpBodyBuilder<C, E>,
-    ) -> Result<(Function, Vec<Function>, Vec<u8>), E> {
+    ) -> Result<Vec<u8>, E>
+    where
+        S: InstructionSink<C, E>,
+        D: InstructionSink<C, E>,
+        H: InstructionSink<C, E>,
+    {
+        let n = builder.num_handler_fns() as usize;
+        assert_eq!(
+            handler_sinks.len(),
+            n,
+            "handler_sinks length must match builder.num_handler_fns()",
+        );
+
         // Build PC table data.
         let data = Self::build_pc_table(entries);
 
-        // Emit lookup stub into a fresh Function.
-        let mut lookup_fn = Function::new([
-            (1, ValType::I32),
-            (1, ValType::I32),
-            (1, ValType::I32),
-            (1, ValType::I64),
-            (1, ValType::I32),
-        ]);
+        // Emit lookup stub into caller's sink.
         emit_lookup_stub(
-            &mut lookup_fn,
+            lookup_sink,
             ctx,
             oob,
             params,
@@ -252,37 +266,18 @@ impl OobInterp {
         // Resolve absolute function indices for dispatch + handler fns.
         let base = entity_space.functions.base(self.func_slot);
         let dispatch_func_idx = base + 1;
-        let n = builder.num_handler_fns();
-        let handler_func_indices: Vec<u32> = (0..n).map(|i| base + 2 + i).collect();
+        let handler_func_indices: Vec<u32> = (0..n as u32).map(|i| base + 2 + i).collect();
 
         ictx.dispatch_func_idx = dispatch_func_idx;
         ictx.handler_func_indices = handler_func_indices;
 
-        // Create sinks for dispatch fn + handler fns using declared locals.
-        let mut dispatch_fn = Function::new(builder.dispatch_fn_locals());
-        let mut handler_fns: Vec<Function> = (0..n)
-            .map(|i| Function::new(builder.handler_fn_locals(i)))
-            .collect();
+        // Erase each handler sink to a trait object so `build_interp` can take
+        // a uniform slice without further generics.
+        let mut handler_sink_refs: Vec<&mut (dyn InstructionSink<C, E>)> =
+            handler_sinks.iter_mut().map(|h| h as &mut dyn InstructionSink<C, E>).collect();
+        builder.build_interp(dispatch_sink, handler_sink_refs.as_mut_slice(), ctx, ictx)?;
 
-        // SAFETY: handler_fns outlives handler_sinks; we drop handler_sinks
-        // (and thus all borrows) before accessing handler_fns below.
-        let mut handler_sinks: Vec<Box<dyn InstructionSink<C, E>>> = handler_fns
-            .iter_mut()
-            .map(|f| -> Box<dyn InstructionSink<C, E>> {
-                let f: &'static mut Function = unsafe { &mut *(f as *mut Function) };
-                Box::new(BorrowedFnSink(f))
-            })
-            .collect();
-
-        builder.build_interp(&mut dispatch_fn, &mut handler_sinks, ctx, ictx)?;
-        drop(handler_sinks); // release raw borrows before moving handler_fns
-
-        let _ = (data_seg_idx, returns);
-        let mut interp_fns = Vec::with_capacity(1 + n as usize);
-        interp_fns.push(dispatch_fn);
-        interp_fns.extend(handler_fns);
-
-        Ok((lookup_fn, interp_fns, data))
+        Ok(data)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -294,23 +289,6 @@ impl OobInterp {
             data.extend_from_slice(&e.table_slot.to_le_bytes());
         }
         data
-    }
-}
-
-// ── BorrowedFnSink ────────────────────────────────────────────────────────────
-
-/// Newtype that lets a `&mut Function` act as a `Box<dyn InstructionSink>`.
-struct BorrowedFnSink<'a>(&'a mut Function);
-
-impl<Context, E> InstructionSink<Context, E> for BorrowedFnSink<'_> {
-    fn instruction(&mut self, _ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
-        self.0.instruction(instruction);
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<(), E> {
-        self.0.instruction(&Instruction::End);
-        Ok(())
     }
 }
 

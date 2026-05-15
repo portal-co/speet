@@ -57,7 +57,7 @@ pub trait InterpBodyBuilder<Context, E> {
     fn build_interp(
         &mut self,
         dispatch_sink: &mut dyn InstructionSink<Context, E>,
-        handler_sinks: &mut [Box<dyn InstructionSink<Context, E>>],
+        handler_sinks: &mut [&mut dyn InstructionSink<Context, E>],
         ctx: &mut Context,
         ictx: &mut InterpBuildCtx<'_, Context, E>,
     ) -> Result<(), E>;
@@ -79,7 +79,7 @@ impl<C, E> InterpBodyBuilder<C, E> for NullInterpBuilder {
     fn build_interp(
         &mut self,
         dispatch_sink: &mut dyn InstructionSink<C, E>,
-        _handler_sinks: &mut [Box<dyn InstructionSink<C, E>>],
+        _handler_sinks: &mut [&mut dyn InstructionSink<C, E>],
         ctx: &mut C,
         _ictx: &mut InterpBuildCtx<'_, C, E>,
     ) -> Result<(), E> {

@@ -123,24 +123,24 @@ impl<Context, E> InterpBodyBuilder<Context, E> for RiscVThompsonInterp<Context, 
     fn build_interp(
         &mut self,
         dispatch_sink: &mut dyn InstructionSink<Context, E>,
-        handler_sinks: &mut [Box<dyn InstructionSink<Context, E>>],
+        handler_sinks: &mut [&mut dyn InstructionSink<Context, E>],
         ctx: &mut Context,
         ictx: &mut InterpBuildCtx<'_, Context, E>,
     ) -> Result<(), E> {
         self.build_dispatch(dispatch_sink, ctx, ictx)?;
-        self.build_handler_load(handler_sinks[SLOT_LOAD as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_store(handler_sinks[SLOT_STORE as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_op_imm(handler_sinks[SLOT_OP_IMM as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_op(handler_sinks[SLOT_OP as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_branch(handler_sinks[SLOT_BRANCH as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_jal(handler_sinks[SLOT_JAL as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_jalr(handler_sinks[SLOT_JALR as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_lui(handler_sinks[SLOT_LUI as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_auipc(handler_sinks[SLOT_AUIPC as usize].as_mut(), ctx, ictx)?;
-        self.build_handler_stub(handler_sinks[SLOT_OP_IMM32 as usize].as_mut(), ctx)?;
-        self.build_handler_stub(handler_sinks[SLOT_OP32 as usize].as_mut(), ctx)?;
-        self.build_handler_stub(handler_sinks[SLOT_SYSTEM as usize].as_mut(), ctx)?;
-        self.build_handler_stub(handler_sinks[SLOT_FALLBACK as usize].as_mut(), ctx)
+        self.build_handler_load(&mut *handler_sinks[SLOT_LOAD as usize], ctx, ictx)?;
+        self.build_handler_store(&mut *handler_sinks[SLOT_STORE as usize], ctx, ictx)?;
+        self.build_handler_op_imm(&mut *handler_sinks[SLOT_OP_IMM as usize], ctx, ictx)?;
+        self.build_handler_op(&mut *handler_sinks[SLOT_OP as usize], ctx, ictx)?;
+        self.build_handler_branch(&mut *handler_sinks[SLOT_BRANCH as usize], ctx, ictx)?;
+        self.build_handler_jal(&mut *handler_sinks[SLOT_JAL as usize], ctx, ictx)?;
+        self.build_handler_jalr(&mut *handler_sinks[SLOT_JALR as usize], ctx, ictx)?;
+        self.build_handler_lui(&mut *handler_sinks[SLOT_LUI as usize], ctx, ictx)?;
+        self.build_handler_auipc(&mut *handler_sinks[SLOT_AUIPC as usize], ctx, ictx)?;
+        self.build_handler_stub(&mut *handler_sinks[SLOT_OP_IMM32 as usize], ctx)?;
+        self.build_handler_stub(&mut *handler_sinks[SLOT_OP32 as usize], ctx)?;
+        self.build_handler_stub(&mut *handler_sinks[SLOT_SYSTEM as usize], ctx)?;
+        self.build_handler_stub(&mut *handler_sinks[SLOT_FALLBACK as usize], ctx)
     }
 }
 
