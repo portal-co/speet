@@ -309,6 +309,39 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
             .map(|trap| ConditionHookWrapper { info, trap })
     }
 
+    /// Fire the post-instruction trap hook (if installed).
+    ///
+    /// Call immediately after the instruction body is emitted, before the next
+    /// control-flow transfer.  Only call when [`on_instruction`](Self::on_instruction)
+    /// returned [`TrapAction::Continue`].
+    ///
+    /// Does nothing when no instruction trap is installed.
+    pub fn after_instruction(
+        &mut self,
+        info: &InstructionInfo,
+        ctx: &mut Context,
+        sink: &mut dyn EmitSink<Context, E>,
+        layout: &dyn LocalAllocator,
+    ) -> Result<(), E> {
+        let trap = match self.insn_trap.as_mut() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        let mut trap_ctx = TrapContext::new(sink, layout);
+        trap.after_instruction(info, ctx, &mut trap_ctx)
+    }
+
+    /// Return `true` if the installed instruction trap wraps register locals.
+    ///
+    /// When `true` the arch recompiler should use [`LocalLayout::emit_get`] /
+    /// [`LocalLayout::emit_set`] instead of bare `local.get` / `local.set` for
+    /// register access.
+    pub fn wraps_register_locals(&self) -> bool {
+        self.insn_trap
+            .as_deref()
+            .map_or(false, |t| t.wraps_register_locals())
+    }
+
     /// Fire the condition trap directly via a [`TrapContext`].
     ///
     /// Used by the WASM frontend, which emits instructions through an

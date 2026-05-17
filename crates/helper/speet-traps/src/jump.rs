@@ -43,7 +43,7 @@
 use alloc::boxed::Box;
 use wasm_encoder::Instruction;
 use yecta::layout::CellIdx;
-use yecta::{LocalDeclarator, LocalLayout};
+use yecta::{EmitSink, LocalAllocator, LocalDeclarator, LocalLayout};
 
 use crate::context::TrapContext;
 use crate::insn::TrapAction;
@@ -161,6 +161,24 @@ where
     ) -> Result<TrapAction, E> {
         self(info, ctx, trap_ctx)
     }
+}
+
+// ── fire_jump_trap ────────────────────────────────────────────────────────────
+
+/// Fire a [`JumpTrap`] using an arbitrary [`EmitSink`] as the emission target.
+///
+/// Constructs a temporary [`TrapContext`] wrapping `sink` and `layout`, then
+/// calls [`JumpTrap::on_jump`].  Use this from interpreter handlers that have
+/// a bare instruction sink but not a full `Reactor` context.
+pub fn fire_jump_trap<Context, E>(
+    trap: &mut dyn JumpTrap<Context, E>,
+    info: &JumpInfo,
+    ctx: &mut Context,
+    sink: &mut dyn EmitSink<Context, E>,
+    layout: &dyn LocalAllocator,
+) -> Result<TrapAction, E> {
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    trap.on_jump(info, ctx, &mut trap_ctx)
 }
 
 /// `Box<dyn JumpTrap<…>>` delegates to the inner value.

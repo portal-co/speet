@@ -7,5 +7,5 @@
 
 pub use wasm_layout::{
     CellIdx, CellRegistry, CellSignature, FuncSignature, LocalAllocator, LocalDeclarator,
-    LocalLayout, LocalSlot, Mark,
+    LocalLayout, LocalSlot, Mark, SlotKind,
 };

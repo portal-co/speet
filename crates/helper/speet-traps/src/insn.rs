@@ -49,7 +49,7 @@
 
 use alloc::boxed::Box;
 use wasm_encoder::Instruction;
-use yecta::{LocalDeclarator, LocalLayout, layout::CellIdx};
+use yecta::{EmitSink, LocalAllocator, LocalDeclarator, LocalLayout, layout::CellIdx};
 
 use crate::context::TrapContext;
 
@@ -152,6 +152,34 @@ pub trait InstructionTrap<Context, E>: LocalDeclarator {
         trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E>;
 
+    /// Called once per instruction **after** the instruction body is emitted,
+    /// immediately before the next control-flow transfer.
+    ///
+    /// Only fires when [`on_instruction`](Self::on_instruction) returned
+    /// [`TrapAction::Continue`].  The default is a no-op; override to
+    /// post-process or annotate values produced by the instruction (e.g.
+    /// [`ValueTracingTrap`](crate::ValueTracingTrap) wraps the written register
+    /// in a `ValueTrace` GC struct here).
+    fn after_instruction(
+        &mut self,
+        info: &InstructionInfo,
+        ctx: &mut Context,
+        trap_ctx: &mut TrapContext<Context, E>,
+    ) -> Result<(), E> {
+        let _ = (info, ctx, trap_ctx);
+        Ok(())
+    }
+
+    /// Return `true` if this trap wraps register locals in GC-struct value
+    /// traces.  When `true`, the arch recompiler must use
+    /// [`LocalLayout::emit_get`] / [`LocalLayout::emit_set`] instead of bare
+    /// `local.get` / `local.set` for register access.
+    ///
+    /// The default is `false`; override in [`ValueTracingTrap`](crate::ValueTracingTrap).
+    fn wraps_register_locals(&self) -> bool {
+        false
+    }
+
     /// Wasm instructions to emit in place of the instruction body when this
     /// trap returns [`TrapAction::Skip`].
     ///
@@ -167,6 +195,38 @@ pub trait InstructionTrap<Context, E>: LocalDeclarator {
         let _ = info;
         skip_ctx.emit(ctx, &Instruction::Unreachable)
     }
+}
+
+// ── free-function helpers ─────────────────────────────────────────────────────
+
+/// Fire [`InstructionTrap::on_instruction`] using an arbitrary [`EmitSink`].
+///
+/// Constructs a temporary [`TrapContext`] so interpreter handlers can fire the
+/// instruction trap without a full reactor context.
+pub fn fire_insn_trap_before<Context, E>(
+    trap: &mut dyn InstructionTrap<Context, E>,
+    info: &InstructionInfo,
+    ctx: &mut Context,
+    sink: &mut dyn EmitSink<Context, E>,
+    layout: &dyn LocalAllocator,
+) -> Result<TrapAction, E> {
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    trap.on_instruction(info, ctx, &mut trap_ctx)
+}
+
+/// Fire [`InstructionTrap::after_instruction`] using an arbitrary [`EmitSink`].
+///
+/// Constructs a temporary [`TrapContext`] so interpreter handlers can fire the
+/// post-instruction trap hook without a full reactor context.
+pub fn fire_insn_trap_after<Context, E>(
+    trap: &mut dyn InstructionTrap<Context, E>,
+    info: &InstructionInfo,
+    ctx: &mut Context,
+    sink: &mut dyn EmitSink<Context, E>,
+    layout: &dyn LocalAllocator,
+) -> Result<(), E> {
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    trap.after_instruction(info, ctx, &mut trap_ctx)
 }
 
 // ── Blanket impl for FnMut closures ──────────────────────────────────────────
@@ -209,6 +269,19 @@ impl<Context, E> InstructionTrap<Context, E> for Box<dyn InstructionTrap<Context
         trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
         (**self).on_instruction(info, ctx, trap_ctx)
+    }
+
+    fn after_instruction(
+        &mut self,
+        info: &InstructionInfo,
+        ctx: &mut Context,
+        trap_ctx: &mut TrapContext<Context, E>,
+    ) -> Result<(), E> {
+        (**self).after_instruction(info, ctx, trap_ctx)
+    }
+
+    fn wraps_register_locals(&self) -> bool {
+        (**self).wraps_register_locals()
     }
 
     fn skip_snippet(

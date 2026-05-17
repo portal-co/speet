@@ -67,7 +67,7 @@ pub mod builder;
 pub mod context;
 
 pub use builder::{InterpBodyBuilder, NullInterpBuilder};
-pub use context::{FlatEmitSink, FlatMemorySink, InterpBuildCtx};
+pub use context::{BufferedEmitSink, FlatEmitSink, FlatMemorySink, InterpBuildCtx};
 
 // ── PcEntry ───────────────────────────────────────────────────────────────────
 

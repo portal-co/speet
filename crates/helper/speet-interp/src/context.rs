@@ -5,12 +5,91 @@
 //! `MemoryAccess` helpers.
 
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 use speet_link_core::OobConfig;
 use speet_memory::MemoryAccess;
 use speet_traps::{InstructionTrap, JumpTrap};
 use wasm_encoder::{Instruction, ValType};
 use wax_core::build::InstructionSink;
 use yecta::{EmitSink, FuncIdx, LocalLayout};
+
+// ── BufferedEmitSink ──────────────────────────────────────────────────────────
+
+/// An [`EmitSink`] that buffers emitted instructions for later replay.
+///
+/// Used by interpreter handlers to capture the WASM instructions emitted by a
+/// trap's `on_jump` callback into an `if`/`else` branch before replaying them
+/// into the live sink.  Only supports instructions that do not borrow external
+/// data (no `BrTable`, no arbitrary memory references).
+///
+/// `emit_jmp` is implemented as `local.get 0..params-1` followed by
+/// `return_call target`, matching [`FlatEmitSink`]'s flat tail-call semantics.
+pub struct BufferedEmitSink<Context, E> {
+    /// Buffered instructions in emission order.
+    pub instructions: Vec<Instruction<'static>>,
+    _phantom: PhantomData<fn(&mut Context) -> E>,
+}
+
+impl<Context, E> BufferedEmitSink<Context, E> {
+    pub fn new() -> Self {
+        Self { instructions: Vec::new(), _phantom: PhantomData }
+    }
+
+    /// Replay all buffered instructions into `sink`.
+    pub fn replay_into(
+        &self,
+        sink: &mut dyn InstructionSink<Context, E>,
+        ctx: &mut Context,
+    ) -> Result<(), E> {
+        for instr in &self.instructions {
+            sink.instruction(ctx, instr)?;
+        }
+        Ok(())
+    }
+}
+
+impl<Context, E> Default for BufferedEmitSink<Context, E> {
+    fn default() -> Self { Self::new() }
+}
+
+/// Convert an instruction with borrowed lifetime to a `'static` version.
+///
+/// Only handles the variants used by traps (LocalGet/Set/Tee, integer
+/// arithmetic, If/End, ReturnCall, Unreachable).  Panics on other variants.
+fn to_static_instr(instr: &Instruction<'_>) -> Instruction<'static> {
+    match instr {
+        Instruction::LocalGet(i)    => Instruction::LocalGet(*i),
+        Instruction::LocalSet(i)    => Instruction::LocalSet(*i),
+        Instruction::LocalTee(i)    => Instruction::LocalTee(*i),
+        Instruction::I32Const(v)    => Instruction::I32Const(*v),
+        Instruction::I64Const(v)    => Instruction::I64Const(*v),
+        Instruction::I32Add         => Instruction::I32Add,
+        Instruction::I32Sub         => Instruction::I32Sub,
+        Instruction::I32LtS         => Instruction::I32LtS,
+        Instruction::If(bt)         => Instruction::If(*bt),
+        Instruction::Block(bt)      => Instruction::Block(*bt),
+        Instruction::Else           => Instruction::Else,
+        Instruction::End            => Instruction::End,
+        Instruction::Unreachable    => Instruction::Unreachable,
+        Instruction::ReturnCall(i)  => Instruction::ReturnCall(*i),
+        other => panic!("BufferedEmitSink: unsupported instruction variant {:?}", other),
+    }
+}
+
+impl<Context, E> EmitSink<Context, E> for BufferedEmitSink<Context, E> {
+    fn emit(&mut self, _ctx: &mut Context, instr: &Instruction<'_>) -> Result<(), E> {
+        self.instructions.push(to_static_instr(instr));
+        Ok(())
+    }
+
+    fn emit_jmp(&mut self, _ctx: &mut Context, target: FuncIdx, params: u32) -> Result<(), E> {
+        for i in 0..params {
+            self.instructions.push(Instruction::LocalGet(i));
+        }
+        self.instructions.push(Instruction::ReturnCall(target.0));
+        Ok(())
+    }
+}
 
 // ── InterpBuildCtx ────────────────────────────────────────────────────────────
 

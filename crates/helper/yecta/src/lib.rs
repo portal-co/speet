@@ -76,7 +76,7 @@
 pub mod layout;
 pub use layout::{
     CellIdx, CellRegistry, CellSignature, FuncSignature, LocalAllocator, LocalDeclarator,
-    LocalLayout, LocalSlot, Mark,
+    LocalLayout, LocalSlot, Mark, SlotKind,
 };
 pub use wax_core::build::ConstPeek;
 

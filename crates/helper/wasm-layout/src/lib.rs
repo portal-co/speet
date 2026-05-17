@@ -104,7 +104,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use wasm_encoder::ValType;
+use wasm_encoder::{HeapType, Instruction, RefType, ValType};
 
 // ── Mark ─────────────────────────────────────────────────────────────────────
 
@@ -138,6 +138,36 @@ pub struct LocalSlot(pub(crate) usize);
 
 // ── LocalLayout ──────────────────────────────────────────────────────────────
 
+// ── SlotKind ─────────────────────────────────────────────────────────────────
+
+/// How a [`LocalSlot`] stores and exposes its values.
+///
+/// Plain slots emit bare `local.get` / `local.set` instructions.  Traced slots
+/// wrap values inside a GC struct or linear-memory object so that provenance
+/// metadata travels alongside every value.
+///
+/// Use [`LocalLayout::slot_kind`], [`LocalLayout::emit_get`], and
+/// [`LocalLayout::emit_set`] to interact with slots in a kind-aware way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    /// Undecorated WASM local — emit `local.get` / `local.set` directly.
+    Plain,
+    /// Local holds `(ref null $gc_type)`.  The inner value is at field
+    /// `value_field` of the GC struct type `gc_type_idx`.
+    ///
+    /// `emit_get` emits `local.get + struct.get`.
+    /// `emit_set` emits `struct.new + local.set` (caller pushes value then
+    /// trace metadata fields onto the stack first).
+    GcTraced {
+        /// WASM type-section index of the GC struct type.
+        gc_type_idx: u32,
+        /// Field index within the struct that holds the wrapped value.
+        value_field: u32,
+    },
+}
+
+// ── LocalLayout ───────────────────────────────────────────────────────────────
+
 /// A map from `(count, ValType)` groups to contiguous wasm local indices.
 ///
 /// See the [module documentation](self) for usage patterns.
@@ -147,6 +177,8 @@ pub struct LocalLayout {
     /// `offset` is the cumulative count of locals in all *preceding* slots —
     /// i.e. the absolute wasm local index of the first local in this slot.
     slots: Vec<(u32, ValType, u32)>,
+    /// Per-slot wrapping kind.  Same length as `slots`.
+    kinds: Vec<SlotKind>,
 }
 
 impl LocalLayout {
@@ -157,7 +189,7 @@ impl LocalLayout {
     /// Slots are added incrementally via [`append`](Self::append).
     #[inline]
     pub fn empty() -> Self {
-        Self { slots: Vec::new() }
+        Self { slots: Vec::new(), kinds: Vec::new() }
     }
 
     /// Build a `LocalLayout` from a fixed-size array of `(count, ValType)` groups.
@@ -207,7 +239,100 @@ impl LocalLayout {
         let offset = self.total_locals(); // absolute start of new group
         let slot = LocalSlot(self.slots.len());
         self.slots.push((count, ty, offset));
+        self.kinds.push(SlotKind::Plain);
         slot
+    }
+
+    // ── Traced-value helpers ──────────────────────────────────────────────────
+
+    /// Declare `count` GC-traced locals whose stored type is a nullable
+    /// reference to `gc_type_idx`.  The wrapped inner value lives at
+    /// `value_field` within the GC struct.
+    ///
+    /// The WASM local declarations produced by [`iter`](Self::iter) and
+    /// [`iter_since`](Self::iter_since) will use the ref type, matching the
+    /// parameter/local signature expected by the engine.
+    pub fn append_gc_traced(
+        &mut self,
+        count: u32,
+        gc_type_idx: u32,
+        value_field: u32,
+    ) -> LocalSlot {
+        let ref_ty = ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(gc_type_idx),
+        });
+        let offset = self.total_locals();
+        let slot = LocalSlot(self.slots.len());
+        self.slots.push((count, ref_ty, offset));
+        self.kinds.push(SlotKind::GcTraced { gc_type_idx, value_field });
+        slot
+    }
+
+    /// Retrofit an existing slot to a different kind, updating its stored
+    /// `ValType` in-place.
+    ///
+    /// Use this from a trap's `declare_params` to upgrade plain arch register
+    /// slots into GC-traced slots after the arch recompiler has appended them.
+    /// The slot handle remains valid; `emit_get`/`emit_set` will use the new
+    /// kind from this point forward.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `slot` was not produced by this layout.
+    pub fn retrofit_kind(&mut self, slot: LocalSlot, new_val_type: ValType, kind: SlotKind) {
+        self.slots[slot.0].1 = new_val_type;
+        self.kinds[slot.0] = kind;
+    }
+
+    /// Return the kind of `slot`.
+    #[inline]
+    pub fn slot_kind(&self, slot: LocalSlot) -> &SlotKind {
+        &self.kinds[slot.0]
+    }
+
+    /// Emit the instruction sequence that reads the unwrapped value from the
+    /// *n*-th local in `slot` onto the WASM stack.
+    ///
+    /// | Kind | Emitted instructions |
+    /// |------|---------------------|
+    /// | `Plain` | `local.get idx` |
+    /// | `GcTraced` | `local.get idx; struct.get type_idx field` |
+    ///
+    /// The returned `Vec` always contains 1 or 2 static instructions.
+    pub fn emit_get(&self, slot: LocalSlot, n: u32) -> Vec<Instruction<'static>> {
+        let idx = self.local(slot, n);
+        match &self.kinds[slot.0] {
+            SlotKind::Plain => alloc::vec![Instruction::LocalGet(idx)],
+            SlotKind::GcTraced { gc_type_idx, value_field } => alloc::vec![
+                Instruction::LocalGet(idx),
+                Instruction::StructGet {
+                    struct_type_index: *gc_type_idx,
+                    field_index: *value_field,
+                },
+            ],
+        }
+    }
+
+    /// Emit the instruction sequence that pops a value (and trace metadata for
+    /// GC-traced slots) from the WASM stack and stores it into the *n*-th
+    /// local in `slot`.
+    ///
+    /// | Kind | Stack before | Emitted | Stack after |
+    /// |------|-------------|---------|------------|
+    /// | `Plain` | `[value]` | `local.set idx` | `[]` |
+    /// | `GcTraced` | `[value, source_pc: i64, insn_class: i32, chain_depth: i32]` | `struct.new gc_type_idx; local.set idx` | `[]` |
+    ///
+    /// For `GcTraced` the caller is responsible for pushing the value and all
+    /// trace metadata fields in order before calling the emitted instructions.
+    pub fn emit_set(&self, slot: LocalSlot, n: u32) -> Vec<Instruction<'static>> {
+        let idx = self.local(slot, n);
+        match &self.kinds[slot.0] {
+            SlotKind::Plain => alloc::vec![Instruction::LocalSet(idx)],
+            SlotKind::GcTraced { gc_type_idx, .. } => alloc::vec![
+                Instruction::StructNew(*gc_type_idx),
+                Instruction::LocalSet(idx),
+            ],
+        }
     }
 
     // ── Mark / rewind ─────────────────────────────────────────────────────────
@@ -237,6 +362,7 @@ impl LocalLayout {
     #[inline]
     pub fn rewind(&mut self, mark: &Mark) {
         self.slots.truncate(mark.slot_count);
+        self.kinds.truncate(mark.slot_count);
         debug_assert_eq!(self.total_locals(), mark.total_locals);
     }
 

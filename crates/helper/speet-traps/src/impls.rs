@@ -106,6 +106,20 @@ where
         self.b.on_instruction(info, ctx, trap_ctx)
     }
 
+    fn after_instruction(
+        &mut self,
+        info: &InstructionInfo,
+        ctx: &mut Context,
+        trap_ctx: &mut TrapContext<Context, E>,
+    ) -> Result<(), E> {
+        self.a.after_instruction(info, ctx, trap_ctx)?;
+        self.b.after_instruction(info, ctx, trap_ctx)
+    }
+
+    fn wraps_register_locals(&self) -> bool {
+        self.a.wraps_register_locals() || self.b.wraps_register_locals()
+    }
+
     fn skip_snippet(
         &self,
         info: &InstructionInfo,

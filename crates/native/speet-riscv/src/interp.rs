@@ -10,8 +10,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use speet_interp::builder::InterpBodyBuilder;
-use speet_interp::context::{FlatMemorySink, InterpBuildCtx};
+use speet_interp::context::{BufferedEmitSink, FlatMemorySink, InterpBuildCtx};
 use speet_memory::{LoadKind, StoreKind};
+use speet_traps::jump::{fire_jump_trap, JumpInfo, JumpKind};
 use alloc::borrow::Cow;
 use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
@@ -829,7 +830,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         &self,
         sink: &mut dyn InstructionSink<Context, E>,
         ctx: &mut Context,
-        ictx: &InterpBuildCtx<'_, Context, E>,
+        ictx: &mut InterpBuildCtx<'_, Context, E>,
     ) -> Result<(), E> {
         self.emit_read_instr(sink, ctx, ictx)?;
         self.emit_decode_rrf(sink, ctx)?;
@@ -845,6 +846,13 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         sink.instruction(ctx, &Instruction::I64Add)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_NEXT_PC)))?;
 
+        // Fire jump trap if installed: rd==1 → Call, otherwise DirectJump.
+        // JAL with rd=x1 (ra) is a RISC-V subroutine call convention.
+        sink.instruction(ctx, &Instruction::LocalGet(self.si(SI_RD)))?;
+        sink.instruction(ctx, &Instruction::I32Const(1))?;
+        sink.instruction(ctx, &Instruction::I32Eq)?;
+        self.emit_conditional_jump_trap(sink, ctx, ictx, JumpKind::Call, JumpKind::DirectJump)?;
+
         self.emit_forward_to_lookup(sink, ctx, ictx)
     }
 
@@ -852,7 +860,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         &self,
         sink: &mut dyn InstructionSink<Context, E>,
         ctx: &mut Context,
-        ictx: &InterpBuildCtx<'_, Context, E>,
+        ictx: &mut InterpBuildCtx<'_, Context, E>,
     ) -> Result<(), E> {
         self.emit_read_instr(sink, ctx, ictx)?;
         self.emit_decode_rrf(sink, ctx)?;
@@ -873,7 +881,83 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         sink.instruction(ctx, &Instruction::I64And)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_NEXT_PC)))?;
 
+        // Fire jump trap if installed.
+        // JALR x0, 0(ra)  → rd==0 && rs1==1: Return
+        // JALR rd, ...    → rd!=0:           IndirectCall
+        // JALR x0, 0(rs)  → rd==0 && rs1!=1: IndirectJump
+        sink.instruction(ctx, &Instruction::LocalGet(self.si(SI_RD)))?;
+        sink.instruction(ctx, &Instruction::I32Const(0))?;
+        sink.instruction(ctx, &Instruction::I32Eq)?;
+        if ictx.jump_trap.is_some() {
+            // Outer if: rd == 0
+            sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+            // Inner branch: rs1 == 1 → Return, else IndirectJump
+            sink.instruction(ctx, &Instruction::LocalGet(self.si(SI_RS1)))?;
+            sink.instruction(ctx, &Instruction::I32Const(1))?;
+            sink.instruction(ctx, &Instruction::I32Eq)?;
+            self.emit_conditional_jump_trap(sink, ctx, ictx, JumpKind::Return, JumpKind::IndirectJump)?;
+            sink.instruction(ctx, &Instruction::Else)?;
+            // rd != 0 → IndirectCall: capture trap into buffer before replaying.
+            {
+                let info   = JumpInfo::indirect(0, self.sj(SJ_NEXT_PC), JumpKind::IndirectCall);
+                let layout = ictx.layout;
+                let mut buf = BufferedEmitSink::new();
+                fire_jump_trap(ictx.jump_trap.as_deref_mut().unwrap(), &info, ctx, &mut buf, layout)?;
+                buf.replay_into(sink, ctx)?;
+            }
+            sink.instruction(ctx, &Instruction::End)?;
+        } else {
+            // No trap: consume the condition left on the stack.
+            sink.instruction(ctx, &Instruction::Drop)?;
+        }
+
         self.emit_forward_to_lookup(sink, ctx, ictx)
+    }
+
+    /// Emit a conditional jump-trap block.
+    ///
+    /// Expects an `i32` condition on the WASM stack (1 = true, 0 = false).
+    /// If a jump trap is installed, wraps its emission in an `if/else/end` so
+    /// `kind_if_true` fires when the condition is non-zero and `kind_if_false`
+    /// fires otherwise.  If no trap is installed, drops the condition.
+    ///
+    /// Only supports traps that return [`TrapAction::Continue`].
+    fn emit_conditional_jump_trap(
+        &self,
+        sink: &mut dyn InstructionSink<Context, E>,
+        ctx: &mut Context,
+        ictx: &mut InterpBuildCtx<'_, Context, E>,
+        kind_if_true: JumpKind,
+        kind_if_false: JumpKind,
+    ) -> Result<(), E> {
+        if ictx.jump_trap.is_none() {
+            sink.instruction(ctx, &Instruction::Drop)?;
+            return Ok(());
+        }
+
+        let target_local = self.sj(SJ_NEXT_PC);
+        let true_info  = JumpInfo::indirect(0, target_local, kind_if_true);
+        let false_info = JumpInfo::indirect(0, target_local, kind_if_false);
+
+        // Extract layout before mutably borrowing jump_trap to avoid split-borrow conflict.
+        let layout = ictx.layout;
+
+        let mut true_buf  = BufferedEmitSink::new();
+        let mut false_buf = BufferedEmitSink::new();
+
+        // Scope the mutable borrow of jump_trap so it's released before sink writes.
+        {
+            let trap = ictx.jump_trap.as_deref_mut().unwrap();
+            fire_jump_trap(trap, &true_info,  ctx, &mut true_buf,  layout)?;
+            fire_jump_trap(trap, &false_info, ctx, &mut false_buf, layout)?;
+        }
+
+        // Emit: if [true branch] else [false branch] end
+        sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+        true_buf.replay_into(sink, ctx)?;
+        sink.instruction(ctx, &Instruction::Else)?;
+        false_buf.replay_into(sink, ctx)?;
+        sink.instruction(ctx, &Instruction::End)
     }
 
     fn build_handler_branch(

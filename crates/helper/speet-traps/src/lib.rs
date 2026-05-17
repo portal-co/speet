@@ -132,6 +132,7 @@ pub mod insn;
 pub mod jump;
 pub mod security;
 pub mod tracing;
+pub mod value_trace;
 
 // Flat re-exports for the most commonly used items.
 pub use cond::{ConditionHookWrapper, ConditionInfo, ConditionTrap};
@@ -139,8 +140,12 @@ pub use config::TrapConfig;
 pub use context::TrapContext;
 pub use hardening::RopDetectTrap;
 pub use impls::{ChainedTrap, NullTrap};
-pub use insn::{ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction};
-pub use jump::{JumpInfo, JumpKind, JumpTrap};
+pub use insn::{
+    ArchTag, InsnClass, InstructionInfo, InstructionTrap, TrapAction,
+    fire_insn_trap_after, fire_insn_trap_before,
+};
+pub use jump::{JumpInfo, JumpKind, JumpTrap, fire_jump_trap};
 pub use security::CfiReturnTrap;
 pub use tracing::{CounterTrap, TraceLogTrap};
+pub use value_trace::ValueTracingTrap;
 pub use yecta::{ConstPeek, LocalDeclarator, LocalLayout, LocalSlot, Mark};
