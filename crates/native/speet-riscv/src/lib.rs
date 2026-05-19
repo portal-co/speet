@@ -261,6 +261,14 @@ pub struct RiscVRecompiler<
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
     addr_scratch_slot: LocalSlot,
+    /// Slot for the 32 integer registers (x0-x31).
+    int_reg_slot: LocalSlot,
+    /// Slot for the 32 floating-point registers (f0-f31).
+    fp_reg_slot: LocalSlot,
+    /// Slot for the program counter.
+    pc_slot: LocalSlot,
+    /// Slot for the expected return address (speculative calls).
+    expected_ra_slot: LocalSlot,
     /// Optional slot assigner: controls which PCs get function slots and maps
     /// PCs to sequential slot indices.  When `None`, the legacy formula is used.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
@@ -305,6 +313,10 @@ where
             atomic_opts: AtomicOpts::NONE,
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
+            int_reg_slot: LocalSlot::default(),
+            fp_reg_slot: LocalSlot::default(),
+            pc_slot: LocalSlot::default(),
+            expected_ra_slot: LocalSlot::default(),
             slot_assigner: None,
             total_func_count: None,
         }
@@ -589,7 +601,7 @@ where
     /// The returned `total_params` value is the wasm function parameter count
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
-    pub fn setup_traps<RC: ReactorContext<Context, E> + ?Sized>(&self, rctx: &mut RC) -> u32 {
+    pub fn setup_traps<RC: ReactorContext<Context, E> + ?Sized>(&mut self, rctx: &mut RC) -> u32 {
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
@@ -597,10 +609,10 @@ where
         };
         {
             let layout = rctx.layout_mut();
-            layout.append(32, int_type); // x0-x31 (params 0-31)
-            layout.append(32, ValType::F64); // f0-f31 (params 32-63)
-            layout.append(1, int_type); // PC (param 64)
-            layout.append(1, int_type); // expected_RA (param 65)
+            self.int_reg_slot     = layout.append(32, int_type); // x0-x31 (params 0-31)
+            self.fp_reg_slot      = layout.append(32, ValType::F64); // f0-f31 (params 32-63)
+            self.pc_slot          = layout.append(1,  int_type); // PC (param 64)
+            self.expected_ra_slot = layout.append(1,  int_type); // expected_RA (param 65)
         }
         rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
@@ -801,18 +813,18 @@ where
     const N_POOL_I64: u32 = 4;
 
     /// Get the local index for an integer register
-    fn reg_to_local(reg: Reg) -> u32 {
-        reg.0 as u32
+    fn reg_to_local(&self, reg: Reg, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.int_reg_slot, reg.0 as u32)
     }
 
     /// Get the local index for a floating-point register
-    fn freg_to_local(freg: FReg) -> u32 {
-        32 + freg.0 as u32
+    fn freg_to_local(&self, freg: FReg, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.fp_reg_slot, freg.0 as u32)
     }
 
     /// Get the local index for the program counter
-    const fn pc_local() -> u32 {
-        64
+    fn pc_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.pc_slot, 0)
     }
 
     /// Get the local index for the expected return address (used for speculative calls)
@@ -820,8 +832,122 @@ where
     /// When a callee performs an ABI-compliant return (jalr x0, ra, 0), it throws an
     /// exception that the caller's try-catch block catches, restoring execution to
     /// continue after the call site.
-    const fn expected_ra_local() -> u32 {
-        65
+    fn expected_ra_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.expected_ra_slot, 0)
+    }
+
+    /// Feed a `Vec<Instruction<'static>>` through `rctx`.
+    fn feed_instrs<RC: ReactorContext<Context, E> + ?Sized>(
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        instrs: Vec<wasm_encoder::Instruction<'static>>,
+    ) -> Result<(), E> {
+        for instr in &instrs {
+            rctx.feed(ctx, tail_idx, instr)?;
+        }
+        Ok(())
+    }
+
+    /// Emit instructions to read integer register `reg` onto the WASM stack.
+    pub fn emit_xreg_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        reg: Reg,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.int_reg_slot, reg.0 as u32);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to pop the top WASM stack value into integer register `reg`.
+    /// For GcTraced slots, pushes placeholder trace metadata (pc=0, class=0, depth=0).
+    pub fn emit_xreg_set<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        reg: Reg,
+    ) -> Result<(), E> {
+        let (need_meta, instrs) = {
+            let layout = rctx.layout();
+            let need_meta = !matches!(layout.slot_kind(self.int_reg_slot), yecta::SlotKind::Plain);
+            (need_meta, layout.emit_set(self.int_reg_slot, reg.0 as u32))
+        };
+        if need_meta {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+        }
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to read FP register `freg` onto the WASM stack.
+    pub fn emit_freg_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        freg: FReg,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.fp_reg_slot, freg.0 as u32);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to pop the top WASM stack value into FP register `freg`.
+    /// For GcTraced slots, pushes placeholder trace metadata.
+    pub fn emit_freg_set<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        freg: FReg,
+    ) -> Result<(), E> {
+        let (need_meta, instrs) = {
+            let layout = rctx.layout();
+            let need_meta = !matches!(layout.slot_kind(self.fp_reg_slot), yecta::SlotKind::Plain);
+            (need_meta, layout.emit_set(self.fp_reg_slot, freg.0 as u32))
+        };
+        if need_meta {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+        }
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to pop the top WASM stack value into the PC slot.
+    pub fn emit_pc_set<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_set(self.pc_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to read the PC slot onto the WASM stack.
+    pub fn emit_pc_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.pc_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to read the expected_ra slot onto the WASM stack.
+    pub fn emit_expected_ra_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.expected_ra_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
     }
 
     /// Get the starting index for temporary registers
@@ -1446,24 +1572,17 @@ mod tests {
 
     #[test]
     fn test_register_mapping() {
-        // Test that register indices map correctly
-        assert_eq!(
-            RiscVRecompiler::<(), Infallible, Function>::reg_to_local(rv_asm::Reg(0)),
-            0
-        );
-        assert_eq!(
-            RiscVRecompiler::<(), Infallible, Function>::reg_to_local(rv_asm::Reg(31)),
-            31
-        );
-        assert_eq!(
-            RiscVRecompiler::<(), Infallible, Function>::freg_to_local(rv_asm::FReg(0)),
-            32
-        );
-        assert_eq!(
-            RiscVRecompiler::<(), Infallible, Function>::freg_to_local(rv_asm::FReg(31)),
-            63
-        );
-        assert_eq!(RiscVRecompiler::<(), Infallible, Function>::pc_local(), 64);
+        // Test that register indices map correctly via layout-aware helpers.
+        let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new();
+        let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+        let mut rctx = make_rctx(&mut reactor);
+        recompiler.setup_traps(&mut rctx);
+        let layout = rctx.layout();
+        assert_eq!(recompiler.reg_to_local(rv_asm::Reg(0),  layout), 0);
+        assert_eq!(recompiler.reg_to_local(rv_asm::Reg(31), layout), 31);
+        assert_eq!(recompiler.freg_to_local(rv_asm::FReg(0),  layout), 32);
+        assert_eq!(recompiler.freg_to_local(rv_asm::FReg(31), layout), 63);
+        assert_eq!(recompiler.pc_local(layout), 64);
     }
 
     #[test]

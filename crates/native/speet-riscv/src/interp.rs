@@ -16,6 +16,7 @@ use speet_traps::jump::{fire_jump_trap, JumpInfo, JumpKind};
 use alloc::borrow::Cow;
 use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
+use yecta::LocalLayout;
 
 // ── Major-opcode to handler-slot mapping ─────────────────────────────────────
 //
@@ -80,6 +81,10 @@ pub struct RiscVThompsonInterp<Context, E> {
     pub total_params: u32,
     /// Whether RV64 instructions are enabled (uses i64 for integer regs).
     pub enable_rv64: bool,
+    /// Slot handle for the 32 integer registers (x0-x31).
+    pub int_reg_slot: yecta::LocalSlot,
+    /// Slot handle for the 32 floating-point registers (f0-f31).
+    pub fp_reg_slot: yecta::LocalSlot,
     _marker: PhantomData<fn(&mut Context) -> E>,
 }
 
@@ -89,7 +94,13 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
     /// `total_params` must equal the param count used when generating the
     /// shared function type (the value returned by `setup_traps`).
     pub fn new(total_params: u32, enable_rv64: bool) -> Self {
-        Self { total_params, enable_rv64, _marker: PhantomData }
+        Self {
+            total_params,
+            enable_rv64,
+            int_reg_slot: yecta::LocalSlot::default(),
+            fp_reg_slot: yecta::LocalSlot::default(),
+            _marker: PhantomData,
+        }
     }
 
     /// Local index of `target_pc` (last param).
@@ -408,6 +419,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         sink: &mut dyn InstructionSink<Context, E>,
         ctx: &mut Context,
         reg_idx_local: u32,
+        layout: &LocalLayout,
     ) -> Result<(), E> {
         // block (result i64)  + 32 inner blocks.
         // br_table targets[k] = k, so: index k → br k → exit inner block k → land at case k.
@@ -429,13 +441,17 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         // Cases 1..30.
         for r in 1..31u32 {
             sink.instruction(ctx, &Instruction::End)?; // end $Br
-            sink.instruction(ctx, &Instruction::LocalGet(r))?;
+            for instr in layout.emit_get(self.int_reg_slot, r) {
+                sink.instruction(ctx, &instr)?;
+            }
             sink.instruction(ctx, &Instruction::Br(31 - r))?;
         }
 
         // Case 31: br 31 from br_table exits all inner blocks, land inside $R.
         sink.instruction(ctx, &Instruction::End)?; // end $B31
-        sink.instruction(ctx, &Instruction::LocalGet(31))?;
+        for instr in layout.emit_get(self.int_reg_slot, 31) {
+            sink.instruction(ctx, &instr)?;
+        }
         // fall through to end $R
         sink.instruction(ctx, &Instruction::End) // end result block — i64 on stack
     }
@@ -449,6 +465,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         ctx: &mut Context,
         rd_idx_local: u32,
         scratch: u32, // a spare i64 local to save the value
+        layout: &LocalLayout,
     ) -> Result<(), E> {
         sink.instruction(ctx, &Instruction::LocalSet(scratch))?;
 
@@ -469,14 +486,18 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         for r in 1..31u32 {
             sink.instruction(ctx, &Instruction::End)?;
             sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
-            sink.instruction(ctx, &Instruction::LocalSet(r))?;
+            for instr in layout.emit_set(self.int_reg_slot, r) {
+                sink.instruction(ctx, &instr)?;
+            }
             sink.instruction(ctx, &Instruction::Br(31 - r))?;
         }
 
         // Case 31: write and fall through to end $outer.
         sink.instruction(ctx, &Instruction::End)?; // end $B31
         sink.instruction(ctx, &Instruction::LocalGet(scratch))?;
-        sink.instruction(ctx, &Instruction::LocalSet(31))?;
+        for instr in layout.emit_set(self.int_reg_slot, 31) {
+            sink.instruction(ctx, &instr)?;
+        }
 
         sink.instruction(ctx, &Instruction::End) // end $outer
     }
@@ -519,7 +540,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_decode_rrf(sink, ctx)?;
         self.emit_imm_i_type(sink, ctx)?;
         // rs1_val = x[rs1]
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS1V)))?;
 
         // Dispatch on funct3 for the operation.
@@ -527,7 +548,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_op_imm_dispatch(sink, ctx)?;
 
         // Write result to rd.
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
 
         // next_pc = target_pc + 4
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
@@ -659,14 +680,14 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_decode_rrf(sink, ctx)?;
         self.emit_decode_rs2_funct7(sink, ctx)?;
         // rs1_val, rs2_val
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS1V)))?;
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS2V)))?;
 
         self.emit_op_dispatch(sink, ctx)?;
 
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
 
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
@@ -793,7 +814,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_imm_u_type(sink, ctx)?;
         // rd = imm (upper 20 bits, sign-extended)
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
 
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
@@ -816,7 +837,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
         sink.instruction(ctx, &Instruction::I64Add)?;
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
 
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
@@ -839,7 +860,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
         sink.instruction(ctx, &Instruction::I64Add)?;
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
         // next_pc = PC + imm
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
@@ -866,13 +887,13 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_decode_rrf(sink, ctx)?;
         self.emit_imm_i_type(sink, ctx)?;
         // rs1_val = x[rs1]
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS1V)))?;
         // rd = PC + 4
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
         sink.instruction(ctx, &Instruction::I64Add)?;
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
         // next_pc = (rs1_val + imm) & !1
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_RS1V)))?;
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
@@ -970,9 +991,9 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_decode_rrf(sink, ctx)?;
         self.emit_decode_rs2_funct7(sink, ctx)?;
         self.emit_imm_b_type(sink, ctx)?;
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS1V)))?;
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RS2V)))?;
 
         // Evaluate condition based on funct3.
@@ -1080,7 +1101,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         self.emit_decode_rrf(sink, ctx)?;
         self.emit_imm_i_type(sink, ctx)?;
         // effective address = x[rs1] + imm
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
         sink.instruction(ctx, &Instruction::I64Add)?;
         // emit_load via MemoryAccess.  Dispatch load kind from funct3.
@@ -1092,7 +1113,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         }
         let _ = f3_val;
         sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_RESULT)))?;
-        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT))?;
+        self.emit_dyn_xreg_write(sink, ctx, self.si(SI_RD), self.sj(SJ_RESULT), ictx.layout)?;
 
         sink.instruction(ctx, &Instruction::LocalGet(self.tpc()))?;
         sink.instruction(ctx, &Instruction::I64Const(4))?;
@@ -1138,7 +1159,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
             sink.instruction(ctx, &Instruction::LocalSet(self.sj(SJ_IMM)))?;
         }
         // effective address = x[rs1] + imm
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS1), ictx.layout)?;
         sink.instruction(ctx, &Instruction::LocalGet(self.sj(SJ_IMM)))?;
         sink.instruction(ctx, &Instruction::I64Add)?;
         let mut mem_sink = FlatMemorySink::new(sink);
@@ -1146,7 +1167,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
             mem.emit_store_addr(ctx, &mut mem_sink)?;
         }
         // value = x[rs2]
-        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2))?;
+        self.emit_dyn_xreg_read(sink, ctx, self.si(SI_RS2), ictx.layout)?;
         // For simplicity emit SW (32-bit store) — full funct3 dispatch is a follow-up.
         let mut mem_sink2 = FlatMemorySink::new(sink);
         if let Some(mem) = ictx.memory.as_mut() {

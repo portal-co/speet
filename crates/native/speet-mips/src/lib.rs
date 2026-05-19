@@ -252,6 +252,12 @@ pub struct MipsRecompiler<
     /// Registry mapping unique (function-type params, locals) combinations
     /// to [`CellIdx`] handles.  Populated on each `init_function` call.
     /// The [`CellIdx`] allocated for the most-recently initialised function.
+    /// Slot for the 32 GPRs ($0–$31).
+    gpr_slot: LocalSlot,
+    /// Slot for HI (index 0) and LO (index 1).
+    hi_lo_slot: LocalSlot,
+    /// Slot for the PC register.
+    pc_slot: LocalSlot,
     /// Slot for per-function GPR-type temp locals (num_temps of them).
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
@@ -288,6 +294,9 @@ where
             enable_mips64,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
+            gpr_slot: LocalSlot::default(),
+            hi_lo_slot: LocalSlot::default(),
+            pc_slot: LocalSlot::default(),
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
@@ -445,9 +454,9 @@ where
         rctx: &mut RC,
     ) -> u32 {
         let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
-        rctx.layout_mut().append(32, gpr_type);
-        rctx.layout_mut().append(2, gpr_type);
-        rctx.layout_mut().append(1, ValType::I32);
+        self.gpr_slot   = rctx.layout_mut().append(32, gpr_type); // $0–$31
+        self.hi_lo_slot = rctx.layout_mut().append(2,  gpr_type); // HI, LO
+        self.pc_slot    = rctx.layout_mut().append(1,  ValType::I32); // PC
         rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
@@ -603,24 +612,92 @@ where
         ValType::I32
     }
 
-    /// Get the local index for a general-purpose register
-    fn gpr_to_local(reg: GprO32) -> u32 {
-        reg as u32
+    /// Get the local index for a general-purpose register.
+    fn gpr_to_local(&self, reg: GprO32, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.gpr_slot, reg as u32)
     }
 
-    /// Get the local index for the HI register
-    const fn hi_local() -> u32 {
-        32
+    /// Get the local index for the HI register.
+    fn hi_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.hi_lo_slot, 0)
     }
 
-    /// Get the local index for the LO register
-    const fn lo_local() -> u32 {
-        33
+    /// Get the local index for the LO register.
+    fn lo_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.hi_lo_slot, 1)
     }
 
-    /// Get the local index for the program counter
-    const fn pc_local() -> u32 {
-        34
+    /// Get the local index for the program counter.
+    fn pc_local(&self, layout: &yecta::LocalLayout) -> u32 {
+        layout.local(self.pc_slot, 0)
+    }
+
+    // ── Layout-aware register emit helpers ────────────────────────────────────
+
+    fn feed_instrs<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+        instrs: alloc::vec::Vec<WasmInstruction<'static>>,
+    ) -> Result<(), E> {
+        for instr in &instrs { rctx.feed(ctx, tail_idx, instr)?; }
+        Ok(())
+    }
+
+    pub fn emit_gpr_get<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize, reg: GprO32,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.gpr_slot, reg as u32);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_gpr_set<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize, reg: GprO32,
+    ) -> Result<(), E> {
+        let (need_meta, instrs) = {
+            let layout = rctx.layout();
+            let need_meta = !matches!(layout.slot_kind(self.gpr_slot), yecta::SlotKind::Plain);
+            (need_meta, layout.emit_set(self.gpr_slot, reg as u32))
+        };
+        if need_meta {
+            rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0))?;
+            rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0))?;
+            rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0))?;
+        }
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_hi_get<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.hi_lo_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_hi_set<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_set(self.hi_lo_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_lo_get<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.hi_lo_slot, 1);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_lo_set<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_set(self.hi_lo_slot, 1);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    pub fn emit_pc_set<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_set(self.pc_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
     }
 
     /// Emit an integer constant (i32 or i64 depending on MIPS64 mode)
@@ -831,8 +908,8 @@ where
         }
 
         let condition = BranchCondition {
-            rs_local: Self::gpr_to_local(rs),
-            rt_local: rt.map(|r| Self::gpr_to_local(r)),
+            rs_local: self.gpr_to_local(rs, rctx.layout()),
+            rt_local: rt.map(|r| self.gpr_to_local(r, rctx.layout())),
             op,
         };
 
@@ -892,7 +969,7 @@ where
         let tail_idx = self.init_function(ctx, rctx, pc, 8, f)?;
 
         rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(pc as i32))?;
-        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::pc_local()))?;
+        self.emit_pc_set(ctx, rctx, tail_idx)?;
 
         let insn_info = InstructionInfo {
             pc: pc as u64,
@@ -914,10 +991,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_add(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -927,10 +1004,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_add(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -940,10 +1017,10 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -953,10 +1030,10 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -966,10 +1043,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_sub(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -979,10 +1056,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_sub(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -993,10 +1070,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_and(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1006,10 +1083,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_or(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1019,10 +1096,10 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_xor(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1032,12 +1109,12 @@ where
                 let rd: GprO32 = instruction.get_rd_o32();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     self.emit_or(ctx, rctx, tail_idx)?;
                     self.emit_int_const(ctx, rctx, tail_idx, -1)?;
                     self.emit_xor(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1047,10 +1124,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_and(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1060,10 +1137,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_or(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1073,10 +1150,10 @@ where
                 let imm = instruction.get_immediate() as u32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm as i32))?;
                     self.emit_xor(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1087,10 +1164,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shl(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1100,10 +1177,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shr_u(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1113,10 +1190,10 @@ where
                 let sa = instruction.get_sa();
 
                 if rd != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(sa as i32))?;
                     self.emit_shr_s(ctx, rctx, tail_idx)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
             }
 
@@ -1127,7 +1204,7 @@ where
 
                 if rt != GprO32::zero {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const((imm << 16) as i32))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1183,7 +1260,7 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1195,7 +1272,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1219,7 +1296,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1230,7 +1307,7 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1242,7 +1319,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1265,7 +1342,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1276,7 +1353,7 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1288,7 +1365,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1311,7 +1388,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1322,7 +1399,7 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1334,7 +1411,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1357,7 +1434,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1367,10 +1444,11 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
+                let rt_instrs_sb = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
                     use speet_ordering::EagerMemorySink;
                     {
@@ -1378,7 +1456,7 @@ where
                         let mut sink = EagerMemorySink::new(&mut fed);
                         ma.emit_store_addr(ctx, &mut sink)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    for instr in &rt_instrs_sb { rctx.feed(ctx, tail_idx, instr)?; }
                     if ma.needs_wrap_for_narrow_store(StoreKind::I8) {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     }
@@ -1392,7 +1470,7 @@ where
 
                 // value to store: wrap to i32 then store 8 bits
                 if self.enable_mips64 {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
@@ -1408,7 +1486,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     emit_store(
                         ctx,
                         rctx,
@@ -1431,10 +1509,11 @@ where
                 let rt: GprO32 = instruction.get_rt_o32();
                 let imm = instruction.get_immediate() as i32;
 
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
+                let rt_instrs_sh = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
                     use speet_ordering::EagerMemorySink;
                     {
@@ -1442,7 +1521,7 @@ where
                         let mut sink = EagerMemorySink::new(&mut fed);
                         ma.emit_store_addr(ctx, &mut sink)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    for instr in &rt_instrs_sh { rctx.feed(ctx, tail_idx, instr)?; }
                     if ma.needs_wrap_for_narrow_store(StoreKind::I16) {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     }
@@ -1456,7 +1535,7 @@ where
 
                 // value to store: wrap to i32 then store 16 bits
                 if self.enable_mips64 {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
@@ -1472,7 +1551,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     emit_store(
                         ctx,
                         rctx,
@@ -1497,7 +1576,7 @@ where
 
                 if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1509,7 +1588,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1532,7 +1611,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1543,11 +1622,12 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 // compute effective address: base + imm
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
                 // invoke mapper callback if present (virtual -> physical)
+                let rt_instrs_sw = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
                     use speet_ordering::EagerMemorySink;
                     {
@@ -1555,7 +1635,7 @@ where
                         let mut sink = EagerMemorySink::new(&mut fed);
                         ma.emit_store_addr(ctx, &mut sink)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    for instr in &rt_instrs_sw { rctx.feed(ctx, tail_idx, instr)?; }
                     if ma.needs_wrap_for_narrow_store(StoreKind::I32) {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     }
@@ -1569,7 +1649,7 @@ where
 
                 // value to store: if MIPS64 wrap to i32 then store 32-bit
                 if self.enable_mips64 {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     emit_store(
                         ctx,
@@ -1585,7 +1665,7 @@ where
                         tail_idx,
                     )?;
                 } else {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     emit_store(
                         ctx,
                         rctx,
@@ -1613,7 +1693,7 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
                 } else if rt != GprO32::zero {
                     // compute effective address: base + imm
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1623,7 +1703,7 @@ where
                         let mut fed = FedContext::new(rctx, tail_idx);
                         let mut sink = EagerMemorySink::new(&mut fed);
                         ma.emit_load(ctx, &mut sink, LoadKind::I64)?;
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1643,7 +1723,7 @@ where
                         }),
                         tail_idx,
                     )?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1658,11 +1738,12 @@ where
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
                 } else {
                     // compute effective address: base + imm
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
                     // invoke mapper callback if present (virtual -> physical)
+                    let rt_instrs_sd = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
                         {
@@ -1670,7 +1751,7 @@ where
                             let mut sink = EagerMemorySink::new(&mut fed);
                             ma.emit_store_addr(ctx, &mut sink)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                        for instr in &rt_instrs_sd { rctx.feed(ctx, tail_idx, instr)?; }
                         // StoreKind::I64 never needs wrapping
                         {
                             let mut fed = FedContext::new(rctx, tail_idx);
@@ -1681,7 +1762,7 @@ where
                     }
 
                     // store 64-bit value directly
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     emit_store(
                         ctx,
                         rctx,
@@ -1721,8 +1802,7 @@ where
                 // Save return address in $ra ($31)
                 let return_addr = pc + 8; // JAL has a delay slot
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(GprO32::ra)),
-                )?;
+                self.emit_gpr_set(ctx, rctx, tail_idx, GprO32::ra)?;
 
                 let jal_info = JumpInfo::direct(pc as u64, target_pc as u64, JumpKind::Call);
                 if rctx.on_jump(&jal_info, ctx)?
@@ -1739,7 +1819,7 @@ where
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local(rctx.layout());
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(scratch))?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Drop)?;
 
@@ -1757,7 +1837,7 @@ where
                 }
 
                 let snippet = TableIndexSnippet {
-                    rs_local: Self::gpr_to_local(rs),
+                    rs_local: self.gpr_to_local(rs, rctx.layout()),
                     base_pc: self.base_pc,
                 };
                 let params =
@@ -1774,12 +1854,12 @@ where
                 let return_addr = pc + 8; // JALR has a delay slot
                 if rd != GprO32::zero {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rd)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
                 }
 
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local(rctx.layout());
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rs)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(scratch))?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Drop)?;
 
@@ -1791,7 +1871,7 @@ where
                 }
 
                 let snippet = TableIndexSnippet {
-                    rs_local: Self::gpr_to_local(rs),
+                    rs_local: self.gpr_to_local(rs, rctx.layout()),
                     base_pc: self.base_pc,
                 };
                 let params =
@@ -1861,7 +1941,7 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -1887,7 +1967,7 @@ where
                         if self.enable_mips64 {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -1907,7 +1987,7 @@ where
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1918,10 +1998,11 @@ where
                 let imm = instruction.get_immediate() as i32;
 
                 // Compute effective address
-                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
 
+                let rt_instrs_swl = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
                     use speet_ordering::EagerMemorySink;
                     {
@@ -1929,7 +2010,7 @@ where
                         let mut sink = EagerMemorySink::new(&mut fed);
                         ma.emit_store_addr(ctx, &mut sink)?;
                     }
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    for instr in &rt_instrs_swl { rctx.feed(ctx, tail_idx, instr)?; }
                     if ma.needs_wrap_for_narrow_store(StoreKind::I32) {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                     }
@@ -1949,17 +2030,17 @@ where
                             WasmInstruction::I32Const(1)
                         };
                         rctx.feed(ctx, tail_idx, &one)?;
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                     }
                     return Ok(());
                 }
 
                 // Value to store: rt (truncated to i32 if MIPS64)
                 if self.enable_mips64 {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
                 } else {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                 }
 
                 emit_sc(
@@ -1979,7 +2060,7 @@ where
                         WasmInstruction::I32Const(1)
                     };
                     rctx.feed(ctx, tail_idx, &one)?;
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -1992,7 +2073,7 @@ where
                 if !self.enable_mips64 {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
                 } else if rt != GprO32::zero {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -2015,7 +2096,7 @@ where
                             speet_ordering::MemOrder::Strong,
                             tail_idx,
                         )?;
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         return Ok(());
                     }
 
@@ -2032,7 +2113,7 @@ where
                         tail_idx,
                     )?;
 
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
 
@@ -2045,7 +2126,7 @@ where
                 if !self.enable_mips64 {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
                 } else {
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(base)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
 
@@ -2056,7 +2137,7 @@ where
                             let mut sink = EagerMemorySink::new(&mut fed);
                             ma.emit_store_addr(ctx, &mut sink)?;
                         }
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                         // StoreKind::I64 never needs wrapping
                         emit_sc(
                             ctx,
@@ -2069,12 +2150,12 @@ where
                         // SCD always succeeds: write 1 into rt
                         if rt != GprO32::zero {
                             rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(1))?;
-                            rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                            self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                         }
                         return Ok(());
                     }
 
-                    rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(Self::gpr_to_local(rt)))?;
+                    self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
 
                     emit_sc(
                         ctx,
@@ -2088,7 +2169,7 @@ where
                     // SCD always succeeds: write 1 into rt
                     if rt != GprO32::zero {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(1))?;
-                        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(Self::gpr_to_local(rt)))?;
+                        self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                     }
                 }
             }

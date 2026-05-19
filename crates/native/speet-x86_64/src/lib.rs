@@ -72,6 +72,14 @@ pub struct X86Recompiler<Context, E> {
     unsupported_insns: alloc::collections::BTreeSet<alloc::string::String>,
     /// Optional memory access implementation (mapper + load/store).
     memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
+    /// Slot for the 16 x86-64 GPRs (RAX–R15, indices 0–15).
+    gpr_slot: yecta::LocalSlot,
+    /// Slot for RIP (index 0).
+    rip_slot: yecta::LocalSlot,
+    /// Slot for ZF, SF, CF, OF, PF (indices 0–4).
+    flags_slot: yecta::LocalSlot,
+    /// Slot for 4 i64 temporaries (including expected_RA at index 3).
+    tmp_slot: yecta::LocalSlot,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -101,6 +109,10 @@ impl<Context, E> X86Recompiler<Context, E> {
         Self {
             base_rip,
             hints: Vec::new(),
+            gpr_slot: yecta::LocalSlot::default(),
+            rip_slot: yecta::LocalSlot::default(),
+            flags_slot: yecta::LocalSlot::default(),
+            tmp_slot: yecta::LocalSlot::default(),
             enable_speculative_calls: false,
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
@@ -236,10 +248,10 @@ impl<Context, E> X86Recompiler<Context, E> {
         &mut self,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
     ) -> u32 {
-        rctx.layout_mut().append(16, wasm_encoder::ValType::I64);
-        rctx.layout_mut().append(1, wasm_encoder::ValType::I32);
-        rctx.layout_mut().append(5, wasm_encoder::ValType::I32);
-        rctx.layout_mut().append(4, wasm_encoder::ValType::I64);
+        self.gpr_slot   = rctx.layout_mut().append(16, wasm_encoder::ValType::I64); // RAX–R15
+        self.rip_slot   = rctx.layout_mut().append(1,  wasm_encoder::ValType::I32); // RIP
+        self.flags_slot = rctx.layout_mut().append(5,  wasm_encoder::ValType::I32); // ZF SF CF OF PF
+        self.tmp_slot   = rctx.layout_mut().append(4,  wasm_encoder::ValType::I64); // tmp0-3 + expected_RA
         let mut unit = ();
         let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
             Some(m) => m as &mut dyn LocalDeclarator,
@@ -348,29 +360,77 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
     }
 
+    // ── Layout-aware emit helpers ─────────────────────────────────────────────
+
+    fn feed_instrs_x86<F>(
+        ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        instrs: alloc::vec::Vec<Instruction<'static>>,
+    ) -> Result<(), E> {
+        for instr in &instrs { rctx.feed(ctx, tail_idx, instr)?; }
+        Ok(())
+    }
+
+    /// Emit instructions to read GPR `idx` (0–15) onto the WASM stack.
+    pub fn emit_gpr_get<F>(
+        &self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, idx: u32,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.gpr_slot, idx);
+        Self::feed_instrs_x86(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to pop stack into GPR `idx` (0–15).
+    pub fn emit_gpr_set<F>(
+        &self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, idx: u32,
+    ) -> Result<(), E> {
+        let (need_meta, instrs) = {
+            let layout = rctx.layout();
+            let need_meta = !matches!(layout.slot_kind(self.gpr_slot), yecta::SlotKind::Plain);
+            (need_meta, layout.emit_set(self.gpr_slot, idx))
+        };
+        if need_meta {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?;
+        }
+        Self::feed_instrs_x86(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Emit instructions to pop stack into flag slot `flag_idx`
+    /// (0=ZF, 1=SF, 2=CF, 3=OF, 4=PF).
+    fn emit_flag_set<F>(
+        &self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, flag_idx: u32,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_set(self.flags_slot, flag_idx);
+        Self::feed_instrs_x86(ctx, rctx, tail_idx, instrs)
+    }
+
+    // ── Flag set helpers ──────────────────────────────────────────────────────
+
     fn set_zf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::ZF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 0)
     }
 
     fn set_sf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::SF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 1)
     }
 
     fn set_cf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::CF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 2)
     }
 
     fn set_of<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 3)
     }
 
     fn set_pf<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, value: bool) -> Result<(), E> {
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(if value { 1 } else { 0 }))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 4)
     }
 
     // Helper to compute parity flag (even number of 1 bits in lowest byte)
@@ -387,7 +447,7 @@ impl<Context, E> X86Recompiler<Context, E> {
         // For now, just set to 0 (even parity) - this is a simplification
         rctx.feed(ctx, tail_idx, &Instruction::Drop)?;
         rctx.feed(ctx, tail_idx, &Instruction::I32Const(0))?; // Assume even parity for simplicity
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::PF_LOCAL))
+        self.emit_flag_set(ctx, rctx, tail_idx, 4)
     }
 
     // Helper to set flags after arithmetic operation
@@ -561,8 +621,9 @@ impl<Context, E> X86Recompiler<Context, E> {
         size_bits: u32,
         bit_offset: u32,
     ) -> Result<(), E> {
+        let scratch = rctx.layout().local(self.tmp_slot, 0); // i64 scratch temp
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(17))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(scratch))?;
         let mask: i64 = if size_bits == 64 { -1i64 } else { ((1u128 << size_bits) - 1) as i64 };
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(mask))?;
         if bit_offset > 0 {
@@ -571,7 +632,7 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(17))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(scratch))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
         let small_mask: i64 = if size_bits == 64 { -1i64 } else { ((1u128 << size_bits) - 1) as i64 };
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(small_mask))?;

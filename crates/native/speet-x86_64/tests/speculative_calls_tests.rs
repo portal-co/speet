@@ -19,13 +19,13 @@ fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, wasm_encoder::
 
 #[test]
 fn test_speculative_calls_disabled_by_default() {
-    let recompiler = X86Recompiler::new();
+    let recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
     assert!(!recompiler.is_speculative_calls_enabled());
 }
 
 #[test]
 fn test_speculative_calls_toggle() {
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Initially disabled
     assert!(!recompiler.is_speculative_calls_enabled());
@@ -41,7 +41,7 @@ fn test_speculative_calls_toggle() {
 
 #[test]
 fn test_escape_tag_configuration() {
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
@@ -67,7 +67,7 @@ fn test_escape_tag_configuration() {
 fn test_call_with_speculative_calls_disabled() {
     // Direct CALL instruction: E8 05 00 00 00 (call +5)
     let bytes = vec![0xE8, 0x05, 0x00, 0x00, 0x00];
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Speculative calls disabled (default)
     assert!(!recompiler.is_speculative_calls_enabled());
@@ -87,7 +87,7 @@ fn test_call_with_speculative_calls_disabled() {
 fn test_call_with_speculative_calls_enabled() {
     // Direct CALL instruction: E8 05 00 00 00 (call +5)
     let bytes = vec![0xE8, 0x05, 0x00, 0x00, 0x00];
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Configure for speculative calls
     recompiler.set_speculative_calls(true);
@@ -112,7 +112,7 @@ fn test_call_with_speculative_calls_enabled() {
 fn test_ret_with_speculative_calls_enabled() {
     // RET instruction: C3
     let bytes = vec![0xC3];
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Configure for speculative calls
     recompiler.set_speculative_calls(true);
@@ -137,7 +137,7 @@ fn test_ret_with_speculative_calls_enabled() {
 fn test_speculative_calls_requires_escape_tag() {
     // Direct CALL instruction: E8 05 00 00 00 (call +5)
     let bytes = vec![0xE8, 0x05, 0x00, 0x00, 0x00];
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Enable speculative calls but don't set escape tag
     recompiler.set_speculative_calls(true);
@@ -159,7 +159,7 @@ fn test_speculative_calls_requires_escape_tag() {
 fn test_ret_with_immediate_speculative() {
     // RET with immediate: C2 08 00 (ret 8) - return and clean up 8 bytes from stack
     let bytes = vec![0xC2, 0x08, 0x00];
-    let mut recompiler = X86Recompiler::new();
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
 
     // Configure for speculative calls
     recompiler.set_speculative_calls(true);
