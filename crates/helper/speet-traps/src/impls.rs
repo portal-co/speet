@@ -87,6 +87,22 @@ impl<A: LocalDeclarator, B: LocalDeclarator> LocalDeclarator for ChainedTrap<A, 
         self.a.declare_locals(cell, locals);
         self.b.declare_locals(cell, locals);
     }
+
+    /// Compose slot translation: apply `A` first, then `B`.
+    ///
+    /// Because `A` and `B` own **disjoint** slots (each calls `layout.append`
+    /// independently), exactly one of them will recognise any given slot; the
+    /// other will return it unchanged.  The result is therefore always correct
+    /// regardless of which order the two are applied.
+    fn translate_slot(
+        &self,
+        slot: yecta::LocalSlot,
+        from_cell: CellIdx,
+        to_cell: CellIdx,
+    ) -> yecta::LocalSlot {
+        let slot = self.a.translate_slot(slot, from_cell, to_cell);
+        self.b.translate_slot(slot, from_cell, to_cell)
+    }
 }
 
 impl<Context, E, A, B> InstructionTrap<Context, E> for ChainedTrap<A, B>

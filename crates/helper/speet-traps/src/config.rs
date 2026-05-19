@@ -236,15 +236,16 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         ctx: &mut Context,
         sink: &mut dyn EmitSink<Context, E>,
         layout: &dyn LocalAllocator,
+        cell: CellIdx,
     ) -> Result<TrapAction, E> {
         let trap = match self.insn_trap.as_mut() {
             Some(t) => t,
             None => return Ok(TrapAction::Continue),
         };
-        let mut trap_ctx = TrapContext::new(sink, layout);
+        let mut trap_ctx = TrapContext::new(sink, layout, cell);
         let action = trap.on_instruction(info, ctx, &mut trap_ctx)?;
         if action == TrapAction::Skip {
-            let mut trap_ctx2 = TrapContext::new(sink, layout);
+            let mut trap_ctx2 = TrapContext::new(sink, layout, cell);
             self.insn_trap
                 .as_ref()
                 .unwrap()
@@ -264,15 +265,16 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         ctx: &mut Context,
         sink: &mut dyn EmitSink<Context, E>,
         layout: &dyn LocalAllocator,
+        cell: CellIdx,
     ) -> Result<TrapAction, E> {
         let trap = match self.jump_trap.as_mut() {
             Some(t) => t,
             None => return Ok(TrapAction::Continue),
         };
-        let mut trap_ctx = TrapContext::new(sink, layout);
+        let mut trap_ctx = TrapContext::new(sink, layout, cell);
         let action = trap.on_jump(info, ctx, &mut trap_ctx)?;
         if action == TrapAction::Skip {
-            let mut trap_ctx2 = TrapContext::new(sink, layout);
+            let mut trap_ctx2 = TrapContext::new(sink, layout, cell);
             self.jump_trap
                 .as_ref()
                 .unwrap()
@@ -322,12 +324,13 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         ctx: &mut Context,
         sink: &mut dyn EmitSink<Context, E>,
         layout: &dyn LocalAllocator,
+        cell: CellIdx,
     ) -> Result<(), E> {
         let trap = match self.insn_trap.as_mut() {
             Some(t) => t,
             None => return Ok(()),
         };
-        let mut trap_ctx = TrapContext::new(sink, layout);
+        let mut trap_ctx = TrapContext::new(sink, layout, cell);
         trap.after_instruction(info, ctx, &mut trap_ctx)
     }
 
@@ -354,12 +357,13 @@ impl<'cb, 'ctx, Context, E> TrapConfig<'cb, 'ctx, Context, E> {
         ctx: &mut Context,
         sink: &mut dyn EmitSink<Context, E>,
         layout: &dyn LocalAllocator,
+        cell: CellIdx,
     ) -> Result<(), E> {
         let trap = match self.cond_trap.as_deref() {
             Some(t) => t,
             None => return Ok(()),
         };
-        let mut trap_ctx = TrapContext::new(sink, layout);
+        let mut trap_ctx = TrapContext::new(sink, layout, cell);
         fire_via_trap_ctx(trap, info, ctx, &mut trap_ctx)
     }
 }

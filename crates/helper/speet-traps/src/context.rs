@@ -49,7 +49,7 @@
 //! recompiler's stored field.
 
 use wasm_encoder::Instruction;
-use yecta::{ConstPeek, EmitSink, FuncIdx, LocalAllocator};
+use yecta::{ConstPeek, EmitSink, FuncIdx, LocalAllocator, layout::CellIdx};
 
 // ── TrapContext ───────────────────────────────────────────────────────────────
 
@@ -62,6 +62,11 @@ pub struct TrapContext<'a, Context, E> {
     sink: &'a mut dyn EmitSink<Context, E>,
     /// Unified layout for all params and locals owned by the arch recompiler.
     layout: &'a dyn LocalAllocator,
+    /// The [`CellIdx`] of the function currently being translated.
+    ///
+    /// Traps that store per-cell [`LocalSlot`](yecta::LocalSlot) maps use this
+    /// to resolve the correct slot for the active function signature.
+    current_cell: CellIdx,
 }
 
 impl<'a, Context, E> TrapContext<'a, Context, E> {
@@ -72,8 +77,9 @@ impl<'a, Context, E> TrapContext<'a, Context, E> {
     pub(crate) fn new(
         sink: &'a mut dyn EmitSink<Context, E>,
         layout: &'a dyn LocalAllocator,
+        current_cell: CellIdx,
     ) -> Self {
-        Self { sink, layout }
+        Self { sink, layout, current_cell }
     }
 
     /// Emit a single wasm instruction into the current function.
@@ -94,6 +100,15 @@ impl<'a, Context, E> TrapContext<'a, Context, E> {
     #[inline]
     pub fn layout(&self) -> &dyn LocalAllocator {
         self.layout
+    }
+
+    /// The [`CellIdx`] of the function currently being translated.
+    ///
+    /// Traps use this to look up their slot for the active cell when they
+    /// store per-cell [`LocalSlot`](yecta::LocalSlot) maps.
+    #[inline]
+    pub fn current_cell(&self) -> CellIdx {
+        self.current_cell
     }
 
     /// Emit an **unconditional jump** to `target`, forwarding `params`

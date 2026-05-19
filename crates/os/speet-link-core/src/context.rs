@@ -648,6 +648,12 @@ where
     pub escape_tag: Option<EscapeTag>,
     /// Registry mapping unique `(params, locals)` signatures to [`CellIdx`] handles.
     pub cell_registry: CellRegistry,
+    /// The cell most recently allocated for the current function.
+    ///
+    /// Set by [`alloc_cell`](BaseContext::alloc_cell) and
+    /// [`alloc_cell_for_guest`](BaseContext::alloc_cell_for_guest).
+    /// Passed to [`TrapConfig`] firing methods so traps can resolve per-cell slots.
+    pub current_cell: CellIdx,
 }
 
 impl<'r, 'cb, 'ctx, Context, E, F, P> TrapReactorAdapter<'r, 'cb, 'ctx, Context, E, F, P>
@@ -671,6 +677,7 @@ where
             pool,
             escape_tag,
             cell_registry: CellRegistry::default(),
+            current_cell: CellIdx(0),
         }
     }
 }
@@ -714,10 +721,12 @@ where
     }
     fn alloc_cell(&mut self) -> CellIdx {
         let mark = self.locals_mark;
-        self.cell_registry.register(
+        let cell = self.cell_registry.register(
             self.layout.iter_before(&mark),
             self.layout.iter_since(&mark),
-        )
+        );
+        self.current_cell = cell;
+        cell
     }
     fn on_instruction(
         &mut self,
@@ -727,12 +736,12 @@ where
         let layout = &self.layout as *const LocalLayout;
         // SAFETY: layout is borrowed immutably; self.traps and self.reactor are disjoint fields.
         let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
-        self.traps.on_instruction(info, ctx, &mut *self.reactor, layout_ref)
+        self.traps.on_instruction(info, ctx, &mut *self.reactor, layout_ref, self.current_cell)
     }
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E> {
         let layout = &self.layout as *const LocalLayout;
         let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
-        self.traps.on_jump(info, ctx, &mut *self.reactor, layout_ref)
+        self.traps.on_jump(info, ctx, &mut *self.reactor, layout_ref, self.current_cell)
     }
 }
 

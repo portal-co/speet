@@ -49,6 +49,8 @@
 // See docs/trap-hooks.md §9 and AGENTS.md §2 for the rationale behind using a
 // wasm *parameter* (not a local) for RopDetectTrap's depth counter.
 
+extern crate alloc;
+use alloc::collections::BTreeMap;
 use wasm_encoder::{Instruction, ValType};
 use yecta::layout::CellIdx;
 use yecta::{FuncIdx, LocalDeclarator, LocalLayout, LocalSlot};
@@ -85,6 +87,15 @@ use crate::jump::{JumpInfo, JumpKind, JumpTrap};
 /// `params` argument to every `jmp` / `ji` call, so the depth counter is
 /// forwarded on every control-flow edge.
 ///
+/// ## Multi-cell slot tracking
+///
+/// `RopDetectTrap` stores one [`LocalSlot`] per [`CellIdx`] it is declared
+/// into.  When a cross-cell shim needs to forward the depth counter from one
+/// cell's layout to another, [`translate_slot`](LocalDeclarator::translate_slot)
+/// maps the source-cell slot to the corresponding target-cell slot.  Unknown
+/// slots (not owned by this trap) pass through unchanged, ensuring safe
+/// composition via [`ChainedTrap`](crate::ChainedTrap).
+///
 /// ## Mechanism
 ///
 /// | Event | Action |
@@ -105,9 +116,12 @@ pub struct RopDetectTrap {
     pub violation_handler: FuncIdx,
     /// Number of wasm function parameters to pass to the violation handler.
     pub handler_params: u32,
-    /// Slot for the `i32` depth-counter parameter.
-    /// Set during [`declare_params`](JumpTrap::declare_params).
-    depth_param_slot: LocalSlot,
+    /// Per-cell depth-counter parameter slots.
+    ///
+    /// One entry is inserted per `declare_params(cell, …)` call.  The slot
+    /// index differs between cells because each cell has a different layout
+    /// (different arch params, different ordering of injected params, etc.).
+    depth_param_slots: BTreeMap<CellIdx, LocalSlot>,
 }
 
 impl RopDetectTrap {
@@ -122,14 +136,32 @@ impl RopDetectTrap {
         Self {
             violation_handler,
             handler_params,
-            depth_param_slot: LocalSlot::default(),
+            depth_param_slots: BTreeMap::new(),
         }
     }
 }
 
 impl LocalDeclarator for RopDetectTrap {
     fn declare_params(&mut self, cell: CellIdx, params: &mut LocalLayout) {
-        self.depth_param_slot = params.append(1, ValType::I32);
+        let slot = params.append(1, ValType::I32);
+        self.depth_param_slots.insert(cell, slot);
+    }
+
+    /// Map the depth-counter slot from `from_cell`'s layout to `to_cell`'s
+    /// layout.  Returns `slot` unchanged if this trap does not own it in
+    /// `from_cell` (pass-through for unknown slots).
+    fn translate_slot(
+        &self,
+        slot: LocalSlot,
+        from_cell: CellIdx,
+        to_cell: CellIdx,
+    ) -> LocalSlot {
+        if self.depth_param_slots.get(&from_cell) == Some(&slot) {
+            if let Some(&to_slot) = self.depth_param_slots.get(&to_cell) {
+                return to_slot;
+            }
+        }
+        slot
     }
 }
 
@@ -140,7 +172,12 @@ impl<Context, E> JumpTrap<Context, E> for RopDetectTrap {
         ctx: &mut Context,
         trap_ctx: &mut TrapContext<Context, E>,
     ) -> Result<TrapAction, E> {
-        let depth_local = trap_ctx.layout().local(self.depth_param_slot, 0);
+        let current_cell = trap_ctx.current_cell();
+        let depth_local = self
+            .depth_param_slots
+            .get(&current_cell)
+            .map(|&s| trap_ctx.layout().local(s, 0))
+            .unwrap_or(0);
         match info.kind {
             JumpKind::Call | JumpKind::IndirectCall => {
                 trap_ctx.emit(ctx, &Instruction::LocalGet(depth_local))?;

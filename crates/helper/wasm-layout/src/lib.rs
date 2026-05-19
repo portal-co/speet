@@ -730,6 +730,15 @@ impl LocalAllocator for LocalLayout {
 /// * [`declare_locals`](Self::declare_locals) — called **once per function**
 ///   after the params mark.  Slots appended here are reset to zero at the
 ///   start of each new wasm function (scratch locals).
+///
+/// # Cross-cell slot translation
+///
+/// When the same declarator is used across multiple cells (distinct
+/// `(params, locals)` signatures), [`translate_slot`](Self::translate_slot)
+/// maps a [`LocalSlot`] allocated in one cell's layout to the corresponding
+/// slot in another cell's layout.  The default implementation is a
+/// pass-through, which is correct for declarators that only ever participate
+/// in a single cell or that carry no ambient state across cell boundaries.
 pub trait LocalDeclarator {
     /// Append parameter-level slots (persist across `return_call` chains).
     #[allow(unused_variables)]
@@ -738,6 +747,38 @@ pub trait LocalDeclarator {
     /// Append per-function scratch slots (reset each new wasm function).
     #[allow(unused_variables)]
     fn declare_locals(&mut self, cell: CellIdx, locals: &mut LocalLayout) {}
+
+    /// Translate `slot` from the layout of `from_cell` to the layout of
+    /// `to_cell`.
+    ///
+    /// If this declarator recognises `slot` as one it allocated via
+    /// `declare_params(from_cell, …)`, it returns the corresponding
+    /// [`LocalSlot`] it allocated via `declare_params(to_cell, …)`.
+    /// Otherwise it returns `slot` **unchanged** (pass-through for unknown
+    /// slots).
+    ///
+    /// ## Composability
+    ///
+    /// Because each declarator owns **disjoint** slots (each calls
+    /// `layout.append` independently), composed declarators (e.g.
+    /// `ChainedTrap`) can apply translation in sequence — exactly one member
+    /// will recognise any given slot; the rest pass it through.  Unknown slots
+    /// therefore propagate correctly through the entire chain without
+    /// collisions.
+    ///
+    /// ## Default behaviour
+    ///
+    /// The default implementation returns `slot` unchanged.  Types that do not
+    /// store per-cell ambient state need not override this method.
+    #[allow(unused_variables)]
+    fn translate_slot(
+        &self,
+        slot: LocalSlot,
+        from_cell: CellIdx,
+        to_cell: CellIdx,
+    ) -> LocalSlot {
+        slot
+    }
 }
 
 impl LocalDeclarator for () {}

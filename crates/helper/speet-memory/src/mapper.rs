@@ -38,6 +38,20 @@ impl<'a, Context, E> CallbackContext<'a, Context, E> {
     pub fn emit(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.sink.instruction(ctx, instruction)
     }
+
+    /// Emit a direct (non-tail) `call` to an absolute WASM function index.
+    ///
+    /// Use this to call an imported function (e.g. a WASI preview1 import)
+    /// mid-chain without ending the current function.  The callee's return
+    /// values are left on the WASM stack for the caller to consume or discard.
+    ///
+    /// This does **not** interact with yecta's predecessor graph — it is a
+    /// plain instruction emit, equivalent to calling
+    /// `emit(ctx, &Instruction::Call(func_idx))`.
+    #[inline]
+    pub fn emit_call(&mut self, ctx: &mut Context, func_idx: u32) -> Result<(), E> {
+        self.sink.instruction(ctx, &Instruction::Call(func_idx))
+    }
 }
 
 // ── AddressMapper ──────────────────────────────────────────────────────────────

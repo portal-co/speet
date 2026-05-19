@@ -81,6 +81,13 @@ pub struct LinkerInner<'cb, 'ctx, Context, E> {
     pub target_pc_local: u32,
     /// OOB jump dispatch config; `None` means OOB → `unreachable`.
     pub oob_config: Option<OobConfig>,
+    /// The cell most recently allocated for the current function.
+    ///
+    /// Updated by [`alloc_cell`](BaseContext::alloc_cell) and
+    /// [`alloc_cell_for_guest`](BaseContext::alloc_cell_for_guest).
+    /// Passed to [`TrapConfig`] firing methods so traps can resolve per-cell
+    /// [`LocalSlot`](yecta::LocalSlot) maps.
+    pub current_cell: CellIdx,
 }
 
 // ── BaseContext for LinkerInner ───────────────────────────────────────────────
@@ -127,10 +134,12 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
     }
     fn alloc_cell(&mut self) -> CellIdx {
         let mark = self.locals_mark;
-        self.cell_registry.register(
+        let cell = self.cell_registry.register(
             self.layout.iter_before(&mark),
             self.layout.iter_since(&mark),
-        )
+        );
+        self.current_cell = cell;
+        cell
     }
     fn alloc_cell_for_guest(
         &mut self,
@@ -138,11 +147,13 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
         guest_results: &[ValType],
         guest_locals: &[(u32, ValType)],
     ) -> CellIdx {
-        self.cell_registry.register_for_guest(
+        let cell = self.cell_registry.register_for_guest(
             guest_params.iter().copied(),
             guest_results.iter().copied(),
             guest_locals.iter().copied(),
-        )
+        );
+        self.current_cell = cell;
+        cell
     }
     fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
         extra.declare_locals(cell, &mut self.layout);
@@ -258,12 +269,12 @@ where
     ) -> Result<TrapAction, E> {
         let layout = &self.base.layout as *const LocalLayout;
         let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
-        self.base.traps.on_instruction(info, ctx, &mut *self.reactor, layout_ref)
+        self.base.traps.on_instruction(info, ctx, &mut *self.reactor, layout_ref, self.base.current_cell)
     }
     fn on_jump(&mut self, info: &JumpInfo, ctx: &mut Context) -> Result<TrapAction, E> {
         let layout = &self.base.layout as *const LocalLayout;
         let layout_ref: &dyn yecta::LocalAllocator = unsafe { &*layout };
-        self.base.traps.on_jump(info, ctx, &mut *self.reactor, layout_ref)
+        self.base.traps.on_jump(info, ctx, &mut *self.reactor, layout_ref, self.base.current_cell)
     }
 }
 
@@ -443,6 +454,7 @@ impl<'cb, 'ctx, Context, E, Plugin> Linker<'cb, 'ctx, Context, E, Plugin>
                 entity_space: EntityIndexSpace::empty(),
                 target_pc_local: 0,
                 oob_config: None,
+                current_cell: CellIdx(0),
             },
             plugin,
         }
