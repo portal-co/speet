@@ -24,7 +24,7 @@ fn test_simple_add() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test simple ADD instruction: add $t0, $t1, $t2 (0x012A4020)
     let add_instruction = Instruction::new(0x012A4020, 0x1000, InstrCategory::CPU);
@@ -43,7 +43,7 @@ fn test_simple_addi() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test simple ADDI instruction: addi $t0, $t1, 1 (0x21290001)
     let addi_instruction = Instruction::new(0x21290001, 0x1000, InstrCategory::CPU);
@@ -62,7 +62,7 @@ fn test_simple_and() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test simple AND instruction: and $t0, $t1, $t2 (0x012A4024)
     let and_instruction = Instruction::new(0x012A4024, 0x1000, InstrCategory::CPU);
@@ -81,7 +81,7 @@ fn test_simple_or() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test simple OR instruction: or $t0, $t1, $t2 (0x012A4025)
     let or_instruction = Instruction::new(0x012A4025, 0x1000, InstrCategory::CPU);
@@ -110,7 +110,7 @@ fn test_simple_syscall() {
 
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test SYSCALL instruction: syscall (0x0000000C)
     let syscall_instruction = Instruction::new(0x0000000C, 0x1000, InstrCategory::CPU);
@@ -131,7 +131,7 @@ fn test_simple_jr() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test JR instruction: jr $ra (0x03E00008) - jump to return address
     let jr_instruction = Instruction::new(0x03E00008, 0x1000, InstrCategory::CPU);
@@ -150,7 +150,7 @@ fn test_simple_jalr() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test JALR instruction: jalr $ra, $t0 (0x01800008) - jump and link
     let jalr_instruction = Instruction::new(0x01800008, 0x1000, InstrCategory::CPU);

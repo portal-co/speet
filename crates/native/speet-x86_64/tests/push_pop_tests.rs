@@ -26,7 +26,7 @@ fn test_push_register_translation() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -43,7 +43,7 @@ fn test_push_immediate_translation() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -60,7 +60,7 @@ fn test_pop_register_translation() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -77,7 +77,7 @@ fn test_push_pop_sequence() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -94,7 +94,7 @@ fn test_push_32bit_immediate() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });

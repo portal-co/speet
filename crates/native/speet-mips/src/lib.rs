@@ -452,6 +452,7 @@ where
     pub fn setup_traps<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
         &mut self,
         rctx: &mut RC,
+        _ctx: &mut Context,
     ) -> u32 {
         let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
         self.gpr_slot   = rctx.layout_mut().append(32, gpr_type); // $0–$31

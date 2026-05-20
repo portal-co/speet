@@ -72,7 +72,7 @@ fn recompile_mips_text(text: &[u8], base_pc: u32) -> usize {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let mut count = 0usize;
 
     let words = text.len() / 4;

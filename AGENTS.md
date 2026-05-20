@@ -185,3 +185,15 @@ or not) rather than type-level (two different context implementations).
 
 Do not add a `Reactor` field back to `LinkerInner` — that reintroduces the hard
 native-vs-WASM dichotomy and prevents per-recompile reactor lifecycle management.
+
+---
+
+## 9. `Ctx` parameter passed down to raw targets
+
+**Code:** `crates/native/speet-x86_64/src/lib.rs` (`setup_traps`), `crates/native/speet-riscv/src/lib.rs` (`setup_traps`), `crates/native/speet-mips/src/lib.rs` (`setup_traps`), `crates/managed/speet-dex/src/lib.rs` (`setup_traps`)
+**Doc:** `docs/recompiler-guide.md`
+
+All recompiler `setup_traps` and translate methods accept a `ctx: &mut Context` parameter. This is intentional. Even though the default or vanilla targets (like `wasm_encoder::Function`) might pass a dummy `()` or ignore this parameter, it is a strict requirement for other `wax-core` recompile targets. These custom targets use the context to manage parallel instruction emission and coordinate state across multiple threads.
+
+Do not remove the `ctx: &mut Context` parameter from `setup_traps` or any other recompiler API signatures. Ensure `Ctx` is passed all the way down to the raw target.
+

@@ -601,7 +601,11 @@ where
     /// The returned `total_params` value is the wasm function parameter count
     /// for all translated functions.  It must also be passed to `jmp` / `ji`
     /// calls so that trap parameters are forwarded across `return_call` chains.
-    pub fn setup_traps<RC: ReactorContext<Context, E> + ?Sized>(&mut self, rctx: &mut RC) -> u32 {
+    pub fn setup_traps<RC: ReactorContext<Context, E> + ?Sized>(
+        &mut self,
+        rctx: &mut RC,
+        _ctx: &mut Context,
+    ) -> u32 {
         let int_type = if self.enable_rv64 {
             ValType::I64
         } else {
@@ -1365,7 +1369,7 @@ mod tests {
         ($recompiler:expr, $ctx:expr, $inst:expr, $pc:expr, $compressed:expr) => {{
             let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
             let mut rctx = make_rctx(&mut reactor);
-            $recompiler.setup_traps(&mut rctx);
+            $recompiler.setup_traps(&mut rctx, $ctx);
             $recompiler.translate_instruction(
                 $ctx, &mut rctx, $inst, $pc, $compressed,
                 &mut |a| Function::new(a.collect::<Vec<_>>()),
@@ -1546,7 +1550,7 @@ mod tests {
 
         let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
         let mut rctx = make_rctx(&mut reactor);
-        recompiler.setup_traps(&mut rctx);
+        recompiler.setup_traps(&mut rctx, &mut ctx);
         let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| Function::new(a.collect::<Vec<_>>()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 4); // Should have translated 4 bytes
@@ -1564,7 +1568,7 @@ mod tests {
 
         let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
         let mut rctx = make_rctx(&mut reactor);
-        recompiler.setup_traps(&mut rctx);
+        recompiler.setup_traps(&mut rctx, &mut ctx);
         let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, Xlen::Rv32, &mut |a| Function::new(a.collect::<Vec<_>>()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 2); // Should have translated 2 bytes
@@ -1576,7 +1580,8 @@ mod tests {
         let mut recompiler = RiscVRecompiler::<'_, '_, (), Infallible, Function>::new();
         let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
         let mut rctx = make_rctx(&mut reactor);
-        recompiler.setup_traps(&mut rctx);
+        let mut ctx = ();
+        recompiler.setup_traps(&mut rctx, &mut ctx);
         let layout = rctx.layout();
         assert_eq!(recompiler.reg_to_local(rv_asm::Reg(0),  layout), 0);
         assert_eq!(recompiler.reg_to_local(rv_asm::Reg(31), layout), 31);

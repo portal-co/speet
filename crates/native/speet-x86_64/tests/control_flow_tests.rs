@@ -25,7 +25,7 @@ fn test_test_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -42,7 +42,7 @@ fn test_cmp_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -59,7 +59,7 @@ fn test_jmp_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -76,7 +76,7 @@ fn test_je_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -93,7 +93,7 @@ fn test_jne_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -110,7 +110,7 @@ fn test_jl_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -127,7 +127,7 @@ fn test_jg_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -144,7 +144,7 @@ fn test_jb_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
@@ -161,7 +161,7 @@ fn test_ja_instruction() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())

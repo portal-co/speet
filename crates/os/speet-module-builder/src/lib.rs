@@ -21,11 +21,11 @@ use core::convert::Infallible;
 
 use speet_link_core::linker::LinkerPlugin;
 use speet_link_core::unit::{BinaryUnit, FuncType};
-use speet_module_target::ModuleTarget;
+use speet_module_target::{FuncImport, ModuleTarget};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportKind, ExportSection,
-    FunctionSection, GlobalSection, GlobalType, MemorySection, MemoryType, Module, RefType,
-    TableSection, TableType, TagSection, TagType, TypeSection,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType, Module,
+    RefType, TableSection, TableType, TagSection, TagType, TypeSection,
 };
 
 // ── ElementsOwned ─────────────────────────────────────────────────────────────
@@ -96,6 +96,7 @@ pub struct MegabinaryOutput<F> {
     pub active_data: Vec<(u32, ConstExpr, Vec<u8>)>,
     pub passive_elements: Vec<ElementsOwned>,
     pub active_elements: Vec<(u32, ConstExpr, ElementsOwned)>,
+    pub imports: Vec<FuncImport>,
 }
 
 // ── MegabinaryBuilder ─────────────────────────────────────────────────────────
@@ -126,6 +127,7 @@ pub struct MegabinaryBuilder<F> {
     active_data: Vec<(u32, ConstExpr, Vec<u8>)>,
     passive_elements: Vec<ElementsOwned>,
     active_elements: Vec<(u32, ConstExpr, ElementsOwned)>,
+    imports: Vec<FuncImport>,
 }
 
 impl<F> Default for MegabinaryBuilder<F> {
@@ -151,6 +153,7 @@ impl<F> MegabinaryBuilder<F> {
             active_data: Vec::new(),
             passive_elements: Vec::new(),
             active_elements: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -231,6 +234,7 @@ impl<F> MegabinaryBuilder<F> {
             active_data: self.active_data,
             passive_elements: self.passive_elements,
             active_elements: self.active_elements,
+            imports: self.imports,
         }
     }
 }
@@ -261,6 +265,26 @@ impl<F> LinkerPlugin<F> for MegabinaryBuilder<F> {
 /// The builder operations are infallible (indices are returned by value).
 /// The `Ctx` parameter is accepted but ignored.
 impl<F, Ctx> ModuleTarget<Ctx, Infallible> for MegabinaryBuilder<F> {
+    fn declare_func_import(
+        &mut self,
+        _ctx: &mut Ctx,
+        module: &str,
+        field: &str,
+        params: &[wasm_encoder::ValType],
+        results: &[wasm_encoder::ValType],
+    ) -> Result<u32, Infallible> {
+        let ft = FuncType::from_val_types(params, results);
+        self.intern_type(ft);
+        let idx = self.imports.len() as u32;
+        self.imports.push(FuncImport {
+            module: module.to_string(),
+            field: field.to_string(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+        });
+        Ok(idx)
+    }
+
     fn declare_global(
         &mut self,
         _ctx: &mut Ctx,
@@ -364,7 +388,22 @@ pub fn assemble(output: MegabinaryOutput<wasm_encoder::Function>) -> Module {
         active_data,
         passive_elements,
         active_elements,
+        imports,
     } = output;
+
+    let mut import_type_indices = Vec::new();
+    for imp in &imports {
+        let ft = FuncType::from_val_types(&imp.params, &imp.results);
+        let type_idx = match types.iter().position(|t| t == &ft) {
+            Some(i) => i as u32,
+            None => {
+                let i = types.len() as u32;
+                types.push(ft);
+                i
+            }
+        };
+        import_type_indices.push(type_idx);
+    }
 
     // Append data_init_fns, interning their types.
     let data_init_start_idx = fns.len() as u32;
@@ -463,11 +502,19 @@ pub fn assemble(output: MegabinaryOutput<wasm_encoder::Function>) -> Module {
         data_sec.active(*mem_idx, offset, data.iter().copied());
     }
 
+    let mut import_sec = ImportSection::new();
+    for (imp, &type_idx) in imports.iter().zip(&import_type_indices) {
+        import_sec.import(&imp.module, &imp.field, wasm_encoder::EntityType::Function(type_idx));
+    }
+
     // Assemble in canonical order:
-    // Type → Function → Table → Memory → Tag → Global →
+    // Type → Import → Function → Table → Memory → Tag → Global →
     // Export → Element → Code → Data
     let mut module = Module::new();
     module.section(&types_sec);
+    if !imports.is_empty() {
+        module.section(&import_sec);
+    }
     module.section(&funcs_sec);
     if !tables.is_empty() {
         module.section(&table_sec);
@@ -511,11 +558,22 @@ pub struct ModuleBuilder {
     passive_data:     Vec<Vec<u8>>,
     active_elements:  Vec<(u32, ConstExpr, ElementsOwned)>,
     passive_elements: Vec<ElementsOwned>,
+    imports:          Vec<FuncImport>,
 }
 
 impl ModuleBuilder {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            globals: Vec::new(),
+            memories: Vec::new(),
+            tables: Vec::new(),
+            tags: Vec::new(),
+            active_data: Vec::new(),
+            passive_data: Vec::new(),
+            active_elements: Vec::new(),
+            passive_elements: Vec::new(),
+            imports: Vec::new(),
+        }
     }
 
     /// Produce a `wasm_encoder::Module` with all declared entities.
@@ -530,6 +588,15 @@ impl ModuleBuilder {
         let mut global_sec = GlobalSection::new();
         let mut elem_sec   = ElementSection::new();
         let mut data_sec   = DataSection::new();
+
+        let mut type_sec = TypeSection::new();
+        let mut import_sec = ImportSection::new();
+        if !self.imports.is_empty() {
+            for (i, imp) in self.imports.iter().enumerate() {
+                type_sec.ty().function(imp.params.clone(), imp.results.clone());
+                import_sec.import(&imp.module, &imp.field, wasm_encoder::EntityType::Function(i as u32));
+            }
+        }
 
         for (tt, init) in &self.tables {
             if let Some(expr) = init {
@@ -561,6 +628,10 @@ impl ModuleBuilder {
         }
 
         let mut module = Module::new();
+        if !self.imports.is_empty() {
+            module.section(&type_sec);
+            module.section(&import_sec);
+        }
         if !self.tables.is_empty() {
             module.section(&table_sec);
         }
@@ -584,6 +655,24 @@ impl ModuleBuilder {
 }
 
 impl<Ctx> ModuleTarget<Ctx, Infallible> for ModuleBuilder {
+    fn declare_func_import(
+        &mut self,
+        _ctx: &mut Ctx,
+        module: &str,
+        field: &str,
+        params: &[wasm_encoder::ValType],
+        results: &[wasm_encoder::ValType],
+    ) -> Result<u32, Infallible> {
+        let idx = self.imports.len() as u32;
+        self.imports.push(FuncImport {
+            module: module.to_string(),
+            field: field.to_string(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+        });
+        Ok(idx)
+    }
+
     fn declare_global(
         &mut self,
         _ctx: &mut Ctx,

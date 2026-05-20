@@ -28,7 +28,7 @@ fn test_basic_arithmetic() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &add_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -47,7 +47,7 @@ fn test_immediate_instructions() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &addi_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -63,7 +63,7 @@ fn test_load_store() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test LW instruction: lw $t0, 4($t1)
     let lw_instruction = Instruction::new(0x8D2A0004, 0x1000, InstrCategory::CPU); // lw $t0, 4($t1)
@@ -90,7 +90,7 @@ fn test_branch_instructions() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test BEQ instruction: beq $t0, $t1, target
     let beq_instruction = Instruction::new(0x11290004, 0x1000, InstrCategory::CPU); // beq $t0, $t1, 4
@@ -156,7 +156,7 @@ fn test_jump_instructions() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &j_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -184,7 +184,7 @@ fn test_syscall_callback() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &syscall_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -214,7 +214,7 @@ fn test_break_callback() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &break_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -232,7 +232,7 @@ fn test_logical_operations() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test AND instruction: and $t0, $t1, $t2
     let and_instruction = Instruction::new(0x012A4024, 0x1000, InstrCategory::CPU); // and $t0, $t1, $t2
@@ -262,7 +262,7 @@ fn test_shift_operations() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_instruction(&mut ctx, &mut rctx, &sll_instruction, &mut |locals| {
             Function::new(locals.collect::<Vec<_>>())
@@ -278,7 +278,7 @@ fn test_multiplication_division() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test MULT instruction: mult $t0, $t1
     let mult_instruction = Instruction::new(0x01090018, 0x1000, InstrCategory::CPU); // mult $t0, $t1
@@ -305,7 +305,7 @@ fn test_hi_lo_operations() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Test MFHI instruction: mfhi $t0
     let mfhi_instruction = Instruction::new(0x00001010, 0x1000, InstrCategory::CPU); // mfhi $t0

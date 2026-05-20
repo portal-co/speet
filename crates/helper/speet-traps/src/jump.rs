@@ -176,8 +176,9 @@ pub fn fire_jump_trap<Context, E>(
     ctx: &mut Context,
     sink: &mut dyn EmitSink<Context, E>,
     layout: &dyn LocalAllocator,
+    current_cell: CellIdx,
 ) -> Result<TrapAction, E> {
-    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout, current_cell);
     trap.on_jump(info, ctx, &mut trap_ctx)
 }
 

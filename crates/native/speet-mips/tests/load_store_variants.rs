@@ -24,7 +24,7 @@ fn test_load_store_variants() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // LB: lb $t0, 1($t1) -> opcode 0x812A0001 (LB with rt=10, rs=9, imm=1)
     let lb = Instruction::new(0x812A0001, 0x2000, InstrCategory::CPU);

@@ -49,7 +49,7 @@ fn recompile_riscv_text(text: &[u8], start_addr: u64, xlen: Xlen) -> usize {
     let mut ctx = ();
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler
         .translate_bytes(&mut ctx, &mut rctx, text, start_addr as u32, xlen, &mut |a| Function::new(a.collect::<Vec<_>>()))
         .expect("translate_bytes failed")

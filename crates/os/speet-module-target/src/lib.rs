@@ -2,8 +2,27 @@
 
 use wasm_encoder::{ConstExpr, Elements, GlobalType, MemoryType, TableType, TagType};
 
+extern crate alloc;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FuncImport {
+    pub module: alloc::string::String,
+    pub field: alloc::string::String,
+    pub params: alloc::vec::Vec<wasm_encoder::ValType>,
+    pub results: alloc::vec::Vec<wasm_encoder::ValType>,
+}
+
 pub trait ModuleTarget<Ctx, Err> {
     // --- Declarations — each returns the allocated section index ---
+
+    fn declare_func_import(
+        &mut self,
+        ctx: &mut Ctx,
+        module: &str,
+        field: &str,
+        params: &[wasm_encoder::ValType],
+        results: &[wasm_encoder::ValType],
+    ) -> Result<u32, Err>;
 
     fn declare_global(
         &mut self,

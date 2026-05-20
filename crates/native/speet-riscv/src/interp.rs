@@ -17,6 +17,7 @@ use alloc::borrow::Cow;
 use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 use yecta::LocalLayout;
+use yecta::layout::CellIdx;
 
 // ── Major-opcode to handler-slot mapping ─────────────────────────────────────
 //
@@ -923,7 +924,7 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
                 let info   = JumpInfo::indirect(0, self.sj(SJ_NEXT_PC), JumpKind::IndirectCall);
                 let layout = ictx.layout;
                 let mut buf = BufferedEmitSink::new();
-                fire_jump_trap(ictx.jump_trap.as_deref_mut().unwrap(), &info, ctx, &mut buf, layout)?;
+                fire_jump_trap(ictx.jump_trap.as_deref_mut().unwrap(), &info, ctx, &mut buf, layout, CellIdx(0))?;
                 buf.replay_into(sink, ctx)?;
             }
             sink.instruction(ctx, &Instruction::End)?;
@@ -969,8 +970,8 @@ impl<Context, E> RiscVThompsonInterp<Context, E> {
         // Scope the mutable borrow of jump_trap so it's released before sink writes.
         {
             let trap = ictx.jump_trap.as_deref_mut().unwrap();
-            fire_jump_trap(trap, &true_info,  ctx, &mut true_buf,  layout)?;
-            fire_jump_trap(trap, &false_info, ctx, &mut false_buf, layout)?;
+            fire_jump_trap(trap, &true_info,  ctx, &mut true_buf,  layout, CellIdx(0))?;
+            fire_jump_trap(trap, &false_info, ctx, &mut false_buf, layout, CellIdx(0))?;
         }
 
         // Emit: if [true branch] else [false branch] end

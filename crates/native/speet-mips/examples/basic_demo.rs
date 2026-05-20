@@ -27,7 +27,7 @@ fn main() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Example 1: Simple addition
     println!("\n1. Translating: add $t0, $t1, $t2");

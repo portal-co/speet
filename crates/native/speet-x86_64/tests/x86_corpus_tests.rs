@@ -76,7 +76,7 @@ fn test_corpus_file(elf_path: &Path) {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     recompiler
         .translate_bytes(&mut ctx, &mut rctx, &text, load_addr, &mut |locals| {

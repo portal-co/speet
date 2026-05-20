@@ -59,7 +59,7 @@ fn test_hint_tracking_with_rv32im_multiply() {
     let mut ctx = ();
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     let mut offset = 0;
     while offset < text_data.len() {
@@ -124,12 +124,12 @@ fn test_hint_tracking_performance() {
     let mut ctx_no = ();
     let mut reactor_no: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx_no = make_rctx(&mut reactor_no);
-    recompiler_no_hints.setup_traps(&mut rctx_no);
+    recompiler_no_hints.setup_traps(&mut rctx_no, &mut ctx_no);
 
     let mut ctx_with = ();
     let mut reactor_with: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx_with = make_rctx(&mut reactor_with);
-    recompiler_with_hints.setup_traps(&mut rctx_with);
+    recompiler_with_hints.setup_traps(&mut rctx_with, &mut ctx_with);
 
     for (i, inst) in instructions.iter().enumerate() {
         let pc = 0x1000 + (i as u32 * 4);

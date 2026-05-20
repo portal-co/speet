@@ -255,13 +255,13 @@ pub fn translate_rv(
     );
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
-    recompiler.setup_traps(&mut rctx);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_rv_params(&rctx);
 
     let mut hint_cb = build_hint_callback(rv64);
     recompiler.set_hint_callback(&mut hint_cb);
 
-    let mut ctx = ();
     recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr, xlen,
         &mut |a| Function::new(a.collect::<Vec<_>>()))
         .expect("translate_bytes failed");
@@ -284,13 +284,13 @@ pub fn translate_rv_with_trap(
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut jump_trap = JumpEventTrap::new();
     let mut rctx = make_trap_rctx(&mut reactor, base_func_offset, type_idx, eh, &mut jump_trap);
-    recompiler.setup_traps(&mut rctx);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_trap_params(&rctx);
 
     let mut hint_cb = build_hint_callback(rv64);
     recompiler.set_hint_callback(&mut hint_cb);
 
-    let mut ctx = ();
     recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr, xlen,
         &mut |a| Function::new(a.collect::<Vec<_>>()))
         .expect("translate_bytes failed");
@@ -308,10 +308,10 @@ pub fn translate_x86(
     let mut recompiler = X86Recompiler::new_with_base_rip(rip);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
-    recompiler.setup_traps(&mut rctx, &mut ());
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_rv_params(&rctx);
 
-    let mut ctx = ();
     recompiler.translate_bytes(&mut ctx, &mut rctx, text, rip,
         &mut |a| Function::new(a.collect::<Vec<_>>()))
         .expect("translate_bytes failed");
@@ -426,16 +426,16 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
     match arch {
         Arch::Rv32 | Arch::Rv64 => {
             let xlen = if arch == Arch::Rv64 { Xlen::Rv64 } else { Xlen::Rv32 };
-            let recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+            let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
                 addr, false, xlen == Xlen::Rv64, false,
             );
             let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
             let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
-            recompiler.setup_traps(&mut rctx);
+            recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
         Arch::X86_64 => {
-            let recompiler = X86Recompiler::new_with_base_rip(addr);
+            let mut recompiler = X86Recompiler::new_with_base_rip(addr);
             let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
             let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
             recompiler.setup_traps(&mut rctx, &mut ());

@@ -209,8 +209,9 @@ pub fn fire_insn_trap_before<Context, E>(
     ctx: &mut Context,
     sink: &mut dyn EmitSink<Context, E>,
     layout: &dyn LocalAllocator,
+    current_cell: CellIdx,
 ) -> Result<TrapAction, E> {
-    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout, current_cell);
     trap.on_instruction(info, ctx, &mut trap_ctx)
 }
 
@@ -224,8 +225,9 @@ pub fn fire_insn_trap_after<Context, E>(
     ctx: &mut Context,
     sink: &mut dyn EmitSink<Context, E>,
     layout: &dyn LocalAllocator,
+    current_cell: CellIdx,
 ) -> Result<(), E> {
-    let mut trap_ctx = crate::context::TrapContext::new(sink, layout);
+    let mut trap_ctx = crate::context::TrapContext::new(sink, layout, current_cell);
     trap.after_instruction(info, ctx, &mut trap_ctx)
 }
 

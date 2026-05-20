@@ -1,0 +1,12 @@
+[package]
+name = "speet-linux-wasi"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-syscall       = { path = "../speet-syscall" }
+speet-link-core     = { path = "../speet-link-core" }
+speet-module-target = { path = "../speet-module-target" }
+wasm-encoder        = { workspace = true }

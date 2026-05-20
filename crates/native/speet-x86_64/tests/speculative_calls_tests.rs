@@ -45,7 +45,8 @@ fn test_escape_tag_configuration() {
 
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Initially None
     assert_eq!(recompiler.get_escape_tag(&rctx), None);
@@ -75,7 +76,7 @@ fn test_call_with_speculative_calls_disabled() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -95,7 +96,7 @@ fn test_call_with_speculative_calls_enabled() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler.set_escape_tag(&mut rctx, Some(EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(0),
@@ -120,7 +121,7 @@ fn test_ret_with_speculative_calls_enabled() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler.set_escape_tag(&mut rctx, Some(EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(0),
@@ -146,7 +147,7 @@ fn test_speculative_calls_requires_escape_tag() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     let result = recompiler.translate_bytes(&mut ctx, &mut rctx, &bytes, 0x1000, &mut |locals| {
         wasm_encoder::Function::new(locals.collect::<Vec<_>>())
     });
@@ -167,7 +168,7 @@ fn test_ret_with_immediate_speculative() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
     recompiler.set_escape_tag(&mut rctx, Some(EscapeTag {
         tag: TagIdx(0),
         ty: TypeIdx(0),

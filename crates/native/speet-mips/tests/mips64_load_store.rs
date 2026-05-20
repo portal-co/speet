@@ -28,7 +28,7 @@ fn test_mips64_load_store() {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     // Use existing LW/SW encodings to exercise MIPS64 paths (sign-extend / wrap behaviors)
     let lw_instruction = Instruction::new(0x8D2A0004, 0x1000, InstrCategory::CPU); // lw $t0, 4($t1)

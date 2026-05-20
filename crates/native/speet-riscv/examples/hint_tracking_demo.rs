@@ -34,8 +34,8 @@ fn main() {
 
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    recompiler.setup_traps(&mut rctx);
     let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
 
     println!("HINT tracking is enabled\n");
 

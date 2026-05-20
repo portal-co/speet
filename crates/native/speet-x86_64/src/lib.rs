@@ -247,6 +247,7 @@ impl<Context, E> X86Recompiler<Context, E> {
     pub fn setup_traps<F>(
         &mut self,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        _ctx: &mut Context,
     ) -> u32 {
         self.gpr_slot   = rctx.layout_mut().append(16, wasm_encoder::ValType::I64); // RAX–R15
         self.rip_slot   = rctx.layout_mut().append(1,  wasm_encoder::ValType::I32); // RIP

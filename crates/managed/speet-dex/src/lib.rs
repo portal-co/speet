@@ -20,7 +20,7 @@
 //!
 //! ```ignore
 //! recompiler.set_jump_trap(&mut my_jump_trap);
-//! recompiler.setup_traps();
+//! recompiler.setup_traps(&mut rctx, &mut ctx);
 //! ```
 //!
 //! `setup_traps` appends trap parameter groups to the shared layout and fixes
@@ -32,7 +32,7 @@
 //! ```ignore
 //! let dex_data = std::fs::read("classes.dex")?;
 //! let mut recompiler = DexRecompiler::new(&dex_data)?;
-//! recompiler.setup_traps();
+//! recompiler.setup_traps(&mut rctx, &mut ctx);
 //! for method in recompiler.methods() {
 //!     recompiler.translate_method(&mut ctx, method, &mut |locals| Function::new(locals.collect()))?;
 //! }
@@ -705,6 +705,7 @@ where
     pub fn setup_traps<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
         &mut self,
         rctx: &mut RC,
+        _ctx: &mut Context,
     ) -> u32 {
         let max_regs = self.flat.max_registers();
         if max_regs > 0 {
