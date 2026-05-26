@@ -201,3 +201,36 @@ impl<Context, E> JumpTrap<Context, E> for RopDetectTrap {
         Ok(TrapAction::Continue)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rop_detect_trap_slots() {
+        let mut trap = RopDetectTrap::new(FuncIdx(0), 0);
+        let cell_a = CellIdx(0);
+        let cell_b = CellIdx(1);
+
+        let mut layout_a = LocalLayout::empty();
+        let mut layout_b = LocalLayout::empty();
+
+        trap.declare_params(cell_a, &mut layout_a);
+        trap.declare_params(cell_b, &mut layout_b);
+
+        // Verify we got two distinct slots in depth_param_slots
+        assert_eq!(trap.depth_param_slots.len(), 2);
+        let slot_a = *trap.depth_param_slots.get(&cell_a).unwrap();
+        let slot_b = *trap.depth_param_slots.get(&cell_b).unwrap();
+
+        // Translate slot_a from cell_a to cell_b should yield slot_b
+        let translated = trap.translate_slot(slot_a, cell_a, cell_b);
+        assert_eq!(translated, slot_b);
+
+        // Translate an unknown slot should be passed through unchanged
+        let unknown_slot = layout_a.append(1, ValType::I32);
+        let translated_unknown = trap.translate_slot(unknown_slot, cell_a, cell_b);
+        assert_eq!(translated_unknown, unknown_slot);
+    }
+}
+

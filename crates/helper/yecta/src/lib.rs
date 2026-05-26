@@ -2506,8 +2506,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             Instruction::GlobalSet(_) => 1,
             Instruction::GlobalGet(_) => 0,
 
-            // If consumes the condition
-            Instruction::If(_) => 1,
+            // If, BrIf, and BrTable consume the condition/selector
+            Instruction::If(_) | Instruction::BrIf(_) | Instruction::BrTable(_, _) => 1,
             Instruction::Block(_) | Instruction::Loop(_) => 0,
             Instruction::End | Instruction::Else | Instruction::Nop => 0,
             Instruction::Return | Instruction::Unreachable => 0,

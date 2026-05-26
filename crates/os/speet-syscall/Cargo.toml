@@ -8,3 +8,6 @@ license-file.workspace = true
 [dependencies]
 speet-riscv  = { path = "../../native/speet-riscv" }
 wasm-encoder = { workspace = true }
+
+[dev-dependencies]
+wax-core = { workspace = true }

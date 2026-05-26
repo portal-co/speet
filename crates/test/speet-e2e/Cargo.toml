@@ -21,3 +21,5 @@ wasmparser = { version = "0.240.0", features = ["validate"] }
 yecta = { path = "../../helper/yecta" }
 wasm-layout = { path = "../../helper/wasm-layout" }
 speet-wasm = { path = "../../managed/speet-wasm" }
+speet-linux-wasi = { path = "../../os/speet-linux-wasi" }
+speet-syscall = { path = "../../os/speet-syscall" }

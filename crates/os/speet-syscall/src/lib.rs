@@ -267,11 +267,7 @@ impl<'t> WasmSyscallDispatcher<'t> {
     ) -> Result<(), E> {
         let entries = self.table.entries();
 
-        // ── 1. Load the syscall number onto the WASM stack as i32 ─────────
-        cb.emit(ctx, &Instruction::LocalGet(self.syscall_num_local))?;
-        if self.syscall_num_is_i64 {
-            cb.emit(ctx, &Instruction::I32WrapI64)?;
-        }
+
 
         // ── 2. Build a dense br_table over the [min, max] syscall range ───
         //
@@ -300,7 +296,6 @@ impl<'t> WasmSyscallDispatcher<'t> {
 
         if entries.is_empty() {
             // No entries: always unreachable.
-            cb.emit(ctx, &Instruction::Drop)?; // drop the syscall number
             cb.emit(ctx, &Instruction::Unreachable)?;
             return Ok(());
         }
@@ -344,6 +339,12 @@ impl<'t> WasmSyscallDispatcher<'t> {
         // arm blocks (n total, arm_{n-1} outermost → arm_0 innermost)
         for _ in 0..n {
             cb.emit(ctx, &Instruction::Block(wasm_encoder::BlockType::Empty))?;
+        }
+
+        // ── 1. Load the syscall number onto the WASM stack as i32 ─────────
+        cb.emit(ctx, &Instruction::LocalGet(self.syscall_num_local))?;
+        if self.syscall_num_is_i64 {
+            cb.emit(ctx, &Instruction::I32WrapI64)?;
         }
 
         // Subtract min_num from the syscall number to index into br_targets.
@@ -460,6 +461,7 @@ impl<'t> WasmSyscallDispatcher<'t> {
         cb.emit(ctx, &Instruction::Unreachable)?;
 
         // ── Close $exit block ─────────────────────────────────────────────
+        // Close $exit block
         cb.emit(ctx, &Instruction::End)?;
 
         // ── 4. Forward all params unchanged → return_call $next_pc_func ──
@@ -471,3 +473,86 @@ impl<'t> WasmSyscallDispatcher<'t> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::convert::Infallible;
+    use alloc::string::String;
+    use alloc::format;
+    use speet_riscv::CallbackContext;
+
+    struct MockSink {
+        instructions: Vec<String>,
+    }
+
+    impl wax_core::build::InstructionSink<(), Infallible> for MockSink {
+        fn instruction(&mut self, _ctx: &mut (), instruction: &Instruction<'_>) -> Result<(), Infallible> {
+            self.instructions.push(format!("{:?}", instruction));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_syscall_dispatcher_emit() {
+        // Build a SyscallTable with two entries:
+        // Syscall 10 -> func_idx 100
+        // Syscall 20 -> func_idx 200
+        let entries = alloc::vec![
+            (10, SyscallEntry {
+                func_idx: 100,
+                param_map: alloc::vec![ParamSource::LocalI64AsI32(1)],
+                saves: alloc::vec![],
+                result_local: Some(2),
+                negate_nonzero_result: false,
+                has_return: true,
+                memory_stores: alloc::vec![],
+                load_mem_on_success: None,
+            }),
+            (20, SyscallEntry {
+                func_idx: 200,
+                param_map: alloc::vec![ParamSource::ConstI32(42)],
+                saves: alloc::vec![],
+                result_local: None,
+                negate_nonzero_result: false,
+                has_return: false,
+                memory_stores: alloc::vec![],
+                load_mem_on_success: None,
+            }),
+        ];
+        let table = SyscallTable::new(entries);
+
+        let dispatcher = WasmSyscallDispatcher {
+            table: &table,
+            syscall_num_local: 10,
+            syscall_num_is_i64: true,
+            num_params: 5,
+            next_pc_func: 300,
+        };
+
+        let mut sink = MockSink { instructions: Vec::new() };
+        {
+            let mut cb = CallbackContext::new(&mut sink);
+            dispatcher.emit(&mut (), &mut cb).unwrap();
+        }
+
+        // Verify emitted instructions
+        let insts = &sink.instructions;
+
+        // Check loading the syscall number: LocalGet(10) followed by I32WrapI64
+        assert!(insts.iter().any(|i| i.contains("LocalGet(10)")));
+        assert!(insts.iter().any(|i| i.contains("I32WrapI64")));
+
+        // Check that a BrTable is emitted
+        assert!(insts.iter().any(|i| i.contains("BrTable")));
+
+        // Check call targets
+        assert!(insts.iter().any(|i| i.contains("Call(100)")));
+        assert!(insts.iter().any(|i| i.contains("Call(200)")));
+
+        // Check trailing parameter gets and ReturnCall
+        assert!(insts.iter().any(|i| i.contains("ReturnCall(300)")));
+        assert_eq!(insts.last().unwrap().as_str(), "ReturnCall(300)");
+    }
+}
+
