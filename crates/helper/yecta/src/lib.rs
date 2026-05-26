@@ -2343,22 +2343,50 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     | Instruction::ReturnCallRef(_)
             );
 
-        if !needs_flush || entry.const_stack.iter().all(|s| s.is_none()) {
-            return Ok(());
+        if needs_flush {
+            for slot in &mut entry.const_stack {
+                if let Some((v, ty)) = *slot {
+                    let emit_insn = match ty {
+                        ValType::I32 => Instruction::I32Const(v as i32),
+                        ValType::I64 => Instruction::I64Const(v as i64),
+                        _ => Instruction::I64Const(v as i64),
+                    };
+                    entry.function.instruction(ctx, &emit_insn)?;
+                    entry.inst_count += 1;
+                    *slot = None;
+                }
+            }
         }
 
-        for slot in &mut entry.const_stack {
-            if let Some((v, ty)) = *slot {
-                let emit_insn = match ty {
+        // Always commit all virtual locals before emitting any instruction.
+        //
+        // A virtual local is one whose `local.set` was elided by constant
+        // folding: `locals_const[n]` holds the known value, but the WASM
+        // local `n` has never been physically written.  This is safe as long
+        // as every subsequent `local.get n` also folds the same constant.
+        //
+        // That invariant breaks inside a single emitted function when the same
+        // Entry is used to emit sequential br_table arms: arm A may store an
+        // unknown result into local n (clearing `locals_const[n]` and
+        // `locals_virtual[n]`), after which arm B emits a real `local.get n`
+        // that reads the WASM default 0 instead of the pre-ecall constant.
+        //
+        // Fix: commit every pending virtual-local store before any emitted
+        // instruction, so the physical WASM local is always up-to-date.
+        for n in entry.locals_virtual.iter().copied().collect::<alloc::vec::Vec<_>>() {
+            if let Some(&(v, ty)) = entry.locals_const.get(&n) {
+                let const_insn = match ty {
                     ValType::I32 => Instruction::I32Const(v as i32),
                     ValType::I64 => Instruction::I64Const(v as i64),
                     _ => Instruction::I64Const(v as i64),
                 };
-                entry.function.instruction(ctx, &emit_insn)?;
-                entry.inst_count += 1;
-                *slot = None;
+                entry.function.instruction(ctx, &const_insn)?;
+                entry.function.instruction(ctx, &Instruction::LocalSet(n))?;
+                entry.inst_count += 2;
             }
         }
+        entry.locals_virtual.clear();
+
         Ok(())
     }
 

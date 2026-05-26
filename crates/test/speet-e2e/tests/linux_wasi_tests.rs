@@ -224,6 +224,7 @@ fn test_linux_to_wasi_write_and_exit() {
 
     linker.func_wrap("wasi_snapshot_preview1", "fd_write",
         |mut caller: wasmi::Caller<'_, HostState>, fd: i32, iovs: i32, iovs_len: i32, nwritten_ptr: i32| -> i32 {
+            println!("fd_write called: fd={fd} iovs={iovs:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x}");
             if fd == 1 || fd == 2 {
                 let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
                 let mut total_written = 0;
@@ -277,10 +278,10 @@ fn test_linux_to_wasi_write_and_exit() {
     // hardcoding 32 zeros causes a silent type-mismatch. Derive from the type instead.
     let call_params: Vec<wasmi::Val> = entry_func.ty(&store).params().iter().map(|ty| {
         match ty {
-            wasmi::core::ValType::I32 => wasmi::Val::I32(0),
-            wasmi::core::ValType::I64 => wasmi::Val::I64(0),
-            wasmi::core::ValType::F32 => wasmi::Val::F32(wasmi::core::F32::from_bits(0)),
-            wasmi::core::ValType::F64 => wasmi::Val::F64(wasmi::core::F64::from_bits(0)),
+            wasmi::ValType::I32 => wasmi::Val::I32(0),
+            wasmi::ValType::I64 => wasmi::Val::I64(0),
+            wasmi::ValType::F32 => wasmi::Val::F32(wasmi::F32::from_bits(0)),
+            wasmi::ValType::F64 => wasmi::Val::F64(wasmi::F64::from_bits(0)),
             _ => wasmi::Val::I64(0),
         }
     }).collect();

@@ -123,6 +123,7 @@ impl LinuxToWasi {
                 result_local: Some(a0_local),
                 negate_nonzero_result: true,
                 has_return: true,
+                terminates: false,
                 memory_stores: alloc::vec![
                     MemoryStore {
                         addr: self.iovec_scratch_offset,
@@ -159,6 +160,7 @@ impl LinuxToWasi {
                 result_local: Some(a0_local),
                 negate_nonzero_result: true,
                 has_return: true,
+                terminates: false,
                 memory_stores: alloc::vec![
                     MemoryStore {
                         addr: self.iovec_scratch_offset,
@@ -186,6 +188,7 @@ impl LinuxToWasi {
                 result_local: Some(a0_local),
                 negate_nonzero_result: true,
                 has_return: true,
+                terminates: false,
                 memory_stores: alloc::vec![],
                 load_mem_on_success: None,
             },
@@ -202,6 +205,7 @@ impl LinuxToWasi {
                 result_local: None,
                 negate_nonzero_result: false,
                 has_return: false,
+                terminates: true,
                 memory_stores: alloc::vec![],
                 load_mem_on_success: None,
             },
@@ -218,6 +222,7 @@ impl LinuxToWasi {
                 result_local: None,
                 negate_nonzero_result: false,
                 has_return: false,
+                terminates: true,
                 memory_stores: alloc::vec![],
                 load_mem_on_success: None,
             },

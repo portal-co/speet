@@ -6,27 +6,93 @@ patterns without reading the linked documentation first.**
 
 ---
 
-## 1. One WASM function per guest instruction (yecta)
+## 1. One WASM function per possible instruction slot (yecta)
 
 **Code:** `crates/helper/yecta/src/lib.rs`, `Reactor` struct
 **Doc:** `docs/recompiler-guide.md` §1
 
-The `Reactor` emits one WASM function for every guest instruction.  This is not
-a mistake.  Guest ISAs (x86-64, RISC-V, MIPS, DEX) have arbitrary,
-unstructured control-flow graphs — computed gotos, loops entered from the
-middle, fall-through between switch arms — that cannot be straightforwardly
-mapped to WASM's structured `block`/`loop`/`if` nesting.
+### 1a. Slot granularity
 
-The solution is to represent each control-flow edge as a `return_call` tail
-call to the next function.  Because WASM tail calls forward parameters without
+The `Reactor` emits one WASM function for every **possible instruction slot**,
+not every actual instruction.  On RISC-V (which has 2-byte-aligned compressed
+instructions), a slot exists at every 2-byte offset — even inside a 4-byte
+instruction, and even at addresses that are never the start of a real
+instruction.  The PC→function-index formula is `(pc - base_pc) / 2`.
+
+This is deliberate: when a jump target is computed at runtime (indirect branch,
+computed goto), the recompiler cannot know at translation time which offsets
+are valid instruction starts.  Allocating a slot for every possible alignment
+means any valid jump target already has a function index, avoiding the need for
+a runtime lookup table.
+
+Do not assume "one function = one decoded instruction."  Do not try to reduce
+the function count by only allocating slots for known instruction starts — that
+breaks indirect branches.
+
+### 1b. Why `return_call` (not a single function)
+
+Guest ISAs (x86-64, RISC-V, MIPS, DEX) have arbitrary, unstructured
+control-flow graphs — computed gotos, loops entered from the middle,
+fall-through between switch arms — that cannot be straightforwardly mapped to
+WASM's structured `block`/`loop`/`if` nesting.
+
+Each control-flow edge is represented as a `return_call` tail call to the
+target slot's function.  Because WASM tail calls forward parameters without
 growing the call stack, the entire translated binary runs at **O(1) stack
-depth** no matter how many instruction-function hops it takes.  The guest
-register file lives in the WASM *parameters* and is forwarded unchanged on
-every `return_call`.
+depth** no matter how many hops it takes.  The guest register file lives in
+the WASM *parameters* and is forwarded unchanged on every `return_call`.
 
 Do not collapse functions, eliminate `return_call` chains, or try to
 restructure the CFG into a single function — this would require a general
 CFG-to-structured-control-flow conversion and is explicitly avoided.
+
+### 1c. Function merging (inline fall-through)
+
+`return_call` to an immediately-sequential slot is expensive as a cross-call.
+The `Reactor` merges functions that unconditionally fall through to one
+successor: it inlines the successor's instruction body directly into the
+predecessor's WASM function body, emitting the successor's instructions
+immediately after the predecessor's without a `return_call`.
+
+This means **a single WASM function can contain the code for many consecutive
+guest instructions**.  When you read a generated WASM function and see
+instructions that "don't belong" to the guest instruction you expect, they have
+been inlined by function merging.
+
+Do not assume that the WASM function at index N contains only the code for
+guest instruction N.  Do not try to reconstruct the guest instruction stream by
+reading one WASM function at a time — merged functions span multiple guest
+instructions.
+
+### 1d. Constant folding across merged functions (and its hazards)
+
+The `Reactor` performs local constant folding inside each WASM function body as
+it emits instructions.  Two mechanisms work together:
+
+- **`const_stack`**: deferred `I32Const`/`I64Const` values on the WASM value
+  stack.  Subsequent operations that consume them are folded at emit time.
+- **`locals_const` / `locals_virtual`**: when a `local.set N` stores a known
+  constant, the store is *elided* (not emitted) and the value is recorded in
+  `locals_const[N]`.  Subsequent `local.get N` are replaced inline by the
+  constant without emitting a real `local.get`.  The local is marked
+  `locals_virtual` — meaning its WASM storage cell has not been physically
+  written yet.
+
+**The hazard**: code emitted sequentially inside the same Entry (e.g. multiple
+arms of a `br_table` dispatch) shares this folding state.  If arm A stores an
+*unknown* value into local N (clearing `locals_const[N]`), arm B's `local.get
+N` falls back to a real `local.get` and reads the WASM default `0`, not the
+constant that was virtually stored before the dispatch.
+
+**The fix** (`materialize_for` in `yecta/src/lib.rs`): before emitting *any*
+instruction that was not constant-folded away, all pending `locals_virtual`
+stores are flushed — the deferred `const` + `local.set` pair is emitted so
+that the WASM local physically holds the correct value.  This is intentionally
+conservative (less optimized, but correct under sequential multi-arm emission).
+
+Do not remove the `locals_virtual` flush in `materialize_for`.  Do not assume
+that a local which was "virtually" set actually contains the right value in its
+WASM storage cell — it may not until the flush runs.
 
 ---
 
@@ -37,8 +103,9 @@ CFG-to-structured-control-flow conversion and is explicitly avoided.
 **Doc:** `docs/trap-hooks.md` §3.1, §9
 
 WASM non-parameter locals reset to zero at every function boundary.  Because
-each guest instruction is its own WASM function (see §1 above), state stored
-in a non-param local is silently lost when the `return_call` chain advances.
+each guest instruction slot is its own WASM function (see §1 above), state
+stored in a non-param local is silently lost when the `return_call` chain
+advances.
 
 `RopDetectTrap` stores its call/return depth counter in a WASM **parameter**
 so it survives across the chain.  `CfiReturnTrap` uses a **local** for its

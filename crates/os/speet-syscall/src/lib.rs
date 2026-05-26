@@ -156,6 +156,13 @@ pub struct SyscallEntry {
     /// Set `false` for functions that return no value (e.g. `proc_exit` which has type `(i32) -> ()`).
     pub has_return: bool,
 
+    /// If `true`, this syscall never returns (e.g. `proc_exit`).
+    ///
+    /// The dispatcher emits `unreachable` after the call instead of branching to
+    /// `$exit` and forwarding params via `return_call`.  This prevents infinite
+    /// loops when the host mock returns normally.
+    pub terminates: bool,
+
     /// Memory writes to perform before marshalling handler params.
     pub memory_stores: Vec<MemoryStore>,
 
@@ -444,15 +451,19 @@ impl<'t> WasmSyscallDispatcher<'t> {
                 }
             }
 
-            // 3e. Branch to $exit (depth from current position = n - arm_idx)
-            // We are inside: $exit > $unknown > [arm_{n-1} … arm_{arm_idx+1}]
-            // arm_{arm_idx} was already closed (End above).
-            // Remaining open arm blocks above us: n - arm_idx - 1.
-            // Then $unknown (1 more), then $exit (1 more).
-            let depth_to_exit = (n - arm_idx) as u32; // n - arm_idx - 1 + 1 ($unknown) + 0 (we target $exit label)
-            // Actually: open blocks above = (n - arm_idx - 1) arm blocks + $unknown = n - arm_idx blocks
-            // $exit is 1 more, so depth = n - arm_idx.
-            cb.emit(ctx, &Instruction::Br(depth_to_exit))?;
+            // 3e. Terminate or branch to $exit.
+            if entry.terminates {
+                // Non-returning syscall: trap rather than fall through to return_call.
+                cb.emit(ctx, &Instruction::Unreachable)?;
+            } else {
+                // Branch to $exit (depth from current position = n - arm_idx)
+                // We are inside: $exit > $unknown > [arm_{n-1} … arm_{arm_idx+1}]
+                // arm_{arm_idx} was already closed (End above).
+                // Remaining open arm blocks above us: n - arm_idx - 1.
+                // Then $unknown (1 more), then $exit (1 more).
+                let depth_to_exit = (n - arm_idx) as u32;
+                cb.emit(ctx, &Instruction::Br(depth_to_exit))?;
+            }
         }
 
         // ── $unknown arm ──────────────────────────────────────────────────
@@ -506,6 +517,7 @@ mod tests {
                 result_local: Some(2),
                 negate_nonzero_result: false,
                 has_return: true,
+                terminates: false,
                 memory_stores: alloc::vec![],
                 load_mem_on_success: None,
             }),
@@ -516,6 +528,7 @@ mod tests {
                 result_local: None,
                 negate_nonzero_result: false,
                 has_return: false,
+                terminates: false,
                 memory_stores: alloc::vec![],
                 load_mem_on_success: None,
             }),
