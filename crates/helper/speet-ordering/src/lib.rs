@@ -60,7 +60,7 @@
 //!
 //! - `docs/lazy-store-alias-checking.md` — full design: alias-check `if` blocks,
 //!   `emitted_local` double-store prevention, pool sizing, memory64 notes.
-//! - `AGENTS.md` §3 — agent guidance; explains why lazy deferral and alias checks
+//! - `docs/guides/yecta.md` §2 — agent guidance; explains why lazy deferral and alias checks
 //!   must not be collapsed into eager flushes.
 
 #![no_std]

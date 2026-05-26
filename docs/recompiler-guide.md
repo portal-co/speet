@@ -740,3 +740,16 @@ The typical end-to-end flow for a two-binary megabinary:
     → MegabinaryOutput { types, func_type_indices, fns, exports, … }
     → assemble into final .wasm module
 ```
+
+---
+
+### 3e. `speet-schedule` — multi-binary two-pass coordinator
+
+`crates/os/speet-schedule` is the coordination layer that sits above `FuncSchedule`. It manages the case where multiple independent binaries (e.g. all the ELFs in a container image) are translated together:
+
+1. **Phase 1 (registration)**: each binary calls `push` to declare its function count. After all binaries have registered, `speet-schedule` freezes the `EntityIndexSpace` and computes `base_func_offset` for each binary.
+2. **Phase 2 (emission)**: `speet-schedule` dispatches emit closures in declaration order, passing each closure the correct `base_func_offset` from the frozen layout.
+
+The panic-on-count-mismatch invariant from `FuncSchedule::execute` applies here: if an emit closure produces a different function count than declared in Phase 1, `speet-schedule` panics rather than producing a silently corrupt module.
+
+**Do not** compute `base_func_offset` inside a Phase 2 closure — all offsets must be known before any emission begins.

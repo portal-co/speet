@@ -1,0 +1,87 @@
+# Yecta Component Guide
+
+**Crates:** `crates/helper/yecta`, `crates/helper/speet-ordering`, `crates/helper/speet-wasm-helpers`  
+**Design docs:** [recompiler-guide.md](../recompiler-guide.md) §1, [lazy-store-alias-checking.md](../lazy-store-alias-checking.md), [SPECULATIVE_CALLS.md](../../crates/helper/yecta/SPECULATIVE_CALLS.md)
+
+---
+
+## 1. One WASM function per possible instruction slot
+
+**Code:** `crates/helper/yecta/src/lib.rs`, `Reactor` struct
+
+### 1a. Slot granularity
+
+The `Reactor` emits one WASM function for every **possible instruction slot**, not every actual instruction. On RISC-V (which has 2-byte-aligned compressed instructions), a slot exists at every 2-byte offset — even inside a 4-byte instruction, and even at addresses that are never the start of a real instruction. The PC→function-index formula is `(pc - base_pc) / 2`.
+
+This is deliberate: when a jump target is computed at runtime (indirect branch, computed goto), the recompiler cannot know at translation time which offsets are valid instruction starts. Allocating a slot for every possible alignment means any valid jump target already has a function index, avoiding the need for a runtime lookup table.
+
+**Do not** assume "one function = one decoded instruction." **Do not** try to reduce the function count by only allocating slots for known instruction starts — that breaks indirect branches.
+
+### 1b. Why `return_call` (not a single function)
+
+Guest ISAs (x86-64, RISC-V, MIPS, DEX) have arbitrary, unstructured control-flow graphs — computed gotos, loops entered from the middle, fall-through between switch arms — that cannot be straightforwardly mapped to WASM's structured `block`/`loop`/`if` nesting.
+
+Each control-flow edge is represented as a `return_call` tail call to the target slot's function. Because WASM tail calls forward parameters without growing the call stack, the entire translated binary runs at **O(1) stack depth** no matter how many hops it takes. The guest register file lives in the WASM *parameters* and is forwarded unchanged on every `return_call`.
+
+**Do not** collapse functions, eliminate `return_call` chains, or try to restructure the CFG into a single function — this would require a general CFG-to-structured-control-flow conversion and is explicitly avoided.
+
+### 1c. Function merging (inline fall-through)
+
+`return_call` to an immediately-sequential slot is expensive as a cross-call. The `Reactor` merges functions that unconditionally fall through to one successor: it inlines the successor's instruction body directly into the predecessor's WASM function body, emitting the successor's instructions immediately after the predecessor's without a `return_call`.
+
+This means **a single WASM function can contain the code for many consecutive guest instructions**. When you read a generated WASM function and see instructions that "don't belong" to the guest instruction you expect, they have been inlined by function merging.
+
+**Do not** assume that the WASM function at index N contains only the code for guest instruction N. **Do not** try to reconstruct the guest instruction stream by reading one WASM function at a time — merged functions span multiple guest instructions.
+
+### 1d. Constant folding across merged functions (and its hazards)
+
+The `Reactor` performs local constant folding inside each WASM function body as it emits instructions. Two mechanisms work together:
+
+- **`const_stack`**: deferred `I32Const`/`I64Const` values on the WASM value stack. Subsequent operations that consume them are folded at emit time.
+- **`locals_const` / `locals_virtual`**: when a `local.set N` stores a known constant, the store is *elided* (not emitted) and the value is recorded in `locals_const[N]`. Subsequent `local.get N` are replaced inline by the constant without emitting a real `local.get`. The local is marked `locals_virtual` — meaning its WASM storage cell has not been physically written yet.
+
+**The hazard**: code emitted sequentially inside the same Entry (e.g. multiple arms of a `br_table` dispatch) shares this folding state. If arm A stores an *unknown* value into local N (clearing `locals_const[N]`), arm B's `local.get N` falls back to a real `local.get` and reads the WASM default `0`, not the constant that was virtually stored before the dispatch.
+
+**The fix** (`materialize_for` in `yecta/src/lib.rs`): before emitting *any* instruction that was not constant-folded away, all pending `locals_virtual` stores are flushed — the deferred `const` + `local.set` pair is emitted so that the WASM local physically holds the correct value. This is intentionally conservative (less optimized, but correct under sequential multi-arm emission).
+
+**Do not** remove the `locals_virtual` flush in `materialize_for`. **Do not** assume that a local which was "virtually" set actually contains the right value in its WASM storage cell — it may not until the flush runs.
+
+---
+
+## 2. Lazy store deferral and runtime alias checking
+
+**Code:** `crates/helper/yecta/src/lib.rs` (`LazyStore`, `LocalPool`), `crates/helper/speet-ordering/src/lib.rs`  
+**Design doc:** [lazy-store-alias-checking.md](../lazy-store-alias-checking.md)
+
+For weak-memory ISAs (RISC-V, MIPS), `MemOrder::Relaxed` defers stores via `Reactor::feed_lazy` rather than emitting them immediately. This lets the reactor sink stores toward control-flow join points and deduplicate stores that appear in all predecessors.
+
+The hazard is store-to-load forwarding: a deferred store followed by a load from the same address would give the load a stale value. The fix is not to flush all pending stores before every load — that would destroy the optimisation. Instead, before emitting each load, the recompiler emits a runtime alias check: a WASM `if` block that compares the load address against each pending store's address and flushes only the matching stores.
+
+The `emitted_local` field in `LazyStore` is an i32 runtime flag set to 1 inside the alias-check `if`. The unconditional barrier flush wraps each store in `i32.eqz(emitted_local)` to avoid double-storing.
+
+Float stores (`F32Store`, `F64Store`) are always emitted eagerly: float values cannot be saved in the i32/i64 `LocalPool`, so deferral is not possible.
+
+**Do not** remove the `emitted_local` flag, remove the alias-check `if` blocks, or flush all stores before every load.
+
+---
+
+## 3. Speculative call lowering
+
+**Code:** `crates/native/speet-riscv/src/direct.rs`, `crates/native/speet-x86_64/src/direct.rs`  
+**Design doc:** [SPECULATIVE_CALLS.md](../../crates/helper/yecta/SPECULATIVE_CALLS.md)
+
+When the recompiler detects an ABI-compliant call instruction (RISC-V `jal x1`/`jalr x1`, x86-64 `call`), it lowers it to a native WASM `call` wrapped in a `TryTable`/catch block rather than a `return_call`. The expected return address is stored in a hidden `expected_ra` local (via the fixups mechanism) *and* in the guest register (`ra`/stack).
+
+On the matching ABI-compliant return, if the guest `ra` (or stack top) matches `expected_ra`, a direct WASM `Return` is emitted. If not, the escape tag is thrown so the caller can fall back to the indirect dispatch path.
+
+**Do not** remove or short-circuit the `expected_ra` comparison — it is the mechanism that distinguishes a legitimate ABI return from a computed jump that happens to land on a return instruction.
+
+---
+
+## 4. `speet-wasm-helpers` — WASM arithmetic helpers
+
+**Code:** `crates/helper/speet-wasm-helpers/src/lib.rs`
+
+This crate provides inline WASM instruction sequences for operations that WASM lacks natively, specifically 64×64→128-bit multiplication variants (high-bits extraction for both signed and unsigned). The helpers emit sequences of `i64.mul`, shifts, and `extend` instructions documented inline in the source.
+
+These are pure instruction emitters with no architectural decisions. If you need a new arithmetic helper for a guest ISA instruction that WASM can't express directly, add it here.

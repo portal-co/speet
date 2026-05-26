@@ -1,0 +1,41 @@
+# Speet Agent Guides
+
+This directory contains per-component alignment guides for AI agents working on the speet codebase.
+
+---
+
+## What guides are
+
+Each guide documents the behaviours and invariants of one component that an agent might accidentally remove or "fix" without understanding the design. Guides are **loaded on demand** — an agent working on yecta loads `yecta.md`; an agent working on the linker loads `linker.md` — rather than being forced into every context upfront.
+
+**Accuracy and completeness matter most.** The lesson from commit c273616: the original `AGENTS.md §1` omitted function merging and constant folding. Agents misattributed behaviour to other causes and broke those features. Omissions are as dangerous as errors. Every guide must cover *all* behaviours in its component that could be mistakenly removed or simplified.
+
+---
+
+## How to use guides
+
+When touching a component, read its guide before making changes. If the guide appears to contradict what the code actually does, **trust the code and the design docs, not the guide** — then update the guide.
+
+Guides are alignment signals, not hard stops. They work like Claude Code's contextual reminders: they surface relevant context rather than issuing rigid "STOP THIS" blocks. A goal-aligned agent that encounters a faulty or incomplete guide should reason from project goals and the relevant design docs in `docs/`. Rigidly following a wrong guide is a failure mode.
+
+**Alignment with goals over rigidity of process.**
+
+---
+
+## Available guides
+
+| Guide | Component | Key "do not" |
+|-------|-----------|--------------|
+| [yecta.md](yecta.md) | `yecta` reactor, `speet-ordering`, `speet-wasm-helpers` | Do not collapse `return_call` chains; do not remove the `locals_virtual` flush; do not flush all stores before every load |
+| [speet-traps.md](speet-traps.md) | `speet-traps` | Do not move `RopDetectTrap`'s depth counter to a local; do not add `F` type param back to trap traits |
+| [linker.md](linker.md) | `speet-link-core`, `speet-linker`, `wasm-layout`, `speet-link`, `speet-schedule` | Do not merge two-pass into one; do not add entity declarations inside emit closures; do not add `Reactor` back to `LinkerInner` |
+| [arch-recompilers.md](arch-recompilers.md) | `speet-x86_64`, `speet-riscv`, `speet-mips`, `speet-dex` | Do not remove `ctx: &mut Context` from `setup_traps` |
+| [parallel-api.md](parallel-api.md) | `yecta`, `speet-ordering`, `speet-link`, all arch frontends | Do not revert `feed`/`seal`/`barrier`/`jmp_tail` refactor; replace `&mut self` on hooks with interior mutability |
+
+---
+
+## Auditing a guide
+
+If you change a component's behaviour and no guide entry covers it, add one. Guides should be audited against the actual code, not just the design docs — behaviour that exists only in code and nowhere in documentation is the most likely to be accidentally erased.
+
+See [AGENTS.md](../../AGENTS.md) for the hub index, and `docs/` for the full design documents that guides reference.

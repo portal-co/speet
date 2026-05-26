@@ -1,6 +1,6 @@
 # Lazy Store Alias Checking
 
-**Status:** Implemented  
+**Status: Implemented — this doc is a reference.**  
 **Crates affected:** `yecta`, `speet-ordering`, `speet-riscv`, `speet-mips`
 
 ---

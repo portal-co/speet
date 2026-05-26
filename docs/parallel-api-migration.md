@@ -1,6 +1,8 @@
 # Parallel / Multi-Target API Migration
 
-The build is currently broken (~96 errors across downstream crates) after a refactor of `yecta`'s
+**Status: Mostly complete. Remaining work: interior mutability refactor on hook traits — see [goals/active.md](../goals/active.md).**
+
+The build was broken (~96 errors across downstream crates) after a refactor of `yecta`'s
 `Reactor` internals to support concurrent multi-threaded emission.  This doc describes what broke,
 the required API changes, and the migration order.
 
@@ -102,12 +104,12 @@ Once the single-threaded path is green, parallel emission works by:
 3. Draining sequentially via `into_fns()`.
 
 `FuncSchedule::execute_parallel` can parallelize the **emission phase** while keeping the two-pass
-registration/emit invariant intact (see `AGENTS.md §5`).
+registration/emit invariant intact (see [docs/guides/linker.md §1](guides/linker.md)).
 
 ---
 
 ## Invariants (do not break)
-- One WASM function per guest instruction (`AGENTS.md §1`): never collapse multiple instructions into one entry.
-- Trap-state in parameters, not locals (`AGENTS.md §2`): `tail_idx` forwarded to `jmp`/`feed_to` must match the live trap-parameter entry.
-- Lazy store alias checking (`AGENTS.md §3`): every `feed_lazy` matched by `flush_bundles_for_load` before aliasing loads; `flush_bundles`/`barrier` at every control-flow boundary; same `tail_idx` throughout.
-- Two-pass `FuncSchedule` (`AGENTS.md §5`): registration layout must be final before any emission.
+- One WASM function per guest instruction ([docs/guides/yecta.md §1](guides/yecta.md)): never collapse multiple instructions into one entry.
+- Trap-state in parameters, not locals ([docs/guides/speet-traps.md §1](guides/speet-traps.md)): `tail_idx` forwarded to `jmp`/`feed_to` must match the live trap-parameter entry.
+- Lazy store alias checking ([docs/guides/yecta.md §2](guides/yecta.md)): every `feed_lazy` matched by `flush_bundles_for_load` before aliasing loads; `flush_bundles`/`barrier` at every control-flow boundary; same `tail_idx` throughout.
+- Two-pass `FuncSchedule` ([docs/guides/linker.md §1](guides/linker.md)): registration layout must be final before any emission.

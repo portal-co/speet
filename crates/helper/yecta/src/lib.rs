@@ -47,7 +47,7 @@
 //!   model, `return_call` chain semantics, predecessor graph, and function splitting rules.
 //! - `docs/lazy-store-alias-checking.md` — the `LazyStore` / `LocalPool` mechanism that
 //!   enables deferred stores with runtime alias checking.
-//! - `AGENTS.md` §1, §3 — agent guidance; explains why these patterns must not be "fixed".
+//! - `docs/guides/yecta.md` — agent guidance; explains why these patterns must not be "fixed".
 //!
 //! ## Static Speculative Call Lowering
 //!
@@ -342,7 +342,7 @@ impl<const N: usize> Default for LocalPool<N> {
 /// A store instruction that has been deferred via [`Reactor::feed_lazy`].
 ///
 /// See `docs/lazy-store-alias-checking.md` for the full alias-checking protocol
-/// and the role of each field.  See `AGENTS.md` §3 before modifying this type.
+/// and the role of each field.  See `docs/guides/yecta.md` §2 before modifying this type.
 ///
 /// At deferral time the operands (`[addr, value]`) are popped from the wasm
 /// value stack and saved into borrowed locals from the [`LocalPool`].  The

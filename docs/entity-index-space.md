@@ -1,5 +1,7 @@
 # Entity Index Space
 
+**Status: Implemented — this doc is a reference.**
+
 This document describes the `EntityIndexSpace` pre-declaration system, which replaces
 `FuncLayout` with a unified two-pass index resolver for all five WASM entity kinds.
 

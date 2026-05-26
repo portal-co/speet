@@ -1,4 +1,6 @@
-# Recompilation Goal List
+# Candidate Workloads
+
+← [goals.md](../goals.md)
 
 Candidate workloads for Speet-style AOT recompilation: buggy or hard-to-fix software, retro binaries, and stacks with operational overreach (telemetry, permissions, drivers). Names anchor to widely cited examples; this is a prioritization aid, not an exhaustive catalog.
 
@@ -63,4 +65,5 @@ Recompilation does not replace policy or store review; these are targets where *
 
 ## Related
 
-- [Container megabinary plan](container-plan.md) — how translated workloads may ship as megabinaries.
+- [Container megabinary plan](../docs/container-plan.md) — how translated workloads may ship as megabinaries.
+- [← goals.md](../goals.md)

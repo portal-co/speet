@@ -1,5 +1,7 @@
 # FuncSignature: LocalLayout + Returns
 
+**Status: Implemented — this doc is a reference.**
+
 This document describes `FuncSignature`, which pairs a `LocalLayout` (params) with an
 explicit return type list.  Injected params (trap/call-optimization state) are mirrored as
 returns, giving both native recompilers and the WASM frontend a single, consistent function

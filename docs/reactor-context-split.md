@@ -1,5 +1,7 @@
 # Base-Reactor Context Split
 
+**Status: Implemented — this doc is a reference.**
+
 This document describes the base-reactor context split, which moves `Reactor` ownership
 out of `LinkerInner` and into per-emit-closure scope so that native and WASM recompilers
 share a single base-context type without a hard native-vs-WASM dichotomy.

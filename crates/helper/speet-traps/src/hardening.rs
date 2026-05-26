@@ -46,7 +46,7 @@
 //! linker.traps.set_jump_trap(&mut trap);
 //! ```
 
-// See docs/trap-hooks.md §9 and AGENTS.md §2 for the rationale behind using a
+// See docs/trap-hooks.md §9 and docs/guides/speet-traps.md §1 for the rationale behind using a
 // wasm *parameter* (not a local) for RopDetectTrap's depth counter.
 
 extern crate alloc;
