@@ -99,12 +99,21 @@ with two targets uses `len=1` so both branches lead to the merge function.
 
 ### Predecessor graph and transitive saturation
 
-The reactor tracks a `preds: BTreeSet<FuncIdx>` for each entry. When deciding
-whether to force a split, it computes the *transitive predecessor set* of the
-current tail via BFS — every function that can reach the tail through `preds`
-edges. If any member of that set has hit a limit, the whole group is sealed.
-The transitive set is cached per entry and lazily invalidated whenever any
-`preds` set changes.
+The reactor tracks a `preds: BTreeMap<FuncIdx, ExitId>` for each entry. When
+deciding whether to force a split, it computes the *transitive predecessor set*
+of the current tail via BFS — every function that can reach the tail through
+`preds` edges. If any member of that set has hit a limit, the whole group is
+sealed. The transitive set is cached per entry and lazily invalidated whenever
+any `preds` set changes.
+
+Each edge is annotated with an `ExitId` recording *which exit point* of the
+predecessor leads here. Today every function has a single (tail) exit, so all
+edges carry `SOLE_EXIT`; the annotation is groundwork for optimizer variants
+that emit native multi-way control flow. Relatedly, conditional-branch lowering
+is a *per-`Entry` decision* made through a Reactor↔Entry handshake
+(`Entry::emit_conditional_arm`): the reactor owns the predecessor graph and
+drives the reachable set, while each entry emits its own branch body (the
+default being a conditional `return_call`). See `docs/guides/yecta.md` §1e.
 
 ### Speculative calls and `EscapeTag`
 

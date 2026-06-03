@@ -42,9 +42,28 @@ The `Reactor` performs local constant folding inside each WASM function body as 
 
 **The hazard**: code emitted sequentially inside the same Entry (e.g. multiple arms of a `br_table` dispatch) shares this folding state. If arm A stores an *unknown* value into local N (clearing `locals_const[N]`), arm B's `local.get N` falls back to a real `local.get` and reads the WASM default `0`, not the constant that was virtually stored before the dispatch.
 
-**The fix** (`materialize_for` in `yecta/src/lib.rs`): before emitting *any* instruction that was not constant-folded away, all pending `locals_virtual` stores are flushed — the deferred `const` + `local.set` pair is emitted so that the WASM local physically holds the correct value. This is intentionally conservative (less optimized, but correct under sequential multi-arm emission).
+**The fix** (`ConstFoldState::materialize` / `commit_virtual_locals` in `yecta/src/lib.rs`): before emitting *any* instruction that was not constant-folded away, all pending `locals_virtual` stores are flushed — the deferred `const` + `local.set` pair is emitted so that the WASM local physically holds the correct value. This is intentionally conservative (less optimized, but correct under sequential multi-arm emission).
 
-**Do not** remove the `locals_virtual` flush in `materialize_for`. **Do not** assume that a local which was "virtually" set actually contains the right value in its WASM storage cell — it may not until the flush runs.
+**Do not** remove the `locals_virtual` flush in `ConstFoldState::commit_virtual_locals`. **Do not** assume that a local which was "virtually" set actually contains the right value in its WASM storage cell — it may not until the flush runs.
+
+### 1e. Optimizer seam, the Reactor↔Entry handshake, and exit-point edges
+
+The constant folding above is one *optimizer strategy*. It lives behind a one-variant enum:
+
+```rust
+enum Optimizer { ConstFold(ConstFoldState) }
+```
+
+attached to each `Entry`. This is deliberate groundwork: the enum is the seam for future optimizer variants (e.g. native condition emission) without disturbing the faithful default.
+
+Emission is split into two halves:
+
+- **The `Reactor` owns the predecessor graph** — it computes the reachable set, records edges, detects cycles, and forces splits. It decides *which* functions receive an instruction.
+- **Each `Entry` decides *how* it emits** — `Entry::feed_one` runs the optimizer pipeline (fold / defer / skip / emit) for one function body. Conditional branches go through `Entry::emit_conditional_arm`, the per-entry half of the handshake: the Reactor loops the reachable set and asks each `Entry` to emit its own branch arm. The default arm emits the faithful `if <cond> { <params>; return_call target } else …`.
+
+Predecessor edges carry an `ExitId` (`Entry.preds: BTreeMap<FuncIdx, ExitId>`). Today every edge is `SOLE_EXIT` because the faithful lowering gives each function a single tail exit. The id is the hook a future optimizer variant uses to emit native control flow — where the taken branch and the fall-through are *distinct* exits of one function and must be told apart in the graph. See [perf.md](../../goals/perf.md) for the long-term goal.
+
+**Do not** assume "one function = one exit" is a structural invariant — it is the *default* lowering, and `ExitId` exists precisely so optimizer variants can break it. **Do not** move the predecessor-graph / cycle / split logic onto `Entry`, or the per-entry emission decision onto the `Reactor`: that split is the handshake.
 
 ---
 

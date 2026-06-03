@@ -382,6 +382,21 @@ pub struct LazyStore {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct FuncIdx(pub u32);
 
+/// Identifies *which exit point* of a predecessor transferred control to a
+/// successor.
+///
+/// Today every generated function has a single exit (its tail `return_call` /
+/// fall-through), so all edges carry [`SOLE_EXIT`] (`ExitId(0)`).  The id exists
+/// as groundwork for future optimizer variants (see [`Optimizer`]) that emit
+/// native multi-way control flow — e.g. native condition emission, where the
+/// taken branch and the fall-through are *distinct* exits of the same function
+/// and must be told apart by the predecessor graph.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct ExitId(pub u32);
+
+/// The sole exit point of a function under the default faithful lowering.
+pub const SOLE_EXIT: ExitId = ExitId(0);
+
 /// Index of a WebAssembly tag (exception tag) in the module.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct TagIdx(pub u32);
@@ -649,7 +664,10 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
 }
 /// Target for a jump or call operation.
 /// Can be either a static function reference or a dynamic indirect call.
-#[derive(Clone, Copy)]
+///
+/// `Clone`/`Copy` are implemented manually (not derived) so they do not impose
+/// spurious `Context: Copy` / `E: Copy` bounds — the type only ever holds a
+/// `FuncIdx` or a shared reference, so it is always trivially copyable.
 pub enum Target<'a, Context, E> {
     /// Static call to a known function index.
     Static { func: FuncIdx },
@@ -658,6 +676,13 @@ pub enum Target<'a, Context, E> {
         idx: &'a (dyn Snippet<Context, E> + 'a),
     },
 }
+
+impl<'a, Context, E> Clone for Target<'a, Context, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, Context, E> Copy for Target<'a, Context, E> {}
 /// Trait for code snippets that can emit WebAssembly instructions.
 /// Used for dynamic code generation within the reactor system.
 pub trait Snippet<Context, E = Infallible>: wax_core::build::InstructionSource<Context, E> {
@@ -710,7 +735,10 @@ where
 {
     lock: spin::Mutex<LockCfg>,
     fns: core::cell::UnsafeCell<Vec<Entry<F>>>,
-    lens: spin::Mutex<VecDeque<BTreeSet<FuncIdx>>>,
+    /// Pending predecessor edges for functions not yet created, keyed by the
+    /// control-flow distance bucket.  Each edge records the predecessor and
+    /// which [`ExitId`] of it leads to the future successor.
+    lens: spin::Mutex<VecDeque<BTreeMap<FuncIdx, ExitId>>>,
     phantom: PhantomData<(Context, E)>,
     /// Base offset added to all emitted function indices.
     /// Used when imports or helper functions precede the generated functions in the module.
@@ -853,11 +881,40 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     }
 }
 
+/// Per-entry constant-folding optimizer state.
+///
+/// Holds the shadow value stack and the virtual-local tracking used to fold
+/// constants inside a single emitted function body.  See `docs/guides/yecta.md`
+/// §1d for the rationale and the `locals_virtual` flush hazard.
+#[derive(Default)]
+struct ConstFoldState {
+    const_stack: Vec<Option<(u64, ValType)>>,
+    locals_const: BTreeMap<u32, (u64, ValType)>,
+    locals_virtual: BTreeSet<u32>,
+    skip_depth: usize,
+    block_frames: Vec<bool>, // true = taken-if frame (End should be skipped), false = normal
+}
+
+/// The optimization strategy/state attached to an [`Entry`].
+///
+/// This is a one-variant enum on purpose: today every entry uses the faithful
+/// constant-folding strategy, but the enum is the seam through which future
+/// optimizer variants (e.g. native condition emission using the [`ExitId`] edge
+/// system) are added without disturbing the default faithful lowering.  Dispatch
+/// methods here delegate to the active variant so behaviour can be deduplicated
+/// and specialised per variant.
+enum Optimizer {
+    ConstFold(ConstFoldState),
+}
+
 /// Internal entry representing a function being generated.
 struct Entry<F> {
     function: F,
     bundles: Vec<LazyStore>,
-    preds: BTreeSet<FuncIdx>,
+    /// Direct predecessors of this entry, each annotated with the [`ExitId`] of
+    /// the predecessor that transfers control here (always [`SOLE_EXIT`] under
+    /// the default faithful lowering).
+    preds: BTreeMap<FuncIdx, ExitId>,
     if_stmts: usize,
     /// Running count of instructions emitted into this function via `feed`.
     inst_count: usize,
@@ -869,17 +926,1161 @@ struct Entry<F> {
     /// changes.  Only recomputed when actually needed (in `feed`, `seal`,
     /// saturation checks, etc.).
     transitive_preds: Option<BTreeSet<FuncIdx>>,
-    const_stack: Vec<Option<(u64, ValType)>>,
-    locals_const: BTreeMap<u32, (u64, ValType)>,
-    locals_virtual: BTreeSet<u32>,
-    skip_depth: usize,
-    block_frames: Vec<bool>, // true = taken-if frame (End should be skipped), false = normal
+    /// Optimization strategy and its working state (see [`Optimizer`]).
+    opt: Optimizer,
     /// Set to `true` once the function body has been terminated (via
     /// `seal_to`, `seal_for_split`, or the `jmp` cycle path).  `drain_fns`
     /// uses this to emit `unreachable; end` for any functions that were never
     /// explicitly sealed (e.g. the final instructions of a translated region).
     sealed: bool,
 }
+
+impl ConstFoldState {
+    /// Reset all folding state to empty (used when an entry is sealed or its
+    /// predecessor edges are severed).
+    fn reset(&mut self) {
+        self.const_stack.clear();
+        self.locals_const.clear();
+        self.locals_virtual.clear();
+        self.skip_depth = 0;
+        self.block_frames.clear();
+    }
+
+    /// Read a deferred constant `depth` slots from the top of the shadow stack.
+    fn peek_stack_i32(&self, depth: usize) -> Option<i32> {
+        let len = self.const_stack.len();
+        if depth >= len {
+            return None;
+        }
+        let (v, _) = self.const_stack[len - 1 - depth]?;
+        Some(v as i32)
+    }
+
+    /// Read the tracked constant value of local `local_idx`, if any.
+    fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
+        let (v, _) = *self.locals_const.get(&local_idx)?;
+        Some(v as i32)
+    }
+
+    /// Handle an instruction while in skip mode (dropping the inlined else-body
+    /// of an always-taken `if`).  Returns `true` if the instruction was consumed
+    /// by skip mode and must not be emitted.  `if_stmts` is the owning entry's
+    /// open-`if` counter, corrected when a skipped `If` is dropped.
+    fn handle_skip(&mut self, insn: &Instruction<'_>, if_stmts: &mut usize) -> bool {
+        if self.skip_depth == 0 {
+            return false;
+        }
+        match insn {
+            Instruction::If(_) => {
+                self.skip_depth += 1;
+                // increment_if_stmts_for_predecessors already counted this If,
+                // but it won't be emitted — correct the count.
+                *if_stmts = if_stmts.saturating_sub(1);
+            }
+            Instruction::Block(_) | Instruction::Loop(_) => {
+                self.skip_depth += 1;
+            }
+            Instruction::End => {
+                self.skip_depth -= 1;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Try to constant-fold `insn`.
+    /// Returns `true` if the instruction was fully handled (not emitted, not counted).
+    /// Returns `false` if the instruction should be emitted normally.
+    /// `if_stmts` is the owning entry's open-`if` counter, corrected when a
+    /// known-true `if` is elided.
+    fn try_fold(&mut self, insn: &Instruction<'_>, if_stmts: &mut usize) -> bool {
+        match insn {
+            // ── Constant pushes: defer, push Some(v) ──────────────────
+            Instruction::I32Const(v) => {
+                self.const_stack.push(Some((*v as u64, ValType::I32)));
+                return true;
+            }
+            Instruction::I64Const(v) => {
+                self.const_stack.push(Some((*v as u64, ValType::I64)));
+                return true;
+            }
+
+            // ── Drop: if top is a known constant, elide both ──────────
+            Instruction::Drop => {
+                if let Some(Some(_)) = self.const_stack.last() {
+                    self.const_stack.pop();
+                    return true;
+                }
+            }
+
+            // ── i32 binary ops: fold if both operands known ────────────
+            Instruction::I32Add
+            | Instruction::I32Sub
+            | Instruction::I32Mul
+            | Instruction::I32And
+            | Instruction::I32Or
+            | Instruction::I32Xor
+            | Instruction::I32Shl
+            | Instruction::I32ShrS
+            | Instruction::I32ShrU => {
+                let len = self.const_stack.len();
+                if len >= 2 {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        self.const_stack.get(len - 1),
+                        self.const_stack.get(len - 2),
+                    ) {
+                        let a = *a as i32;
+                        let b = *b as i32;
+                        let result: i32 = match insn {
+                            Instruction::I32Add => a.wrapping_add(b),
+                            Instruction::I32Sub => a.wrapping_sub(b),
+                            Instruction::I32Mul => a.wrapping_mul(b),
+                            Instruction::I32And => a & b,
+                            Instruction::I32Or => a | b,
+                            Instruction::I32Xor => a ^ b,
+                            Instruction::I32Shl => a.wrapping_shl(b as u32 & 31),
+                            Instruction::I32ShrS => a.wrapping_shr(b as u32 & 31),
+                            Instruction::I32ShrU => ((a as u32).wrapping_shr(b as u32 & 31)) as i32,
+                            _ => unreachable!(),
+                        };
+                        self.const_stack.truncate(len - 2);
+                        self.const_stack.push(Some((result as u64, ValType::I32)));
+                        return true;
+                    }
+                }
+            }
+
+            // ── i64 binary ops: fold if both operands known ────────────
+            Instruction::I64Add
+            | Instruction::I64Sub
+            | Instruction::I64Mul
+            | Instruction::I64And
+            | Instruction::I64Or
+            | Instruction::I64Xor
+            | Instruction::I64Shl
+            | Instruction::I64ShrS
+            | Instruction::I64ShrU => {
+                let len = self.const_stack.len();
+                if len >= 2 {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        self.const_stack.get(len - 1),
+                        self.const_stack.get(len - 2),
+                    ) {
+                        let a = *a as i64;
+                        let b = *b as i64;
+                        let result: i64 = match insn {
+                            Instruction::I64Add => a.wrapping_add(b),
+                            Instruction::I64Sub => a.wrapping_sub(b),
+                            Instruction::I64Mul => a.wrapping_mul(b),
+                            Instruction::I64And => a & b,
+                            Instruction::I64Or => a | b,
+                            Instruction::I64Xor => a ^ b,
+                            Instruction::I64Shl => a.wrapping_shl(b as u32 & 63),
+                            Instruction::I64ShrS => a.wrapping_shr(b as u32 & 63),
+                            Instruction::I64ShrU => ((a as u64).wrapping_shr(b as u32 & 63)) as i64,
+                            _ => unreachable!(),
+                        };
+                        self.const_stack.truncate(len - 2);
+                        self.const_stack.push(Some((result as u64, ValType::I64)));
+                        return true;
+                    }
+                }
+            }
+
+            // ── i32 comparisons: fold if both known ───────────────────
+            Instruction::I32Eq
+            | Instruction::I32Ne
+            | Instruction::I32LtS
+            | Instruction::I32LtU
+            | Instruction::I32GtS
+            | Instruction::I32GtU
+            | Instruction::I32LeS
+            | Instruction::I32LeU
+            | Instruction::I32GeS
+            | Instruction::I32GeU => {
+                let len = self.const_stack.len();
+                if len >= 2 {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        self.const_stack.get(len - 1),
+                        self.const_stack.get(len - 2),
+                    ) {
+                        let a = *a as i32;
+                        let b = *b as i32;
+                        let au = a as u32;
+                        let bu = b as u32;
+                        let result: i32 = match insn {
+                            Instruction::I32Eq => (a == b) as i32,
+                            Instruction::I32Ne => (a != b) as i32,
+                            Instruction::I32LtS => (a < b) as i32,
+                            Instruction::I32LtU => (au < bu) as i32,
+                            Instruction::I32GtS => (a > b) as i32,
+                            Instruction::I32GtU => (au > bu) as i32,
+                            Instruction::I32LeS => (a <= b) as i32,
+                            Instruction::I32LeU => (au <= bu) as i32,
+                            Instruction::I32GeS => (a >= b) as i32,
+                            Instruction::I32GeU => (au >= bu) as i32,
+                            _ => unreachable!(),
+                        };
+                        self.const_stack.truncate(len - 2);
+                        self.const_stack.push(Some((result as u64, ValType::I32)));
+                        return true;
+                    }
+                }
+            }
+
+            // ── i64 comparisons: fold if both known ───────────────────
+            Instruction::I64Eq
+            | Instruction::I64Ne
+            | Instruction::I64LtS
+            | Instruction::I64LtU
+            | Instruction::I64GtS
+            | Instruction::I64GtU
+            | Instruction::I64LeS
+            | Instruction::I64LeU
+            | Instruction::I64GeS
+            | Instruction::I64GeU => {
+                let len = self.const_stack.len();
+                if len >= 2 {
+                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
+                        self.const_stack.get(len - 1),
+                        self.const_stack.get(len - 2),
+                    ) {
+                        let a = *a as i64;
+                        let b = *b as i64;
+                        let au = a as u64;
+                        let bu = b as u64;
+                        let result: i32 = match insn {
+                            Instruction::I64Eq => (a == b) as i32,
+                            Instruction::I64Ne => (a != b) as i32,
+                            Instruction::I64LtS => (a < b) as i32,
+                            Instruction::I64LtU => (au < bu) as i32,
+                            Instruction::I64GtS => (a > b) as i32,
+                            Instruction::I64GtU => (au > bu) as i32,
+                            Instruction::I64LeS => (a <= b) as i32,
+                            Instruction::I64LeU => (au <= bu) as i32,
+                            Instruction::I64GeS => (a >= b) as i32,
+                            Instruction::I64GeU => (au >= bu) as i32,
+                            _ => unreachable!(),
+                        };
+                        self.const_stack.truncate(len - 2);
+                        self.const_stack.push(Some((result as u64, ValType::I32)));
+                        return true;
+                    }
+                }
+            }
+
+            // ── i32 unary ─────────────────────────────────────────────
+            Instruction::I32Eqz => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    let result = (v as i32 == 0) as i32;
+                    self.const_stack.push(Some((result as u64, ValType::I32)));
+                    return true;
+                }
+            }
+
+            // ── i64 unary ─────────────────────────────────────────────
+            Instruction::I64Eqz => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    let result = (v as i64 == 0) as i32;
+                    self.const_stack.push(Some((result as u64, ValType::I32)));
+                    return true;
+                }
+            }
+
+            // ── i32 extend / wrap ─────────────────────────────────────
+            Instruction::I32WrapI64 => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    self.const_stack.push(Some((v as i32 as u64, ValType::I32)));
+                    return true;
+                }
+            }
+            Instruction::I64ExtendI32S => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    self.const_stack
+                        .push(Some((v as i32 as i64 as u64, ValType::I64)));
+                    return true;
+                }
+            }
+            Instruction::I64ExtendI32U => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    self.const_stack.push(Some((v as u32 as u64, ValType::I64)));
+                    return true;
+                }
+            }
+
+            // ── local.set N ───────────────────────────────────────────
+            Instruction::LocalSet(n) => {
+                let n = *n;
+                if let Some(Some((v, ty))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    self.locals_const.insert(n, (v, ty));
+                    self.locals_virtual.insert(n);
+                    return true; // Virtual store: don't emit local.set
+                }
+                // Unknown value: clear tracking for this local.
+                self.locals_const.remove(&n);
+                self.locals_virtual.remove(&n);
+                // Fall through: emit local.set normally.
+            }
+
+            // ── local.tee N ───────────────────────────────────────────
+            Instruction::LocalTee(n) => {
+                let n = *n;
+                if let Some(Some((v, ty))) = self.const_stack.last().cloned() {
+                    // Keep Some(v) on shadow stack (tee leaves value on stack).
+                    self.locals_const.insert(n, (v, ty));
+                    self.locals_virtual.insert(n);
+                    return true; // Virtual tee
+                }
+                self.locals_const.remove(&n);
+                self.locals_virtual.remove(&n);
+                // Fall through: emit local.tee normally.
+            }
+
+            // ── local.get N ───────────────────────────────────────────
+            Instruction::LocalGet(n) => {
+                if let Some(&(v, ty)) = self.locals_const.get(n) {
+                    self.const_stack.push(Some((v, ty)));
+                    return true; // Replaced with inline const
+                }
+                // Unknown local: push None (update_shadow_stack will handle).
+                // Fall through to emit + update_shadow_stack.
+            }
+
+            // ── If: constant-condition branch elimination ──────────────
+            Instruction::If(_block_type) => {
+                let cond = self.const_stack.last().cloned();
+                match cond {
+                    Some(Some((v, _))) if v != 0 => {
+                        // Known-true: don't emit If; inline the then-body and
+                        // skip the else-body via skip_depth.
+                        // Decrement the owning entry's if_stmts — it was
+                        // incremented by increment_if_stmts_for_predecessors but
+                        // the If won't be emitted.
+                        *if_stmts = if_stmts.saturating_sub(1);
+                        self.const_stack.pop(); // consume condition
+                        self.block_frames.push(true); // TakenIf
+                        return true; // Don't emit If
+                    }
+                    _ => {
+                        // Unknown condition OR known-false: emit If normally.
+                        // For known-false the condition constant stays on
+                        // const_stack; materialize will emit I32Const(0)
+                        // and the WASM runtime will select the else-branch.
+                        self.block_frames.push(false); // Normal
+                        // Fall through to emit.
+                    }
+                }
+            }
+
+            // ── Block / Loop: track block frames ──────────────────────
+            Instruction::Block(_) | Instruction::Loop(_) => {
+                self.block_frames.push(false); // Normal
+                // Fall through to emit.
+            }
+
+            // ── End: may close a taken-if frame ───────────────────────
+            Instruction::End => {
+                if let Some(taken) = self.block_frames.pop() {
+                    if taken {
+                        // This End closes a taken-if; don't emit it.
+                        return true;
+                    }
+                }
+                // Normal End: emit it.
+            }
+
+            // ── Else: handle taken-if by skipping else-body ───────────
+            Instruction::Else => {
+                // If the corresponding if was a taken-if, start skipping else.
+                // Check the last block_frames entry.
+                if let Some(&taken) = self.block_frames.last() {
+                    if taken {
+                        // We're in the always-taken branch; skip the else body.
+                        // Remove the TakenIf frame and enter skip mode.
+                        self.block_frames.pop();
+                        self.skip_depth += 1;
+                        return true;
+                    }
+                }
+                // Normal Else: emit it.
+            }
+
+            _ => {}
+        }
+        false
+    }
+
+    /// Materialize any deferred constants that the instruction needs from the
+    /// shadow stack, then commit all pending virtual locals.
+    fn materialize<Context, E, F: InstructionSink<Context, E>>(
+        &mut self,
+        ctx: &mut Context,
+        function: &mut F,
+        inst_count: &mut usize,
+        insn: &Instruction<'_>,
+    ) -> Result<(), E> {
+        // Flush the entire const_stack whenever the instruction interacts with
+        // the value stack (pushes, pops, or is a call).  This keeps the
+        // invariant that no deferred constant sits below a concrete runtime
+        // value on the abstract stack.
+        let needs_flush = Self::stack_pops(insn) > 0
+            || Self::stack_pushes(insn) > 0
+            || matches!(
+                insn,
+                Instruction::Call(_)
+                    | Instruction::CallIndirect { .. }
+                    | Instruction::ReturnCall(_)
+                    | Instruction::ReturnCallIndirect { .. }
+                    | Instruction::CallRef(_)
+                    | Instruction::ReturnCallRef(_)
+            );
+
+        if needs_flush {
+            for slot in &mut self.const_stack {
+                if let Some((v, ty)) = *slot {
+                    let emit_insn = match ty {
+                        ValType::I32 => Instruction::I32Const(v as i32),
+                        ValType::I64 => Instruction::I64Const(v as i64),
+                        _ => Instruction::I64Const(v as i64),
+                    };
+                    function.instruction(ctx, &emit_insn)?;
+                    *inst_count += 1;
+                    *slot = None;
+                }
+            }
+        }
+
+        // Always commit all virtual locals before emitting any instruction.
+        //
+        // A virtual local is one whose `local.set` was elided by constant
+        // folding: `locals_const[n]` holds the known value, but the WASM
+        // local `n` has never been physically written.  This is safe as long
+        // as every subsequent `local.get n` also folds the same constant.
+        //
+        // That invariant breaks inside a single emitted function when the same
+        // Entry is used to emit sequential br_table arms: arm A may store an
+        // unknown result into local n (clearing `locals_const[n]` and
+        // `locals_virtual[n]`), after which arm B emits a real `local.get n`
+        // that reads the WASM default 0 instead of the pre-ecall constant.
+        //
+        // Fix: commit every pending virtual-local store before any emitted
+        // instruction, so the physical WASM local is always up-to-date.
+        self.commit_virtual_locals(ctx, function, inst_count)?;
+
+        Ok(())
+    }
+
+    /// Emit the deferred `const` + `local.set` pair for every virtual local,
+    /// then clear the virtual-local set.  Shared by [`materialize`](Self::materialize)
+    /// and [`flush`](Self::flush).  Does **not** clear `locals_const`.
+    fn commit_virtual_locals<Context, E, F: InstructionSink<Context, E>>(
+        &mut self,
+        ctx: &mut Context,
+        function: &mut F,
+        inst_count: &mut usize,
+    ) -> Result<(), E> {
+        for n in self
+            .locals_virtual
+            .iter()
+            .copied()
+            .collect::<alloc::vec::Vec<_>>()
+        {
+            if let Some(&(v, ty)) = self.locals_const.get(&n) {
+                let const_insn = match ty {
+                    ValType::I32 => Instruction::I32Const(v as i32),
+                    ValType::I64 => Instruction::I64Const(v as i64),
+                    _ => Instruction::I64Const(v as i64),
+                };
+                function.instruction(ctx, &const_insn)?;
+                function.instruction(ctx, &Instruction::LocalSet(n))?;
+                *inst_count += 2;
+            }
+        }
+        self.locals_virtual.clear();
+        Ok(())
+    }
+
+    /// Flush the shadow stack, materializing all deferred constants and
+    /// committing all virtual locals, then clear constant tracking entirely.
+    fn flush<Context, E, F: InstructionSink<Context, E>>(
+        &mut self,
+        ctx: &mut Context,
+        function: &mut F,
+        inst_count: &mut usize,
+    ) -> Result<(), E> {
+        // Materialize any deferred constants still on the shadow stack.
+        let stack: Vec<_> = self.const_stack.drain(..).collect();
+        for slot in stack {
+            if let Some((v, ty)) = slot {
+                let insn = match ty {
+                    ValType::I32 => Instruction::I32Const(v as i32),
+                    ValType::I64 => Instruction::I64Const(v as i64),
+                    _ => Instruction::I64Const(v as i64),
+                };
+                function.instruction(ctx, &insn)?;
+                *inst_count += 1;
+            }
+        }
+        // Materialize virtual locals: emit the deferred LocalSet instructions
+        // so that the WASM local actually holds the constant value.  This is
+        // required before any control-flow split (seal_for_split, seal_to, or
+        // cycle-break) where the function may later be entered from a path
+        // that has not seen the original constant-folded store.
+        self.commit_virtual_locals(ctx, function, inst_count)?;
+        self.locals_const.clear();
+        Ok(())
+    }
+
+    /// Update the shadow stack after emitting a non-folded instruction.
+    fn update_shadow_stack(&mut self, insn: &Instruction<'_>) {
+        let pops = Self::stack_pops(insn);
+        let pushes = Self::stack_pushes(insn);
+        for _ in 0..pops {
+            self.const_stack.pop();
+        }
+        for _ in 0..pushes {
+            self.const_stack.push(None); // result is runtime-unknown
+        }
+    }
+
+    /// Returns how many values from the top of the WASM stack the instruction consumes.
+    /// This is a conservative estimate; unknown instructions return 0 (no materialization).
+    fn stack_pops(insn: &Instruction<'_>) -> usize {
+        match insn {
+            Instruction::I32Const(_)
+            | Instruction::I64Const(_)
+            | Instruction::F32Const(_)
+            | Instruction::F64Const(_) => 0,
+
+            // Unary ops
+            Instruction::I32Eqz
+            | Instruction::I64Eqz
+            | Instruction::I32Clz
+            | Instruction::I32Ctz
+            | Instruction::I32Popcnt
+            | Instruction::I64Clz
+            | Instruction::I64Ctz
+            | Instruction::I64Popcnt
+            | Instruction::I32WrapI64
+            | Instruction::I64ExtendI32S
+            | Instruction::I64ExtendI32U
+            | Instruction::I32Extend8S
+            | Instruction::I32Extend16S
+            | Instruction::I64Extend8S
+            | Instruction::I64Extend16S
+            | Instruction::I64Extend32S
+            | Instruction::F32Abs
+            | Instruction::F32Neg
+            | Instruction::F32Sqrt
+            | Instruction::F64Abs
+            | Instruction::F64Neg
+            | Instruction::F64Sqrt
+            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
+            | Instruction::I32TruncF32S
+            | Instruction::I32TruncF32U
+            | Instruction::I32TruncF64S
+            | Instruction::I32TruncF64U
+            | Instruction::I64TruncF32S
+            | Instruction::I64TruncF32U
+            | Instruction::I64TruncF64S
+            | Instruction::I64TruncF64U
+            | Instruction::F32ConvertI32S
+            | Instruction::F32ConvertI32U
+            | Instruction::F32ConvertI64S
+            | Instruction::F32ConvertI64U
+            | Instruction::F64ConvertI32S
+            | Instruction::F64ConvertI32U
+            | Instruction::F64ConvertI64S
+            | Instruction::F64ConvertI64U
+            | Instruction::F32DemoteF64
+            | Instruction::F64PromoteF32
+            | Instruction::I32ReinterpretF32
+            | Instruction::I64ReinterpretF64
+            | Instruction::F32ReinterpretI32
+            | Instruction::F64ReinterpretI64 => 1,
+
+            // Binary ops
+            Instruction::I32Add
+            | Instruction::I32Sub
+            | Instruction::I32Mul
+            | Instruction::I32DivS
+            | Instruction::I32DivU
+            | Instruction::I32RemS
+            | Instruction::I32RemU
+            | Instruction::I32And
+            | Instruction::I32Or
+            | Instruction::I32Xor
+            | Instruction::I32Shl
+            | Instruction::I32ShrS
+            | Instruction::I32ShrU
+            | Instruction::I32Rotl
+            | Instruction::I32Rotr
+            | Instruction::I64Add
+            | Instruction::I64Sub
+            | Instruction::I64Mul
+            | Instruction::I64DivS
+            | Instruction::I64DivU
+            | Instruction::I64RemS
+            | Instruction::I64RemU
+            | Instruction::I64And
+            | Instruction::I64Or
+            | Instruction::I64Xor
+            | Instruction::I64Shl
+            | Instruction::I64ShrS
+            | Instruction::I64ShrU
+            | Instruction::I64Rotl
+            | Instruction::I64Rotr
+            | Instruction::I32Eq
+            | Instruction::I32Ne
+            | Instruction::I32LtS
+            | Instruction::I32LtU
+            | Instruction::I32GtS
+            | Instruction::I32GtU
+            | Instruction::I32LeS
+            | Instruction::I32LeU
+            | Instruction::I32GeS
+            | Instruction::I32GeU
+            | Instruction::I64Eq
+            | Instruction::I64Ne
+            | Instruction::I64LtS
+            | Instruction::I64LtU
+            | Instruction::I64GtS
+            | Instruction::I64GtU
+            | Instruction::I64LeS
+            | Instruction::I64LeU
+            | Instruction::I64GeS
+            | Instruction::I64GeU
+            | Instruction::F32Eq
+            | Instruction::F32Ne
+            | Instruction::F32Lt
+            | Instruction::F32Gt
+            | Instruction::F32Le
+            | Instruction::F32Ge
+            | Instruction::F64Eq
+            | Instruction::F64Ne
+            | Instruction::F64Lt
+            | Instruction::F64Gt
+            | Instruction::F64Le
+            | Instruction::F64Ge
+            | Instruction::F32Add
+            | Instruction::F32Sub
+            | Instruction::F32Mul
+            | Instruction::F32Div
+            | Instruction::F32Min
+            | Instruction::F32Max
+            | Instruction::F32Copysign
+            | Instruction::F64Add
+            | Instruction::F64Sub
+            | Instruction::F64Mul
+            | Instruction::F64Div
+            | Instruction::F64Min
+            | Instruction::F64Max
+            | Instruction::F64Copysign => 2,
+
+            Instruction::Drop => 1,
+            Instruction::Select => 3,
+
+            Instruction::LocalGet(_) => 0,
+            Instruction::LocalSet(_) => 1,
+            Instruction::LocalTee(_) => 1,
+
+            Instruction::GlobalSet(_) => 1,
+            Instruction::GlobalGet(_) => 0,
+
+            // If, BrIf, and BrTable consume the condition/selector
+            Instruction::If(_) | Instruction::BrIf(_) | Instruction::BrTable(_, _) => 1,
+            Instruction::Block(_) | Instruction::Loop(_) => 0,
+            Instruction::End | Instruction::Else | Instruction::Nop => 0,
+            Instruction::Return | Instruction::Unreachable => 0,
+
+            // Loads: consume address
+            Instruction::I32Load(_)
+            | Instruction::I64Load(_)
+            | Instruction::F32Load(_)
+            | Instruction::F64Load(_)
+            | Instruction::I32Load8S(_)
+            | Instruction::I32Load8U(_)
+            | Instruction::I32Load16S(_)
+            | Instruction::I32Load16U(_)
+            | Instruction::I64Load8S(_)
+            | Instruction::I64Load8U(_)
+            | Instruction::I64Load16S(_)
+            | Instruction::I64Load16U(_)
+            | Instruction::I64Load32S(_)
+            | Instruction::I64Load32U(_) => 1,
+
+            // Stores: consume addr + value
+            Instruction::I32Store(_)
+            | Instruction::I64Store(_)
+            | Instruction::F32Store(_)
+            | Instruction::F64Store(_)
+            | Instruction::I32Store8(_)
+            | Instruction::I32Store16(_)
+            | Instruction::I64Store8(_)
+            | Instruction::I64Store16(_)
+            | Instruction::I64Store32(_) => 2,
+
+            _ => 0,
+        }
+    }
+
+    /// Returns how many values the instruction pushes onto the WASM stack.
+    fn stack_pushes(insn: &Instruction<'_>) -> usize {
+        match insn {
+            Instruction::I32Const(_)
+            | Instruction::I64Const(_)
+            | Instruction::F32Const(_)
+            | Instruction::F64Const(_) => 1,
+
+            // Unary ops: consume 1, push 1
+            Instruction::I32Eqz
+            | Instruction::I64Eqz
+            | Instruction::I32Clz
+            | Instruction::I32Ctz
+            | Instruction::I32Popcnt
+            | Instruction::I64Clz
+            | Instruction::I64Ctz
+            | Instruction::I64Popcnt
+            | Instruction::I32WrapI64
+            | Instruction::I64ExtendI32S
+            | Instruction::I64ExtendI32U
+            | Instruction::I32Extend8S
+            | Instruction::I32Extend16S
+            | Instruction::I64Extend8S
+            | Instruction::I64Extend16S
+            | Instruction::I64Extend32S
+            | Instruction::F32Abs
+            | Instruction::F32Neg
+            | Instruction::F32Sqrt
+            | Instruction::F64Abs
+            | Instruction::F64Neg
+            | Instruction::F64Sqrt
+            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
+            | Instruction::I32TruncF32S
+            | Instruction::I32TruncF32U
+            | Instruction::I32TruncF64S
+            | Instruction::I32TruncF64U
+            | Instruction::I64TruncF32S
+            | Instruction::I64TruncF32U
+            | Instruction::I64TruncF64S
+            | Instruction::I64TruncF64U
+            | Instruction::F32ConvertI32S
+            | Instruction::F32ConvertI32U
+            | Instruction::F32ConvertI64S
+            | Instruction::F32ConvertI64U
+            | Instruction::F64ConvertI32S
+            | Instruction::F64ConvertI32U
+            | Instruction::F64ConvertI64S
+            | Instruction::F64ConvertI64U
+            | Instruction::F32DemoteF64
+            | Instruction::F64PromoteF32
+            | Instruction::I32ReinterpretF32
+            | Instruction::I64ReinterpretF64
+            | Instruction::F32ReinterpretI32
+            | Instruction::F64ReinterpretI64 => 1,
+
+            // Binary ops: consume 2, push 1
+            Instruction::I32Add
+            | Instruction::I32Sub
+            | Instruction::I32Mul
+            | Instruction::I32DivS
+            | Instruction::I32DivU
+            | Instruction::I32RemS
+            | Instruction::I32RemU
+            | Instruction::I32And
+            | Instruction::I32Or
+            | Instruction::I32Xor
+            | Instruction::I32Shl
+            | Instruction::I32ShrS
+            | Instruction::I32ShrU
+            | Instruction::I32Rotl
+            | Instruction::I32Rotr
+            | Instruction::I64Add
+            | Instruction::I64Sub
+            | Instruction::I64Mul
+            | Instruction::I64DivS
+            | Instruction::I64DivU
+            | Instruction::I64RemS
+            | Instruction::I64RemU
+            | Instruction::I64And
+            | Instruction::I64Or
+            | Instruction::I64Xor
+            | Instruction::I64Shl
+            | Instruction::I64ShrS
+            | Instruction::I64ShrU
+            | Instruction::I64Rotl
+            | Instruction::I64Rotr
+            | Instruction::I32Eq
+            | Instruction::I32Ne
+            | Instruction::I32LtS
+            | Instruction::I32LtU
+            | Instruction::I32GtS
+            | Instruction::I32GtU
+            | Instruction::I32LeS
+            | Instruction::I32LeU
+            | Instruction::I32GeS
+            | Instruction::I32GeU
+            | Instruction::I64Eq
+            | Instruction::I64Ne
+            | Instruction::I64LtS
+            | Instruction::I64LtU
+            | Instruction::I64GtS
+            | Instruction::I64GtU
+            | Instruction::I64LeS
+            | Instruction::I64LeU
+            | Instruction::I64GeS
+            | Instruction::I64GeU
+            | Instruction::F32Add
+            | Instruction::F32Sub
+            | Instruction::F32Mul
+            | Instruction::F32Div
+            | Instruction::F32Min
+            | Instruction::F32Max
+            | Instruction::F32Copysign
+            | Instruction::F64Add
+            | Instruction::F64Sub
+            | Instruction::F64Mul
+            | Instruction::F64Div
+            | Instruction::F64Min
+            | Instruction::F64Max
+            | Instruction::F64Copysign
+            | Instruction::F32Eq
+            | Instruction::F32Ne
+            | Instruction::F32Lt
+            | Instruction::F32Gt
+            | Instruction::F32Le
+            | Instruction::F32Ge
+            | Instruction::F64Eq
+            | Instruction::F64Ne
+            | Instruction::F64Lt
+            | Instruction::F64Gt
+            | Instruction::F64Le
+            | Instruction::F64Ge => 1,
+
+            Instruction::Drop => 0,
+            Instruction::Select => 1,
+
+            Instruction::LocalGet(_) => 1,
+            Instruction::LocalSet(_) => 0,
+            Instruction::LocalTee(_) => 1,
+
+            Instruction::GlobalGet(_) => 1,
+            Instruction::GlobalSet(_) => 0,
+
+            Instruction::If(_) => 0,
+            Instruction::Block(_) | Instruction::Loop(_) => 0,
+            Instruction::End | Instruction::Else | Instruction::Nop => 0,
+            Instruction::Return | Instruction::Unreachable => 0,
+
+            Instruction::I32Load(_)
+            | Instruction::I64Load(_)
+            | Instruction::F32Load(_)
+            | Instruction::F64Load(_)
+            | Instruction::I32Load8S(_)
+            | Instruction::I32Load8U(_)
+            | Instruction::I32Load16S(_)
+            | Instruction::I32Load16U(_)
+            | Instruction::I64Load8S(_)
+            | Instruction::I64Load8U(_)
+            | Instruction::I64Load16S(_)
+            | Instruction::I64Load16U(_)
+            | Instruction::I64Load32S(_)
+            | Instruction::I64Load32U(_) => 1,
+
+            Instruction::I32Store(_)
+            | Instruction::I64Store(_)
+            | Instruction::F32Store(_)
+            | Instruction::F64Store(_)
+            | Instruction::I32Store8(_)
+            | Instruction::I32Store16(_)
+            | Instruction::I64Store8(_)
+            | Instruction::I64Store16(_)
+            | Instruction::I64Store32(_) => 0,
+
+            _ => 0,
+        }
+    }
+}
+
+impl Optimizer {
+    /// Access the constant-folding state (the only variant today).
+    #[inline]
+    fn cf(&mut self) -> &mut ConstFoldState {
+        match self {
+            Optimizer::ConstFold(s) => s,
+        }
+    }
+
+    /// Immutable view of the constant-folding state.
+    #[inline]
+    fn cf_ref(&self) -> &ConstFoldState {
+        match self {
+            Optimizer::ConstFold(s) => s,
+        }
+    }
+
+    /// Reset all optimizer working state (used on seal / edge severing).
+    fn reset(&mut self) {
+        self.cf().reset();
+    }
+
+    fn peek_stack_i32(&self, depth: usize) -> Option<i32> {
+        self.cf_ref().peek_stack_i32(depth)
+    }
+
+    fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
+        self.cf_ref().peek_local_i32(local_idx)
+    }
+
+    /// Flush deferred constants and virtual locals into `function`.
+    fn flush<Context, E, F: InstructionSink<Context, E>>(
+        &mut self,
+        ctx: &mut Context,
+        function: &mut F,
+        inst_count: &mut usize,
+    ) -> Result<(), E> {
+        self.cf().flush(ctx, function, inst_count)
+    }
+}
+
+impl<F> Entry<F> {
+    /// Emit one instruction into this entry's function body, applying the
+    /// entry's optimizer (constant folding) strategy.
+    ///
+    /// This is the per-entry half of the Reactor↔Entry handshake: the Reactor
+    /// owns the predecessor graph and decides *which* entries receive an
+    /// instruction; each `Entry` decides *how* it is emitted (fold, defer,
+    /// skip, or emit).
+    fn feed_one<Context, E>(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        assert!(
+            !self.sealed,
+            "feed to already-sealed function entry: \
+             predecessors were not cleaned up from preds sets of live entries after seal"
+        );
+        // Skip mode: drop instructions until skip_depth returns to 0.
+        if self.opt.cf().handle_skip(insn, &mut self.if_stmts) {
+            return Ok(());
+        }
+        // Try constant folding.
+        if self.opt.cf().try_fold(insn, &mut self.if_stmts) {
+            return Ok(());
+        }
+        // Materialize any deferred constants the instruction needs.
+        self.opt
+            .cf()
+            .materialize(ctx, &mut self.function, &mut self.inst_count, insn)?;
+        // Emit the instruction.
+        self.function.instruction(ctx, insn)?;
+        self.inst_count += 1;
+        // Update shadow stack for stack-pushing / stack-popping instructions.
+        self.opt.cf().update_shadow_stack(insn);
+        Ok(())
+    }
+
+    /// Emit `params` parameters into this entry, applying any `fixups` that
+    /// replace a parameter's value with a computed snippet.
+    fn emit_params_with_fixups<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        for param_idx in 0..params {
+            if let Some(fixup) = fixups.get(&param_idx) {
+                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+            } else {
+                self.feed_one(ctx, &Instruction::LocalGet(param_idx))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore parameters after a call, dropping fixed-up values and restoring
+    /// original locals.
+    fn restore_params_after_call<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        for param_idx in (0..params).rev() {
+            if fixups.contains_key(&param_idx) {
+                self.feed_one(ctx, &Instruction::Drop)?;
+            } else {
+                self.feed_one(ctx, &Instruction::LocalSet(param_idx))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the try-table call skeleton (`block; try_table; <call>; return; end;
+    /// end`) for this entry.  Does **not** flush deferred stores — that is the
+    /// Reactor's cross-entry responsibility before the loop.
+    fn emit_call_body<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        target: Target<Context, E>,
+        tag: EscapeTag,
+        pool: Pool<'_, Context, E>,
+        base_func_offset: u32,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        let EscapeTag {
+            tag: TagIdx(tag_idx),
+            ty: TypeIdx(ty_idx),
+        } = tag;
+        self.feed_one(ctx, &Instruction::Block(BlockType::FunctionType(ty_idx)))?;
+        self.feed_one(
+            ctx,
+            &Instruction::TryTable(
+                BlockType::FunctionType(ty_idx),
+                [Catch::One {
+                    tag: tag_idx,
+                    label: 0,
+                }]
+                .into_iter()
+                .collect(),
+            ),
+        )?;
+        match target {
+            Target::Static {
+                func: FuncIdx(func_idx),
+            } => {
+                self.feed_one(ctx, &Instruction::Call(func_idx + base_func_offset))?;
+            }
+            Target::Dynamic { idx } => {
+                idx.emit_snippet(ctx, &mut |ctx, a| self.feed_one(ctx, a))?;
+                let Pool {
+                    ty: TypeIdx(pool_ty),
+                    handler,
+                } = pool;
+                match handler.indirect_jump(ctx, &mut *self)? {
+                    IndirectJumpKind::Table(TableIdx(pool_table)) => {
+                        self.feed_one(
+                            ctx,
+                            &Instruction::CallIndirect {
+                                type_index: pool_ty,
+                                table_index: pool_table,
+                            },
+                        )?;
+                    }
+                    IndirectJumpKind::Ref => {
+                        self.feed_one(ctx, &Instruction::CallRef(pool_ty))?;
+                    }
+                }
+            }
+        }
+        self.feed_one(ctx, &Instruction::Return)?;
+        self.feed_one(ctx, &Instruction::End)?;
+        self.feed_one(ctx, &Instruction::End)?;
+        Ok(())
+    }
+
+    /// Emit one entry's conditional branch arm: the per-entry half of the
+    /// Reactor↔Entry handshake for conditional jumps and calls.
+    ///
+    /// The Reactor decides the reachable set, the resolved `target`, and which
+    /// `exit` this branch represents; this method emits the faithful skeleton
+    /// for the *default* optimizer:
+    ///
+    /// ```text
+    /// <condition>; [<hook>]; if
+    ///   <params>; <body: return_call | try-table call>; [<restore>]
+    /// else
+    /// ```
+    ///
+    /// A future optimizer variant can override this to emit native control flow
+    /// for `exit` instead of a conditional `return_call`, while the Reactor's
+    /// orchestration (and the public API) stays unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_conditional_arm<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        target: Target<Context, E>,
+        call: Option<EscapeTag>,
+        pool: Pool<'_, Context, E>,
+        condition: &(dyn Snippet<Context, E> + '_),
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        base_func_offset: u32,
+        _exit: ExitId,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        condition.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+        if let Some(hook) = condition_hook {
+            hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+        }
+        self.feed_one(ctx, &Instruction::If(BlockType::Empty))?;
+
+        match call {
+            Some(escape_tag) => {
+                self.emit_params_with_fixups(ctx, params, fixups)?;
+                self.emit_call_body(ctx, target, escape_tag, pool, base_func_offset)?;
+                self.restore_params_after_call(ctx, params, fixups)?;
+            }
+            None => match target {
+                Target::Static {
+                    func: FuncIdx(func_idx),
+                } => {
+                    self.emit_params_with_fixups(ctx, params, fixups)?;
+                    self.feed_one(ctx, &Instruction::ReturnCall(func_idx + base_func_offset))?;
+                }
+                Target::Dynamic { idx } => {
+                    self.emit_params_with_fixups(ctx, params, fixups)?;
+                    idx.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+                    let Pool {
+                        ty: TypeIdx(pool_ty),
+                        handler,
+                    } = pool;
+                    let instr = match handler.indirect_jump(ctx, &mut *self)? {
+                        IndirectJumpKind::Table(TableIdx(pool_table)) => {
+                            Instruction::ReturnCallIndirect {
+                                type_index: pool_ty,
+                                table_index: pool_table,
+                            }
+                        }
+                        IndirectJumpKind::Ref => Instruction::ReturnCallRef(pool_ty),
+                    };
+                    self.feed_one(ctx, &instr)?;
+                }
+            },
+        }
+
+        self.feed_one(ctx, &Instruction::Else)?;
+        Ok(())
+    }
+}
+
+impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E> for Entry<F> {
+    /// Emit one instruction into this entry via its optimizer pipeline.
+    ///
+    /// Lets an `Entry` be passed as a sink to snippets and
+    /// [`IndirectJumpHandler`]s during the per-entry emission handshake.
+    fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
+        self.feed_one(ctx, instruction)
+    }
+}
+
 impl<Context, E> Reactor<Context, E> {
     /// Create a new function with the given locals and control flow distance.
     ///
@@ -1094,16 +2295,16 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         lock.iter_mut()
             .nth(len as usize)
             .unwrap()
-            .insert(FuncIdx(self.fns.get_mut().len() as u32));
+            .insert(FuncIdx(self.fns.get_mut().len() as u32), SOLE_EXIT);
 
         // Build the direct predecessor set for the new entry from the lens queue.
         // Filter out self-references (the new entry's own index in lens[0] for len=0).
         let new_idx = FuncIdx(self.fns.get_mut().len() as u32);
-        let direct_preds: BTreeSet<FuncIdx> = lock
+        let direct_preds: BTreeMap<FuncIdx, ExitId> = lock
             .pop_front()
             .into_iter()
             .flatten()
-            .filter(|&p| p != new_idx)
+            .filter(|(p, _)| *p != new_idx)
             .collect();
 
         self.fns.get_mut().push(Entry {
@@ -1113,11 +2314,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             inst_count: 0,
             bundles: Vec::new(),
             transitive_preds: None,
-            const_stack: Vec::new(),
-            locals_const: BTreeMap::new(),
-            locals_virtual: BTreeSet::new(),
-            skip_depth: 0,
-            block_frames: Vec::new(),
+            opt: Optimizer::ConstFold(ConstFoldState::default()),
             sealed: false,
         });
         Ok(())
@@ -1152,7 +2349,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let mut lock = self.lock_global();
         // Flush const stacks (needs mut entry access through the global lock).
         for &FuncIdx(fi) in &reachable {
-            self.flush_const_stack(ctx, &mut lock[fi as usize], fi as usize)?;
+            let e = &mut lock[fi as usize];
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
         }
         for &FuncIdx(idx) in &reachable {
             let ifs = lock[idx as usize].if_stmts; // each entry closes its own open If frames
@@ -1170,11 +2368,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 .instruction(ctx, &Instruction::End)?;
             lock[idx as usize].sealed = true;
             _ = take(&mut lock[idx as usize].preds);
-            lock[idx as usize].const_stack.clear();
-            lock[idx as usize].locals_const.clear();
-            lock[idx as usize].locals_virtual.clear();
-            lock[idx as usize].skip_depth = 0;
-            lock[idx as usize].block_frames.clear();
+            lock[idx as usize].opt.reset();
             // Invalidate transitive cache after severing preds.
             lock[idx as usize].transitive_preds = None;
         }
@@ -1182,7 +2376,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         for (i, entry) in lock.iter_mut().enumerate() {
             if reachable.contains(&FuncIdx(i as u32)) { continue; }
             let before = entry.preds.len();
-            entry.preds.retain(|fi| !reachable.contains(fi));
+            entry.preds.retain(|fi, _| !reachable.contains(fi));
             if entry.preds.len() != before {
                 entry.transitive_preds = None;
             }
@@ -1211,15 +2405,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             let mut visited: BTreeSet<FuncIdx> = BTreeSet::new();
             visited.insert(FuncIdx(idx as u32));
 
-            let mut stack: Vec<FuncIdx> = lock.preds.iter().cloned().collect();
+            let mut stack: Vec<FuncIdx> = lock.preds.keys().cloned().collect();
             while let Some(p) = stack.pop() {
                 if visited.contains(&p) {
                     continue;
                 }
                 visited.insert(p);
                 let FuncIdx(pi) = p;
-                let mut l = self.lock_entry(pi as usize, true);
-                for &q in &l.preds {
+                let l = self.lock_entry(pi as usize, true);
+                for &q in l.preds.keys() {
                     if !visited.contains(&q) {
                         stack.push(q);
                     }
@@ -1230,17 +2424,18 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         }
     }
 
-    /// Add a predecessor edge from pred to succ in the control flow graph.
+    /// Add a predecessor edge from `pred` (via its exit point `exit`) to `succ`
+    /// in the control flow graph.
     ///
     /// Invalidates the transitive predecessor cache for `succ` and for every
     /// live entry that has `succ` in its cached transitive set (since those
     /// entries can now reach `pred` transitively too).
-    fn add_pred(&self, succ: FuncIdx, pred: FuncIdx) {
+    fn add_pred(&self, succ: FuncIdx, pred: FuncIdx, exit: ExitId) {
         let FuncIdx(succ_idx) = succ;
         let mut lock = self.lock_global();
         match lock.get_mut(succ_idx as usize) {
             Some(a) => {
-                a.preds.insert(pred);
+                a.preds.insert(pred, exit);
                 // Invalidate this entry's cache — it has a new predecessor.
                 a.transitive_preds = None;
             }
@@ -1255,7 +2450,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 while lens.len() < len as usize + 1 {
                     lens.push_back(Default::default());
                 }
-                lens.iter_mut().nth(len as usize).unwrap().insert(pred);
+                lens.iter_mut().nth(len as usize).unwrap().insert(pred, exit);
                 // No live entry to invalidate; done.
                 return;
             }
@@ -1279,6 +2474,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         succ: FuncIdx,
         pred: FuncIdx,
         params: u32,
+        exit: ExitId,
     ) -> Result<(), E> {
         let FuncIdx(pred_idx) = pred;
         // Use the per-entry transitive predecessor cache for the cycle check.
@@ -1336,7 +2532,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             {
                 let mut lens = self.lens.lock();
                 for bucket in lens.iter_mut() {
-                    bucket.retain(|fi| !pred_transitive.contains(fi));
+                    bucket.retain(|fi, _| !pred_transitive.contains(fi));
                 }
             }
             // Remove sealed entries from every live entry's preds set so future
@@ -1346,14 +2542,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 for (i, entry) in lock.iter_mut().enumerate() {
                     if pred_transitive.contains(&FuncIdx(i as u32)) { continue; }
                     let before = entry.preds.len();
-                    entry.preds.retain(|fi| !pred_transitive.contains(fi));
+                    entry.preds.retain(|fi, _| !pred_transitive.contains(fi));
                     if entry.preds.len() != before {
                         entry.transitive_preds = None;
                     }
                 }
             }
         } else {
-            self.add_pred(succ, pred);
+            self.add_pred(succ, pred, exit);
         }
         Ok(())
     }
@@ -1731,25 +2927,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         Ok(())
     }
 
-    /// Restore parameters after a call, dropping fixed-up values and restoring original locals.
-    fn restore_params_after_call(
-        &self,
-        ctx: &mut Context,
-        params: u32,
-        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
-        tail_idx: usize,
-    ) -> Result<(), E> {
-        for param_idx in (0..params).rev() {
-            if fixups.contains_key(&param_idx) {
-                self.feed_to(tail_idx, ctx, &Instruction::Drop)?;
-            } else {
-                self.feed_to(tail_idx, ctx, &Instruction::LocalSet(param_idx))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Emit a conditional call with exception handling.
+    /// Emit a conditional or unconditional call with exception handling.
+    ///
+    /// When `condition` is `Some`, the per-entry conditional skeleton is emitted
+    /// through the Reactor↔Entry handshake ([`Entry::emit_conditional_arm`]);
+    /// otherwise the call body is emitted unconditionally into every reachable
+    /// entry.  Either way the Reactor owns the reachable-set computation; each
+    /// `Entry` emits its own body.
     fn emit_conditional_call(
         &self,
         ctx: &mut Context,
@@ -1762,29 +2946,36 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            if let Some(hook) = condition_hook {
-                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for FuncIdx(idx) in reachable {
+            let mut e = self.lock_entry(idx as usize, false);
+            match condition {
+                Some(cond) => {
+                    e.emit_conditional_arm(
+                        ctx,
+                        params,
+                        fixups,
+                        target,
+                        Some(escape_tag),
+                        pool,
+                        cond,
+                        condition_hook,
+                        self.base_func_offset,
+                        SOLE_EXIT,
+                    )?;
+                }
+                None => {
+                    e.emit_params_with_fixups(ctx, params, fixups)?;
+                    e.emit_call_body(ctx, target, escape_tag, pool, self.base_func_offset)?;
+                    e.restore_params_after_call(ctx, params, fixups)?;
+                }
             }
-            self.feed_to(
-                tail_idx,
-                ctx,
-                &Instruction::If(wasm_encoder::BlockType::Empty),
-            )?;
-        }
-
-        self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
-        self.call(ctx, target, escape_tag, pool, tail_idx)?;
-        self.restore_params_after_call(ctx, params, fixups, tail_idx)?;
-
-        if condition.is_some() {
-            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
         }
         Ok(())
     }
 
-    /// Emit a conditional jump (no exception handling).
+    /// Emit a conditional jump (no exception handling), or dispatch to the
+    /// unconditional jump path.
     fn emit_conditional_jump(
         &self,
         ctx: &mut Context,
@@ -1796,57 +2987,56 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        match target {
-            Target::Static { func } => {
-                self.emit_static_jump(ctx, params, fixups, func, condition, condition_hook, tail_idx)
+        if let Some(cond) = condition {
+            // Conditional: per-entry handshake.  Each reachable entry emits its
+            // own branch arm for `SOLE_EXIT` (the only exit today).
+            let reachable = self.transitive_preds_of(tail_idx).clone();
+            for FuncIdx(idx) in reachable {
+                let mut e = self.lock_entry(idx as usize, false);
+                e.emit_conditional_arm(
+                    ctx,
+                    params,
+                    fixups,
+                    target,
+                    None,
+                    pool,
+                    cond,
+                    condition_hook,
+                    self.base_func_offset,
+                    SOLE_EXIT,
+                )?;
             }
+            return Ok(());
+        }
+        // Unconditional: cross-entry predecessor-graph operations stay on the
+        // Reactor.
+        match target {
+            Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, tail_idx),
             Target::Dynamic { idx } => {
-                self.emit_dynamic_jump(
-                    ctx, params, fixups, idx, pool, condition, condition_hook, tail_idx,
-                )
+                self.emit_dynamic_jump(ctx, params, fixups, idx, pool, tail_idx)
             }
         }
     }
 
-    /// Emit a static (direct) jump to a known function.
+    /// Emit an unconditional static (direct) jump to a known function: apply
+    /// fixups to locals, then record the predecessor edge via [`jmp`](Self::jmp).
     fn emit_static_jump(
         &self,
         ctx: &mut Context,
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         func: FuncIdx,
-        condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            if let Some(hook) = condition_hook {
-                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            }
-            self.feed_to(
-                tail_idx,
-                ctx,
-                &Instruction::If(wasm_encoder::BlockType::Empty),
-            )?;
-
-            let FuncIdx(func_idx) = func;
-            let wasm_func_idx = func_idx + self.base_func_offset;
-            self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
-            self.feed_to(tail_idx, ctx, &Instruction::ReturnCall(wasm_func_idx))?;
-            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
-        } else {
-            // Unconditional jump: apply fixups to locals, then jump
-            for (local_idx, fixup) in fixups.iter() {
-                fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-                self.feed_to(tail_idx, ctx, &Instruction::LocalSet(*local_idx))?;
-            }
-            self.jmp(tail_idx, ctx, func, params)?;
+        for (local_idx, fixup) in fixups.iter() {
+            fixup.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
+            self.feed_to(tail_idx, ctx, &Instruction::LocalSet(*local_idx))?;
         }
-        Ok(())
+        self.jmp(tail_idx, ctx, func, params)
     }
 
-    /// Emit a dynamic (indirect) jump through a table.
+    /// Emit an unconditional dynamic (indirect) tail jump through the pool and
+    /// seal the function group with the resulting `return_call_indirect`/`_ref`.
     fn emit_dynamic_jump(
         &self,
         ctx: &mut Context,
@@ -1854,22 +3044,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         idx: &(dyn Snippet<Context, E> + '_),
         pool: Pool<'_, Context, E>,
-        condition: Option<&(dyn Snippet<Context, E> + '_)>,
-        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        if let Some(cond_snippet) = condition {
-            cond_snippet.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            if let Some(hook) = condition_hook {
-                hook.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
-            }
-            self.feed_to(
-                tail_idx,
-                ctx,
-                &Instruction::If(wasm_encoder::BlockType::Empty),
-            )?;
-        }
-
         self.emit_params_with_fixups(ctx, params, fixups, tail_idx)?;
         idx.emit_snippet(ctx, &mut |ctx, instr| self.feed_to(tail_idx, ctx, instr))?;
 
@@ -1890,13 +3066,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             },
             IndirectJumpKind::Ref => Instruction::ReturnCallRef(pool_ty),
         };
-        if condition.is_some() {
-            self.feed_to(tail_idx, ctx, &i)?;
-            self.feed_to(tail_idx, ctx, &Instruction::Else)?;
-        } else {
-            self.seal_to(tail_idx, ctx, &i)?;
-        }
-        Ok(())
+        self.seal_to(tail_idx, ctx, &i)
     }
     /// Emit an unconditional jump to the target function.
     /// This creates control flow edges from all active functions to the target.
@@ -1912,9 +3082,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         params: u32,
     ) -> Result<(), E> {
         // Use the per-entry transitive predecessor cache instead of a BFS.
+        // Every edge created here uses `SOLE_EXIT`: the faithful lowering gives
+        // each function a single (tail) exit.
         let reachable = self.transitive_preds_of(target_idx).clone();
         for x in reachable {
-            self.add_pred_checked(ctx, target, x, params)?;
+            self.add_pred_checked(ctx, target, x, params, SOLE_EXIT)?;
         }
         Ok(())
     }
@@ -1941,865 +3113,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     }
 
     /// Per-entry instruction dispatch with shadow-stack constant folding.
+    ///
+    /// Locks the target entry and delegates the actual emission to
+    /// [`Entry::feed_one`]; the per-entry folding logic lives on [`Entry`]/
+    /// [`Optimizer`] so that future optimizer variants can specialise it.
     fn feed_one(&self, ctx: &mut Context, idx: usize, insn: &Instruction<'_>) -> Result<(), E> {
-        let mut func = self.lock_entry(idx,false);
-        assert!(
-            !func.sealed,
-            "feed to already-sealed function entry {idx}: \
-             predecessors were not cleaned up from preds sets of live entries after seal"
-        );
-        // Skip mode: drop instructions until skip_depth returns to 0.
-        if func.skip_depth > 0 {
-            match insn {
-                Instruction::If(_) => {
-                    func.skip_depth += 1;
-                    // increment_if_stmts_for_predecessors already counted this If,
-                    // but it won't be emitted — correct the count.
-                    func.if_stmts = func.if_stmts.saturating_sub(1);
-                }
-                Instruction::Block(_) | Instruction::Loop(_) => {
-                    func.skip_depth += 1;
-                }
-                Instruction::End => {
-                    func.skip_depth -= 1;
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Try constant folding.
-        if self.try_fold_one(&mut func, idx, insn) {
-            return Ok(());
-        }
-
-        // Materialize any deferred constants the instruction needs.
-        self.materialize_for(ctx, &mut func, idx, insn)?;
-
-        // Emit the instruction.
-        func.function.instruction(ctx, insn)?;
-        func.inst_count += 1;
-
-        // Update shadow stack for stack-pushing / stack-popping instructions.
-        Self::update_shadow_stack(&mut func, insn);
-
-        Ok(())
-    }
-
-    /// Try to constant-fold `insn` for entry `idx`.
-    /// Returns `true` if the instruction was fully handled (not emitted, not counted).
-    /// Returns `false` if the instruction should be emitted normally.
-    fn try_fold_one(&self, entry: &mut Entry<F>, idx: usize, insn: &Instruction<'_>) -> bool {
-        match insn {
-            // ── Constant pushes: defer, push Some(v) ──────────────────
-            Instruction::I32Const(v) => {
-                entry.const_stack.push(Some((*v as u64, ValType::I32)));
-                return true;
-            }
-            Instruction::I64Const(v) => {
-                entry.const_stack.push(Some((*v as u64, ValType::I64)));
-                return true;
-            }
-
-            // ── Drop: if top is a known constant, elide both ──────────
-            Instruction::Drop => {
-                if let Some(Some(_)) = entry.const_stack.last() {
-                    entry.const_stack.pop();
-                    return true;
-                }
-            }
-
-            // ── i32 binary ops: fold if both operands known ────────────
-            Instruction::I32Add
-            | Instruction::I32Sub
-            | Instruction::I32Mul
-            | Instruction::I32And
-            | Instruction::I32Or
-            | Instruction::I32Xor
-            | Instruction::I32Shl
-            | Instruction::I32ShrS
-            | Instruction::I32ShrU => {
-                let len = entry.const_stack.len();
-                if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
-                        entry.const_stack.get(len - 1),
-                        entry.const_stack.get(len - 2),
-                    ) {
-                        let a = *a as i32;
-                        let b = *b as i32;
-                        let result: i32 = match insn {
-                            Instruction::I32Add => a.wrapping_add(b),
-                            Instruction::I32Sub => a.wrapping_sub(b),
-                            Instruction::I32Mul => a.wrapping_mul(b),
-                            Instruction::I32And => a & b,
-                            Instruction::I32Or => a | b,
-                            Instruction::I32Xor => a ^ b,
-                            Instruction::I32Shl => a.wrapping_shl(b as u32 & 31),
-                            Instruction::I32ShrS => a.wrapping_shr(b as u32 & 31),
-                            Instruction::I32ShrU => ((a as u32).wrapping_shr(b as u32 & 31)) as i32,
-                            _ => unreachable!(),
-                        };
-                        entry.const_stack.truncate(len - 2);
-                        entry.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
-                    }
-                }
-            }
-
-            // ── i64 binary ops: fold if both operands known ────────────
-            Instruction::I64Add
-            | Instruction::I64Sub
-            | Instruction::I64Mul
-            | Instruction::I64And
-            | Instruction::I64Or
-            | Instruction::I64Xor
-            | Instruction::I64Shl
-            | Instruction::I64ShrS
-            | Instruction::I64ShrU => {
-                let len = entry.const_stack.len();
-                if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
-                        entry.const_stack.get(len - 1),
-                        entry.const_stack.get(len - 2),
-                    ) {
-                        let a = *a as i64;
-                        let b = *b as i64;
-                        let result: i64 = match insn {
-                            Instruction::I64Add => a.wrapping_add(b),
-                            Instruction::I64Sub => a.wrapping_sub(b),
-                            Instruction::I64Mul => a.wrapping_mul(b),
-                            Instruction::I64And => a & b,
-                            Instruction::I64Or => a | b,
-                            Instruction::I64Xor => a ^ b,
-                            Instruction::I64Shl => a.wrapping_shl(b as u32 & 63),
-                            Instruction::I64ShrS => a.wrapping_shr(b as u32 & 63),
-                            Instruction::I64ShrU => ((a as u64).wrapping_shr(b as u32 & 63)) as i64,
-                            _ => unreachable!(),
-                        };
-                        entry.const_stack.truncate(len - 2);
-                        entry.const_stack.push(Some((result as u64, ValType::I64)));
-                        return true;
-                    }
-                }
-            }
-
-            // ── i32 comparisons: fold if both known ───────────────────
-            Instruction::I32Eq
-            | Instruction::I32Ne
-            | Instruction::I32LtS
-            | Instruction::I32LtU
-            | Instruction::I32GtS
-            | Instruction::I32GtU
-            | Instruction::I32LeS
-            | Instruction::I32LeU
-            | Instruction::I32GeS
-            | Instruction::I32GeU => {
-                let len = entry.const_stack.len();
-                if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
-                        entry.const_stack.get(len - 1),
-                        entry.const_stack.get(len - 2),
-                    ) {
-                        let a = *a as i32;
-                        let b = *b as i32;
-                        let au = a as u32;
-                        let bu = b as u32;
-                        let result: i32 = match insn {
-                            Instruction::I32Eq => (a == b) as i32,
-                            Instruction::I32Ne => (a != b) as i32,
-                            Instruction::I32LtS => (a < b) as i32,
-                            Instruction::I32LtU => (au < bu) as i32,
-                            Instruction::I32GtS => (a > b) as i32,
-                            Instruction::I32GtU => (au > bu) as i32,
-                            Instruction::I32LeS => (a <= b) as i32,
-                            Instruction::I32LeU => (au <= bu) as i32,
-                            Instruction::I32GeS => (a >= b) as i32,
-                            Instruction::I32GeU => (au >= bu) as i32,
-                            _ => unreachable!(),
-                        };
-                        entry.const_stack.truncate(len - 2);
-                        entry.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
-                    }
-                }
-            }
-
-            // ── i64 comparisons: fold if both known ───────────────────
-            Instruction::I64Eq
-            | Instruction::I64Ne
-            | Instruction::I64LtS
-            | Instruction::I64LtU
-            | Instruction::I64GtS
-            | Instruction::I64GtU
-            | Instruction::I64LeS
-            | Instruction::I64LeU
-            | Instruction::I64GeS
-            | Instruction::I64GeU => {
-                let len = entry.const_stack.len();
-                if len >= 2 {
-                    if let (Some(Some((b, _))), Some(Some((a, _)))) = (
-                        entry.const_stack.get(len - 1),
-                        entry.const_stack.get(len - 2),
-                    ) {
-                        let a = *a as i64;
-                        let b = *b as i64;
-                        let au = a as u64;
-                        let bu = b as u64;
-                        let result: i32 = match insn {
-                            Instruction::I64Eq => (a == b) as i32,
-                            Instruction::I64Ne => (a != b) as i32,
-                            Instruction::I64LtS => (a < b) as i32,
-                            Instruction::I64LtU => (au < bu) as i32,
-                            Instruction::I64GtS => (a > b) as i32,
-                            Instruction::I64GtU => (au > bu) as i32,
-                            Instruction::I64LeS => (a <= b) as i32,
-                            Instruction::I64LeU => (au <= bu) as i32,
-                            Instruction::I64GeS => (a >= b) as i32,
-                            Instruction::I64GeU => (au >= bu) as i32,
-                            _ => unreachable!(),
-                        };
-                        entry.const_stack.truncate(len - 2);
-                        entry.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
-                    }
-                }
-            }
-
-            // ── i32 unary ─────────────────────────────────────────────
-            Instruction::I32Eqz => {
-                if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    let result = (v as i32 == 0) as i32;
-                    entry.const_stack.push(Some((result as u64, ValType::I32)));
-                    return true;
-                }
-            }
-
-            // ── i64 unary ─────────────────────────────────────────────
-            Instruction::I64Eqz => {
-                if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    let result = (v as i64 == 0) as i32;
-                    entry.const_stack.push(Some((result as u64, ValType::I32)));
-                    return true;
-                }
-            }
-
-            // ── i32 extend / wrap ─────────────────────────────────────
-            Instruction::I32WrapI64 => {
-                if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    entry
-                        .const_stack
-                        .push(Some((v as i32 as u64, ValType::I32)));
-                    return true;
-                }
-            }
-            Instruction::I64ExtendI32S => {
-                if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    entry
-                        .const_stack
-                        .push(Some((v as i32 as i64 as u64, ValType::I64)));
-                    return true;
-                }
-            }
-            Instruction::I64ExtendI32U => {
-                if let Some(Some((v, _))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    entry
-                        .const_stack
-                        .push(Some((v as u32 as u64, ValType::I64)));
-                    return true;
-                }
-            }
-
-            // ── local.set N ───────────────────────────────────────────
-            Instruction::LocalSet(n) => {
-                let n = *n;
-                if let Some(Some((v, ty))) = entry.const_stack.last().cloned() {
-                    entry.const_stack.pop();
-                    entry.locals_const.insert(n, (v, ty));
-                    entry.locals_virtual.insert(n);
-                    return true; // Virtual store: don't emit local.set
-                }
-                // Unknown value: clear tracking for this local.
-                entry.locals_const.remove(&n);
-                entry.locals_virtual.remove(&n);
-                // Fall through: emit local.set normally.
-            }
-
-            // ── local.tee N ───────────────────────────────────────────
-            Instruction::LocalTee(n) => {
-                let n = *n;
-                if let Some(Some((v, ty))) = entry.const_stack.last().cloned() {
-                    // Keep Some(v) on shadow stack (tee leaves value on stack).
-                    entry.locals_const.insert(n, (v, ty));
-                    entry.locals_virtual.insert(n);
-                    return true; // Virtual tee
-                }
-                entry.locals_const.remove(&n);
-                entry.locals_virtual.remove(&n);
-                // Fall through: emit local.tee normally.
-            }
-
-            // ── local.get N ───────────────────────────────────────────
-            Instruction::LocalGet(n) => {
-                if let Some(&(v, ty)) = entry.locals_const.get(n) {
-                    entry.const_stack.push(Some((v, ty)));
-                    return true; // Replaced with inline const
-                }
-                // Unknown local: push None (update_shadow_stack will handle).
-                // Fall through to emit + update_shadow_stack.
-            }
-
-            // ── If: constant-condition branch elimination ──────────────
-            Instruction::If(_block_type) => {
-                let cond = entry.const_stack.last().cloned();
-                match cond {
-                    Some(Some((v, _))) if v != 0 => {
-                        // Known-true: don't emit If; inline the then-body and
-                        // skip the else-body via skip_depth.
-                        // Decrement this entry's if_stmts — it was incremented by
-                        // increment_if_stmts_for_predecessors but the If won't be emitted.
-                        entry.if_stmts = entry.if_stmts.saturating_sub(1);
-                        entry.const_stack.pop(); // consume condition
-                        entry.block_frames.push(true); // TakenIf
-                        return true; // Don't emit If
-                    }
-                    _ => {
-                        // Unknown condition OR known-false: emit If normally.
-                        // For known-false the condition constant stays on
-                        // const_stack; materialize_for will emit I32Const(0)
-                        // and the WASM runtime will select the else-branch.
-                        entry.block_frames.push(false); // Normal
-                        // Fall through to emit.
-                    }
-                }
-            }
-
-            // ── Block / Loop: track block frames ──────────────────────
-            Instruction::Block(_) | Instruction::Loop(_) => {
-                entry.block_frames.push(false); // Normal
-                // Fall through to emit.
-            }
-
-            // ── End: may close a taken-if frame ───────────────────────
-            Instruction::End => {
-                if let Some(taken) = entry.block_frames.pop() {
-                    if taken {
-                        // This End closes a taken-if; don't emit it.
-                        return true;
-                    }
-                }
-                // Normal End: emit it.
-            }
-
-            // ── Else: handle taken-if by skipping else-body ───────────
-            Instruction::Else => {
-                // If the corresponding if was a taken-if, start skipping else.
-                // Check the last block_frames entry.
-                if let Some(&taken) = entry.block_frames.last() {
-                    if taken {
-                        // We're in the always-taken branch; skip the else body.
-                        // Remove the TakenIf frame and enter skip mode.
-                        entry.block_frames.pop();
-                        entry.skip_depth += 1;
-                        return true;
-                    }
-                }
-                // Normal Else: emit it.
-            }
-
-            _ => {}
-        }
-        false
-    }
-
-    /// Materialize any deferred constants that the instruction needs from the shadow stack.
-    /// For call-like instructions whose argument count is not statically known by
-    /// `stack_pops`, every deferred constant is emitted first so the WASM stack
-    /// contains the full set of real values before the call.
-    fn materialize_for(
-        &self,
-        ctx: &mut Context,
-        entry: &mut Entry<F>,
-        _idx: usize,
-        insn: &Instruction<'_>,
-    ) -> Result<(), E> {
-        // Flush the entire const_stack whenever the instruction interacts with
-        // the value stack (pushes, pops, or is a call).  This keeps the
-        // invariant that no deferred constant sits below a concrete runtime
-        // value on the abstract stack.
-        let needs_flush = Self::stack_pops(insn) > 0
-            || Self::stack_pushes(insn) > 0
-            || matches!(
-                insn,
-                Instruction::Call(_)
-                    | Instruction::CallIndirect { .. }
-                    | Instruction::ReturnCall(_)
-                    | Instruction::ReturnCallIndirect { .. }
-                    | Instruction::CallRef(_)
-                    | Instruction::ReturnCallRef(_)
-            );
-
-        if needs_flush {
-            for slot in &mut entry.const_stack {
-                if let Some((v, ty)) = *slot {
-                    let emit_insn = match ty {
-                        ValType::I32 => Instruction::I32Const(v as i32),
-                        ValType::I64 => Instruction::I64Const(v as i64),
-                        _ => Instruction::I64Const(v as i64),
-                    };
-                    entry.function.instruction(ctx, &emit_insn)?;
-                    entry.inst_count += 1;
-                    *slot = None;
-                }
-            }
-        }
-
-        // Always commit all virtual locals before emitting any instruction.
-        //
-        // A virtual local is one whose `local.set` was elided by constant
-        // folding: `locals_const[n]` holds the known value, but the WASM
-        // local `n` has never been physically written.  This is safe as long
-        // as every subsequent `local.get n` also folds the same constant.
-        //
-        // That invariant breaks inside a single emitted function when the same
-        // Entry is used to emit sequential br_table arms: arm A may store an
-        // unknown result into local n (clearing `locals_const[n]` and
-        // `locals_virtual[n]`), after which arm B emits a real `local.get n`
-        // that reads the WASM default 0 instead of the pre-ecall constant.
-        //
-        // Fix: commit every pending virtual-local store before any emitted
-        // instruction, so the physical WASM local is always up-to-date.
-        for n in entry.locals_virtual.iter().copied().collect::<alloc::vec::Vec<_>>() {
-            if let Some(&(v, ty)) = entry.locals_const.get(&n) {
-                let const_insn = match ty {
-                    ValType::I32 => Instruction::I32Const(v as i32),
-                    ValType::I64 => Instruction::I64Const(v as i64),
-                    _ => Instruction::I64Const(v as i64),
-                };
-                entry.function.instruction(ctx, &const_insn)?;
-                entry.function.instruction(ctx, &Instruction::LocalSet(n))?;
-                entry.inst_count += 2;
-            }
-        }
-        entry.locals_virtual.clear();
-
-        Ok(())
-    }
-
-    /// Returns how many values from the top of the WASM stack the instruction consumes.
-    /// This is a conservative estimate; unknown instructions return 0 (no materialization).
-    fn stack_pops(insn: &Instruction<'_>) -> usize {
-        match insn {
-            Instruction::I32Const(_)
-            | Instruction::I64Const(_)
-            | Instruction::F32Const(_)
-            | Instruction::F64Const(_) => 0,
-
-            // Unary ops
-            Instruction::I32Eqz
-            | Instruction::I64Eqz
-            | Instruction::I32Clz
-            | Instruction::I32Ctz
-            | Instruction::I32Popcnt
-            | Instruction::I64Clz
-            | Instruction::I64Ctz
-            | Instruction::I64Popcnt
-            | Instruction::I32WrapI64
-            | Instruction::I64ExtendI32S
-            | Instruction::I64ExtendI32U
-            | Instruction::I32Extend8S
-            | Instruction::I32Extend16S
-            | Instruction::I64Extend8S
-            | Instruction::I64Extend16S
-            | Instruction::I64Extend32S
-            | Instruction::F32Abs
-            | Instruction::F32Neg
-            | Instruction::F32Sqrt
-            | Instruction::F64Abs
-            | Instruction::F64Neg
-            | Instruction::F64Sqrt
-            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
-            | Instruction::I32TruncF32S
-            | Instruction::I32TruncF32U
-            | Instruction::I32TruncF64S
-            | Instruction::I32TruncF64U
-            | Instruction::I64TruncF32S
-            | Instruction::I64TruncF32U
-            | Instruction::I64TruncF64S
-            | Instruction::I64TruncF64U
-            | Instruction::F32ConvertI32S
-            | Instruction::F32ConvertI32U
-            | Instruction::F32ConvertI64S
-            | Instruction::F32ConvertI64U
-            | Instruction::F64ConvertI32S
-            | Instruction::F64ConvertI32U
-            | Instruction::F64ConvertI64S
-            | Instruction::F64ConvertI64U
-            | Instruction::F32DemoteF64
-            | Instruction::F64PromoteF32
-            | Instruction::I32ReinterpretF32
-            | Instruction::I64ReinterpretF64
-            | Instruction::F32ReinterpretI32
-            | Instruction::F64ReinterpretI64 => 1,
-
-            // Binary ops
-            Instruction::I32Add
-            | Instruction::I32Sub
-            | Instruction::I32Mul
-            | Instruction::I32DivS
-            | Instruction::I32DivU
-            | Instruction::I32RemS
-            | Instruction::I32RemU
-            | Instruction::I32And
-            | Instruction::I32Or
-            | Instruction::I32Xor
-            | Instruction::I32Shl
-            | Instruction::I32ShrS
-            | Instruction::I32ShrU
-            | Instruction::I32Rotl
-            | Instruction::I32Rotr
-            | Instruction::I64Add
-            | Instruction::I64Sub
-            | Instruction::I64Mul
-            | Instruction::I64DivS
-            | Instruction::I64DivU
-            | Instruction::I64RemS
-            | Instruction::I64RemU
-            | Instruction::I64And
-            | Instruction::I64Or
-            | Instruction::I64Xor
-            | Instruction::I64Shl
-            | Instruction::I64ShrS
-            | Instruction::I64ShrU
-            | Instruction::I64Rotl
-            | Instruction::I64Rotr
-            | Instruction::I32Eq
-            | Instruction::I32Ne
-            | Instruction::I32LtS
-            | Instruction::I32LtU
-            | Instruction::I32GtS
-            | Instruction::I32GtU
-            | Instruction::I32LeS
-            | Instruction::I32LeU
-            | Instruction::I32GeS
-            | Instruction::I32GeU
-            | Instruction::I64Eq
-            | Instruction::I64Ne
-            | Instruction::I64LtS
-            | Instruction::I64LtU
-            | Instruction::I64GtS
-            | Instruction::I64GtU
-            | Instruction::I64LeS
-            | Instruction::I64LeU
-            | Instruction::I64GeS
-            | Instruction::I64GeU
-            | Instruction::F32Eq
-            | Instruction::F32Ne
-            | Instruction::F32Lt
-            | Instruction::F32Gt
-            | Instruction::F32Le
-            | Instruction::F32Ge
-            | Instruction::F64Eq
-            | Instruction::F64Ne
-            | Instruction::F64Lt
-            | Instruction::F64Gt
-            | Instruction::F64Le
-            | Instruction::F64Ge
-            | Instruction::F32Add
-            | Instruction::F32Sub
-            | Instruction::F32Mul
-            | Instruction::F32Div
-            | Instruction::F32Min
-            | Instruction::F32Max
-            | Instruction::F32Copysign
-            | Instruction::F64Add
-            | Instruction::F64Sub
-            | Instruction::F64Mul
-            | Instruction::F64Div
-            | Instruction::F64Min
-            | Instruction::F64Max
-            | Instruction::F64Copysign => 2,
-
-            Instruction::Drop => 1,
-            Instruction::Select => 3,
-
-            Instruction::LocalGet(_) => 0,
-            Instruction::LocalSet(_) => 1,
-            Instruction::LocalTee(_) => 1,
-
-            Instruction::GlobalSet(_) => 1,
-            Instruction::GlobalGet(_) => 0,
-
-            // If, BrIf, and BrTable consume the condition/selector
-            Instruction::If(_) | Instruction::BrIf(_) | Instruction::BrTable(_, _) => 1,
-            Instruction::Block(_) | Instruction::Loop(_) => 0,
-            Instruction::End | Instruction::Else | Instruction::Nop => 0,
-            Instruction::Return | Instruction::Unreachable => 0,
-
-            // Loads: consume address
-            Instruction::I32Load(_)
-            | Instruction::I64Load(_)
-            | Instruction::F32Load(_)
-            | Instruction::F64Load(_)
-            | Instruction::I32Load8S(_)
-            | Instruction::I32Load8U(_)
-            | Instruction::I32Load16S(_)
-            | Instruction::I32Load16U(_)
-            | Instruction::I64Load8S(_)
-            | Instruction::I64Load8U(_)
-            | Instruction::I64Load16S(_)
-            | Instruction::I64Load16U(_)
-            | Instruction::I64Load32S(_)
-            | Instruction::I64Load32U(_) => 1,
-
-            // Stores: consume addr + value
-            Instruction::I32Store(_)
-            | Instruction::I64Store(_)
-            | Instruction::F32Store(_)
-            | Instruction::F64Store(_)
-            | Instruction::I32Store8(_)
-            | Instruction::I32Store16(_)
-            | Instruction::I64Store8(_)
-            | Instruction::I64Store16(_)
-            | Instruction::I64Store32(_) => 2,
-
-            _ => 0,
-        }
-    }
-
-    /// Returns how many values the instruction pushes onto the WASM stack.
-    fn stack_pushes(insn: &Instruction<'_>) -> usize {
-        match insn {
-            Instruction::I32Const(_)
-            | Instruction::I64Const(_)
-            | Instruction::F32Const(_)
-            | Instruction::F64Const(_) => 1,
-
-            // Unary ops: consume 1, push 1
-            Instruction::I32Eqz
-            | Instruction::I64Eqz
-            | Instruction::I32Clz
-            | Instruction::I32Ctz
-            | Instruction::I32Popcnt
-            | Instruction::I64Clz
-            | Instruction::I64Ctz
-            | Instruction::I64Popcnt
-            | Instruction::I32WrapI64
-            | Instruction::I64ExtendI32S
-            | Instruction::I64ExtendI32U
-            | Instruction::I32Extend8S
-            | Instruction::I32Extend16S
-            | Instruction::I64Extend8S
-            | Instruction::I64Extend16S
-            | Instruction::I64Extend32S
-            | Instruction::F32Abs
-            | Instruction::F32Neg
-            | Instruction::F32Sqrt
-            | Instruction::F64Abs
-            | Instruction::F64Neg
-            | Instruction::F64Sqrt
-            // FP <-> int conversions and reinterprets (all unary: pop 1, push 1)
-            | Instruction::I32TruncF32S
-            | Instruction::I32TruncF32U
-            | Instruction::I32TruncF64S
-            | Instruction::I32TruncF64U
-            | Instruction::I64TruncF32S
-            | Instruction::I64TruncF32U
-            | Instruction::I64TruncF64S
-            | Instruction::I64TruncF64U
-            | Instruction::F32ConvertI32S
-            | Instruction::F32ConvertI32U
-            | Instruction::F32ConvertI64S
-            | Instruction::F32ConvertI64U
-            | Instruction::F64ConvertI32S
-            | Instruction::F64ConvertI32U
-            | Instruction::F64ConvertI64S
-            | Instruction::F64ConvertI64U
-            | Instruction::F32DemoteF64
-            | Instruction::F64PromoteF32
-            | Instruction::I32ReinterpretF32
-            | Instruction::I64ReinterpretF64
-            | Instruction::F32ReinterpretI32
-            | Instruction::F64ReinterpretI64 => 1,
-
-            // Binary ops: consume 2, push 1
-            Instruction::I32Add
-            | Instruction::I32Sub
-            | Instruction::I32Mul
-            | Instruction::I32DivS
-            | Instruction::I32DivU
-            | Instruction::I32RemS
-            | Instruction::I32RemU
-            | Instruction::I32And
-            | Instruction::I32Or
-            | Instruction::I32Xor
-            | Instruction::I32Shl
-            | Instruction::I32ShrS
-            | Instruction::I32ShrU
-            | Instruction::I32Rotl
-            | Instruction::I32Rotr
-            | Instruction::I64Add
-            | Instruction::I64Sub
-            | Instruction::I64Mul
-            | Instruction::I64DivS
-            | Instruction::I64DivU
-            | Instruction::I64RemS
-            | Instruction::I64RemU
-            | Instruction::I64And
-            | Instruction::I64Or
-            | Instruction::I64Xor
-            | Instruction::I64Shl
-            | Instruction::I64ShrS
-            | Instruction::I64ShrU
-            | Instruction::I64Rotl
-            | Instruction::I64Rotr
-            | Instruction::I32Eq
-            | Instruction::I32Ne
-            | Instruction::I32LtS
-            | Instruction::I32LtU
-            | Instruction::I32GtS
-            | Instruction::I32GtU
-            | Instruction::I32LeS
-            | Instruction::I32LeU
-            | Instruction::I32GeS
-            | Instruction::I32GeU
-            | Instruction::I64Eq
-            | Instruction::I64Ne
-            | Instruction::I64LtS
-            | Instruction::I64LtU
-            | Instruction::I64GtS
-            | Instruction::I64GtU
-            | Instruction::I64LeS
-            | Instruction::I64LeU
-            | Instruction::I64GeS
-            | Instruction::I64GeU
-            | Instruction::F32Add
-            | Instruction::F32Sub
-            | Instruction::F32Mul
-            | Instruction::F32Div
-            | Instruction::F32Min
-            | Instruction::F32Max
-            | Instruction::F32Copysign
-            | Instruction::F64Add
-            | Instruction::F64Sub
-            | Instruction::F64Mul
-            | Instruction::F64Div
-            | Instruction::F64Min
-            | Instruction::F64Max
-            | Instruction::F64Copysign
-            | Instruction::F32Eq
-            | Instruction::F32Ne
-            | Instruction::F32Lt
-            | Instruction::F32Gt
-            | Instruction::F32Le
-            | Instruction::F32Ge
-            | Instruction::F64Eq
-            | Instruction::F64Ne
-            | Instruction::F64Lt
-            | Instruction::F64Gt
-            | Instruction::F64Le
-            | Instruction::F64Ge => 1,
-
-            Instruction::Drop => 0,
-            Instruction::Select => 1,
-
-            Instruction::LocalGet(_) => 1,
-            Instruction::LocalSet(_) => 0,
-            Instruction::LocalTee(_) => 1,
-
-            Instruction::GlobalGet(_) => 1,
-            Instruction::GlobalSet(_) => 0,
-
-            Instruction::If(_) => 0,
-            Instruction::Block(_) | Instruction::Loop(_) => 0,
-            Instruction::End | Instruction::Else | Instruction::Nop => 0,
-            Instruction::Return | Instruction::Unreachable => 0,
-
-            Instruction::I32Load(_)
-            | Instruction::I64Load(_)
-            | Instruction::F32Load(_)
-            | Instruction::F64Load(_)
-            | Instruction::I32Load8S(_)
-            | Instruction::I32Load8U(_)
-            | Instruction::I32Load16S(_)
-            | Instruction::I32Load16U(_)
-            | Instruction::I64Load8S(_)
-            | Instruction::I64Load8U(_)
-            | Instruction::I64Load16S(_)
-            | Instruction::I64Load16U(_)
-            | Instruction::I64Load32S(_)
-            | Instruction::I64Load32U(_) => 1,
-
-            Instruction::I32Store(_)
-            | Instruction::I64Store(_)
-            | Instruction::F32Store(_)
-            | Instruction::F64Store(_)
-            | Instruction::I32Store8(_)
-            | Instruction::I32Store16(_)
-            | Instruction::I64Store8(_)
-            | Instruction::I64Store16(_)
-            | Instruction::I64Store32(_) => 0,
-
-            _ => 0,
-        }
-    }
-
-    /// Update the shadow stack after emitting a non-folded instruction.
-    fn update_shadow_stack(entry: &mut Entry<F>, insn: &Instruction<'_>) {
-        let pops = Self::stack_pops(insn);
-        let pushes = Self::stack_pushes(insn);
-        for _ in 0..pops {
-            entry.const_stack.pop();
-        }
-        for _ in 0..pushes {
-            entry.const_stack.push(None); // result is runtime-unknown
-        }
-    }
-
-    /// Flush the shadow stack for entry `idx`, materializing all deferred constants.
-    fn flush_const_stack(
-        &self,
-        ctx: &mut Context,
-        entry: &mut Entry<F>,
-        idx: usize,
-    ) -> Result<(), E> {
-        // Materialize any deferred constants still on the shadow stack.
-        let stack: Vec<_> = entry.const_stack.drain(..).collect();
-        for slot in stack {
-            if let Some((v, ty)) = slot {
-                let insn = match ty {
-                    ValType::I32 => Instruction::I32Const(v as i32),
-                    ValType::I64 => Instruction::I64Const(v as i64),
-                    _ => Instruction::I64Const(v as i64),
-                };
-                entry.function.instruction(ctx, &insn)?;
-                entry.inst_count += 1;
-            }
-        }
-        // Materialize virtual locals: emit the deferred LocalSet instructions
-        // so that the WASM local actually holds the constant value.  This is
-        // required before any control-flow split (seal_for_split, seal_to, or
-        // cycle-break) where the function may later be entered from a path
-        // that has not seen the original constant-folded store.
-        for n in entry.locals_virtual.iter().copied().collect::<alloc::vec::Vec<_>>() {
-            if let Some(&(v, ty)) = entry.locals_const.get(&n) {
-                let const_insn = match ty {
-                    ValType::I32 => Instruction::I32Const(v as i32),
-                    ValType::I64 => Instruction::I64Const(v as i64),
-                    _ => Instruction::I64Const(v as i64),
-                };
-                entry.function.instruction(ctx, &const_insn)?;
-                entry.function.instruction(ctx, &Instruction::LocalSet(n))?;
-                entry.inst_count += 2;
-            }
-        }
-        entry.locals_const.clear();
-        entry.locals_virtual.clear();
-        Ok(())
+        let mut func = self.lock_entry(idx, false);
+        func.feed_one(ctx, insn)
     }
 
     /// Flush const stacks for all entries reachable from the tail.
@@ -2812,7 +3132,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let reachable = self.transitive_preds_of(tail_idx).clone();
         lock = self.lock_global();
         for FuncIdx(idx) in reachable {
-            self.flush_const_stack(ctx, &mut lock[idx as usize], idx as usize)?;
+            let e = &mut lock[idx as usize];
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
         }
         Ok(())
     }
@@ -2927,11 +3248,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             func.function.instruction(ctx, &Instruction::End)?;
             func.sealed = true;
             _ = take(&mut func.preds);
-            func.const_stack.clear();
-            func.locals_const.clear();
-            func.locals_virtual.clear();
-            func.skip_depth = 0;
-            func.block_frames.clear();
+            func.opt.reset();
             // Invalidate transitive cache after severing preds.
             func.transitive_preds = None;
         }
@@ -2942,7 +3259,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         {
             let mut lens = self.lens.lock();
             for bucket in lens.iter_mut() {
-                bucket.retain(|fi| !reachable.contains(fi));
+                bucket.retain(|fi, _| !reachable.contains(fi));
             }
         }
         // Remove sealed entries from every live entry's `preds` set and
@@ -2957,7 +3274,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     continue; // already handled in the sealing loop above
                 }
                 let before = entry.preds.len();
-                entry.preds.retain(|fi| !reachable.contains(fi));
+                entry.preds.retain(|fi, _| !reachable.contains(fi));
                 if entry.preds.len() != before {
                     entry.transitive_preds = None;
                 }
@@ -2999,10 +3316,7 @@ where
         if n == 0 { return None; }
         let tail_idx = n - 1;
         let func = self.lock_entry(tail_idx, true);
-        let len = func.const_stack.len();
-        if depth >= len { return None; }
-        let (v, _) = func.const_stack[len - 1 - depth]?;
-        Some(v as i32)
+        func.opt.peek_stack_i32(depth)
     }
 
     fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
@@ -3010,8 +3324,7 @@ where
         if n == 0 { return None; }
         let tail_idx = n - 1;
         let func = self.lock_entry(tail_idx, true);
-        let (v, _) = *func.locals_const.get(&local_idx)?;
-        Some(v as i32)
+        func.opt.peek_local_i32(local_idx)
     }
 }
 
@@ -3023,16 +3336,12 @@ where
 {
     fn peek_stack_i32(&self, depth: usize) -> Option<i32> {
         let func = self.reactor.lock_entry(self.tail_idx, true);
-        let len = func.const_stack.len();
-        if depth >= len { return None; }
-        let (v, _) = func.const_stack[len - 1 - depth]?;
-        Some(v as i32)
+        func.opt.peek_stack_i32(depth)
     }
 
     fn peek_local_i32(&self, local_idx: u32) -> Option<i32> {
         let func = self.reactor.lock_entry(self.tail_idx, true);
-        let (v, _) = *func.locals_const.get(&local_idx)?;
-        Some(v as i32)
+        func.opt.peek_local_i32(local_idx)
     }
 }
 
