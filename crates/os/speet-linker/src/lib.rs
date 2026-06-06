@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{Instruction, ValType};
 use yecta::FuncSignature;
-use wax_core::build::InstructionSink;
+use wax_core::build::{AmbientSink, InstructionSink};
 use yecta::layout::CellIdx;
 use yecta::{
     EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPool, LocalPoolBackend, Mark, Pool, Reactor,
@@ -225,6 +225,9 @@ where
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
+    }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.reactor.as_ambient_sink()
     }
 }
 

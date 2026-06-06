@@ -67,7 +67,7 @@
 
 use speet_link_core::ReactorContext;
 use wasm_encoder::{Instruction, MemArg, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{AmbientSink, InstructionSink};
 
 // ── MemOrder ──────────────────────────────────────────────────────────────────
 
@@ -990,6 +990,9 @@ impl<Context, E, F: InstructionSink<Context, E> + ?Sized> InstructionSink<Contex
         instruction: &Instruction<'_>,
     ) -> Result<(), E> {
         self.sink.instruction(ctx, instruction)
+    }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.sink.as_ambient_sink()
     }
 }
 

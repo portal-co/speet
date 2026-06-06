@@ -16,6 +16,7 @@ AI agents: add subgoals to the relevant file in `goals/` as you work.
 | **Large binary & performance** | [goals/perf.md](goals/perf.md) | Parallel recompilation (blocked); DCE; large binary e2e |
 | **Trace & profiling** | [goals/trace.md](goals/trace.md) | Not yet started |
 | **Candidate workloads** | [goals/workloads.md](goals/workloads.md) | Bun, Electron, COBOL, EHR, embedded OpenSSL, retro |
+| **Ambient library integration** | [goals/ambient.md](goals/ambient.md) | `AmbientInfo`/`AmbientSink` API; recompilers calling unrecompiled libs |
 
 ---
 

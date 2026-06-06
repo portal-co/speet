@@ -37,7 +37,7 @@
 use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{Instruction, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{AmbientSink, InstructionSink};
 use yecta::{EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 use yecta::layout::{CellIdx, CellRegistry};
 
@@ -375,6 +375,9 @@ where
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
     }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.reactor.as_ambient_sink()
+    }
 }
 
 impl<'a, Context, E, F, P> BaseContext<Context, E> for ReactorAdapter<'a, Context, E, F, P>
@@ -690,6 +693,9 @@ where
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
+    }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.reactor.as_ambient_sink()
     }
 }
 

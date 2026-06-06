@@ -10,7 +10,7 @@ use speet_link_core::OobConfig;
 use speet_memory::MemoryAccess;
 use speet_traps::{InstructionTrap, JumpTrap};
 use wasm_encoder::{Instruction, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{AmbientSink, InstructionSink};
 use yecta::{EmitSink, FuncIdx, LocalLayout};
 
 // ── BufferedEmitSink ──────────────────────────────────────────────────────────
@@ -203,6 +203,9 @@ impl<'a, Context, E> FlatMemorySink<'a, Context, E> {
 impl<Context, E> InstructionSink<Context, E> for FlatMemorySink<'_, Context, E> {
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.sink.instruction(ctx, instruction)
+    }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.sink.as_ambient_sink()
     }
 }
 

@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo check:*)",
+      "Bash(grep -E \"^error|^warning.*unused|Compiling|Finished|^$\")",
+      "Bash(grep -rn \"speet-link\\\\|speet_link\" /Users/grahamkelly/Code/portal-hot/speet/crates/*/*/Cargo.toml)",
+      "Bash(cargo metadata:*)",
+      "Bash(perl -i -pe ' *)",
+      "Bash(python3)",
+      "Bash(cargo add *)",
+      "Bash(cargo search *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['crate']['newest_version']\\)\")",
+      "WebFetch(domain:docs.rs)",
+      "Bash(grep -E \"^test |^running|FAILED|ok$|error\\\\[\")",
+      "Bash(clang --version)",
+      "Bash(clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O0 -o /tmp/rv32test.elf -x c -)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(/opt/homebrew/opt/llvm/bin/clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O0 -o /tmp/rv32test.elf -x c -)",
+      "Read(//tmp/**)",
+      "Bash(/opt/homebrew/opt/llvm/bin/ld.lld --version)",
+      "Bash(/opt/homebrew/opt/llvm/bin/clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O0 -o /tmp/rv32test.elf -x c - -fuse-ld=/opt/homebrew/opt/llvm/bin/ld.lld)",
+      "Bash(grep -v \"\\\\.s$\")",
+      "Bash(python3 crates/test/speet-e2e/generate_tests.py)",
+      "Bash(grep -E \"ok$|FAILED\")",
+      "Bash(grep -v \"^--$\")",
+      "Bash(grep -v \"^$\")",
+      "Bash(awk -F: '{print $1}')",
+      "Bash(git -C /Users/grahamkelly/Code/portal-hot/speet show 2f8bf77 --stat)",
+      "Bash(git -C /Users/grahamkelly/Code/portal-hot/speet log --all --oneline)",
+      "Bash(find ~/.cargo/registry/src -name \"code.rs\" -path \"*wasm-encoder-0.240*\" 2>/dev/null | head -3)",
+      "Read(//Users/grahamkelly/.cargo/registry/src/**)"
+    ]
+  }
+}

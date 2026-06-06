@@ -95,7 +95,7 @@ use alloc::{
     vec::Vec,
 };
 use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{AmbientSink, InstructionSink};
 
 extern crate alloc;
 
@@ -2079,6 +2079,9 @@ impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E> for
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.feed_one(ctx, instruction)
     }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.function.as_ambient_sink()
+    }
 }
 
 impl<Context, E> Reactor<Context, E> {
@@ -2125,6 +2128,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             .checked_sub(1)
             .expect("Reactor::instruction (InstructionSink) called on empty reactor");
         self.feed_to(tail_idx, ctx, instruction)
+    }
+    fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
+        self.fns.get_mut().last_mut()?.function.as_ambient_sink()
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
