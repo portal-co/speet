@@ -14,6 +14,7 @@ members = [
     "crates/native/speet-riscv",
     "crates/native/speet-mips",
     "crates/native/speet-powerpc",
+    "crates/native/speet-aarch64",
     # Managed architecture crates
     "crates/managed/speet-dex",
     "crates/managed/dex-bytecode",

@@ -62,6 +62,7 @@ pub enum ArchTag {
     Mips,
     X86_64,
     PowerPC,
+    AArch64,
     Dex,
     Other,
 }

@@ -11,6 +11,7 @@ serde_json = "1"
 rv-asm.workspace = true
 speet-riscv = { path = "../../native/speet-riscv" }
 speet-x86_64 = { path = "../../native/speet-x86_64" }
+speet-aarch64 = { path = "../../native/speet-aarch64" }
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-traps = { path = "../../helper/speet-traps" }
 speet-module-builder = { path = "../../os/speet-module-builder" }

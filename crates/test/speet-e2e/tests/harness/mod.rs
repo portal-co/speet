@@ -12,6 +12,7 @@ use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAd
 use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
 use speet_module_builder::MegabinaryBuilder;
+use speet_aarch64::AArch64Recompiler;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
 use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
@@ -42,7 +43,7 @@ pub const HINT_CALL:   i32 = 0xCA12_u32 as i32;
 pub enum Eh { None, With }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Arch { Rv32, Rv64, X86_64 }
+pub enum Arch { Rv32, Rv64, X86_64, AArch64 }
 
 // ── Harness state ─────────────────────────────────────────────────────────────
 
@@ -86,6 +87,11 @@ pub fn abi_reg_index(name: &str) -> Option<usize> {
 pub fn corpus(rel: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../test-data/rv-corpus").join(rel)
+}
+
+pub fn aarch64_corpus(rel: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/aarch64-corpus").join(rel)
 }
 
 pub fn c_obj(path_env: &str) -> Option<std::path::PathBuf> {
@@ -320,6 +326,28 @@ pub fn translate_x86(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+pub fn translate_aarch64(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+) -> Translated {
+    let mut recompiler = AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_rv_params(&rctx);
+
+    recompiler.translate_bytes(&mut ctx, &mut rctx, text, start_addr,
+        &mut |a| Function::new(a.collect::<Vec<_>>()))
+        .expect("translate_bytes failed");
+
+    let unsupported: Vec<String> = recompiler.unsupported_insns().iter().cloned().collect();
+    Translated { fns: rctx.drain_fns(), params, unsupported }
+}
+
 pub fn translate(
     text: &[u8],
     start_addr: u64,
@@ -329,9 +357,10 @@ pub fn translate(
     eh: Eh,
 ) -> Translated {
     match arch {
-        Arch::Rv32   => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh),
-        Arch::Rv64   => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh),
-        Arch::X86_64 => translate_x86(text, start_addr, base_func_offset, type_idx, eh),
+        Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh),
+        Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh),
+        Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh),
+        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh),
     }
 }
 
@@ -441,6 +470,13 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
             recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
+        Arch::AArch64 => {
+            let mut recompiler = AArch64Recompiler::<(), Infallible>::new_with_base_pc(addr);
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
+            recompiler.setup_traps(&mut rctx, &mut ());
+            collect_rv_params(&rctx)
+        }
     }
 }
 
@@ -458,7 +494,7 @@ pub fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) 
     let t = match arch {
         Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh),
         Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh),
-        Arch::X86_64 => {
+        Arch::X86_64 | Arch::AArch64 => {
             let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
             let unsupported = t.unsupported.clone();
             let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
