@@ -341,6 +341,47 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
         insn: &Instruction<'static>,
         tail_idx: usize,
     ) -> Result<(), E>;
+
+    // ── Ambient library integration ───────────────────────────────────────
+
+    /// Return `true` if the underlying sink supports ambient (unrecompiled)
+    /// library symbol references.
+    ///
+    /// This is a `&self` query — no exclusive access required — so it works
+    /// through `FedContext` (which holds only `&RC`) and reactor contexts that
+    /// use interior mutability.
+    fn has_ambient_sink(&self) -> bool { false }
+
+    /// Push the address of the ambient symbol `name` as a 64-bit integer onto
+    /// the value stack of the function identified by `tail_idx`.
+    ///
+    /// Flushes the optimizer's constant-folding state for all entries reachable
+    /// from `tail_idx` before emitting, then dispatches to each reachable entry
+    /// (multi-tail support).
+    fn ambient_push_addr(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        name: &str,
+    ) -> Result<(), E>;
+
+    /// Emit a direct call to the ambient symbol `name` in all functions
+    /// reachable from `tail_idx`, with optimizer flush.
+    fn ambient_call(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        name: &str,
+    ) -> Result<(), E>;
+
+    /// Emit a direct (tail) jump to the ambient symbol `name` in all functions
+    /// reachable from `tail_idx`, with optimizer flush.
+    fn ambient_jump(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        name: &str,
+    ) -> Result<(), E>;
 }
 
 // ── Blanket impl for Reactor (provides a minimal ReactorContext without traps) ─
@@ -375,6 +416,7 @@ where
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
     }
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
         self.reactor.as_ambient_sink()
     }
@@ -526,6 +568,17 @@ where
     ) -> Result<(), E> {
         Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
     }
+
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
+    fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_push_to(tail_idx, ctx, name)
+    }
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    }
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name)
+    }
 }
 
 // ── FedContext ────────────────────────────────────────────────────────────────
@@ -589,6 +642,23 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> FedContext<'a, Con
     pub fn locals_mark(&self) -> Mark { self.rctx.locals_mark() }
     pub fn base_func_offset(&self) -> u32 { self.rctx.base_func_offset() }
     pub fn layout(&self) -> &LocalLayout { self.rctx.layout() }
+
+    // ── Ambient convenience methods ─────────────────────────────────────────
+    // These delegate to the ReactorContext ambient mirror methods using the
+    // stored tail_idx, allowing &self access without requiring &mut.
+
+    pub fn has_ambient_sink(&self) -> bool {
+        ReactorContext::has_ambient_sink(self.rctx)
+    }
+    pub fn ambient_push_addr(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.rctx.ambient_push_addr(ctx, self.tail_idx, name)
+    }
+    pub fn ambient_call(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.rctx.ambient_call(ctx, self.tail_idx, name)
+    }
+    pub fn ambient_jump(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.rctx.ambient_jump(ctx, self.tail_idx, name)
+    }
 }
 
 impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Context, E>
@@ -596,6 +666,9 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Co
 {
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.rctx.feed(ctx, self.tail_idx, insn)
+    }
+    fn has_ambient_sink(&self) -> bool {
+        ReactorContext::has_ambient_sink(self.rctx)
     }
 }
 
@@ -694,6 +767,7 @@ where
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
     }
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
         self.reactor.as_ambient_sink()
     }
@@ -843,5 +917,16 @@ where
     ) -> Result<(), E> {
         // TrapReactorAdapter has no OobConfig; fall back to unreachable.
         Fed { reactor: &*self.reactor, tail_idx }.instruction(ctx, &Instruction::Unreachable)
+    }
+
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
+    fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_push_to(tail_idx, ctx, name)
+    }
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    }
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name)
     }
 }

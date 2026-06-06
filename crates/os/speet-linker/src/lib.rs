@@ -226,6 +226,7 @@ where
     fn instruction(&mut self, ctx: &mut Context, insn: &Instruction<'_>) -> Result<(), E> {
         self.reactor.tail().instruction(ctx, insn)
     }
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
         self.reactor.as_ambient_sink()
     }
@@ -394,6 +395,17 @@ where
         tail_idx: usize,
     ) -> Result<(), E> {
         self.reactor.feed_lazy(ctx, addr_type, val_type, insn, tail_idx)
+    }
+
+    fn has_ambient_sink(&self) -> bool { self.reactor.has_ambient_sink() }
+    fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_push_to(tail_idx, ctx, name)
+    }
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    }
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name)
     }
 }
 

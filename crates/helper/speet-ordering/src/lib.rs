@@ -928,6 +928,9 @@ impl<Context, E, RC: ReactorContext<Context, E> + ?Sized> InstructionSink<Contex
     ) -> Result<(), E> {
         self.rctx.feed(ctx, self.tail_idx, instruction)
     }
+    fn has_ambient_sink(&self) -> bool {
+        self.rctx.has_ambient_sink()
+    }
 }
 
 impl<Context, E, RC: ReactorContext<Context, E> + ?Sized> MemorySink<Context, E>
@@ -991,6 +994,7 @@ impl<Context, E, F: InstructionSink<Context, E> + ?Sized> InstructionSink<Contex
     ) -> Result<(), E> {
         self.sink.instruction(ctx, instruction)
     }
+    fn has_ambient_sink(&self) -> bool { self.sink.has_ambient_sink() }
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
         self.sink.as_ambient_sink()
     }

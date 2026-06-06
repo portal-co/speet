@@ -752,6 +752,11 @@ where
     pub local_pool: spin::Mutex<P>,
     /// Controls which guest PCs receive function slots and maps PCs to indices.
     slot_assigner: Gate,
+    /// Cached result of whether the inner `F` sink type supports ambient calls.
+    /// `None` = not yet checked; `Some(b)` = cached answer.
+    /// Uses `Cell` for interior mutability so `has_ambient_sink(&self)` can
+    /// initialize the cache without requiring `&mut self`.
+    ambient_capable: core::cell::Cell<Option<bool>>,
 }
 impl<Context, E, F, P, Gate> Default for Reactor<Context, E, F, P, Gate>
 where
@@ -770,6 +775,7 @@ where
             local_pool: spin::Mutex::new(P::default()),
             lock: Default::default(),
             slot_assigner: Gate::default(),
+            ambient_capable: core::cell::Cell::new(None),
         }
     }
 }
@@ -804,6 +810,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             local_pool: spin::Mutex::new(P::default()),
             lock: Default::default(),
             slot_assigner: Gate::default(),
+            ambient_capable: core::cell::Cell::new(None),
         }
     }
 
@@ -825,6 +832,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             local_pool: spin::Mutex::new(P::default()),
             lock: Default::default(),
             slot_assigner: gate,
+            ambient_capable: core::cell::Cell::new(None),
         }
     }
 
@@ -2079,8 +2087,48 @@ impl<Context, E, F: InstructionSink<Context, E>> InstructionSink<Context, E> for
     fn instruction(&mut self, ctx: &mut Context, instruction: &Instruction<'_>) -> Result<(), E> {
         self.feed_one(ctx, instruction)
     }
+    fn has_ambient_sink(&self) -> bool {
+        self.function.has_ambient_sink()
+    }
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
-        self.function.as_ambient_sink()
+        if self.function.has_ambient_sink() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+/// `AmbientSink` for `Entry<F>`: flush the optimizer's const-folding shadow
+/// stack before delegating each ambient operation to the inner sink `F`.
+///
+/// This ensures that any deferred constants materialized by the optimizer are
+/// emitted to the output before the ambient label reference, preserving the
+/// correct WASM stack layout.
+impl<Context, E, F: InstructionSink<Context, E>> AmbientSink<Context, E> for Entry<F> {
+    fn push_ambient_addr(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.opt.flush(ctx, &mut self.function, &mut self.inst_count)?;
+        if let Some(a) = self.function.as_ambient_sink() {
+            a.push_ambient_addr(ctx, name)
+        } else {
+            Ok(())
+        }
+    }
+    fn call_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.opt.flush(ctx, &mut self.function, &mut self.inst_count)?;
+        if let Some(a) = self.function.as_ambient_sink() {
+            a.call_ambient(ctx, name)
+        } else {
+            Ok(())
+        }
+    }
+    fn jump_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        self.opt.flush(ctx, &mut self.function, &mut self.inst_count)?;
+        if let Some(a) = self.function.as_ambient_sink() {
+            a.jump_ambient(ctx, name)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -2129,8 +2177,61 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             .expect("Reactor::instruction (InstructionSink) called on empty reactor");
         self.feed_to(tail_idx, ctx, instruction)
     }
+
+    fn has_ambient_sink(&self) -> bool {
+        self.has_ambient_sink()
+    }
+
     fn as_ambient_sink(&mut self) -> Option<&mut (dyn AmbientSink<Context, E> + '_)> {
-        self.fns.get_mut().last_mut()?.function.as_ambient_sink()
+        if self.has_ambient_sink() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
+    AmbientSink<Context, E> for Reactor<Context, E, F, P, Gate>
+{
+    fn push_ambient_addr(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let tail_idx = self.fns.get_mut().len().checked_sub(1)
+            .expect("push_ambient_addr on empty reactor");
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for FuncIdx(idx) in reachable {
+            let e: &mut Entry<F> = &mut self.fns.get_mut()[idx as usize];
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.push_ambient_addr(ctx, name)?;
+            }
+        }
+        Ok(())
+    }
+    fn call_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let tail_idx = self.fns.get_mut().len().checked_sub(1)
+            .expect("call_ambient on empty reactor");
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for FuncIdx(idx) in reachable {
+            let e: &mut Entry<F> = &mut self.fns.get_mut()[idx as usize];
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.call_ambient(ctx, name)?;
+            }
+        }
+        Ok(())
+    }
+    fn jump_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let tail_idx = self.fns.get_mut().len().checked_sub(1)
+            .expect("jump_ambient on empty reactor");
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for FuncIdx(idx) in reachable {
+            let e: &mut Entry<F> = &mut self.fns.get_mut()[idx as usize];
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.jump_ambient(ctx, name)?;
+            }
+        }
+        Ok(())
     }
 }
 impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: SlotAssigner>
@@ -3427,5 +3528,75 @@ where
             .checked_sub(1)
             .expect("Reactor::tail called on empty reactor");
         Fed { reactor: self, tail_idx }
+    }
+
+    /// Return whether the inner sink type supports ambient (unrecompiled)
+    /// library symbol references.
+    ///
+    /// The result is cached in `self.ambient_capable` on first call so
+    /// subsequent queries are a single `Cell::get` with no locking.
+    pub fn has_ambient_sink(&self) -> bool {
+        if let Some(v) = self.ambient_capable.get() {
+            return v;
+        }
+        // SAFETY: We are reading has_ambient_sink() on the first entry, which
+        // is a pure query that does not mutate shared state. The UnsafeCell is
+        // used for lock-based concurrent write access; a read-only query here
+        // is safe when called while no exclusive lock is held on the entry.
+        let capable = unsafe {
+            (*self.fns.get())
+                .first()
+                .map_or(false, |e| e.function.has_ambient_sink())
+        };
+        self.ambient_capable.set(Some(capable));
+        capable
+    }
+
+    /// Emit `push_ambient_addr` to all reachable entries from `target`,
+    /// flushing optimizer state before each ambient emission.
+    ///
+    /// Uses interior mutability (lock-per-entry) so it can be called with
+    /// `&self` from `ReactorContext` mirror methods.
+    pub fn ambient_push_to(&self, target: usize, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let reachable = self.transitive_preds_of(target).clone();
+        for FuncIdx(idx) in reachable {
+            let mut entry = self.lock_entry(idx as usize, false);
+            let e: &mut Entry<F> = &mut *entry;
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.push_ambient_addr(ctx, name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit `call_ambient` to all reachable entries from `target`,
+    /// flushing optimizer state before each ambient emission.
+    pub fn ambient_call_to(&self, target: usize, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let reachable = self.transitive_preds_of(target).clone();
+        for FuncIdx(idx) in reachable {
+            let mut entry = self.lock_entry(idx as usize, false);
+            let e: &mut Entry<F> = &mut *entry;
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.call_ambient(ctx, name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit `jump_ambient` to all reachable entries from `target`,
+    /// flushing optimizer state before each ambient emission.
+    pub fn ambient_jump_to(&self, target: usize, ctx: &mut Context, name: &str) -> Result<(), E> {
+        let reachable = self.transitive_preds_of(target).clone();
+        for FuncIdx(idx) in reachable {
+            let mut entry = self.lock_entry(idx as usize, false);
+            let e: &mut Entry<F> = &mut *entry;
+            e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
+            if let Some(a) = e.function.as_ambient_sink() {
+                a.jump_ambient(ctx, name)?;
+            }
+        }
+        Ok(())
     }
 }
