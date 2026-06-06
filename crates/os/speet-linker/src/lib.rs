@@ -401,11 +401,11 @@ where
     fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
         self.reactor.ambient_push_to(tail_idx, ctx, name)
     }
-    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &wasm_encoder::FuncType) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name, sig)
     }
-    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_jump_to(tail_idx, ctx, name)
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &wasm_encoder::FuncType) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name, sig)
     }
 }
 

@@ -94,7 +94,7 @@ use alloc::{
     collections::{btree_map::BTreeMap, btree_set::BTreeSet, vec_deque::VecDeque},
     vec::Vec,
 };
-use wasm_encoder::{BlockType, Catch, Function, Instruction, ValType};
+use wasm_encoder::{BlockType, Catch, FuncType, Function, Instruction, ValType};
 use wax_core::build::{AmbientSink, InstructionSink};
 
 extern crate alloc;
@@ -2114,18 +2114,18 @@ impl<Context, E, F: InstructionSink<Context, E>> AmbientSink<Context, E> for Ent
             Ok(())
         }
     }
-    fn call_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+    fn call_ambient(&mut self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         self.opt.flush(ctx, &mut self.function, &mut self.inst_count)?;
         if let Some(a) = self.function.as_ambient_sink() {
-            a.call_ambient(ctx, name)
+            a.call_ambient(ctx, name, sig)
         } else {
             Ok(())
         }
     }
-    fn jump_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+    fn jump_ambient(&mut self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         self.opt.flush(ctx, &mut self.function, &mut self.inst_count)?;
         if let Some(a) = self.function.as_ambient_sink() {
-            a.jump_ambient(ctx, name)
+            a.jump_ambient(ctx, name, sig)
         } else {
             Ok(())
         }
@@ -2207,7 +2207,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         }
         Ok(())
     }
-    fn call_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+    fn call_ambient(&mut self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         let tail_idx = self.fns.get_mut().len().checked_sub(1)
             .expect("call_ambient on empty reactor");
         let reachable = self.transitive_preds_of(tail_idx).clone();
@@ -2215,12 +2215,12 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             let e: &mut Entry<F> = &mut self.fns.get_mut()[idx as usize];
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
             if let Some(a) = e.function.as_ambient_sink() {
-                a.call_ambient(ctx, name)?;
+                a.call_ambient(ctx, name, sig)?;
             }
         }
         Ok(())
     }
-    fn jump_ambient(&mut self, ctx: &mut Context, name: &str) -> Result<(), E> {
+    fn jump_ambient(&mut self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         let tail_idx = self.fns.get_mut().len().checked_sub(1)
             .expect("jump_ambient on empty reactor");
         let reachable = self.transitive_preds_of(tail_idx).clone();
@@ -2228,7 +2228,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             let e: &mut Entry<F> = &mut self.fns.get_mut()[idx as usize];
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
             if let Some(a) = e.function.as_ambient_sink() {
-                a.jump_ambient(ctx, name)?;
+                a.jump_ambient(ctx, name, sig)?;
             }
         }
         Ok(())
@@ -3572,14 +3572,14 @@ where
 
     /// Emit `call_ambient` to all reachable entries from `target`,
     /// flushing optimizer state before each ambient emission.
-    pub fn ambient_call_to(&self, target: usize, ctx: &mut Context, name: &str) -> Result<(), E> {
+    pub fn ambient_call_to(&self, target: usize, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         let reachable = self.transitive_preds_of(target).clone();
         for FuncIdx(idx) in reachable {
             let mut entry = self.lock_entry(idx as usize, false);
             let e: &mut Entry<F> = &mut *entry;
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
             if let Some(a) = e.function.as_ambient_sink() {
-                a.call_ambient(ctx, name)?;
+                a.call_ambient(ctx, name, sig)?;
             }
         }
         Ok(())
@@ -3587,14 +3587,14 @@ where
 
     /// Emit `jump_ambient` to all reachable entries from `target`,
     /// flushing optimizer state before each ambient emission.
-    pub fn ambient_jump_to(&self, target: usize, ctx: &mut Context, name: &str) -> Result<(), E> {
+    pub fn ambient_jump_to(&self, target: usize, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
         let reachable = self.transitive_preds_of(target).clone();
         for FuncIdx(idx) in reachable {
             let mut entry = self.lock_entry(idx as usize, false);
             let e: &mut Entry<F> = &mut *entry;
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
             if let Some(a) = e.function.as_ambient_sink() {
-                a.jump_ambient(ctx, name)?;
+                a.jump_ambient(ctx, name, sig)?;
             }
         }
         Ok(())

@@ -33,18 +33,26 @@ ctx.ambient_addrs.insert("libc_exit".into(),   libc_symbol_address("exit"));
 
 ### 2. Write the recompiler to use `as_ambient_sink`
 
-Accept any `S: InstructionSink<Ctx, E>` and query the capability at runtime:
+Accept any `S: InstructionSink<Ctx, E>` and query the capability at runtime.
+Both `call_ambient` and `jump_ambient` require a `&wasm_encoder::FuncType` that
+describes the callee's parameter and return types. The backend marshals arguments
+from the WASM value stack into the platform's native argument registers (x86-64
+SysV, AAPCS64, or RISC-V psABI) and pushes return values back onto the stack.
 
 ```rust
 use wax_core::build::{AmbientSink, InstructionSink};
+use wasm_encoder::FuncType;
 
-fn emit_printf_call<Ctx, E, S>(sink: &mut S, ctx: &mut Ctx) -> Result<(), E>
+fn emit_printf_call<Ctx, E, S>(
+    sink: &mut S, ctx: &mut Ctx,
+    printf_sig: &FuncType,   // e.g. (i64, i32) -> i32
+) -> Result<(), E>
 where
     S: InstructionSink<Ctx, E>,
 {
     if let Some(ambient) = sink.as_ambient_sink() {
-        // Native backend: emit a direct label-based call.
-        ambient.call_ambient(ctx, "libc_printf")?;
+        // Native backend: pop args into native registers, call, push results.
+        ambient.call_ambient(ctx, "libc_printf", printf_sig)?;
     } else {
         // Pure-WASM backend: fall back to a WASM import call or return an error.
         todo!("WASM backend ambient fallback");
@@ -55,10 +63,13 @@ where
 
 ### 3. Push an address as a value (function pointer)
 
+`push_ambient_addr` does not need a type signature — it simply pushes the
+symbol's address as a 64-bit integer onto the WASM value stack:
+
 ```rust
 if let Some(ambient) = sink.as_ambient_sink() {
     ambient.push_ambient_addr(ctx, "libc_printf")?;
-    // Stack now has the address of printf; combine with call_indirect or store.
+    // Stack now has the address; use with call_indirect or store to memory.
 }
 ```
 
@@ -66,7 +77,8 @@ if let Some(ambient) = sink.as_ambient_sink() {
 
 ```rust
 if let Some(ambient) = sink.as_ambient_sink() {
-    ambient.jump_ambient(ctx, "libc_exit")?;
+    // Same arg marshalling as call_ambient but emits JMP/BR, no return-value push.
+    ambient.jump_ambient(ctx, "libc_exit", &exit_sig)?;
 }
 ```
 

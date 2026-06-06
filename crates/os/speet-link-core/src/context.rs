@@ -36,7 +36,7 @@
 
 use alloc::vec::Vec;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
-use wasm_encoder::{Instruction, ValType};
+use wasm_encoder::{FuncType, Instruction, ValType};
 use wax_core::build::{AmbientSink, InstructionSink};
 use yecta::{EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 use yecta::layout::{CellIdx, CellRegistry};
@@ -365,22 +365,25 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
         name: &str,
     ) -> Result<(), E>;
 
-    /// Emit a direct call to the ambient symbol `name` in all functions
-    /// reachable from `tail_idx`, with optimizer flush.
+    /// Emit a native-ABI call to the ambient symbol `name` in all functions
+    /// reachable from `tail_idx`, with optimizer flush. See
+    /// [`AmbientSink::call_ambient`] for the marshalling contract.
     fn ambient_call(
         &self,
         ctx: &mut Context,
         tail_idx: usize,
         name: &str,
+        sig: &FuncType,
     ) -> Result<(), E>;
 
-    /// Emit a direct (tail) jump to the ambient symbol `name` in all functions
-    /// reachable from `tail_idx`, with optimizer flush.
+    /// Emit a native-ABI direct jump to the ambient symbol `name` in all
+    /// functions reachable from `tail_idx`, with optimizer flush.
     fn ambient_jump(
         &self,
         ctx: &mut Context,
         tail_idx: usize,
         name: &str,
+        sig: &FuncType,
     ) -> Result<(), E>;
 }
 
@@ -573,11 +576,11 @@ where
     fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
         self.reactor.ambient_push_to(tail_idx, ctx, name)
     }
-    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name, sig)
     }
-    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_jump_to(tail_idx, ctx, name)
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name, sig)
     }
 }
 
@@ -653,11 +656,11 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> FedContext<'a, Con
     pub fn ambient_push_addr(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
         self.rctx.ambient_push_addr(ctx, self.tail_idx, name)
     }
-    pub fn ambient_call(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
-        self.rctx.ambient_call(ctx, self.tail_idx, name)
+    pub fn ambient_call(&self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.rctx.ambient_call(ctx, self.tail_idx, name, sig)
     }
-    pub fn ambient_jump(&self, ctx: &mut Context, name: &str) -> Result<(), E> {
-        self.rctx.ambient_jump(ctx, self.tail_idx, name)
+    pub fn ambient_jump(&self, ctx: &mut Context, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.rctx.ambient_jump(ctx, self.tail_idx, name, sig)
     }
 }
 
@@ -923,10 +926,10 @@ where
     fn ambient_push_addr(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
         self.reactor.ambient_push_to(tail_idx, ctx, name)
     }
-    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_call_to(tail_idx, ctx, name)
+    fn ambient_call(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.reactor.ambient_call_to(tail_idx, ctx, name, sig)
     }
-    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str) -> Result<(), E> {
-        self.reactor.ambient_jump_to(tail_idx, ctx, name)
+    fn ambient_jump(&self, ctx: &mut Context, tail_idx: usize, name: &str, sig: &FuncType) -> Result<(), E> {
+        self.reactor.ambient_jump_to(tail_idx, ctx, name, sig)
     }
 }
