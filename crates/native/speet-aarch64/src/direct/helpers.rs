@@ -256,12 +256,14 @@ pub(super) fn emit_indirect_target<Context, E, S>(
 ) -> Result<(), E>
 where S: wax_core::build::InstructionSink<Context, E> + ?Sized
 {
+    // func_idx = (gpr - base_pc) >> 2.  Leave the result as i64: the indirect
+    // call table is a 64-bit table (`table64`), so `return_call_indirect`
+    // consumes an i64 index.  (Do NOT wrap to i32.)
     sink.instruction(ctx, &Instruction::LocalGet(gpr_local))?;
     sink.instruction(ctx, &Instruction::I64Const(base_pc as i64))?;
     sink.instruction(ctx, &Instruction::I64Sub)?;
     sink.instruction(ctx, &Instruction::I64Const(2))?;
     sink.instruction(ctx, &Instruction::I64ShrU)?;
-    sink.instruction(ctx, &Instruction::I32WrapI64)?;
     Ok(())
 }
 

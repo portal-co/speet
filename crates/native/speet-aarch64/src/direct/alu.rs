@@ -90,20 +90,18 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         if set_flags {
             let tmp1 = rctx.layout().local(self.tmp_slot, 1);
             let tmp2 = rctx.layout().local(self.tmp_slot, 2);
-            // Save a = Rn in tmp1
+            // Save a = Rn into tmp1 (LocalSet pops, leaving stack empty)
             self.emit_gpr_get(ctx, rctx, tail_idx, src1)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp1))?;
-            // Compute shifted Rm and save in tmp2
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(tmp1))?;
+            // Compute shifted Rm and save into tmp2 (LocalSet pops, leaving stack empty)
             self.emit_gpr_get(ctx, rctx, tail_idx, src2)?;
             if shamt != 0 {
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(shamt as i64))?;
                 let si = match shtyp { 0 => &Instruction::I64Shl, 1 => &Instruction::I64ShrU, _ => &Instruction::I64ShrS };
                 rctx.feed(ctx, tail_idx, si)?;
             }
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp2))?;
-            // Now: stack has b (shifted Rm), tmp1=a, tmp2=b
-            // We need: stack has result = a op b
-            // But stack currently holds b, not a op b. Compute:
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(tmp2))?;
+            // Stack is empty; reload both operands to compute result
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp1))?; // a
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp2))?; // b
             if is_sub {
@@ -370,8 +368,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             self.emit_gpr_get(ctx, rctx, tail_idx, src2)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp2))?;
-            rctx.feed(ctx, tail_idx, &Instruction::Drop)?; // consume tee
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(tmp2))?;
             // Rn >> r
             self.emit_gpr_get(ctx, rctx, tail_idx, src1)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp2))?;
@@ -573,10 +570,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         if set_flags {
             let tmp1 = rctx.layout().local(self.tmp_slot, 1);
             let tmp2 = rctx.layout().local(self.tmp_slot, 2);
+            // LocalSet pops: stack stays empty between saves
             self.emit_gpr_get(ctx, rctx, tail_idx, src1)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp1))?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(tmp1))?;
             emit_extended(self, ctx, rctx, tail_idx)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp2))?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(tmp2))?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp1))?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp2))?;
             if is_sub {
@@ -688,7 +686,9 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             self.nzcv_local(rctx, 2),
             self.nzcv_local(rctx, 3),
         );
-        emit_cond(ctx, rctx, cond, n, z, c, v)?;
+        // FedContext routes InstructionSink::instruction to rctx.feed(ctx, tail_idx, …)
+        // instead of reactor.tail() which would emit to the wrong function.
+        emit_cond(ctx, &mut FedContext::new(rctx, tail_idx), cond, n, z, c, v)?;
         rctx.feed(ctx, tail_idx, &Instruction::Select)?;
         self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
         Ok(())

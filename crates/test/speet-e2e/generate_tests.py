@@ -43,16 +43,28 @@ def arch_of(dir_name: str) -> str:
     raise ValueError(f"Unrecognised corpus directory: {dir_name!r}")
 
 def ident_of(rel: str) -> str:
-    """Turn a corpus-relative path like 'rv32i/01_foo_bar' into 'rv32i_01'."""
+    """Turn a corpus-relative path like 'rv32i/01_foo_bar' into 'rv32i_01'.
+    The .elf suffix is stripped before splitting."""
     parts = rel.split("/")
+    stem = parts[-1].removesuffix(".elf")
     # Use just the numeric prefix from the filename (e.g. "01" from "01_foo")
-    num = parts[-1].split("_")[0]
+    num = stem.split("_")[0]
     # Sanitise directory part (replace non-ident chars)
     dir_part = re.sub(r"[^0-9a-zA-Z]", "_", parts[0])
     return f"{dir_part}_{num}"
 
-# Collect all ELF binaries: files with no extension inside corpus sub-dirs.
-corpus: list[tuple[str, str, str]] = []  # (ident, rel_path, arch)
+# Fixtures excluded from the generic corpus: these require a syscall/WASI
+# environment (ecall) that the generic e2e runner does not provide, and are
+# exercised by dedicated harnesses (e.g. linux_wasi_tests.rs).  They are kept
+# as .s-only references and are not assembled by compile_corpus.sh, but guard
+# against an accidentally-present .elf here too.
+CORPUS_EXCLUDE: set[str] = {
+    "rv64i/02_write_and_exit",
+}
+
+# Collect all ELF binaries: .elf files inside corpus sub-dirs.
+# The corpus() helper appends ".elf", so we pass the stem (without extension).
+corpus: list[tuple[str, str, str]] = []  # (ident, rel_path_stem, arch)
 for sub in sorted(CORPUS_DIR.iterdir()):
     if not sub.is_dir() or sub.name.startswith("."):
         continue
@@ -61,8 +73,11 @@ for sub in sorted(CORPUS_DIR.iterdir()):
     except ValueError:
         continue
     for f in sorted(sub.iterdir()):
-        if f.is_file() and f.suffix == "":
-            rel = f"{sub.name}/{f.name}"
+        if f.is_file() and f.suffix == ".elf":
+            stem = f.stem  # filename without .elf
+            rel = f"{sub.name}/{stem}"
+            if rel in CORPUS_EXCLUDE:
+                continue
             corpus.append((ident_of(rel), rel, arch))
 
 # ── C objects ─────────────────────────────────────────────────────────────────

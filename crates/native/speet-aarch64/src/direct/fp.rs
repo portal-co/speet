@@ -454,7 +454,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             self.nzcv_local(rctx, 0), self.nzcv_local(rctx, 1),
             self.nzcv_local(rctx, 2), self.nzcv_local(rctx, 3),
         );
-        emit_cond(ctx, rctx, cond, n, z, c, v)?;
+        emit_cond(ctx, &mut FedContext::new(rctx, tail_idx), cond, n, z, c, v)?;
         rctx.feed(ctx, tail_idx, &Instruction::Select)?;
         self.emit_fp_set(ctx, rctx, tail_idx, dest)?;
         Ok(())

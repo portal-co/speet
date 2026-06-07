@@ -29,7 +29,7 @@ macro_rules! smoke {
         #[test]
         fn $name() {
             let path = corpus($rel);
-            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (text, addr) = load_text(&path);
             let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
@@ -48,7 +48,7 @@ macro_rules! smoke_c {
                 eprintln!("  skipping {}: C object not built", stringify!($name));
                 return;
             }};
-            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
             let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
@@ -64,7 +64,7 @@ macro_rules! run {
         #[test]
         fn $name() {
             let path = corpus($rel);
-            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (text, addr) = load_text(&path);
             let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
@@ -87,7 +87,7 @@ macro_rules! run_trap {
         #[test]
         fn $name() {
             let path = corpus($rel);
-            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (text, addr) = load_text(&path);
             let (wasm, _) = build_single_with_trap(&text, addr, $arch, $eh);
             wasmparser::validate(&wasm).expect("WASM with trap is invalid");
             match run_module(&wasm, "_start") {
@@ -111,7 +111,7 @@ macro_rules! run_c {
                 eprintln!("  skipping {}: C object not built", stringify!($name));
                 return;
             }};
-            let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+            let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
             let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
@@ -132,7 +132,7 @@ macro_rules! link {
             $(
                 {
                     let path = corpus($rel);
-                    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+                    let (text, addr) = load_text(&path);
                     specs_data.push((text, addr, $arch, $entry));
                 }
             )+
@@ -170,7 +170,11 @@ macro_rules! link_c {
                         eprintln!("  skipping {}: missing input", stringify!($name));
                         return;
                     }};
-                    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+                    let (text, addr) = if $is_corpus {
+                        load_text(&path)
+                    } else {
+                        match load_text_optional(&path) { Some(v) => v, None => return }
+                    };
                     specs_data.push((text, addr, $arch, $entry));
                 }
             )+
@@ -248,137 +252,81 @@ macro_rules! wasm_run_cond_trap {
 
 // ── AArch64 corpus tests ──────────────────────────────────────────────────────
 
-#[test]
-fn smoke_aarch64_01_arith_no_eh() {
-    let path = aarch64_corpus("01_integer_computational");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_01_arith");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
+macro_rules! smoke_aarch64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = aarch64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            assert!(!wasm.is_empty());
+            wasmparser::validate(&wasm).expect("WASM invalid");
+        }
+    };
 }
 
-#[test]
-fn run_aarch64_01_arith_no_eh() {
-    let path = aarch64_corpus("01_integer_computational");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
+macro_rules! run_aarch64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = aarch64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            wasmparser::validate(&wasm).expect("WASM invalid");
+            run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
+        }
+    };
 }
 
-#[test]
-fn smoke_aarch64_02_control_no_eh() {
-    let path = aarch64_corpus("02_control_transfer");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_02_control");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
+smoke_aarch64!(smoke_aarch64_01_arith_no_eh,        "01_integer_computational");
+run_aarch64!(  run_aarch64_01_arith_no_eh,           "01_integer_computational");
+smoke_aarch64!(smoke_aarch64_02_control_no_eh,       "02_control_transfer");
+run_aarch64!(  run_aarch64_02_control_no_eh,         "02_control_transfer");
+smoke_aarch64!(smoke_aarch64_03_load_store_no_eh,    "03_load_store");
+run_aarch64!(  run_aarch64_03_load_store_no_eh,      "03_load_store");
+smoke_aarch64!(smoke_aarch64_04_integer_ext_no_eh,   "04_integer_ext");
+run_aarch64!(  run_aarch64_04_integer_ext_no_eh,     "04_integer_ext");
+smoke_aarch64!(smoke_aarch64_05_load_store_ext_no_eh,"05_load_store_ext");
+run_aarch64!(  run_aarch64_05_load_store_ext_no_eh,  "05_load_store_ext");
+smoke_aarch64!(smoke_aarch64_06_fp_no_eh,            "06_floating_point");
+run_aarch64!(  run_aarch64_06_fp_no_eh,              "06_floating_point");
+
+// ── x86-64 corpus tests ───────────────────────────────────────────────────────
+
+macro_rules! smoke_x86_64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = x86_64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            assert!(!wasm.is_empty());
+            wasmparser::validate(&wasm).expect("WASM invalid");
+        }
+    };
 }
 
-#[test]
-fn run_aarch64_02_control_no_eh() {
-    let path = aarch64_corpus("02_control_transfer");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
+macro_rules! run_x86_64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = x86_64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, _) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            wasmparser::validate(&wasm).expect("WASM invalid");
+            run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
+        }
+    };
 }
 
-#[test]
-fn smoke_aarch64_03_load_store_no_eh() {
-    let path = aarch64_corpus("03_load_store");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_03_load_store");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
-}
-
-#[test]
-fn run_aarch64_03_load_store_no_eh() {
-    let path = aarch64_corpus("03_load_store");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
-}
-
-#[test]
-fn smoke_aarch64_04_integer_ext_no_eh() {
-    let path = aarch64_corpus("04_integer_ext");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_04_integer_ext");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
-}
-
-#[test]
-fn run_aarch64_04_integer_ext_no_eh() {
-    let path = aarch64_corpus("04_integer_ext");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
-}
-
-#[test]
-fn smoke_aarch64_05_load_store_ext_no_eh() {
-    let path = aarch64_corpus("05_load_store_ext");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_05_load_store_ext");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
-}
-
-#[test]
-fn run_aarch64_05_load_store_ext_no_eh() {
-    let path = aarch64_corpus("05_load_store_ext");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
-}
-
-#[test]
-fn smoke_aarch64_06_fp_no_eh() {
-    let path = aarch64_corpus("06_floating_point");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    report_unsupported(&unsupported, "aarch64_06_fp");
-    assert!(!wasm.is_empty());
-    wasmparser::validate(&wasm).expect("WASM invalid");
-}
-
-#[test]
-fn run_aarch64_06_fp_no_eh() {
-    let path = aarch64_corpus("06_floating_point");
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
-    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
-    wasmparser::validate(&wasm).expect("WASM invalid");
-    match run_module(&wasm, "_start") {
-        Ok(_) => {}
-        Err(e) => panic!("run failed: {e}"),
-    }
-}
+// 01: arithmetic only — full smoke+run coverage.
+// 02-05: the x86-64 recompiler has pre-existing issues with control-flow
+//        corpora (unsupported instructions, branch-target index OOB); these
+//        are tracked separately and excluded here until fixed.
+smoke_x86_64!(smoke_x86_64_01_arith_no_eh,  "01_integer_computational");
+run_x86_64!(  run_x86_64_01_arith_no_eh,    "01_integer_computational");
 
 // @generated-tests-begin
 
@@ -1938,7 +1886,7 @@ wasm_run_cond_trap!(run_wasm_branches_hook_override_true, wasm_branches(), entry
 #[test]
 fn debug_rv32_c_arith() {
     let path = match c_obj("E2E_RV32_ARITH") { Some(p) => p, None => return };
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
     eprintln!("── RV32 .text linear disassembly ({} bytes @ {addr:#x}) ──", text.len());
     disasm_rv(&text, addr as u64, Xlen::Rv32);
     disasm_rv_conservative(&text, addr as u64, Xlen::Rv32);
@@ -1957,7 +1905,7 @@ fn debug_rv32_c_arith() {
 #[test]
 fn debug_rv64_c_arith() {
     let path = match c_obj("E2E_RV64_ARITH") { Some(p) => p, None => return };
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
     eprintln!("── RV64 .text disassembly ({} bytes @ {addr:#x}) ──", text.len());
     disasm_rv(&text, addr as u64, Xlen::Rv64);
     disasm_rv_conservative(&text, addr as u64, Xlen::Rv64);
@@ -1975,7 +1923,7 @@ fn debug_rv64_c_arith() {
 
 fn debug_corpus(rel: &str, arch: Arch, xlen: Xlen) {
     let path = corpus(rel);
-    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (text, addr) = load_text(&path);
     eprintln!("── {} ({} bytes @ {addr:#x}) ──", rel, text.len());
     disasm_rv(&text, addr as u64, xlen);
     let (wasm, _) = build_single(&text, addr, arch, Eh::None);
@@ -2003,6 +1951,23 @@ fn debug_rv32i02_corpus() { debug_corpus("rv32i/02_control_transfer", Arch::Rv32
 fn debug_rv32i04_corpus() { debug_corpus("rv32i/04_edge_cases", Arch::Rv32, Xlen::Rv32); }
 #[test]
 fn debug_rv32i06_corpus() { debug_corpus("rv32i/06_nop_and_hints", Arch::Rv32, Xlen::Rv32); }
+
+#[test]
+fn debug_aarch64_01_corpus() {
+    let path = aarch64_corpus("01_integer_computational");
+    let (text, addr) = load_text(&path);
+    eprintln!("── aarch64 01 ({} bytes @ {addr:#x}) ──", text.len());
+    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    match wasmparser::validate(&wasm) {
+        Ok(_) => eprintln!("  valid!"),
+        Err(e) => {
+            let off = e.offset();
+            eprintln!("Validation error @ {off:#x}: {e}");
+            decode_operators_near(&wasm, off.saturating_sub(120), off + 20);
+            panic!("invalid WASM");
+        }
+    }
+}
 
 fn disasm_rv(text: &[u8], pc: u64, xlen: Xlen) {
     disasm_rv_inner(text, pc, xlen, false);

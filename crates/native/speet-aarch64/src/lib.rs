@@ -38,7 +38,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 
 use disarm64::decoder_full::Mnemonic;
-use speet_link_core::ReactorContext;
+use speet_link_core::{FedContext, ReactorContext};
 use speet_memory::MemoryAccess;
 use speet_traps::{
     InstructionInfo, JumpInfo, JumpKind, TrapAction,

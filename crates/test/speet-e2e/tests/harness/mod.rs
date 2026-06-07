@@ -84,16 +84,29 @@ pub fn abi_reg_index(name: &str) -> Option<usize> {
 
 // ── Corpus / C-object path helpers ───────────────────────────────────────────
 
+/// Path to a RISC-V corpus ELF: `test-data/rv-corpus/<rel>.elf`.
 pub fn corpus(rel: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../test-data/rv-corpus").join(rel)
+        .join("../../../test-data/rv-corpus")
+        .join(format!("{rel}.elf"))
 }
 
+/// Path to an AArch64 corpus ELF: `test-data/aarch64-corpus/<rel>.elf`.
 pub fn aarch64_corpus(rel: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../test-data/aarch64-corpus").join(rel)
+        .join("../../../test-data/aarch64-corpus")
+        .join(format!("{rel}.elf"))
 }
 
+/// Path to an x86-64 corpus ELF: `test-data/x86_64-corpus/<rel>.elf`.
+pub fn x86_64_corpus(rel: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/x86_64-corpus")
+        .join(format!("{rel}.elf"))
+}
+
+/// Path to a C object compiled by `build.rs` (optional — returns `None` when
+/// the env var is unset or the file doesn't exist).
 pub fn c_obj(path_env: &str) -> Option<std::path::PathBuf> {
     let p = std::env::var(path_env).unwrap_or_default();
     if p.is_empty() { return Option::None; }
@@ -103,11 +116,13 @@ pub fn c_obj(path_env: &str) -> Option<std::path::PathBuf> {
 
 // ── ELF loader ────────────────────────────────────────────────────────────────
 
-pub fn load_text(path: &Path) -> Option<(Vec<u8>, u64)> {
-    if !path.exists() {
-        eprintln!("Skipping: not found at {path:?}");
-        return Option::None;
-    }
+/// Load the `.text` section from a corpus ELF.  Panics if the file is missing
+/// or malformed — corpus files must always be present.
+pub fn load_text(path: &Path) -> (Vec<u8>, u64) {
+    assert!(path.exists(),
+        "corpus file not found: {}\n  \
+         Run the appropriate test-data/*/compile_corpus.sh to (re)build it.",
+        path.display());
     let bytes = std::fs::read(path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let obj = object::File::parse(&*bytes)
@@ -117,13 +132,20 @@ pub fn load_text(path: &Path) -> Option<(Vec<u8>, u64)> {
     let data = sec.data()
         .unwrap_or_else(|e| panic!("read .text from {}: {e}", path.display()))
         .to_vec();
-    if data.is_empty() { return Option::None; }
-    Some((data, sec.address()))
+    assert!(!data.is_empty(), ".text section is empty in {}", path.display());
+    (data, sec.address())
+}
+
+/// Load a C object that may legitimately be absent (when the env var is unset).
+/// Returns `None` to signal the test should be skipped.
+pub fn load_text_optional(path: &Path) -> Option<(Vec<u8>, u64)> {
+    if !path.exists() { return None; }
+    Some(load_text(path))
 }
 
 pub fn report_unsupported(unsupported: &[String], context: &str) {
     if !unsupported.is_empty() {
-        eprintln!("  [x86_64 unsupported in {context}]: {}", unsupported.join(", "));
+        eprintln!("  [unsupported in {context}]: {}", unsupported.join(", "));
     }
 }
 
@@ -574,9 +596,20 @@ pub fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
 
 // ── Wasmi execution ───────────────────────────────────────────────────────────
 
+/// Fuel cap for a single `run_module` invocation.  Corpus programs are tiny
+/// (tens to low hundreds of instructions), so 50M units is enormously generous
+/// for any legitimate run while still bounding a runaway/infinite tail-call loop
+/// to a clean `OutOfFuel` trap instead of hanging the whole test process.
+const RUN_FUEL: u64 = 50_000_000;
+
 pub fn run_module(wasm: &[u8], entry: &str) -> Result<HostState, String> {
-    let engine = Engine::default();
+    let mut config = wasmi::Config::default();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config);
     let mut store = Store::new(&engine, HostState::new());
+    // Bound execution so a non-terminating guest traps (OutOfFuel) rather than
+    // pegging a core forever.  Ignored cost: fuel is cheap to meter.
+    store.set_fuel(RUN_FUEL).map_err(|e| e.to_string())?;
     let mut linker: Linker<HostState> = Linker::new(&engine);
 
     linker.func_wrap("env", "__speet_hint",

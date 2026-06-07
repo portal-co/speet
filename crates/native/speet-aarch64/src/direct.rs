@@ -53,7 +53,10 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 .collect::<alloc::vec::Vec<_>>()
                 .into_iter(),
         );
-        rctx.next_with(ctx, fn_type, inst_len)
+        // len=1: each AArch64 instruction is exactly one next_with step (4 bytes).
+        // inst_len bytes, but the fall-through distance is 1 function slot, not 4.
+        let _ = inst_len;
+        rctx.next_with(ctx, fn_type, 1)
     }
 
     /// Translate a block of AArch64 bytes starting at `start_pc`.
@@ -101,6 +104,10 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             offset += 4;
         }
+        // Seal any functions not terminated by a branch (e.g. the last instruction
+        // of a region that isn't a branch) with unreachable + End so the WASM
+        // validator sees properly closed function bodies.
+        let _ = rctx.seal_remaining(ctx);
         Ok(offset)
     }
 

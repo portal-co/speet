@@ -53,12 +53,19 @@ lt_taken:
 ge_taken:
 
     // ── BL / RET ─────────────────────────────────────────────────────────────
-    bl   subroutine
-    b    done
+    // BL clobbers the link register (x30), so preserve the caller's LR in a
+    // spare callee-saved register across the call.  The harness enters with
+    // x30 = 0; restoring it before the final RET makes that RET return to the
+    // caller (index 0 → unpopulated funcref → clean trap), instead of looping
+    // on the stale subroutine return address.
+    mov  x19, x30                  // save caller LR
+    bl   subroutine                // x30 = &(b done); call subroutine
+    b    done                      // subroutine returns here, then jump to done
 
 subroutine:
     movz x11, #42
-    ret                            // return to caller via x30
+    ret                            // return to caller via x30 (→ b done)
 
 done:
-    ret
+    mov  x30, x19                  // restore caller LR
+    ret                            // return to caller
