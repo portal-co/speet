@@ -314,6 +314,72 @@ fn run_aarch64_03_load_store_no_eh() {
     }
 }
 
+#[test]
+fn smoke_aarch64_04_integer_ext_no_eh() {
+    let path = aarch64_corpus("04_integer_ext");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    report_unsupported(&unsupported, "aarch64_04_integer_ext");
+    assert!(!wasm.is_empty());
+    wasmparser::validate(&wasm).expect("WASM invalid");
+}
+
+#[test]
+fn run_aarch64_04_integer_ext_no_eh() {
+    let path = aarch64_corpus("04_integer_ext");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    wasmparser::validate(&wasm).expect("WASM invalid");
+    match run_module(&wasm, "_start") {
+        Ok(_) => {}
+        Err(e) => panic!("run failed: {e}"),
+    }
+}
+
+#[test]
+fn smoke_aarch64_05_load_store_ext_no_eh() {
+    let path = aarch64_corpus("05_load_store_ext");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    report_unsupported(&unsupported, "aarch64_05_load_store_ext");
+    assert!(!wasm.is_empty());
+    wasmparser::validate(&wasm).expect("WASM invalid");
+}
+
+#[test]
+fn run_aarch64_05_load_store_ext_no_eh() {
+    let path = aarch64_corpus("05_load_store_ext");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    wasmparser::validate(&wasm).expect("WASM invalid");
+    match run_module(&wasm, "_start") {
+        Ok(_) => {}
+        Err(e) => panic!("run failed: {e}"),
+    }
+}
+
+#[test]
+fn smoke_aarch64_06_fp_no_eh() {
+    let path = aarch64_corpus("06_floating_point");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    report_unsupported(&unsupported, "aarch64_06_fp");
+    assert!(!wasm.is_empty());
+    wasmparser::validate(&wasm).expect("WASM invalid");
+}
+
+#[test]
+fn run_aarch64_06_fp_no_eh() {
+    let path = aarch64_corpus("06_floating_point");
+    let (text, addr) = match load_text(&path) { Some(v) => v, None => return };
+    let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+    wasmparser::validate(&wasm).expect("WASM invalid");
+    match run_module(&wasm, "_start") {
+        Ok(_) => {}
+        Err(e) => panic!("run failed: {e}"),
+    }
+}
+
 // @generated-tests-begin
 
 // ── Corpus smoke tests ──────────────────────────────────────────────────────────
