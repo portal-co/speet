@@ -49,11 +49,27 @@ though it passes under Unicorn (which doesn't enforce the check). Fixing it need
 16-byte operand-stack slots or a non-SP stack register in the aarch64 backend. Until then
 the runnable path is x86_64 (native on x86 hosts, Rosetta on Apple silicon).
 
-## Scaffolded (compiles; integration TODO)
+## Frontend pipeline — guest machine code → WASM (verified)
 
-- **`speet-recompile`** `frontend` (load, `ExternalTargets`, same-platform guard) — the
-  speet translate loop (real guest binary → WASM) is the next integration step.
-- **`speet-host-syscall`**: placeholder for the host-ambient syscall dispatcher.
+`speet-recompile::frontend::{translate, assemble_module, recompile_to_wasm}` wrap the speet
+x86-64/aarch64 recompilers (mirroring the speet-e2e harness) to turn a `.text` blob into a
+complete WASM module: register-file params, `env.{__speet_hint,write,exit}` imports, 64-bit
+memory, entry exported as `_start`. `tests/frontend_e2e.rs` recompiles a small x86-64 snippet
+to a **valid** WASM module, and feeds that real speet output through the backend object
+compiler — the full **speet → wasm-blitz → binary-io** pipe now produces a native object end
+to end (~1.1 KB). Added `Unreachable` lowering to the blitz x86-64 backend (it `panic!` d on
+speet's `unreachable`).
+
+## Remaining for a fully runnable recompiled guest
+
+- **Termination/observation**: speet functions return nothing and thread state via tail-calls;
+  a real guest must `exit`/`write` via syscalls. speet lowers these via trap hooks to the
+  `env.*` imports, which the native shim must provide (M2 `speet-host-syscall`). Without this a
+  recompiled guest neither terminates cleanly nor exposes a result.
+- **binary-io load wrapper**: `frontend::translate` takes raw `.text` bytes; a thin entry
+  point should `binary_io::load_auto` a real ELF/Mach-O and feed its `.text`+entry.
+- **blitz instruction coverage**: fill gaps as richer guests surface them (`Unreachable` done).
+- **`speet-host-syscall`**: still a placeholder.
 
 ## Architectural findings
 
