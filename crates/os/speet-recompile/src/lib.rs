@@ -12,6 +12,7 @@
 //! (blitz -> object) live in the `frontend` and `backend` modules.
 
 pub mod backend;
+pub mod drive;
 pub mod frontend;
 
 /// Re-exports of the abstracted components this driver is built on.

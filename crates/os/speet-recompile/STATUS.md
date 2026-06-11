@@ -30,10 +30,29 @@ Tracks the build-out of the recompiler described in
   Defines `__wasm_mem`/`__wasm_mem_pages`/`__wasm_memory_grow`, weak `__speet_data_init`,
   and a C `main` that bootstraps linear memory and calls `__guest_entry`.
 
+## Backend pipeline — RUNNABLE end-to-end (x86_64)
+
+`speet-recompile::drive::compile_wasm_to_object` lowers a WASM module through
+wasm-blitz's SysV codegen into one asm-arch binary writer, surfaces external relocations
+via `into_parts_with_relocs`, and emits an ELF/Mach-O `.o` via `binary-io`, exporting the
+entry as the C-callable `__guest_entry`. The integration test `tests/backend_e2e.rs`
+recompiles a WASM `() -> i64` returning 42 into an **x86_64 Mach-O object**, links it with a
+C shim (`main` → `__guest_entry`) via `clang`, runs it (Rosetta on Apple silicon), and
+asserts **exit code 42**. This validates blitz codegen + binary-io object writing + the #2
+C-ABI bridge + link/run together.
+
+### Known limitation: aarch64 native SP alignment
+blitz's aarch64 backend uses the hardware SP as the WASM operand stack with 8-byte
+`str/ldr [sp,#±8]!` pushes. Real arm64 (macOS) enforces a 16-byte SP-alignment check on
+SP-based accesses, so recompiled aarch64 code faults (SIGBUS) after the first push — even
+though it passes under Unicorn (which doesn't enforce the check). Fixing it needs either
+16-byte operand-stack slots or a non-SP stack register in the aarch64 backend. Until then
+the runnable path is x86_64 (native on x86 hosts, Rosetta on Apple silicon).
+
 ## Scaffolded (compiles; integration TODO)
 
-- **`speet-recompile`** driver: `frontend` (load, `ExternalTargets`, same-platform
-  guard) and `backend` (reloc-kind mapping, `__ambient_` symbol rendering) modules.
+- **`speet-recompile`** `frontend` (load, `ExternalTargets`, same-platform guard) — the
+  speet translate loop (real guest binary → WASM) is the next integration step.
 - **`speet-host-syscall`**: placeholder for the host-ambient syscall dispatcher.
 
 ## Architectural findings

@@ -21,6 +21,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "array-init"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -58,6 +64,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "bitvec"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc2832c24239b0141d5674bb9174f9d68a8b5b3f2753311927c172ca46f7e9c"
+dependencies = [
+ "funty",
+ "radium",
+ "serde",
+ "tap",
+ "wyz",
 ]
 
 [[package]]
@@ -147,10 +166,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "exhaust"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36968b35411c99472189a1ab43e2dae5469a2a2064470ab35ce3e9c180fe0ed3"
+dependencies = [
+ "exhaust-macros",
+ "itertools",
+ "mutants",
+]
+
+[[package]]
+name = "exhaust-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de248793548b04e7d29117107315b9cb6410c0b37dbb85038452eccfb489cda3"
+dependencies = [
+ "itertools",
+ "proc-macro2 1.0.106",
+ "quote 1.0.45",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -173,6 +230,12 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "funty"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "getset"
@@ -245,6 +308,15 @@ dependencies = [
  "hashbrown 0.17.0",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
 ]
 
 [[package]]
@@ -327,6 +399,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+
+[[package]]
+name = "no-error-type"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37ede185c18a65ecdf9f657f9361a1e2509eaddcf50efdd63323a829b81af5a2"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
 name = "num-derive"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,6 +479,97 @@ name = "osctx"
 version = "0.1.0"
 
 [[package]]
+name = "portal-pc-asm-common"
+version = "0.1.1"
+dependencies = [
+ "array-init",
+ "bitvec",
+ "either",
+ "embedded-io",
+ "exhaust",
+ "itertools",
+ "no-error-type",
+ "serde",
+]
+
+[[package]]
+name = "portal-solutions-asm-aarch64"
+version = "0.1.0"
+dependencies = [
+ "portal-pc-asm-common",
+ "typeid",
+]
+
+[[package]]
+name = "portal-solutions-asm-regalloc"
+version = "0.1.0"
+dependencies = [
+ "portal-pc-asm-common",
+ "typeid",
+]
+
+[[package]]
+name = "portal-solutions-asm-x86-64"
+version = "0.1.0"
+dependencies = [
+ "iced-x86",
+ "portal-pc-asm-common",
+ "portal-solutions-asm-regalloc",
+ "typeid",
+]
+
+[[package]]
+name = "portal-solutions-blitz-aarch64"
+version = "0.1.0"
+dependencies = [
+ "portal-pc-asm-common",
+ "portal-solutions-asm-aarch64",
+ "portal-solutions-asm-regalloc",
+ "portal-solutions-blitz-codegen",
+ "portal-solutions-blitz-common",
+ "portal-solutions-blitz-i4",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
+ "wax-core",
+]
+
+[[package]]
+name = "portal-solutions-blitz-codegen"
+version = "0.1.0"
+
+[[package]]
+name = "portal-solutions-blitz-common"
+version = "0.1.0"
+dependencies = [
+ "portal-pc-asm-common",
+ "typeid",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
+ "wax-core",
+]
+
+[[package]]
+name = "portal-solutions-blitz-i4"
+version = "0.1.0"
+dependencies = [
+ "portal-solutions-blitz-common",
+]
+
+[[package]]
+name = "portal-solutions-blitz-x86-64"
+version = "0.1.0"
+dependencies = [
+ "portal-solutions-asm-regalloc",
+ "portal-solutions-asm-x86-64",
+ "portal-solutions-blitz-codegen",
+ "portal-solutions-blitz-common",
+ "typeid",
+ "wasm-encoder 0.240.0",
+ "wasmparser 0.240.0",
+ "wax-core",
+]
+
+[[package]]
 name = "powerpc"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -453,6 +631,12 @@ dependencies = [
  "glob",
  "num_enum",
 ]
+
+[[package]]
+name = "radium"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rustc_version"
@@ -774,6 +958,11 @@ name = "speet-recompile"
 version = "0.1.0"
 dependencies = [
  "binary-io",
+ "portal-solutions-asm-aarch64",
+ "portal-solutions-asm-x86-64",
+ "portal-solutions-blitz-aarch64",
+ "portal-solutions-blitz-common",
+ "portal-solutions-blitz-x86-64",
  "speet-rt",
  "tunnel",
 ]
@@ -952,6 +1141,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tap"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1010,6 +1205,12 @@ dependencies = [
  "cfg-if",
  "static_assertions",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "unicode-ident"
@@ -1171,6 +1372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyz"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
+dependencies = [
+ "tap",
+]
+
+[[package]]
 name = "yecta"
 version = "0.1.0"
 dependencies = [
@@ -1187,60 +1397,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
+name = "portal-solutions-asm-jvm"
+version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
+name = "portal-solutions-asm-semantics"
+version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
+name = "portal-solutions-asm-x86-64-shim"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "ephemera"
@@ -1323,94 +1493,6 @@ name = "volar-weaver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-jvm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-regalloc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcomp-ir-plugin-host"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcomp-plugin-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-arena"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps-c-backend"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-e2e-tests"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-edu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-fast-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-lower"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-mini-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-c-interp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-interp"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "portal-jsc-common"
 version = "0.8.0-pre.11"
 
@@ -1447,8 +1529,12 @@ name = "portal-jsc-swc-util"
 version = "0.8.0-pre.11"
 
 [[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
+name = "embedded-llm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "embedded-llm-tools"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "ast-traits"
@@ -1523,9 +1609,117 @@ name = "wax-tags"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "embedded-llm"
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "dreamcomp-ir-plugin-host"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "embedded-llm-tools"
+name = "dreamcomp-plugin-common"
 version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-arena"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps-c-backend"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-e2e-tests"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-edu"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-fast-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-lower"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-mini-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-c-interp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-interp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-solutions-swibb"
+version = "0.6.0-alpha.1"
