@@ -17,3 +17,11 @@ portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x8
 portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
 portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
 portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"] }
+
+# speet frontend (native machine code -> WASM)
+speet-x86_64 = { path = "../../native/speet-x86_64" }
+speet-aarch64 = { path = "../../native/speet-aarch64" }
+speet-link-core = { path = "../speet-link-core" }
+yecta = { path = "../../helper/yecta" }
+wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }
+wasmparser = "0.240.0"

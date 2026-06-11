@@ -65,10 +65,158 @@ pub fn assert_same_platform(bin: &LoadedBinary) -> Result<(), String> {
     Ok(())
 }
 
-// TODO(M1+): the actual speet translation driver:
-//   - construct EntityIndexSpace, register VirtualMemory + host-syscall table,
-//   - call speet_x86_64 / speet_aarch64 `translate_bytes` over the `.text`
-//     section, passing `&ExternalTargets` so external call sites become ambient,
-//   - accumulate BinaryUnits into a MegabinaryBuilder, attach data segments and
-//     the `__guest_entry` export.
-// This requires threading the speet ReactorContext; built up in M1.
+// ── speet translate: guest machine code -> WASM module ───────────────────────
+
+use core::convert::Infallible;
+use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
+use wasm_encoder::{
+    CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
+    FunctionSection, ImportSection, MemorySection, MemoryType, Module, RefType, TableSection,
+    TableType, TypeSection, ValType,
+};
+use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
+
+/// Imports speet's output assumes: `env.__speet_hint`, `env.write`, `env.exit`.
+const N_IMPORTS: u32 = 3;
+
+static REACTOR_TABLE: TableIdx = TableIdx(0);
+
+/// Build a fresh [`ReactorAdapter`] (mirrors the speet-e2e harness `make_rctx`,
+/// with exception handling disabled).
+fn make_rctx<'r>(
+    reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
+    base_func_offset: u32,
+) -> ReactorAdapter<'r, (), Infallible, Function, LocalPool> {
+    let mut rctx = ReactorAdapter {
+        reactor,
+        layout: yecta::LocalLayout::empty(),
+        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        pool: yecta::Pool { handler: &REACTOR_TABLE, ty: TypeIdx(0) },
+        escape_tag: None,
+    };
+    rctx.set_base_func_offset(base_func_offset);
+    rctx
+}
+
+fn collect_params(rctx: &ReactorAdapter<'_, (), Infallible, Function, LocalPool>) -> Vec<ValType> {
+    let mark = rctx.locals_mark();
+    rctx.layout()
+        .iter_before(&mark)
+        .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
+        .collect()
+}
+
+/// Recompiled output of one guest binary: function bodies + their (shared) param
+/// signature (the guest register file) + any unsupported instructions seen.
+pub struct Translated {
+    pub fns: Vec<Function>,
+    pub params: Vec<ValType>,
+    pub unsupported: Vec<String>,
+}
+
+/// Translate a `.text` blob of guest machine code to speet WASM functions.
+pub fn translate(text: &[u8], start_addr: u64, arch: BinArch) -> Translated {
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor, N_IMPORTS);
+    let mut ctx = ();
+
+    let (params, unsupported) = match arch {
+        BinArch::X86_64 => {
+            let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
+            rc.setup_traps(&mut rctx, &mut ctx);
+            let params = collect_params(&rctx);
+            rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                Function::new(a.collect::<Vec<_>>())
+            })
+            .expect("translate_bytes");
+            (params, rc.unsupported_insns().iter().cloned().collect())
+        }
+        BinArch::AArch64 => {
+            let mut rc = speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+            rc.setup_traps(&mut rctx, &mut ctx);
+            let params = collect_params(&rctx);
+            rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                Function::new(a.collect::<Vec<_>>())
+            })
+            .expect("translate_bytes");
+            (params, rc.unsupported_insns().iter().cloned().collect())
+        }
+    };
+
+    Translated { fns: rctx.drain_fns(), params, unsupported }
+}
+
+/// Assemble a single translated binary into a complete WASM module (no exception
+/// handling). The entry (first function) is exported as `_start`. Mirrors the
+/// speet-e2e harness `assemble_module` for one slice.
+pub fn assemble_module(t: &Translated) -> Vec<u8> {
+    let mut types = TypeSection::new();
+    types.ty().function(t.params.clone(), []); // type 0: register-file -> ()
+    types.ty().function([ValType::I32], []); // type 1: hint/exit
+    types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]); // type 2: write
+
+    let mut imports = ImportSection::new();
+    imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(1));
+    imports.import("env", "write", wasm_encoder::EntityType::Function(2));
+    imports.import("env", "exit", wasm_encoder::EntityType::Function(1));
+
+    let mut funcs = FunctionSection::new();
+    for _ in &t.fns {
+        funcs.function(0);
+    }
+
+    let total = t.fns.len() as u32;
+    let table_size = N_IMPORTS + total;
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        minimum: table_size as u64,
+        maximum: Some(table_size as u64),
+        table64: true,
+        shared: false,
+    });
+
+    let mut mems = MemorySection::new();
+    mems.memory(MemoryType {
+        minimum: 64,
+        maximum: None,
+        memory64: true,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    let mut exports = ExportSection::new();
+    exports.export("memory", ExportKind::Memory, 0);
+    exports.export("_start", ExportKind::Func, N_IMPORTS);
+
+    let indices: Vec<u32> = (N_IMPORTS..N_IMPORTS + total).collect();
+    let mut elems = ElementSection::new();
+    elems.active(
+        Some(0),
+        &ConstExpr::i64_const(N_IMPORTS as i64),
+        Elements::Functions(std::borrow::Cow::Borrowed(&indices)),
+    );
+
+    let mut code = CodeSection::new();
+    for f in &t.fns {
+        code.function(f);
+    }
+
+    let mut module = Module::new();
+    module.section(&types);
+    module.section(&imports);
+    module.section(&funcs);
+    module.section(&tables);
+    module.section(&mems);
+    module.section(&exports);
+    module.section(&elems);
+    module.section(&code);
+    module.finish()
+}
+
+/// Recompile a `.text` blob of guest machine code to a complete WASM module.
+pub fn recompile_to_wasm(text: &[u8], start_addr: u64, arch: BinArch) -> (Vec<u8>, Vec<String>) {
+    let t = translate(text, start_addr, arch);
+    let unsupported = t.unsupported.clone();
+    (assemble_module(&t), unsupported)
+}
