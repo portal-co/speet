@@ -53,11 +53,31 @@ Tracks the build-out of the recompiler described in
      MemBase::WasmMemSymbol` so emitted code references `__wasm_mem` (provided by
      `speet-rt`). Memory-touching programs now work, not just `exit`-only.
 
-2. **Entry ABI bridge.** The backend's export dispatcher (`emit_export_dispatchers`)
-   makes `__guest_entry` a stub using the wasm-blitz **NaiveAbi** (custom stack/CTX
-   convention), not the C ABI. The shim's C `main` cannot generally call it directly. For
-   the M1 `exit`-only program the entry never returns (exits via syscall), so the mismatch
-   is benign; a real version needs a SysV/AAPCS64 entry trampoline (the plan's SysVAbi path).
+2. **Entry ABI bridge — RESOLVED (mechanism).** The recompiled guest entry carries the
+   whole guest register file as WASM parameters (32–70 of them). The wasm-blitz **NaiveAbi**
+   needs a host runtime to bootstrap its CTX/operand-stack chain (even wasm-blitz's own
+   tests can't run x86-64 naive standalone), so a NaiveAbi entry trampoline is fragile.
+   Instead we compile the module with **SysVAbi/AAPCS64**, where recompiled functions follow
+   the C ABI directly.
+   - **Blocker found & fixed**: the SysV/AAPCS64 backends only loaded the *register*-passed
+     args (`min(6)`/`min(8)`), dropping stack-passed params — so many-param functions got
+     garbage. Fixed to load params 6+/8+ from the caller's stack frame
+     (`wasm-blitz/crates/blitz-{x86-64,aarch64}/src/sysv.rs`). Verified by two new Unicorn
+     tests (8-param x86-64, 10-param aarch64); full native suite 230 passed.
+   - **Bridge**: the recompiled entry is now directly C-callable. The driver generates the
+     shim's call to it (`__guest_entry(0, 0, …, guest_sp, …, 0)`) passing the initial
+     register values as C arguments — the C compiler handles register+stack placement. No
+     hand-written assembly trampoline required.
+   - **Remaining for integration**: confirm blitz SysV marshals all N args on *internal*
+     tail-calls (`Call`/`return_call`) through the register-file chain, not just at entry.
+
+## Verification capability
+
+`cmake` is now installed, so wasm-blitz's Unicorn-based native test suite runs here
+(`cargo test -p portal-solutions-blitz-tests --test e2e native` → 230 passed). This validated
+the memory-base fix (Raw default unchanged) and the SysV stack-param fix end-to-end under
+emulation. Note: full ELF/Mach-O link+run still needs the driver; Unicorn covers raw native
+code execution without a linker.
 
 ## Host-platform note
 
