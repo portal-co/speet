@@ -1,0 +1,10 @@
+[package]
+name = "speet-recompile"
+version = "0.1.0"
+edition = "2021"
+description = "Full-binary recompiler driver: load host binary -> speet (WASM) -> wasm-blitz (native) -> object -> system link."
+
+[dependencies]
+binary-io = { path = "../../../../binary-io" }
+tunnel = { path = "../../../../tunnel" }
+speet-rt = { path = "../speet-rt" }

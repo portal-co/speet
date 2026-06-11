@@ -28,6 +28,9 @@ members = [
     "crates/os/speet-module-target",
     "crates/os/speet-module-builder",
     "crates/os/speet-linux-wasi",
+    "crates/os/speet-rt",
+    "crates/os/speet-host-syscall",
+    "crates/os/speet-recompile",
     # End-to-end integration tests
     "crates/test/speet-e2e",
 ]

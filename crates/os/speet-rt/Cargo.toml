@@ -1,0 +1,8 @@
+[package]
+name = "speet-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime shim sources for speet full-binary recompiler output (linked by clang into recompiled host binaries)."
+
+[lib]
+path = "src/lib.rs"
