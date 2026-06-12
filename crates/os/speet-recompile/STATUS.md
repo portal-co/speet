@@ -60,6 +60,37 @@ compiler — the full **speet → wasm-blitz → binary-io** pipe now produces a
 to end (~1.1 KB). Added `Unreachable` lowering to the blitz x86-64 backend (it `panic!` d on
 speet's `unreachable`).
 
+## Syscall wiring (M2) — complete on the speet/driver side; blocked in blitz
+
+`speet-host-syscall` builds a Linux RV64 → native-host syscall table
+(`exit`=93, `write`=64) mapping to `env.exit`/`env.write` imports. `frontend::
+translate_rv64`/`recompile_rv64_to_wasm` wire speet-riscv's ecall through
+`WasmSyscallDispatcher` to those imports; the driver threads `func_imports` so
+blitz renders them as `env__exit`/`env__write` and offsets internal indices, and
+prepends the Mach-O `_` to undefined refs to match the C shim. A recompiled RV64
+`exit(42)` guest now **recompiles → validates → lowers → links** cleanly against a
+shim providing `env__exit` (`tests/syscall_e2e.rs::pipeline_reaches_linked_binary`).
+
+**blitz gaps fixed along the way** (native suite still 230 green): `Unreachable`
+(trap), `I64ExtendI32S`/`I64ExtendI32U`, `ReturnCall` (lowered to `call`+`return`),
+a `movsx` 32→64 (MOVSXD) fix in asm-x86-64, and SysV `StartFn` now also publishes
+the `Func{id}` label so delegated calls resolve.
+
+### Critical blocker: blitz inter-function call ABI (SIGSEGV at runtime)
+The recompiled `exit(42)` binary runs but **SIGSEGVs** instead of exiting 42. Root
+cause: blitz's naive `Call`/`ReturnCall` pass arguments via the **operand stack**,
+but the SysV/AAPCS64 function bodies read arguments from **registers**. speet's
+inter-function transitions thread the entire guest register file as call args, so
+each call corrupts it. Two ways forward:
+- **(preferred) SysV-convention call marshalling in blitz**: when lowering a
+  `Call`/`ReturnCall` to a function with N params, pop the N operand-stack args
+  into the SysV/AAPCS64 arg registers + stack before the hardware `call`. Makes
+  SysV bodies + SysV calls consistent and keeps the C-callable entry — unblocks
+  the full run. This is the recommended next task.
+- **(alt) naive-everything + C→naive bootstrap**: compile bodies with the naive
+  operand-stack ABI (internally consistent calls) and add a trampoline that
+  bootstraps the naive CTX/operand-stack chain from the C `main`.
+
 ## Remaining for a fully runnable recompiled guest
 
 - **Termination/observation**: speet functions return nothing and thread state via tail-calls;

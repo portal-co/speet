@@ -220,3 +220,122 @@ pub fn recompile_to_wasm(text: &[u8], start_addr: u64, arch: BinArch) -> (Vec<u8
     let unsupported = t.unsupported.clone();
     (assemble_module(&t), unsupported)
 }
+
+// ── RISC-V guest with host syscall lowering ──────────────────────────────────
+
+/// Number of host-syscall imports (`env.exit`, `env.write`).
+pub const N_SYSCALL_IMPORTS: u32 = 2;
+
+/// Import layout for the native syscall shim: `env.exit` = 0, `env.write` = 1.
+pub fn native_syscall_imports() -> speet_host_syscall::NativeSyscallImports {
+    speet_host_syscall::NativeSyscallImports { exit: 0, write: 1 }
+}
+
+/// Translate an RV64 Linux `.text` blob, lowering `ecall` to the native host
+/// syscall imports (`env.exit`/`env.write`) via [`speet_syscall::WasmSyscallDispatcher`].
+pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
+    use rv_asm::Xlen;
+    let imports = native_syscall_imports();
+    let table = speet_host_syscall::linux_rv64_table(&imports);
+
+    let mut recompiler =
+        speet_riscv::RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+            start_addr, false, true, false,
+        );
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor, N_SYSCALL_IMPORTS);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_params(&rctx);
+
+    let mut dispatcher = speet_syscall::WasmSyscallDispatcher {
+        table: &table,
+        syscall_num_local: speet_host_syscall::A7,
+        syscall_num_is_i64: true,
+        num_params: params.len() as u32,
+        next_pc_func: N_SYSCALL_IMPORTS, // dummy: exit terminates, no continuation
+    };
+    recompiler.set_ecall_callback(&mut dispatcher);
+
+    recompiler
+        .translate_bytes(&mut ctx, &mut rctx, text, start_addr as u32, Xlen::Rv64, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        })
+        .expect("translate_bytes");
+
+    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
+}
+
+/// Assemble an RV64 translation with the native syscall imports
+/// (`env.exit`/`env.write`), entry exported as `_start`. 32-bit linear memory.
+pub fn assemble_syscall_module(t: &Translated) -> Vec<u8> {
+    let mut types = TypeSection::new();
+    types.ty().function(t.params.clone(), []); // type 0: register-file -> ()
+    types.ty().function([ValType::I32], []); // type 1: exit(code)
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]); // type 2: write
+
+    let mut imports = ImportSection::new();
+    imports.import("env", "exit", wasm_encoder::EntityType::Function(1));
+    imports.import("env", "write", wasm_encoder::EntityType::Function(2));
+
+    let mut funcs = FunctionSection::new();
+    for _ in &t.fns {
+        funcs.function(0);
+    }
+
+    let total = t.fns.len() as u32;
+    let table_size = N_SYSCALL_IMPORTS + total;
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        minimum: table_size as u64,
+        maximum: Some(table_size as u64),
+        table64: true,
+        shared: false,
+    });
+
+    let mut mems = MemorySection::new();
+    mems.memory(MemoryType {
+        minimum: 64,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    let mut exports = ExportSection::new();
+    exports.export("memory", ExportKind::Memory, 0);
+    exports.export("_start", ExportKind::Func, N_SYSCALL_IMPORTS);
+
+    let indices: Vec<u32> = (N_SYSCALL_IMPORTS..N_SYSCALL_IMPORTS + total).collect();
+    let mut elems = ElementSection::new();
+    elems.active(
+        Some(0),
+        &ConstExpr::i64_const(N_SYSCALL_IMPORTS as i64),
+        Elements::Functions(std::borrow::Cow::Borrowed(&indices)),
+    );
+
+    let mut code = CodeSection::new();
+    for f in &t.fns {
+        code.function(f);
+    }
+
+    let mut module = Module::new();
+    module.section(&types);
+    module.section(&imports);
+    module.section(&funcs);
+    module.section(&tables);
+    module.section(&mems);
+    module.section(&exports);
+    module.section(&elems);
+    module.section(&code);
+    module.finish()
+}
+
+/// Recompile an RV64 Linux `.text` blob (with `ecall` → host syscalls) to WASM.
+pub fn recompile_rv64_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
+    let t = translate_rv64(text, start_addr);
+    assemble_syscall_module(&t)
+}

@@ -63,11 +63,28 @@ fn function_bodies(wasm: &[u8]) -> Vec<wasmparser::FunctionBody<'_>> {
     bodies
 }
 
+/// Imported functions as `(module, name)` pairs, in import order. blitz renders
+/// a call to import `i` as the external symbol `{module}__{name}` and offsets
+/// internal function indices past the imports.
+fn function_imports(wasm: &[u8]) -> Vec<(String, String)> {
+    let mut imports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
+        if let wasmparser::Payload::ImportSection(reader) = payload {
+            for imp in reader.into_iter().flatten() {
+                if matches!(imp.ty, wasmparser::TypeRef::Func(_)) {
+                    imports.push((imp.module.to_string(), imp.name.to_string()));
+                }
+            }
+        }
+    }
+    imports
+}
+
 /// Render a reloc-target label to its emitted object symbol name, or `None` for
 /// internal (`Func`/`Indexed`) labels that should never appear as relocations.
 enum LabelSym {
     External(String),
-    Internal,
+    Internal(String),
 }
 
 /// Compile a WASM module to a native relocatable object (`.o`) for `arch`/`os`.
@@ -82,14 +99,17 @@ pub fn compile_wasm_to_object(
 ) -> Result<Vec<u8>, String> {
     let (sigs, fsigs) = parse_sigs(wasm);
     let bodies = function_bodies(wasm);
-    let import_count = fsigs.len() as u32 - bodies.len() as u32;
+    let imports = function_imports(wasm);
+    let import_count = imports.len() as u32;
     let raw_ops =
         mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs, import_count);
     let ops = dce_pass!(raw_ops);
+    let import_refs: Vec<(&str, &str)> =
+        imports.iter().map(|(m, n)| (m.as_str(), n.as_str())).collect();
 
     match arch {
-        BinArch::AArch64 => compile_aarch64(ops, arch, os),
-        BinArch::X86_64 => compile_x86_64(ops, arch, os),
+        BinArch::AArch64 => compile_aarch64(ops, &import_refs, arch, os),
+        BinArch::X86_64 => compile_x86_64(ops, &import_refs, arch, os),
     }
 }
 
@@ -115,19 +135,26 @@ where
             });
         }
     }
-    // Relocations: each unresolved external/ambient reference.
+    // Relocations: each unresolved external/ambient reference. On Mach-O, C
+    // symbols carry a leading underscore; `binary-io` auto-mangles *defined*
+    // symbols but not undefined relocation targets, so prepend it here to match
+    // the shim/libc definitions (e.g. `env__exit` -> `_env__exit`).
+    let mangle = |name: String| match os {
+        BinOs::MacOs => format!("_{name}"),
+        BinOs::Linux => name,
+    };
     let mut obj_relocs = Vec::new();
     for (off, sym, kind, addend) in relocs {
         match sym {
             LabelSym::External(name) => obj_relocs.push(ObjReloc {
                 off: off as u64,
-                symbol: name,
+                symbol: mangle(name),
                 kind,
                 addend,
             }),
-            LabelSym::Internal => {
+            LabelSym::Internal(dbg) => {
                 return Err(format!(
-                    "internal label produced an unresolved relocation at offset {off} (codegen bug)"
+                    "internal label {dbg} produced an unresolved relocation at offset {off} (codegen bug)"
                 ))
             }
         }
@@ -156,6 +183,7 @@ trait LabelName {
 
 fn compile_aarch64<'a>(
     ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    func_imports: &[(&str, &str)],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -168,7 +196,7 @@ fn compile_aarch64<'a>(
             match self {
                 AArch64Label::External { name } => LabelSym::External(name.clone()),
                 AArch64Label::Ambient { name } => LabelSym::External(format!("__ambient_{name}")),
-                _ => LabelSym::Internal,
+                other => LabelSym::Internal(format!("{other:?}")),
             }
         }
     }
@@ -187,7 +215,7 @@ fn compile_aarch64<'a>(
     for op in ops {
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
-            &mut out, &mut ctx, archc, &mut state, &[], &op, &mut reencoder, 0,
+            &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
         )
         .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
     }
@@ -210,6 +238,7 @@ fn compile_aarch64<'a>(
 
 fn compile_x86_64<'a>(
     ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    func_imports: &[(&str, &str)],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -222,7 +251,7 @@ fn compile_x86_64<'a>(
             match self {
                 X64Label::External { name } => LabelSym::External(name.clone()),
                 X64Label::Ambient { name } => LabelSym::External(format!("__ambient_{name}")),
-                _ => LabelSym::Internal,
+                other => LabelSym::Internal(format!("{other:?}")),
             }
         }
     }
@@ -240,7 +269,7 @@ fn compile_x86_64<'a>(
     for op in ops {
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
-            &mut out, &mut ctx, archc, &mut state, &[], &op, &mut reencoder, 0,
+            &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
         )
         .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
     }
