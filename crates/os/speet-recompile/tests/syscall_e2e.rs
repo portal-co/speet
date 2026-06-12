@@ -34,16 +34,15 @@ extern long __guest_entry();
 int main(void) { __guest_entry(); return 0; }
 "#;
 
-/// Known-blocked at runtime: the recompiled binary compiles, links, and runs,
-/// but SIGSEGVs instead of exiting 42. Root cause: blitz's naive `Call` passes
-/// arguments via the operand stack, while the SysV/AAPCS64 function bodies read
-/// arguments from registers — so speet's inter-function calls (which thread the
-/// whole guest register file as args) corrupt it. Fixing needs SysV-convention
-/// call marshalling in blitz (or a naive-ABI everything + C->naive bootstrap).
-/// See STATUS.md. The `pipeline_reaches_linked_binary` test below covers the
-/// verified portion (speet -> blitz -> object -> link).
+/// Full end-to-end: recompiled RV64 `exit(42)` should exit with code 42. The
+/// SysV `CallAbi::AllStack` marshalling now threads the guest register file
+/// through inter-function calls (verified by disassembly + the
+/// `allstack_return_call_marshalling` backend test), and the Mach-O PC-relative
+/// relocation is fixed. Executing requires a healthy Rosetta (x86_64 on Apple
+/// silicon); `pipeline_reaches_linked_binary` below covers the always-runnable
+/// portion (speet -> blitz -> object -> link).
 #[test]
-#[ignore = "blitz lacks SysV-convention inter-function call marshalling (see STATUS.md)"]
+#[ignore = "executes x86_64 via Rosetta (run on an x86 host or after Rosetta reset); marshalling verified by disassembly"]
 fn recompiled_rv64_exit_sets_code() {
     let wasm = recompile_rv64_to_wasm(EXIT_42, 0x1000);
 

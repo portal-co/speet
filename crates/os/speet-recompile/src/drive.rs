@@ -107,9 +107,22 @@ pub fn compile_wasm_to_object(
     let import_refs: Vec<(&str, &str)> =
         imports.iter().map(|(m, n)| (m.as_str(), n.as_str())).collect();
 
+    // Per-WASM-function-index param/result counts (imports first, then internal),
+    // used by the backend to marshal call arguments.
+    let call_params: Vec<u32> = fsigs
+        .iter()
+        .map(|&ti| sigs[ti as usize].params().len() as u32)
+        .collect();
+    let call_results: Vec<u32> = fsigs
+        .iter()
+        .map(|&ti| sigs[ti as usize].results().len() as u32)
+        .collect();
+
     match arch {
         BinArch::AArch64 => compile_aarch64(ops, &import_refs, arch, os),
-        BinArch::X86_64 => compile_x86_64(ops, &import_refs, arch, os),
+        BinArch::X86_64 => {
+            compile_x86_64(ops, &import_refs, import_count, &call_params, &call_results, arch, os)
+        }
     }
 }
 
@@ -143,6 +156,24 @@ where
         BinOs::MacOs => format!("_{name}"),
         BinOs::Linux => name,
     };
+    // Mach-O uses *implicit* addends (the value lives in the relocated field),
+    // while ELF (RELA) carries the addend in the relocation entry. asm-arch's
+    // RIP-relative `lea` placeholder is encoded by iced as `disp = -(next_ip)`
+    // (it treats the 0 displacement as an absolute target), which pollutes the
+    // field. For Mach-O we zero the 4-byte field so the linker resolves a clean
+    // `S - next_ip`; the addend (`-4`) becomes 0 via object's pcrel adjustment.
+    // (CALL/JMP placeholders are already zero.)
+    let mut text = text;
+    if os == BinOs::MacOs {
+        for (off, sym, _, _) in &relocs {
+            if matches!(sym, LabelSym::External(_)) {
+                let end = (off + 4).min(text.len());
+                for b in &mut text[*off..end] {
+                    *b = 0;
+                }
+            }
+        }
+    }
     let mut obj_relocs = Vec::new();
     for (off, sym, kind, addend) in relocs {
         match sym {
@@ -239,6 +270,9 @@ fn compile_aarch64<'a>(
 fn compile_x86_64<'a>(
     ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
     func_imports: &[(&str, &str)],
+    n_imports: u32,
+    call_params: &[u32],
+    call_results: &[u32],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -261,6 +295,12 @@ fn compile_x86_64<'a>(
     let archc = X64Arch::default();
     let mut state = sysv::SysVState::default();
     state.mem_base = portal_solutions_blitz_x86_64::naive::MemBase::WasmMemSymbol;
+    // Use the all-on-stack inter-function ABI so the per-instruction register-file
+    // threading round-trips; import calls still use the C ABI (register args).
+    state.call_abi = sysv::CallAbi::AllStack;
+    state.n_imports = n_imports;
+    state.call_params = call_params.to_vec();
+    state.call_results = call_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
     out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })

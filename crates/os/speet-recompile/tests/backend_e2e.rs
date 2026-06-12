@@ -44,7 +44,78 @@ fn const_return_module(val: i64) -> Vec<u8> {
     module.finish()
 }
 
+/// Two internal functions with a `return_call` that forwards a 1-param register
+/// file, plus an `env.exit` import call. Isolates the `CallAbi::AllStack`
+/// marshalling (internal call) + the C-ABI import call from speet's output.
+/// f0 (entry): i64.const 42 ; return_call f1
+/// f1(i64):    local.get 0 ; i32.wrap_i64 ; call env.exit ; unreachable
+fn return_call_module() -> Vec<u8> {
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], []); // type 0: exit(i32)
+    types.ty().function([ValType::I64], []); // type 1: internal (i64)->()
+    module.section(&types);
+    let mut imports = wasm_encoder::ImportSection::new();
+    imports.import("env", "exit", wasm_encoder::EntityType::Function(0));
+    module.section(&imports);
+    let mut functions = FunctionSection::new();
+    functions.function(1); // f0 (wasm idx 1)
+    functions.function(1); // f1 (wasm idx 2)
+    module.section(&functions);
+    let mut exports = ExportSection::new();
+    exports.export("f0", ExportKind::Func, 1);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut f0 = Function::new([]);
+    f0.instruction(&Instruction::I64Const(42));
+    f0.instruction(&Instruction::ReturnCall(2)); // tail-call f1 with arg 42
+    f0.instruction(&Instruction::End);
+    code.function(&f0);
+    let mut f1 = Function::new([]);
+    f1.instruction(&Instruction::LocalGet(0));
+    f1.instruction(&Instruction::I32WrapI64);
+    f1.instruction(&Instruction::Call(0)); // env.exit
+    f1.instruction(&Instruction::Unreachable);
+    f1.instruction(&Instruction::End);
+    code.function(&f1);
+    module.section(&code);
+    module.finish()
+}
+
+// Runs an x86_64 binary via Rosetta; the marshalling itself is verified by
+// disassembly (STATUS.md). Ignored by default because executing requires a
+// healthy Rosetta — re-enable to run on an x86 host or after a Rosetta reset.
 #[test]
+#[ignore = "executes x86_64 via Rosetta (run on an x86 host or after Rosetta reset)"]
+fn allstack_return_call_marshalling() {
+    let wasm = return_call_module();
+    let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    v.validate_all(&wasm).expect("validates");
+    let obj = compile_wasm_to_object(&wasm, BinArch::X86_64, BinOs::MacOs).expect("object");
+
+    let dir = std::env::temp_dir().join(format!("speet_rc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("g.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "#include <unistd.h>\nvoid env__exit(int c){_exit(c);}\nextern long __guest_entry();\nint main(void){__guest_entry();return 0;}\n",
+    )
+    .unwrap();
+    let link = Command::new("clang")
+        .args(["-arch", "x86_64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run");
+    eprintln!("status={run:?}");
+    assert_eq!(run.code(), Some(42), "return_call marshalling should deliver arg → exit(42)");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "executes x86_64 via Rosetta (run on an x86 host or after Rosetta reset)"]
 fn recompiled_const_function_sets_exit_code() {
     let wasm = const_return_module(42);
     let obj = compile_wasm_to_object(&wasm, BinArch::X86_64, BinOs::MacOs)
