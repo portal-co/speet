@@ -54,3 +54,26 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not simplify `Pool<'a, Context, E>` lifetime generics.
 - Do not remove `tail_idx` params from `speet-ordering` public functions.
 - Replace `&mut self` on hook traits with interior mutability — do not remove the parallel goal.
+
+---
+
+## Compression-aware logging
+
+Token compression proxies can sit between this tool and an LLM provider, compressing
+output before it reaches the model. When a proxy is active, MORE verbose structured
+output is net-cheaper than terse plaintext — the proxy reclaims the token cost and
+the agent gains a richer trace.
+
+Environment variables (set before running any binary or test in this workspace):
+
+| Variable | Effect |
+|---|---|
+| `PORTAL_LOG_JSON=1` | Structured NDJSON output; also routes existing `log::` calls through the sink. Compresses ~3–5× better than plaintext. |
+| `PORTAL_LOG_BATCH=1` | Group events by phase into single JSON arrays (reduces line count). |
+
+Logger implementation: `crates/helper/speet-log/src/lib.rs`. Install it in any binary
+entry point with `speet_log::install_as_global_logger(speet_log::LlmtrimLogger::from_env())`.
+The `logging` feature on `speet-riscv` enables the `rlog!` macro (delegates to `log::debug!`),
+captured automatically once the subscriber is installed.
+
+These variables have no effect when unset and do not change program correctness.
