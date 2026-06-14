@@ -122,7 +122,9 @@ pub fn compile_wasm_to_object(
 
     _portal_log.log_event("INFO", "drive", "dispatch to backend", &[("arch", &format!("{arch:?}"), ), ("n_funcs", &bodies.len().to_string())]);
     match arch {
-        BinArch::AArch64 => compile_aarch64(ops, &import_refs, arch, os),
+        BinArch::AArch64 => {
+            compile_aarch64(ops, &import_refs, import_count, &call_params, &call_results, arch, os)
+        }
         BinArch::X86_64 => {
             compile_x86_64(ops, &import_refs, import_count, &call_params, &call_results, arch, os)
         }
@@ -218,6 +220,9 @@ trait LabelName {
 fn compile_aarch64<'a>(
     ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
     func_imports: &[(&str, &str)],
+    n_imports: u32,
+    call_params: &[u32],
+    call_results: &[u32],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -240,6 +245,12 @@ fn compile_aarch64<'a>(
     let archc = AArch64Arch::default();
     let mut state = naive::State::default();
     state.mem_base = naive::MemBase::WasmMemSymbol;
+    // Marshal the full guest register file per AAPCS64 (X0-X7 then stack), matching
+    // the SysV prologue, so inter-function tail calls thread all params correctly.
+    state.call_abi = naive::CallAbi::AllStack;
+    state.n_imports = n_imports;
+    state.call_params = call_params.to_vec();
+    state.call_results = call_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
     // Export the entry (func 0) at offset 0.

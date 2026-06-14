@@ -5,7 +5,7 @@ edition = "2024"
 publish.workspace = true
 
 [dependencies]
-log = { version = "0.4", optional = true }
+log = { version = "0.4", optional = true, features = ["std"] }
 
 [features]
 log-subscriber = ["dep:log"]
