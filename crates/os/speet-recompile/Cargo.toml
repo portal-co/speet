@@ -21,10 +21,11 @@ portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64",
 # speet frontend (native machine code -> WASM)
 speet-x86_64 = { path = "../../native/speet-x86_64" }
 speet-aarch64 = { path = "../../native/speet-aarch64" }
-speet-riscv = { path = "../../native/speet-riscv" }
+speet-riscv = { path = "../../native/speet-riscv", features = ["logging"] }
 speet-syscall = { path = "../speet-syscall" }
 speet-host-syscall = { path = "../speet-host-syscall" }
 speet-link-core = { path = "../speet-link-core" }
+speet-log = { path = "../../helper/speet-log", features = ["log-subscriber"] }
 yecta = { path = "../../helper/yecta" }
 rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }

@@ -97,6 +97,8 @@ pub fn compile_wasm_to_object(
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
+    let _portal_log = speet_log::LlmtrimLogger::from_env();
+    _portal_log.log_event("INFO", "drive", "compile_wasm_to_object start", &[("arch", &format!("{arch:?}"))]);    
     let (sigs, fsigs) = parse_sigs(wasm);
     let bodies = function_bodies(wasm);
     let imports = function_imports(wasm);
@@ -118,6 +120,7 @@ pub fn compile_wasm_to_object(
         .map(|&ti| sigs[ti as usize].results().len() as u32)
         .collect();
 
+    _portal_log.log_event("INFO", "drive", "dispatch to backend", &[("arch", &format!("{arch:?}"), ), ("n_funcs", &bodies.len().to_string())]);
     match arch {
         BinArch::AArch64 => compile_aarch64(ops, &import_refs, arch, os),
         BinArch::X86_64 => {
