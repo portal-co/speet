@@ -9,6 +9,7 @@ members = [
     "crates/helper/speet-wasm-helpers",
     "crates/helper/speet-reach",
     "crates/helper/speet-interp",
+    "crates/helper/speet-log",
     # Native architecture crates
     "crates/native/speet-x86_64",
     "crates/native/speet-riscv",
