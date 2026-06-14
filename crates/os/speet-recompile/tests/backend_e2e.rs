@@ -114,6 +114,41 @@ fn allstack_return_call_marshalling() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// AArch64 native: the `CallAbi::AllStack` tail-call marshalling + C-ABI import
+/// call, run on this host. f0 `return_call`s f1(42); f1 calls `env.exit(42)`.
+/// Currently blocked at link: aarch64 loads an external symbol address with a
+/// single `ADR`, but Mach-O has no ADR relocation — external refs need an
+/// `ADRP`+`ADD` pair (PAGE21/PAGEOFF12). Pending that codegen change in
+/// asm-arch + wasm-blitz; the marshalling itself runs (see Unicorn tests).
+#[cfg(target_arch = "aarch64")]
+#[test]
+#[ignore = "aarch64 Mach-O external calls need ADRP+ADD relocs (PAGE21/PAGEOFF12); pending"]
+fn allstack_return_call_marshalling_aarch64_native() {
+    let wasm = return_call_module();
+    let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    v.validate_all(&wasm).expect("validates");
+    let obj = compile_wasm_to_object(&wasm, BinArch::AArch64, BinOs::MacOs).expect("object");
+
+    let dir = std::env::temp_dir().join(format!("speet_a64rc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("g.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "#include <unistd.h>\nvoid env__exit(int c){_exit(c);}\nextern long __guest_entry();\nint main(void){__guest_entry();return 0;}\n",
+    )
+    .unwrap();
+    let link = Command::new("clang")
+        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run");
+    assert_eq!(run.code(), Some(42), "return_call marshalling should deliver arg → exit(42)");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 #[ignore = "executes x86_64 via Rosetta (run on an x86 host or after Rosetta reset)"]
 fn recompiled_const_function_sets_exit_code() {
@@ -151,5 +186,38 @@ fn recompiled_const_function_sets_exit_code() {
     let run = Command::new(&exe_path).status().expect("run recompiled binary");
     assert_eq!(run.code(), Some(42), "recompiled guest should exit with its return value");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AArch64 native output, end-to-end on this host: compile -> link (native
+/// arm64) -> run -> exit code. This is the same-platform M1 artifact for the
+/// dev host (macOS/arm64). It exercises the 16-byte-slot operand stack that
+/// keeps the hardware SP 16-byte aligned (macOS faults on a misaligned SP);
+/// before that fix this faulted with SIGBUS.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn recompiled_const_function_aarch64_native() {
+    let wasm = const_return_module(42);
+    let obj = compile_wasm_to_object(&wasm, BinArch::AArch64, BinOs::MacOs)
+        .expect("compile to aarch64 object");
+
+    let dir = std::env::temp_dir().join(format!("speet_a64_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("guest.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("guest_exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "extern long __guest_entry(void);\nint main(void){ return (int)__guest_entry(); }\n",
+    )
+    .unwrap();
+
+    let link = Command::new("clang")
+        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("run clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run recompiled binary");
+    assert_eq!(run.code(), Some(42), "recompiled aarch64 guest should exit with its return value");
     let _ = std::fs::remove_dir_all(&dir);
 }
