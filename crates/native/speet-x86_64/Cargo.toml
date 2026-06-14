@@ -6,6 +6,7 @@ license-file = "../../COPYING.md"
 description = "x86_64 to WebAssembly recompiler (basic integer ops)"
 
 [dependencies]
+log = { version = "0.4", optional = true }
 iced-x86 = "1.18.0"
 wasm-encoder = { workspace = true }
 yecta = { path = "../../helper/yecta" }
@@ -24,3 +25,4 @@ wasm-encoder = { workspace = true }
 
 [features]
 default = []
+logging = ["dep:log"]

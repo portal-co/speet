@@ -617,6 +617,8 @@ impl<Context, E> X86Recompiler<Context, E> {
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, wasm_encoder::ValType)> + '_)) -> F
                   + '_),
     ) -> Result<(), E> {
+        #[cfg(feature = "logging")]
+        log::trace!(target: "speet::x86_64", "translate_bytes rip={:#x} len={}", rip, bytes.len());
         let mut dec = Decoder::with_ip(64, bytes, rip, DecoderOptions::NONE);
         while dec.can_decode() {
             let inst = dec.decode();

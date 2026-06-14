@@ -6,6 +6,7 @@ description.workspace = true
 license-file.workspace = true
 
 [dependencies]
+log = { version = "0.4", optional = true }
 disarm64.workspace = true
 wasm-encoder.workspace = true
 wax-core.workspace = true
@@ -16,3 +17,4 @@ speet-link-core = { path = "../../os/speet-link-core" }
 
 [features]
 default = []
+logging = ["dep:log"]
