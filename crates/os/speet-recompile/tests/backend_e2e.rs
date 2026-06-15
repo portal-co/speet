@@ -116,13 +116,10 @@ fn allstack_return_call_marshalling() {
 
 /// AArch64 native: the `CallAbi::AllStack` tail-call marshalling + C-ABI import
 /// call, run on this host. f0 `return_call`s f1(42); f1 calls `env.exit(42)`.
-/// Currently blocked at link: aarch64 loads an external symbol address with a
-/// single `ADR`, but Mach-O has no ADR relocation — external refs need an
-/// `ADRP`+`ADD` pair (PAGE21/PAGEOFF12). Pending that codegen change in
-/// asm-arch + wasm-blitz; the marshalling itself runs (see Unicorn tests).
+/// External symbols are loaded via ADRP+ADD (PAGE21/PAGEOFF12) so the object
+/// links against the shim's `env__exit` on Mach-O.
 #[cfg(target_arch = "aarch64")]
 #[test]
-#[ignore = "aarch64 Mach-O external calls need ADRP+ADD relocs (PAGE21/PAGEOFF12); pending"]
 fn allstack_return_call_marshalling_aarch64_native() {
     let wasm = return_call_module();
     let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());

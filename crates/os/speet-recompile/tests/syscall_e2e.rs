@@ -83,7 +83,6 @@ fn recompiled_rv64_exit_sets_code() {
 /// import → shim → terminate path on the dev host.
 #[cfg(target_arch = "aarch64")]
 #[test]
-#[ignore = "aarch64 Mach-O external calls (env__exit) need ADRP+ADD relocs (PAGE21/PAGEOFF12); pending"]
 fn recompiled_rv64_exit_sets_code_aarch64_native() {
     let wasm = recompile_rv64_to_wasm(EXIT_42, 0x1000);
     let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());

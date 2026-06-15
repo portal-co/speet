@@ -162,14 +162,15 @@ where
         BinOs::Linux => name,
     };
     // Mach-O uses *implicit* addends (the value lives in the relocated field),
-    // while ELF (RELA) carries the addend in the relocation entry. asm-arch's
-    // RIP-relative `lea` placeholder is encoded by iced as `disp = -(next_ip)`
-    // (it treats the 0 displacement as an absolute target), which pollutes the
-    // field. For Mach-O we zero the 4-byte field so the linker resolves a clean
-    // `S - next_ip`; the addend (`-4`) becomes 0 via object's pcrel adjustment.
-    // (CALL/JMP placeholders are already zero.)
+    // while ELF (RELA) carries the addend in the relocation entry. On x86-64,
+    // asm-arch's RIP-relative `lea` placeholder is encoded by iced as
+    // `disp = -(next_ip)` (it treats the 0 displacement as an absolute target),
+    // which pollutes the field, so we zero the 4-byte rel32 so the linker
+    // resolves a clean `S - next_ip`. AArch64 emits ADRP/ADD with a *clean* zero
+    // immediate already, and the opcode bits must survive — so this x86-only
+    // workaround must NOT run there (it would destroy the instruction).
     let mut text = text;
-    if os == BinOs::MacOs {
+    if os == BinOs::MacOs && arch == BinArch::X86_64 {
         for (off, sym, _, _) in &relocs {
             if matches!(sym, LabelSym::External(_)) {
                 let end = (off + 4).min(text.len());
@@ -273,6 +274,8 @@ fn compile_aarch64<'a>(
                 AsmRelocKind::A64Call26 => RelocKind::A64Call26,
                 AsmRelocKind::A64Jump26 => RelocKind::A64Jump26,
                 AsmRelocKind::A64AdrPrel21 => RelocKind::A64AdrPrel21,
+                AsmRelocKind::A64AdrpPage21 => RelocKind::A64AdrpPage21,
+                AsmRelocKind::A64AddAbsLo12 => RelocKind::A64AddAbsLo12,
                 AsmRelocKind::A64CondBr19 => RelocKind::A64Jump26, // unreached for externals
             };
             (r.byte_offset, r.label.label_sym(), kind, r.addend)
