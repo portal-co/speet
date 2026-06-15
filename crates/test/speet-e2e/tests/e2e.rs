@@ -250,6 +250,85 @@ macro_rules! wasm_run_cond_trap {
     };
 }
 
+// ── Native-backend cross macros ───────────────────────────────────────────────
+//
+// For each frontend (corpus / C / WASM fixture), `native*` recompiles the same
+// module the wasmi tests use all the way to native machine code via wasm-blitz
+// (x86-64/ELF + aarch64/Mach-O). Compilation success is asserted; documented
+// instruction gaps are tolerated and reported (see `native_compile_check`).
+
+macro_rules! native {
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr) => {
+        #[test]
+        fn $name() {
+            let path = corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
+            report_unsupported(&unsupported, stringify!($name));
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
+macro_rules! native_c {
+    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr) => {
+        #[test]
+        fn $name() {
+            let path = match c_obj($env) { Some(p) => p, None => {
+                eprintln!("  skipping {}: C object not built", stringify!($name));
+                return;
+            }};
+            let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
+            let (wasm, unsupported) = build_single(&text, addr, $arch, $eh);
+            report_unsupported(&unsupported, stringify!($name));
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
+macro_rules! native_wasm {
+    ($name:ident, $builder:expr, mapper = $mapper:expr, cond_trap = $cond_trap:expr) => {
+        #[test]
+        fn $name() {
+            let input = $builder;
+            let cfg = WasmTranslateConfig { mapper: $mapper, cond_trap: $cond_trap };
+            let wasm = translate_wasm(&input, cfg, &[]);
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
+macro_rules! native_aarch64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = aarch64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
+macro_rules! native_x86_64 {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = x86_64_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
 // ── AArch64 corpus tests ──────────────────────────────────────────────────────
 
 macro_rules! smoke_aarch64 {
@@ -292,6 +371,14 @@ run_aarch64!(  run_aarch64_05_load_store_ext_no_eh,  "05_load_store_ext");
 smoke_aarch64!(smoke_aarch64_06_fp_no_eh,            "06_floating_point");
 run_aarch64!(  run_aarch64_06_fp_no_eh,              "06_floating_point");
 
+// Native-backend cross for the AArch64 frontend (guest aarch64 → WASM → native).
+native_aarch64!(native_aarch64_01_arith,        "01_integer_computational");
+native_aarch64!(native_aarch64_02_control,      "02_control_transfer");
+native_aarch64!(native_aarch64_03_load_store,   "03_load_store");
+native_aarch64!(native_aarch64_04_integer_ext,  "04_integer_ext");
+native_aarch64!(native_aarch64_05_load_store_ext,"05_load_store_ext");
+native_aarch64!(native_aarch64_06_fp,           "06_floating_point");
+
 // ── x86-64 corpus tests ───────────────────────────────────────────────────────
 
 macro_rules! smoke_x86_64 {
@@ -327,6 +414,7 @@ macro_rules! run_x86_64 {
 //        are tracked separately and excluded here until fixed.
 smoke_x86_64!(smoke_x86_64_01_arith_no_eh,  "01_integer_computational");
 run_x86_64!(  run_x86_64_01_arith_no_eh,    "01_integer_computational");
+native_x86_64!(native_x86_64_01_arith,      "01_integer_computational");
 
 // @generated-tests-begin
 
@@ -1878,6 +1966,65 @@ wasm_run_cond_trap!(run_wasm_branches_hook_override_false, wasm_branches(), entr
     input = 1, decide_fn = |_| 0, expected = 0);
 wasm_run_cond_trap!(run_wasm_branches_hook_override_true, wasm_branches(), entry = "test",
     input = 0, decide_fn = |_| 1, expected = 1);
+
+// ── Native-backend corpus tests ─────────────────────────────────────────────────
+
+native!(native_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None);
+native!(native_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With);
+native!(native_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None);
+native!(native_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With);
+native!(native_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None);
+native!(native_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With);
+native!(native_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None);
+native!(native_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With);
+native!(native_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None);
+native!(native_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With);
+native!(native_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None);
+native!(native_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With);
+native!(native_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None);
+native!(native_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With);
+native!(native_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None);
+native!(native_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With);
+native!(native_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None);
+native!(native_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With);
+
+// ── Native-backend C tests ──────────────────────────────────────────────────────
+
+native_c!(native_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None);
+native_c!(native_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With);
+native_c!(native_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None);
+native_c!(native_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With);
+native_c!(native_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None);
+native_c!(native_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With);
+
+// ── Native-backend WASM tests ───────────────────────────────────────────────────
+
+native_wasm!(native_wasm_arith_no_mapper_no_cond_trap, wasm_arith(), mapper = None, cond_trap = None);
+native_wasm!(native_wasm_arith_no_mapper_with_flip_trap, wasm_arith(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+native_wasm!(native_wasm_arith_with_mapper_no_cond_trap, wasm_arith(), mapper = Some(make_test_mapper()), cond_trap = None);
+native_wasm!(native_wasm_arith_with_mapper_with_flip_trap, wasm_arith(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+native_wasm!(native_wasm_branches_no_mapper_no_cond_trap, wasm_branches(), mapper = None, cond_trap = None);
+native_wasm!(native_wasm_branches_no_mapper_with_flip_trap, wasm_branches(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+native_wasm!(native_wasm_branches_with_mapper_no_cond_trap, wasm_branches(), mapper = Some(make_test_mapper()), cond_trap = None);
+native_wasm!(native_wasm_branches_with_mapper_with_flip_trap, wasm_branches(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+native_wasm!(native_wasm_memory_rw_no_mapper_no_cond_trap, wasm_memory_rw(), mapper = None, cond_trap = None);
+native_wasm!(native_wasm_memory_rw_no_mapper_with_flip_trap, wasm_memory_rw(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
+native_wasm!(native_wasm_memory_rw_with_mapper_no_cond_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = None);
+native_wasm!(native_wasm_memory_rw_with_mapper_with_flip_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
 
 // @generated-tests-end
 

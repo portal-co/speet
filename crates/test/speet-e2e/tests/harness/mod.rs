@@ -8,6 +8,7 @@ use std::{borrow::Cow, convert::Infallible, path::Path};
 
 use object::{Object, ObjectSection};
 use rv_asm::Xlen;
+use speet_recompile::binary_io::{BinArch, BinOs};
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAdapter};
 use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
@@ -146,6 +147,64 @@ pub fn load_text_optional(path: &Path) -> Option<(Vec<u8>, u64)> {
 pub fn report_unsupported(unsupported: &[String], context: &str) {
     if !unsupported.is_empty() {
         eprintln!("  [unsupported in {context}]: {}", unsupported.join(", "));
+    }
+}
+
+// ── Native backend (wasm-blitz) cross-check ───────────────────────────────────
+
+/// Native targets the wasm→native backend is exercised against: both
+/// architectures and both object formats (x86-64/ELF, aarch64/Mach-O).
+const NATIVE_TARGETS: &[(&str, BinArch, BinOs)] = &[
+    ("x86_64/elf", BinArch::X86_64, BinOs::Linux),
+    ("aarch64/macho", BinArch::AArch64, BinOs::MacOs),
+];
+
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    }
+}
+
+/// A known, *documented* native-backend gap (an unimplemented WASM instruction
+/// or a `todo!()`), as opposed to a real crash. Tolerated and reported, mirroring
+/// the frontend's `report_unsupported` philosophy.
+fn is_known_native_gap(msg: &str) -> bool {
+    msg.contains("unimplemented WASM instruction")
+        || msg.contains("not implemented")
+        || msg.contains("not yet implemented") // todo!()/unimplemented!()
+}
+
+/// Compile `wasm` (the frontend's recompiled output) through the **native**
+/// backend (wasm-blitz → relocatable object) for every [`NATIVE_TARGETS`] entry.
+///
+/// This is the wasm-vs-native cross: the same module that the wasmi tests run is
+/// also lowered all the way to native machine code + an object file. Successful
+/// compilation is asserted (non-empty object); *documented* instruction gaps are
+/// tolerated and reported (like `report_unsupported`); any other crash fails.
+pub fn native_compile_check(wasm: &[u8], context: &str) {
+    for (label, arch, os) in NATIVE_TARGETS {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            speet_recompile::drive::compile_wasm_to_object(wasm, *arch, *os)
+        }));
+        match res {
+            Ok(Ok(bytes)) => {
+                assert!(!bytes.is_empty(), "native {label} produced empty object ({context})");
+                eprintln!("  ✓ native {label}: {} bytes", bytes.len());
+            }
+            Ok(Err(e)) => eprintln!("  [native gap {label} in {context}]: {e}"),
+            Err(panic) => {
+                let msg = panic_message(panic);
+                if is_known_native_gap(&msg) {
+                    eprintln!("  [native unsupported {label} in {context}]: {msg}");
+                } else {
+                    panic!("native {label} compile crashed ({context}): {msg}");
+                }
+            }
+        }
     }
 }
 

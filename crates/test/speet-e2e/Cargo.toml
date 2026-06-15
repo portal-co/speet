@@ -24,3 +24,5 @@ wasm-layout = { path = "../../helper/wasm-layout" }
 speet-wasm = { path = "../../managed/speet-wasm" }
 speet-linux-wasi = { path = "../../os/speet-linux-wasi" }
 speet-syscall = { path = "../../os/speet-syscall" }
+# Native backend (wasm-blitz) for the wasm-vs-native cross tests; re-exports binary-io.
+speet-recompile = { path = "../../os/speet-recompile" }
