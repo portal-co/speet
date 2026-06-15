@@ -16,8 +16,8 @@
 
 use binary_io::{BinArch, BinOs};
 use portal_solutions_blitz_common::wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
-    TypeSection, ValType,
+    CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
+    FunctionSection, Instruction, Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 use speet_recompile::drive::compile_wasm_to_object;
 use std::process::Command;
@@ -80,6 +80,93 @@ fn return_call_module() -> Vec<u8> {
     code.function(&f1);
     module.section(&code);
     module.finish()
+}
+
+/// A `call_indirect` module exercising the native `__wasm_table`. Three internal
+/// functions of type `(i32)->i64` (`x+10`, `x+20`, `x+30`); the entry dispatches
+/// through the table by index. With no imports, the identity table maps slot i to
+/// `__wasm_func_i`, so calling index `which` runs `f{which}`.
+/// f0 (entry, ()->i64): i32.const 5 ; i32.const `which` ; call_indirect t0 ; return
+fn call_indirect_module(which: i32) -> Vec<u8> {
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], [ValType::I64]); // type 0: (i32)->i64 (table fns)
+    types.ty().function([], [ValType::I64]); // type 1: entry ()->i64
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(1); // f0 entry
+    functions.function(0); // f1
+    functions.function(0); // f2
+    functions.function(0); // f3
+    module.section(&functions);
+    // A funcref table of 4 identity slots, initialised by an active element.
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        table64: false,
+        minimum: 4,
+        maximum: Some(4),
+        shared: false,
+    });
+    module.section(&tables);
+    let mut exports = ExportSection::new();
+    exports.export("f0", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut elems = ElementSection::new();
+    elems.active(Some(0), &ConstExpr::i32_const(0), Elements::Functions((&[0u32, 1, 2, 3][..]).into()));
+    module.section(&elems);
+    let mut code = CodeSection::new();
+    let mut f0 = Function::new([]);
+    f0.instruction(&Instruction::I32Const(5)); // arg
+    f0.instruction(&Instruction::I32Const(which)); // table index (= func index)
+    f0.instruction(&Instruction::CallIndirect { type_index: 0, table_index: 0 });
+    f0.instruction(&Instruction::Return);
+    f0.instruction(&Instruction::End);
+    code.function(&f0);
+    for add in [10i64, 20, 30] {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::I64Const(add));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        code.function(&f);
+    }
+    module.section(&code);
+    module.finish()
+}
+
+/// AArch64 native: dispatch through the recompiled `__wasm_table`. Func index 2
+/// is `f2` (the second table function, `x + 20`), so `f2(5) = 25`. Validates C1
+/// (data-section Abs64 relocs) + C2 (`__wasm_table`/`__wasm_func_N` emission) +
+/// C3 (indirect codegen) end-to-end.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn call_indirect_dispatch_aarch64_native() {
+    let wasm = call_indirect_module(2);
+    let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    v.validate_all(&wasm).expect("validates");
+    let obj = compile_wasm_to_object(&wasm, BinArch::AArch64, BinOs::MacOs).expect("object");
+
+    let dir = std::env::temp_dir().join(format!("speet_a64ci_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("g.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "extern long __guest_entry(void);\nint main(void){ return (int)__guest_entry(); }\n",
+    )
+    .unwrap();
+    let link = Command::new("clang")
+        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run");
+    assert_eq!(run.code(), Some(25), "call_indirect index 2 should run f2(5)=25");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Runs an x86_64 binary via Rosetta; the marshalling itself is verified by

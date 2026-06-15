@@ -10,7 +10,8 @@
 //! `main` calls it, passing the guest's initial register values as C arguments.
 
 use binary_io::{
-    BinArch, BinOs, DefinedSym, ObjReloc, ObjectInput, ObjectWriter, RelocKind, SymSection,
+    BinArch, BinOs, DataBlob, DataReloc, DefinedSym, ObjReloc, ObjectInput, ObjectWriter,
+    RelocKind, SymSection,
 };
 use portal_solutions_blitz_common::{
     dce_pass, ops::mach_operators, wasm_encoder::reencode::RoundtripReencoder, wasmparser,
@@ -120,14 +121,21 @@ pub fn compile_wasm_to_object(
         .map(|&ti| sigs[ti as usize].results().len() as u32)
         .collect();
 
+    // Per-WASM-*type*-index param/result counts, used by `call_indirect`
+    // (whose operand is a type index, not a function index).
+    let sig_params: Vec<u32> = sigs.iter().map(|t| t.params().len() as u32).collect();
+    let sig_results: Vec<u32> = sigs.iter().map(|t| t.results().len() as u32).collect();
+
     _portal_log.log_event("INFO", "drive", "dispatch to backend", &[("arch", &format!("{arch:?}"), ), ("n_funcs", &bodies.len().to_string())]);
     match arch {
-        BinArch::AArch64 => {
-            compile_aarch64(ops, &import_refs, import_count, &call_params, &call_results, arch, os)
-        }
-        BinArch::X86_64 => {
-            compile_x86_64(ops, &import_refs, import_count, &call_params, &call_results, arch, os)
-        }
+        BinArch::AArch64 => compile_aarch64(
+            ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
+            &sig_results, arch, os,
+        ),
+        BinArch::X86_64 => compile_x86_64(
+            ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
+            &sig_results, arch, os,
+        ),
     }
 }
 
@@ -137,12 +145,22 @@ fn finish_object<L>(
     text: Vec<u8>,
     labels: impl IntoIterator<Item = (L, usize)>,
     relocs: Vec<(usize, LabelSym, RelocKind, i64)>,
+    n_imports: u32,
+    func_imports: &[(&str, &str)],
 ) -> Result<Vec<u8>, String>
 where
     L: LabelName,
 {
-    // Defined symbols: every External label that was placed (set_label'd).
+    let mangle = |name: String| match os {
+        BinOs::MacOs => format!("_{name}"),
+        BinOs::Linux => name,
+    };
+
+    // Defined symbols: every External label that was placed (set_label'd), plus a
+    // `__wasm_func_N` local symbol per internal function entry (so `__wasm_table`
+    // slots can take its address).
     let mut defined_syms = Vec::new();
+    let mut func_offsets: Vec<(u32, u64)> = Vec::new();
     for (label, off) in labels {
         if let LabelSym::External(name) = label.label_sym() {
             defined_syms.push(DefinedSym {
@@ -152,15 +170,57 @@ where
                 global: true,
             });
         }
+        if let Some(k) = label.func_index() {
+            defined_syms.push(DefinedSym {
+                name: format!("__wasm_func_{k}"),
+                section: SymSection::Text,
+                offset: off as u64,
+                global: false,
+            });
+            func_offsets.push((k, off as u64));
+        }
     }
+
+    // Build `__wasm_table`: an identity-mapped function-pointer table over every
+    // WASM function index (imports first, then internal). `call_indirect` indexes
+    // it with the guest function index. Slot i < n_imports points at the import's
+    // external symbol; otherwise at the `__wasm_func_{i-n_imports}` local symbol.
+    let n_internal = func_offsets.iter().map(|(k, _)| *k + 1).max().unwrap_or(0);
+    let n_slots = n_imports + n_internal;
+    let abs64 = match arch {
+        BinArch::X86_64 => RelocKind::X86Abs64,
+        BinArch::AArch64 => RelocKind::A64Abs64,
+    };
+    let mut table_relocs = Vec::with_capacity(n_slots as usize);
+    for i in 0..n_slots {
+        let symbol = if i < n_imports {
+            let (m, n) = func_imports[i as usize];
+            mangle(format!("{m}__{n}"))
+        } else {
+            format!("__wasm_func_{}", i - n_imports)
+        };
+        table_relocs.push(DataReloc { off: (i as u64) * 8, symbol, kind: abs64, addend: 0 });
+    }
+    let data = vec![DataBlob {
+        name: "__wasm_table".to_string(),
+        bytes: vec![0u8; n_slots as usize * 8],
+        align: 8,
+        // Writable so the absolute function-pointer relocations are permitted:
+        // macOS rejects text-relocations in a read-only section (they would need
+        // load-time fixups dyld only applies to writable data).
+        writable: true,
+        relocs: table_relocs,
+    }];
+    defined_syms.push(DefinedSym {
+        name: "__wasm_table".to_string(),
+        section: SymSection::Data(0),
+        offset: 0,
+        global: true,
+    });
     // Relocations: each unresolved external/ambient reference. On Mach-O, C
     // symbols carry a leading underscore; `binary-io` auto-mangles *defined*
     // symbols but not undefined relocation targets, so prepend it here to match
     // the shim/libc definitions (e.g. `env__exit` -> `_env__exit`).
-    let mangle = |name: String| match os {
-        BinOs::MacOs => format!("_{name}"),
-        BinOs::Linux => name,
-    };
     // Mach-O uses *implicit* addends (the value lives in the relocated field),
     // while ELF (RELA) carries the addend in the relocation entry. On x86-64,
     // asm-arch's RIP-relative `lea` placeholder is encoded by iced as
@@ -183,6 +243,15 @@ where
     let mut obj_relocs = Vec::new();
     for (off, sym, kind, addend) in relocs {
         match sym {
+            // `__wasm_table` is defined in *this* object, so it must not be
+            // pre-mangled — its `DefinedSym` keys `binary-io`'s symbol map by the
+            // bare name (the format writer applies any leading underscore itself).
+            LabelSym::External(name) if name == "__wasm_table" => obj_relocs.push(ObjReloc {
+                off: off as u64,
+                symbol: name,
+                kind,
+                addend,
+            }),
             LabelSym::External(name) => obj_relocs.push(ObjReloc {
                 off: off as u64,
                 symbol: mangle(name),
@@ -201,7 +270,7 @@ where
         arch,
         os,
         text: &text,
-        data: Vec::new(),
+        data,
         defined_syms,
         relocs: obj_relocs,
     };
@@ -216,6 +285,12 @@ where
 /// Trait to extract a neutral symbol classification from an arch-specific label.
 trait LabelName {
     fn label_sym(&self) -> LabelSym;
+    /// If this label marks an internal function entry, its 0-based internal
+    /// function id (i.e. `wasm_func_idx - n_imports`). Used to emit the
+    /// `__wasm_func_N` symbols that `__wasm_table` slots point at.
+    fn func_index(&self) -> Option<u32> {
+        None
+    }
 }
 
 fn compile_aarch64<'a>(
@@ -224,6 +299,8 @@ fn compile_aarch64<'a>(
     n_imports: u32,
     call_params: &[u32],
     call_results: &[u32],
+    sig_params: &[u32],
+    sig_results: &[u32],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -239,6 +316,15 @@ fn compile_aarch64<'a>(
                 other => LabelSym::Internal(format!("{other:?}")),
             }
         }
+        fn func_index(&self) -> Option<u32> {
+            // aarch64 function entries use `Indexed { id + 0x8000_0000 }`.
+            match self {
+                AArch64Label::Indexed { idx } if *idx >= 0x8000_0000 => {
+                    Some((*idx - 0x8000_0000) as u32)
+                }
+                _ => None,
+            }
+        }
     }
 
     let mut out = AArch64Writer::<AArch64Label>::new();
@@ -252,6 +338,8 @@ fn compile_aarch64<'a>(
     state.n_imports = n_imports;
     state.call_params = call_params.to_vec();
     state.call_results = call_results.to_vec();
+    state.sig_params = sig_params.to_vec();
+    state.sig_results = sig_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
     // Export the entry (func 0) at offset 0.
@@ -281,7 +369,7 @@ fn compile_aarch64<'a>(
             (r.byte_offset, r.label.label_sym(), kind, r.addend)
         })
         .collect();
-    finish_object(arch, os, text, labels, mapped)
+    finish_object(arch, os, text, labels, mapped, n_imports, func_imports)
 }
 
 fn compile_x86_64<'a>(
@@ -290,6 +378,8 @@ fn compile_x86_64<'a>(
     n_imports: u32,
     call_params: &[u32],
     call_results: &[u32],
+    sig_params: &[u32],
+    sig_results: &[u32],
     arch: BinArch,
     os: BinOs,
 ) -> Result<Vec<u8>, String> {
@@ -305,6 +395,12 @@ fn compile_x86_64<'a>(
                 other => LabelSym::Internal(format!("{other:?}")),
             }
         }
+        fn func_index(&self) -> Option<u32> {
+            match self {
+                X64Label::Func { r#fn } => Some(*r#fn),
+                _ => None,
+            }
+        }
     }
 
     let mut out = IcedWriter::<X64Label>::new(0);
@@ -318,6 +414,8 @@ fn compile_x86_64<'a>(
     state.n_imports = n_imports;
     state.call_params = call_params.to_vec();
     state.call_results = call_results.to_vec();
+    state.sig_params = sig_params.to_vec();
+    state.sig_results = sig_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
     out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })
@@ -342,5 +440,5 @@ fn compile_x86_64<'a>(
             (r.byte_offset, r.label.label_sym(), kind, r.addend)
         })
         .collect();
-    finish_object(arch, os, text, labels, mapped)
+    finish_object(arch, os, text, labels, mapped, n_imports, func_imports)
 }
