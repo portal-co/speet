@@ -82,6 +82,143 @@ fn return_call_module() -> Vec<u8> {
     module.finish()
 }
 
+/// A floating-point module exercising the scalar FP backend end-to-end. The
+/// entry `() -> i64` computes, with no imports:
+///   a = sqrt(i64_to_f64(7) / 2.0 + 0.5) = sqrt(4.0) = 2.0
+///   b = promote(3.0f * 3.0f)            = 9.0
+///   trunc_s(a + b) = trunc(11.0) = 11
+/// covering i64->f64 convert, fdiv, fadd, fsqrt, f32 fmul, f64 promote, and
+/// f64->i64 truncation.
+fn fp_module() -> Vec<u8> {
+    use portal_solutions_blitz_common::wasm_encoder::Ieee32;
+    use portal_solutions_blitz_common::wasm_encoder::Ieee64;
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I64]);
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+    let mut exports = ExportSection::new();
+    exports.export("f0", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut f0 = Function::new([]);
+    f0.instruction(&Instruction::I64Const(7));
+    f0.instruction(&Instruction::F64ConvertI64S); // 7.0
+    f0.instruction(&Instruction::F64Const(Ieee64::from(2.0f64)));
+    f0.instruction(&Instruction::F64Div); // 3.5
+    f0.instruction(&Instruction::F64Const(Ieee64::from(0.5f64)));
+    f0.instruction(&Instruction::F64Add); // 4.0
+    f0.instruction(&Instruction::F64Sqrt); // 2.0
+    f0.instruction(&Instruction::F32Const(Ieee32::from(3.0f32)));
+    f0.instruction(&Instruction::F32Const(Ieee32::from(3.0f32)));
+    f0.instruction(&Instruction::F32Mul); // 9.0f
+    f0.instruction(&Instruction::F64PromoteF32); // 9.0
+    f0.instruction(&Instruction::F64Add); // 11.0
+    f0.instruction(&Instruction::I64TruncF64S); // 11
+    f0.instruction(&Instruction::Return);
+    f0.instruction(&Instruction::End);
+    code.function(&f0);
+    module.section(&code);
+    module.finish()
+}
+
+/// FP comparison module: `() -> i64` returning `(2<3) + (3>=3) + (5<1) = 2`,
+/// exercising lt (true), ge (equal boundary, true) and lt (false) — i.e. the
+/// hand-derived FP condition-code mappings.
+fn fp_cmp_module() -> Vec<u8> {
+    use portal_solutions_blitz_common::wasm_encoder::Ieee64;
+    let c = |x: f64| Instruction::F64Const(Ieee64::from(x));
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I64]);
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+    let mut exports = ExportSection::new();
+    exports.export("f0", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut f0 = Function::new([]);
+    f0.instruction(&c(2.0));
+    f0.instruction(&c(3.0));
+    f0.instruction(&Instruction::F64Lt); // 1
+    f0.instruction(&c(3.0));
+    f0.instruction(&c(3.0));
+    f0.instruction(&Instruction::F64Ge); // 1 (equal boundary)
+    f0.instruction(&Instruction::I32Add); // 2
+    f0.instruction(&c(5.0));
+    f0.instruction(&c(1.0));
+    f0.instruction(&Instruction::F64Lt); // 0
+    f0.instruction(&Instruction::I32Add); // 2
+    f0.instruction(&Instruction::I64ExtendI32S);
+    f0.instruction(&Instruction::Return);
+    f0.instruction(&Instruction::End);
+    code.function(&f0);
+    module.section(&code);
+    module.finish()
+}
+
+/// AArch64 native: FP comparisons evaluate to exit code 2 (see [`fp_cmp_module`]).
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn fp_cmp_aarch64_native() {
+    let wasm = fp_cmp_module();
+    let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    v.validate_all(&wasm).expect("validates");
+    let obj = compile_wasm_to_object(&wasm, BinArch::AArch64, BinOs::MacOs).expect("object");
+    let dir = std::env::temp_dir().join(format!("speet_a64fc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("g.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "extern long __guest_entry(void);\nint main(void){ return (int)__guest_entry(); }\n",
+    )
+    .unwrap();
+    let link = Command::new("clang")
+        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run");
+    assert_eq!(run.code(), Some(2), "FP comparisons should evaluate to 2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AArch64 native: the scalar FP pipeline, run on this host. Asserts the FP
+/// expression in [`fp_module`] evaluates to exit code 11.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn fp_arith_aarch64_native() {
+    let wasm = fp_module();
+    let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    v.validate_all(&wasm).expect("validates");
+    let obj = compile_wasm_to_object(&wasm, BinArch::AArch64, BinOs::MacOs).expect("object");
+
+    let dir = std::env::temp_dir().join(format!("speet_a64fp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("g.o");
+    let shim_path = dir.join("shim.c");
+    let exe_path = dir.join("exe");
+    std::fs::write(&obj_path, &obj).unwrap();
+    std::fs::write(
+        &shim_path,
+        "extern long __guest_entry(void);\nint main(void){ return (int)__guest_entry(); }\n",
+    )
+    .unwrap();
+    let link = Command::new("clang")
+        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
+        .output().expect("clang");
+    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe_path).status().expect("run");
+    assert_eq!(run.code(), Some(11), "FP expression should evaluate to 11");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A `call_indirect` module exercising the native `__wasm_table`. Three internal
 /// functions of type `(i32)->i64` (`x+10`, `x+20`, `x+30`); the entry dispatches
 /// through the table by index. With no imports, the identity table maps slot i to
