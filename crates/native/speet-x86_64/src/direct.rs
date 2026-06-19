@@ -608,6 +608,323 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
     }
 
+    /// Map an XMM register to its guest-state WASM local (raw i64 bits). The
+    /// XMM file occupies locals `XMM_BASE_LOCAL .. +16`; scalar SSE only.
+    fn resolve_xmm(reg: Register) -> Option<u32> {
+        use iced_x86::Register;
+        let n: u32 = match reg {
+            Register::XMM0 => 0, Register::XMM1 => 1, Register::XMM2 => 2, Register::XMM3 => 3,
+            Register::XMM4 => 4, Register::XMM5 => 5, Register::XMM6 => 6, Register::XMM7 => 7,
+            Register::XMM8 => 8, Register::XMM9 => 9, Register::XMM10 => 10, Register::XMM11 => 11,
+            Register::XMM12 => 12, Register::XMM13 => 13, Register::XMM14 => 14, Register::XMM15 => 15,
+            _ => return None,
+        };
+        Some(Self::XMM_BASE_LOCAL + n)
+    }
+
+    // ── SSE scalar floating point ────────────────────────────────────────────
+    // XMM registers are stored as raw i64 bit patterns (low 64 bits). Handlers
+    // reinterpret i64↔f64/f32 around native WASM FP ops; loads/stores move the
+    // bits unchanged. Scratch GP temporaries 23/24 are used by `Ucomis*`.
+    const FP_TMP_A: u32 = 23;
+    const FP_TMP_B: u32 = 24;
+
+    /// Stack: i64 bits → fp value (f32 if `f32` else f64).
+    fn sse_bits_to_fp<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, f32: bool) -> Result<(), E> {
+        if f32 {
+            rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+            rctx.feed(ctx, tail_idx, &Instruction::F32ReinterpretI32)
+        } else {
+            rctx.feed(ctx, tail_idx, &Instruction::F64ReinterpretI64)
+        }
+    }
+
+    /// Stack: fp value → i64 bits (zero-extended for f32).
+    fn sse_fp_to_bits<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, f32: bool) -> Result<(), E> {
+        if f32 {
+            rctx.feed(ctx, tail_idx, &Instruction::I32ReinterpretF32)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)
+        } else {
+            rctx.feed(ctx, tail_idx, &Instruction::I64ReinterpretF64)
+        }
+    }
+
+    /// Push operand `op1` (the source) as i64 bits. Handles an XMM register, a
+    /// GP register (for `cvtsi`/`movq`), or memory. Returns `false` if the
+    /// operand kind is unsupported.
+    fn sse_push_src<F>(&mut self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst, size_bits: u32) -> Result<bool, E> {
+        use iced_x86::OpKind;
+        match inst.op1_kind() {
+            OpKind::Register => {
+                let r = inst.op1_register();
+                if let Some(x) = Self::resolve_xmm(r) {
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(x))?;
+                } else if let Some((g, _gs, _z, bit)) = Self::resolve_reg(r) {
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(g))?;
+                    if bit > 0 { self.emit_mask_shift_for_read(ctx, rctx, tail_idx, _gs, bit)?; }
+                    if size_bits == 32 {
+                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                    }
+                } else {
+                    return Ok(false);
+                }
+            }
+            OpKind::Memory => {
+                self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+                self.emit_memory_load(ctx, rctx, tail_idx, size_bits, false)?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Write the i64 on top of stack into GP register `dst` (size 32 or 64),
+    /// zero-extending 32-bit results (mirrors the `Mov` reg-dst path).
+    fn sse_write_gpr<F>(&self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, dst: u32, size_bits: u32) -> Result<(), E> {
+        if size_bits == 32 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+        }
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
+    }
+
+    /// Integer size (bits) of operand `op1` for `cvtsi2s*` (register or memory).
+    fn sse_int_src_size(inst: &IxInst) -> u32 {
+        use iced_x86::OpKind;
+        match inst.op1_kind() {
+            OpKind::Register => Self::resolve_reg(inst.op1_register()).map(|r| r.1).unwrap_or(64),
+            OpKind::Memory => (inst.memory_size().size() as u32) * 8,
+            _ => 64,
+        }
+    }
+
+    /// Translate an SSE scalar FP instruction. Returns `Ok(None)` if `inst` is
+    /// not an SSE instruction this backend recognizes (so the caller falls
+    /// through to `unsupported_insns`).
+    fn handle_sse<F>(&mut self, ctx: &mut Context, rctx: &dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+        use iced_x86::{Mnemonic, OpKind};
+        let m = inst.mnemonic();
+
+        // (wasm f64 op, wasm f32 op) for scalar binary arithmetic.
+        let arith: Option<(Instruction, Instruction)> = match m {
+            Mnemonic::Addsd => Some((Instruction::F64Add, Instruction::F32Add)),
+            Mnemonic::Addss => Some((Instruction::F32Add, Instruction::F32Add)),
+            Mnemonic::Subsd => Some((Instruction::F64Sub, Instruction::F32Sub)),
+            Mnemonic::Subss => Some((Instruction::F32Sub, Instruction::F32Sub)),
+            Mnemonic::Mulsd => Some((Instruction::F64Mul, Instruction::F32Mul)),
+            Mnemonic::Mulss => Some((Instruction::F32Mul, Instruction::F32Mul)),
+            Mnemonic::Divsd => Some((Instruction::F64Div, Instruction::F32Div)),
+            Mnemonic::Divss => Some((Instruction::F32Div, Instruction::F32Div)),
+            Mnemonic::Minsd => Some((Instruction::F64Min, Instruction::F32Min)),
+            Mnemonic::Minss => Some((Instruction::F32Min, Instruction::F32Min)),
+            Mnemonic::Maxsd => Some((Instruction::F64Max, Instruction::F32Max)),
+            Mnemonic::Maxss => Some((Instruction::F32Max, Instruction::F32Max)),
+            _ => None,
+        };
+        if let Some((op64, op32)) = arith {
+            let f32 = matches!(m, Mnemonic::Addss | Mnemonic::Subss | Mnemonic::Mulss | Mnemonic::Divss | Mnemonic::Minss | Mnemonic::Maxss);
+            let dst = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+            let sz = if f32 { 32 } else { 64 };
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+            self.sse_bits_to_fp(ctx, rctx, tail_idx, f32)?;
+            if !self.sse_push_src(ctx, rctx, tail_idx, inst, sz)? { return Ok(None); }
+            self.sse_bits_to_fp(ctx, rctx, tail_idx, f32)?;
+            rctx.feed(ctx, tail_idx, if f32 { &op32 } else { &op64 })?;
+            self.sse_fp_to_bits(ctx, rctx, tail_idx, f32)?;
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+            return Ok(Some(()));
+        }
+
+        match m {
+            // ── unary sqrt: dst = sqrt(src) ──
+            Mnemonic::Sqrtsd | Mnemonic::Sqrtss => {
+                let f32 = m == Mnemonic::Sqrtss;
+                let dst = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, if f32 { 32 } else { 64 })? { return Ok(None); }
+                self.sse_bits_to_fp(ctx, rctx, tail_idx, f32)?;
+                rctx.feed(ctx, tail_idx, if f32 { &Instruction::F32Sqrt } else { &Instruction::F64Sqrt })?;
+                self.sse_fp_to_bits(ctx, rctx, tail_idx, f32)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                Ok(Some(()))
+            }
+
+            // ── bitwise (abs/neg/copysign idioms) on raw bits ──
+            Mnemonic::Andpd | Mnemonic::Andps | Mnemonic::Pand
+            | Mnemonic::Orpd | Mnemonic::Orps | Mnemonic::Por
+            | Mnemonic::Xorpd | Mnemonic::Xorps | Mnemonic::Pxor
+            | Mnemonic::Andnpd | Mnemonic::Andnps => {
+                let dst = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+                let andn = matches!(m, Mnemonic::Andnpd | Mnemonic::Andnps);
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+                if andn {
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?; // ~dst
+                }
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, 64)? { return Ok(None); }
+                let op = match m {
+                    Mnemonic::Andpd | Mnemonic::Andps | Mnemonic::Pand
+                    | Mnemonic::Andnpd | Mnemonic::Andnps => Instruction::I64And,
+                    Mnemonic::Orpd | Mnemonic::Orps | Mnemonic::Por => Instruction::I64Or,
+                    _ => Instruction::I64Xor,
+                };
+                rctx.feed(ctx, tail_idx, &op)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                Ok(Some(()))
+            }
+
+            // ── moves: movsd/movss + the aligned/unaligned reg-copy forms ──
+            Mnemonic::Movsd | Mnemonic::Movss
+            | Mnemonic::Movaps | Mnemonic::Movapd | Mnemonic::Movups | Mnemonic::Movupd
+            | Mnemonic::Movdqa | Mnemonic::Movdqu => {
+                // Disambiguate the string MOVSD from the SSE one: require an XMM operand.
+                let op0_xmm = Self::resolve_xmm(inst.op0_register());
+                let op1_xmm = Self::resolve_xmm(inst.op1_register());
+                if op0_xmm.is_none() && op1_xmm.is_none() { return Ok(None); }
+                let sz = if m == Mnemonic::Movss { 32 } else { 64 };
+                if inst.op0_kind() == OpKind::Memory {
+                    // store [mem], xmm
+                    let src = match op1_xmm { Some(s) => s, None => return Ok(None) };
+                    self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src))?;
+                    self.emit_memory_store(ctx, rctx, tail_idx, sz)?;
+                } else {
+                    // load/copy into xmm dst
+                    let dst = match op0_xmm { Some(d) => d, None => return Ok(None) };
+                    if !self.sse_push_src(ctx, rctx, tail_idx, inst, sz)? { return Ok(None); }
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                }
+                Ok(Some(()))
+            }
+
+            // ── movq / movd: xmm↔gpr, xmm↔mem ──
+            Mnemonic::Movq | Mnemonic::Movd => {
+                let sz = if m == Mnemonic::Movd { 32 } else { 64 };
+                if let Some(dst) = Self::resolve_xmm(inst.op0_register()) {
+                    // dst is xmm ← gpr/mem/xmm
+                    if !self.sse_push_src(ctx, rctx, tail_idx, inst, sz)? { return Ok(None); }
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                    Ok(Some(()))
+                } else if inst.op0_kind() == OpKind::Memory {
+                    let src = match Self::resolve_xmm(inst.op1_register()) { Some(s) => s, None => return Ok(None) };
+                    self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src))?;
+                    if sz == 32 { rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?; rctx.feed(ctx, tail_idx, &Instruction::I64And)?; }
+                    self.emit_memory_store(ctx, rctx, tail_idx, sz)?;
+                    Ok(Some(()))
+                } else if let Some((dst, dsz, _z, bit)) = Self::resolve_reg(inst.op0_register()) {
+                    // dst is gpr ← xmm (op1)
+                    if bit != 0 { return Ok(None); }
+                    let src = match Self::resolve_xmm(inst.op1_register()) { Some(s) => s, None => return Ok(None) };
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src))?;
+                    self.sse_write_gpr(ctx, rctx, tail_idx, dst, dsz)?;
+                    Ok(Some(()))
+                } else {
+                    Ok(None)
+                }
+            }
+
+            // ── compares: set ZF/PF/CF, clear SF/OF (NaN ⇒ ZF=PF=CF=1) ──
+            Mnemonic::Ucomisd | Mnemonic::Ucomiss | Mnemonic::Comisd | Mnemonic::Comiss => {
+                let f32 = matches!(m, Mnemonic::Ucomiss | Mnemonic::Comiss);
+                let a = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(a))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::FP_TMP_A))?;
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, if f32 { 32 } else { 64 })? { return Ok(None); }
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::FP_TMP_B))?;
+                let (ne, eq, lt) = if f32 {
+                    (Instruction::F32Ne, Instruction::F32Eq, Instruction::F32Lt)
+                } else {
+                    (Instruction::F64Ne, Instruction::F64Eq, Instruction::F64Lt)
+                };
+                // Helper sequences (pushed inline): a_fp / b_fp / uno = a!=a | b!=b.
+                let push_a = |this: &mut Self, ctx: &mut Context| -> Result<(), E> {
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::FP_TMP_A))?;
+                    this.sse_bits_to_fp(ctx, rctx, tail_idx, f32)
+                };
+                let push_b = |this: &mut Self, ctx: &mut Context| -> Result<(), E> {
+                    rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::FP_TMP_B))?;
+                    this.sse_bits_to_fp(ctx, rctx, tail_idx, f32)
+                };
+                let push_uno = |this: &mut Self, ctx: &mut Context| -> Result<(), E> {
+                    push_a(this, ctx)?; push_a(this, ctx)?; rctx.feed(ctx, tail_idx, &ne)?;
+                    push_b(this, ctx)?; push_b(this, ctx)?; rctx.feed(ctx, tail_idx, &ne)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I32Or)
+                };
+                // PF = uno
+                push_uno(self, ctx)?;
+                self.emit_flag_set(ctx, rctx, tail_idx, 4)?;
+                // CF = (a < b) | uno
+                push_a(self, ctx)?; push_b(self, ctx)?; rctx.feed(ctx, tail_idx, &lt)?;
+                push_uno(self, ctx)?; rctx.feed(ctx, tail_idx, &Instruction::I32Or)?;
+                self.emit_flag_set(ctx, rctx, tail_idx, 2)?;
+                // ZF = (a == b) | uno
+                push_a(self, ctx)?; push_b(self, ctx)?; rctx.feed(ctx, tail_idx, &eq)?;
+                push_uno(self, ctx)?; rctx.feed(ctx, tail_idx, &Instruction::I32Or)?;
+                self.emit_flag_set(ctx, rctx, tail_idx, 0)?;
+                self.set_sf(ctx, rctx, tail_idx, false)?;
+                self.set_of(ctx, rctx, tail_idx, false)?;
+                Ok(Some(()))
+            }
+
+            // ── int → fp (signed) ──
+            Mnemonic::Cvtsi2sd | Mnemonic::Cvtsi2ss => {
+                let f32 = m == Mnemonic::Cvtsi2ss;
+                let dst = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+                let isz = Self::sse_int_src_size(inst);
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, isz)? { return Ok(None); }
+                if isz <= 32 {
+                    rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                    rctx.feed(ctx, tail_idx, if f32 { &Instruction::F32ConvertI32S } else { &Instruction::F64ConvertI32S })?;
+                } else {
+                    rctx.feed(ctx, tail_idx, if f32 { &Instruction::F32ConvertI64S } else { &Instruction::F64ConvertI64S })?;
+                }
+                self.sse_fp_to_bits(ctx, rctx, tail_idx, f32)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                Ok(Some(()))
+            }
+
+            // ── fp → int (truncating / rounding); saturating to avoid traps ──
+            Mnemonic::Cvttsd2si | Mnemonic::Cvttss2si | Mnemonic::Cvtsd2si | Mnemonic::Cvtss2si => {
+                let f32 = matches!(m, Mnemonic::Cvttss2si | Mnemonic::Cvtss2si);
+                let round = matches!(m, Mnemonic::Cvtsd2si | Mnemonic::Cvtss2si);
+                let (dst, dsz, bit) = match Self::resolve_reg(inst.op0_register()) {
+                    Some((d, s, _z, b)) => (d, s, b),
+                    None => return Ok(None),
+                };
+                if bit != 0 { return Ok(None); }
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, if f32 { 32 } else { 64 })? { return Ok(None); }
+                self.sse_bits_to_fp(ctx, rctx, tail_idx, f32)?;
+                if round { rctx.feed(ctx, tail_idx, if f32 { &Instruction::F32Nearest } else { &Instruction::F64Nearest })?; }
+                let to64 = dsz == 64;
+                let conv = match (f32, to64) {
+                    (false, true)  => Instruction::I64TruncSatF64S,
+                    (false, false) => Instruction::I32TruncSatF64S,
+                    (true,  true)  => Instruction::I64TruncSatF32S,
+                    (true,  false) => Instruction::I32TruncSatF32S,
+                };
+                rctx.feed(ctx, tail_idx, &conv)?;
+                if !to64 { rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?; }
+                self.sse_write_gpr(ctx, rctx, tail_idx, dst, dsz)?;
+                Ok(Some(()))
+            }
+
+            // ── fp width conversions ──
+            Mnemonic::Cvtsd2ss | Mnemonic::Cvtss2sd => {
+                let demote = m == Mnemonic::Cvtsd2ss; // f64 → f32
+                let dst = match Self::resolve_xmm(inst.op0_register()) { Some(d) => d, None => return Ok(None) };
+                if !self.sse_push_src(ctx, rctx, tail_idx, inst, if demote { 64 } else { 32 })? { return Ok(None); }
+                self.sse_bits_to_fp(ctx, rctx, tail_idx, !demote)?; // src precision
+                rctx.feed(ctx, tail_idx, if demote { &Instruction::F32DemoteF64 } else { &Instruction::F64PromoteF32 })?;
+                self.sse_fp_to_bits(ctx, rctx, tail_idx, demote)?;  // dst precision
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+                Ok(Some(()))
+            }
+
+            _ => Ok(None),
+        }
+    }
+
     pub fn translate_bytes<F>(
         &mut self,
         ctx: &mut Context,
@@ -1021,6 +1338,10 @@ impl<Context, E> X86Recompiler<Context, E> {
                     }
                 }
                 Mnemonic::Nop => Ok(Some(())),
+                // HLT halts the (guest) CPU; asm-arch's backend lowers WASM
+                // `Unreachable` to a native `hlt` (naive.rs), so this is the
+                // exact round-trip inverse — not a fallback/gap.
+                Mnemonic::Hlt => { rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?; Ok(Some(())) }
                 Mnemonic::Lea => {
                     if inst.op0_kind() != OpKind::Register || inst.op1_kind() != OpKind::Memory {
                         Ok(None)
@@ -1275,7 +1596,87 @@ impl<Context, E> X86Recompiler<Context, E> {
                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))?;
                     Ok(Some(()))
                 }
-                _ => Ok(None),
+                Mnemonic::Cmove | Mnemonic::Cmovne | Mnemonic::Cmovl | Mnemonic::Cmovle
+                | Mnemonic::Cmovg | Mnemonic::Cmovge | Mnemonic::Cmovb | Mnemonic::Cmovbe
+                | Mnemonic::Cmova | Mnemonic::Cmovae | Mnemonic::Cmovs | Mnemonic::Cmovns
+                | Mnemonic::Cmovo | Mnemonic::Cmovno | Mnemonic::Cmovp | Mnemonic::Cmovnp => {
+                    let condition_type = match inst.mnemonic() {
+                        Mnemonic::Cmove => ConditionType::ZF,
+                        Mnemonic::Cmovne => ConditionType::NZF,
+                        Mnemonic::Cmovl => ConditionType::SF_NE_OF,
+                        Mnemonic::Cmovle => ConditionType::ZF_OR_SF_NE_OF,
+                        Mnemonic::Cmovg => ConditionType::NZF_AND_SF_EQ_OF,
+                        Mnemonic::Cmovge => ConditionType::SF_EQ_OF,
+                        Mnemonic::Cmovb => ConditionType::CF,
+                        Mnemonic::Cmovbe => ConditionType::CF_OR_ZF,
+                        Mnemonic::Cmova => ConditionType::NCF_AND_NZF,
+                        Mnemonic::Cmovae => ConditionType::NCF,
+                        Mnemonic::Cmovs => ConditionType::SF,
+                        Mnemonic::Cmovns => ConditionType::NSF,
+                        Mnemonic::Cmovo => ConditionType::OF,
+                        Mnemonic::Cmovno => ConditionType::NOF,
+                        Mnemonic::Cmovp => ConditionType::PF,
+                        _ => ConditionType::NPF, // Cmovnp
+                    };
+                    self.handle_cmovcc(ctx, rctx, tail_idx, &inst, condition_type)
+                }
+                Mnemonic::Not => {
+                    match inst.op0_kind() {
+                        OpKind::Register => {
+                            if let Some((local, size_bits, _z, bit_offset)) = Self::resolve_reg(inst.op0_register()) {
+                                match size_bits {
+                                    64 => {
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
+                                        Ok(Some(()))
+                                    }
+                                    32 => {
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
+                                        Ok(Some(()))
+                                    }
+                                    16 | 8 => {
+                                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+                                        if bit_offset > 0 {
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(bit_offset as i64))?;
+                                            rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
+                                        }
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+                                        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+                                        self.emit_subreg_merge_write(ctx, rctx, tail_idx, local, size_bits, bit_offset)?;
+                                        Ok(Some(()))
+                                    }
+                                    _ => Ok(None),
+                                }
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        OpKind::Memory => {
+                            let size_bits = (inst.memory_size().size() as u32) * 8;
+                            self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                            self.emit_memory_load(ctx, rctx, tail_idx, size_bits, false)?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I64Const(-1))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(22))?;
+                            self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
+                            self.emit_memory_store(ctx, rctx, tail_idx, size_bits)?;
+                            Ok(Some(()))
+                        }
+                        _ => Ok(None),
+                    }
+                }
+                Mnemonic::Div => self.handle_div(ctx, rctx, tail_idx, &inst, false),
+                Mnemonic::Idiv => self.handle_div(ctx, rctx, tail_idx, &inst, true),
+                // SSE scalar floating point (and a few packed bitwise idioms).
+                _ => self.handle_sse(ctx, rctx, tail_idx, &inst),
             })?;
 
             if undecidable_option.is_none() {
@@ -1458,6 +1859,260 @@ impl<Context, E> X86Recompiler<Context, E> {
         };
         rctx.jmp(ctx, tail_idx, target_func_idx, rctx.locals_mark().total_locals)?;
         Ok(Some(()))
+    }
+
+    /// CMOVcc: build the "would-write" and "unchanged" 64-bit candidates and
+    /// pick between them with `Select` + one `LocalSet`. Unlike an
+    /// unconditional `mov`, CMOVcc performs *no write at all* when the
+    /// condition is false — so a false 32-bit CMOVcc must NOT zero-extend
+    /// (the false candidate is the untouched old register), and a 16-bit
+    /// CMOVcc's true candidate must merge into the dest's untouched upper 48
+    /// bits (since a real 16-bit write, when it happens, never touches them).
+    fn handle_cmovcc<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        inst: &IxInst,
+        condition_type: ConditionType,
+    ) -> Result<Option<()>, E> {
+        let Some((dst, dst_size, _z, _dst_bit)) = Self::resolve_reg(inst.op0_register()) else {
+            return Ok(None);
+        };
+        // Push the source value (the candidate new value) as i64.
+        match inst.op1_kind() {
+            OpKind::Register => {
+                let Some((src_local, src_size, _z, bit)) = Self::resolve_reg(inst.op1_register()) else {
+                    return Ok(None);
+                };
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
+                self.emit_mask_shift_for_read(ctx, rctx, tail_idx, src_size, bit)?;
+            }
+            OpKind::Memory => {
+                self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+                self.emit_memory_load(ctx, rctx, tail_idx, dst_size, false)?;
+            }
+            _ => return Ok(None),
+        }
+        // Stack: [src]. Build [true_val, false_val] per dest width — CMOVcc
+        // is only ever 16/32/64-bit (never 8-bit), so `resolve_reg` always
+        // gives `_dst_bit == 0` here.
+        match dst_size {
+            64 => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+            }
+            32 => {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+            }
+            16 => {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(!0xFFFFi64))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst))?;
+            }
+            _ => return Ok(None),
+        }
+        self.push_condition(ctx, rctx, tail_idx, condition_type)?;
+        rctx.feed(ctx, tail_idx, &Instruction::Select)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
+        Ok(Some(()))
+    }
+
+    /// DIV/IDIV. Scoped to the common compiler-generated pattern: the
+    /// dividend's incoming high half (RDX/EDX/DX, or AH for the 8-bit form)
+    /// is ignored, and the low register is treated as the *entire* dividend,
+    /// zero/sign-extended to 64 bits per `signed`. This is exact for the
+    /// `xor edx,edx; div` / `cdq; idiv` idiom compilers emit, but wrong for a
+    /// genuine 128-bit dividend. Divide-by-zero and signed-overflow
+    /// (`INT64_MIN / -1`) both trap via WASM's native `i64.div_u/s`
+    /// semantics, matching real DIV/IDIV's `#DE` exception — no explicit
+    /// guard needed.
+    fn handle_div<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        inst: &IxInst,
+        signed: bool,
+    ) -> Result<Option<()>, E> {
+        let size_bits = match inst.op0_kind() {
+            OpKind::Register => match Self::resolve_reg(inst.op0_register()) {
+                Some((_, s, _, _)) => s,
+                None => return Ok(None),
+            },
+            OpKind::Memory => (inst.memory_size().size() as u32) * 8,
+            _ => return Ok(None),
+        };
+
+        // Divisor → scratch local 22, zero/sign-extended to i64.
+        match inst.op0_kind() {
+            OpKind::Register => {
+                let Some((r_local, r_size, _z, bit)) = Self::resolve_reg(inst.op0_register()) else {
+                    return Ok(None);
+                };
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(r_local))?;
+                self.emit_mask_shift_for_read(ctx, rctx, tail_idx, r_size, bit)?;
+                if signed {
+                    match r_size {
+                        8 => rctx.feed(ctx, tail_idx, &Instruction::I64Extend8S)?,
+                        16 => rctx.feed(ctx, tail_idx, &Instruction::I64Extend16S)?,
+                        32 => rctx.feed(ctx, tail_idx, &Instruction::I64Extend32S)?,
+                        _ => {}
+                    }
+                }
+            }
+            OpKind::Memory => {
+                self.emit_memory_address(ctx, rctx, tail_idx, inst)?;
+                self.emit_memory_load(ctx, rctx, tail_idx, size_bits, signed)?;
+            }
+            _ => return Ok(None),
+        }
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(22))?;
+
+        // Dividend: the low register (RAX/EAX/AX; AX for the 8-bit form).
+        let dividend_size = if size_bits == 8 { 16 } else { size_bits };
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(0))?;
+        self.emit_mask_shift_for_read(ctx, rctx, tail_idx, dividend_size, 0)?;
+        if signed {
+            match dividend_size {
+                16 => rctx.feed(ctx, tail_idx, &Instruction::I64Extend16S)?,
+                32 => rctx.feed(ctx, tail_idx, &Instruction::I64Extend32S)?,
+                _ => {}
+            }
+        }
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(23))?;
+
+        // Quotient → scratch local 24 (written to its destination below).
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(23))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
+        rctx.feed(ctx, tail_idx, if signed { &Instruction::I64DivS } else { &Instruction::I64DivU })?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(24))?;
+
+        // Remainder → high register (RDX/EDX/DX, or AH for the 8-bit form).
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(23))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
+        rctx.feed(ctx, tail_idx, if signed { &Instruction::I64RemS } else { &Instruction::I64RemU })?;
+        match size_bits {
+            64 => { rctx.feed(ctx, tail_idx, &Instruction::LocalSet(2))?; }
+            32 => {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(2))?;
+            }
+            16 => self.emit_subreg_merge_write(ctx, rctx, tail_idx, 2, 16, 0)?,
+            8 => self.emit_subreg_merge_write(ctx, rctx, tail_idx, 0, 8, 8)?, // AH
+            _ => return Ok(None),
+        }
+
+        // Quotient → low register (RAX/EAX/AX/AL).
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
+        match size_bits {
+            64 => { rctx.feed(ctx, tail_idx, &Instruction::LocalSet(0))?; }
+            32 => {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(0xFFFFFFFF))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalSet(0))?;
+            }
+            16 => self.emit_subreg_merge_write(ctx, rctx, tail_idx, 0, 16, 0)?,
+            8 => self.emit_subreg_merge_write(ctx, rctx, tail_idx, 0, 8, 0)?, // AL
+            _ => return Ok(None),
+        }
+        Ok(Some(()))
+    }
+
+    /// Push the i32 boolean value of `condition_type` onto the WASM stack,
+    /// mirroring `ConditionSnippet::emit_instruction` but through `rctx.feed`
+    /// directly — used by `Cmovcc`, which needs the condition as a plain
+    /// stack value rather than as a `JumpCallParams` snippet.
+    fn push_condition<F>(
+        &self,
+        ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        condition_type: ConditionType,
+    ) -> Result<(), E> {
+        match condition_type {
+            ConditionType::ZF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+            }
+            ConditionType::NZF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+            ConditionType::SF_NE_OF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+            }
+            ConditionType::ZF_OR_SF_NE_OF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Or)?;
+            }
+            ConditionType::NZF_AND_SF_EQ_OF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
+            }
+            ConditionType::SF_EQ_OF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+            ConditionType::CF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::CF_LOCAL))?;
+            }
+            ConditionType::CF_OR_ZF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::CF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Or)?;
+            }
+            ConditionType::NCF_AND_NZF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::CF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::ZF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
+            }
+            ConditionType::NCF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::CF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+            ConditionType::SF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+            }
+            ConditionType::NSF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::SF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+            ConditionType::OF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+            }
+            ConditionType::NOF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::OF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+            ConditionType::PF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::PF_LOCAL))?;
+            }
+            ConditionType::NPF => {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::PF_LOCAL))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I32Eqz)?;
+            }
+        }
+        Ok(())
     }
 
     fn handle_conditional_jump<F>(

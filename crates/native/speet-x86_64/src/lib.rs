@@ -80,6 +80,9 @@ pub struct X86Recompiler<Context, E> {
     flags_slot: yecta::LocalSlot,
     /// Slot for 4 i64 temporaries (including expected_RA at index 3).
     tmp_slot: yecta::LocalSlot,
+    /// Slot for XMM0–XMM15, stored as raw `i64` bit patterns (low 64 bits;
+    /// scalar SSE only). FP handlers reinterpret around WASM FP ops.
+    xmm_slot: yecta::LocalSlot,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -113,6 +116,7 @@ impl<Context, E> X86Recompiler<Context, E> {
             rip_slot: yecta::LocalSlot::default(),
             flags_slot: yecta::LocalSlot::default(),
             tmp_slot: yecta::LocalSlot::default(),
+            xmm_slot: yecta::LocalSlot::default(),
             enable_speculative_calls: false,
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
@@ -237,8 +241,11 @@ impl<Context, E> X86Recompiler<Context, E> {
 
     /// x86-64 base parameter count:
     /// 16 GPRs (i64) + PC (i32) + ZF + SF + CF + OF + PF (5×i32) + 4 temp i64s
-    /// + expected_RA (i64) = 26.
-    pub const BASE_PARAMS: u32 = 26;
+    /// + expected_RA (i64) + 16 XMM (i64, locals 26–41) = 42.
+    pub const BASE_PARAMS: u32 = 42;
+
+    /// Local index of XMM0 (the XMM register file occupies locals 26–41).
+    const XMM_BASE_LOCAL: u32 = 26;
 
     /// **Phase 1** — register trap parameters and compute `total_params`.
     ///
@@ -253,6 +260,7 @@ impl<Context, E> X86Recompiler<Context, E> {
         self.rip_slot   = rctx.layout_mut().append(1,  wasm_encoder::ValType::I32); // RIP
         self.flags_slot = rctx.layout_mut().append(5,  wasm_encoder::ValType::I32); // ZF SF CF OF PF
         self.tmp_slot   = rctx.layout_mut().append(4,  wasm_encoder::ValType::I64); // tmp0-3 + expected_RA
+        self.xmm_slot   = rctx.layout_mut().append(16, wasm_encoder::ValType::I64); // XMM0–15 (raw bits)
         let mut unit = ();
         let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
             Some(m) => m as &mut dyn LocalDeclarator,
@@ -646,6 +654,39 @@ impl<Context, E> X86Recompiler<Context, E> {
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
         Ok(())
     }
+
+    /// Merge-write the low `width_bits` of the i64 on top of the stack into
+    /// `local`'s sub-register field at `bit_offset`, preserving every other
+    /// bit of `local`. Stack: `[value] -> []`. Unlike `emit_subreg_write_rmw`
+    /// above (which has a masking bug that drops the preserved bits whenever
+    /// `bit_offset == 0`), this is correct — new 8/16-bit-write call sites
+    /// should use this instead.
+    pub(crate) fn emit_subreg_merge_write<F>(
+        &self,
+        ctx: &mut Context,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        local: u32,
+        width_bits: u32,
+        bit_offset: u32,
+    ) -> Result<(), E> {
+        let width_mask: i64 = if width_bits == 64 { -1i64 } else { (1i64 << width_bits) - 1 };
+        if width_bits != 64 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(width_mask))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+        }
+        if bit_offset > 0 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(bit_offset as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
+        }
+        let field_mask = width_mask << bit_offset;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(!field_mask))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
+        Ok(())
+    }
 }
 enum Operand {
     Imm(i64),
@@ -707,11 +748,12 @@ where
         entry_points: Vec<(String, u32)>,
     ) -> BinaryUnit<F> {
         // Build the uniform function type matching setup_traps():
-        // 16 x i64 GPRs, 1 x i32 PC, 5 x i32 flags, 4 x i64 temps.
+        // 16 x i64 GPRs, 1 x i32 PC, 5 x i32 flags, 4 x i64 temps, 16 x i64 XMM.
         let mut param_types: alloc::vec::Vec<ValType> = alloc::vec::Vec::with_capacity(Self::BASE_PARAMS as usize);
         param_types.extend((0..16).map(|_| ValType::I64));
         param_types.extend((0..6).map(|_| ValType::I32));
         param_types.extend((0..4).map(|_| ValType::I64));
+        param_types.extend((0..16).map(|_| ValType::I64)); // XMM0–15 (raw bits)
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
         let base = rctx.base_func_offset();

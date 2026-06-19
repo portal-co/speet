@@ -18,7 +18,8 @@
 //! scalar loads/stores unsigned-offset (`LDR`, `LDRB`, `LDRH`, `LDRSW`,
 //! `STR`, `STRB`, `STRH`), pre/post-index loads/stores, register-offset
 //! loads/stores, load/store pairs (`LDP`, `STP`, `LDPSW`),
-//! floating-point arithmetic (`FADD`, `FSUB`, `FMUL`, `FDIV`, `FMADD`, `FMSUB`),
+//! floating-point arithmetic (`FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FMIN`,
+//! `FMAX`, `FMINNM`, `FMAXNM`, `FMADD`, `FMSUB`, `FNMADD`, `FNMSUB`),
 //! FP unary (`FABS`, `FNEG`, `FSQRT`, `FMOV`), FP conversions
 //! (`SCVTF`, `UCVTF`, `FCVTZS`, `FCVTZU`), FP compare (`FCMP`), FP select (`FCSEL`).
 //!

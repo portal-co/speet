@@ -57,6 +57,20 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
+## 6. asm-arch ↔ speet instruction sync (`speet-x86_64`, `speet-aarch64`)
+
+**Guide:** [docs/guides/asm-arch-instruction-sync.md](docs/guides/asm-arch-instruction-sync.md)
+
+- speet's frontends must be able to decode every instruction family asm-arch's `WriterCore`
+  emitter trait can produce — that's the invariant this sync maintains, not general ISA
+  completeness.
+- Do not assume a `WriterCore` method name matches its real encoding — verify against the
+  binary writer impl (`iced.rs`/`bin.rs`) before concluding something is a gap.
+- Do not assume one disarm64 enum variant = one instruction form — some merge multiple
+  width/precision combinations, distinguished only by raw instruction bits.
+
+---
+
 ## Compression-aware logging
 
 Token compression proxies can sit between this tool and an LLM provider, compressing

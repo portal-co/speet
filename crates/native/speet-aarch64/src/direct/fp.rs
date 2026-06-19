@@ -1,7 +1,13 @@
 //! Floating-point operation handlers.
 //!
-//! FP registers V0–V31 are stored as f64 locals (`fp_slot`).
-//! Single-precision (S-register) operations demote/promote through f32.
+//! FP registers V0–V31 are stored as f64 locals (`fp_slot`). Arithmetic
+//! (FLOATDP1/2/3) runs in f64 for both single- and double-precision forms —
+//! single-precision ops are *not* demoted/promoted around the WASM op, so
+//! results can differ from real hardware in the low mantissa bits/rounding
+//! (a known approximation, not yet closed). Conversions that cross the
+//! GPR/FP boundary (FLOAT2INT) do demote/promote through f32 where the
+//! source or destination is genuinely single-precision, since that boundary
+//! is where bit-exactness is cheap to get right.
 
 use crate::*;
 use super::helpers::*;
@@ -17,7 +23,7 @@ fn f64c(v: f64) -> Instruction<'static> { Instruction::F64Const(Ieee64::from(v))
 
 impl<Context, E> AArch64Recompiler<Context, E> {
 
-    // ── FLOATDP2 (binary arithmetic: FADD, FSUB, FMUL, FDIV, FNMUL) ──────────
+    // ── FLOATDP2 (binary arithmetic: FADD, FSUB, FMUL, FDIV, FNMUL, FMIN(NM), FMAX(NM)) ──
 
     pub(super) fn translate_floatdp2<F>(
         &mut self,
@@ -32,18 +38,26 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                      self.unsupported_insns.insert(alloc::format!("{:?}", mnemonic));
                      return Ok(()); }};
         }
-        // op: 0=FADD 1=FSUB 2=FMUL 3=FDIV 4=FNMUL
+        // op: 0=FADD 1=FSUB 2=FMUL 3=FDIV 4=FNMUL 5=FMIN/FMINNM 6=FMAX/FMAXNM
         let (w, op) = match inner {
-            FLOATDP2::FADD_Fd_Fn_Fm(x)              => (x.0, 0u8),
-            FLOATDP2::FADD_Fd_S_S_Fn_S_S_Fm_S_S(x)  => (x.0, 0u8),
-            FLOATDP2::FSUB_Fd_Fn_Fm(x)              => (x.0, 1u8),
-            FLOATDP2::FSUB_Fd_S_S_Fn_S_S_Fm_S_S(x)  => (x.0, 1u8),
-            FLOATDP2::FMUL_Fd_Fn_Fm(x)              => (x.0, 2u8),
-            FLOATDP2::FMUL_Fd_S_S_Fn_S_S_Fm_S_S(x)  => (x.0, 2u8),
-            FLOATDP2::FDIV_Fd_Fn_Fm(x)              => (x.0, 3u8),
-            FLOATDP2::FDIV_Fd_S_S_Fn_S_S_Fm_S_S(x)  => (x.0, 3u8),
-            FLOATDP2::FNMUL_Fd_Fn_Fm(x)             => (x.0, 4u8),
-            FLOATDP2::FNMUL_Fd_S_S_Fn_S_S_Fm_S_S(x) => (x.0, 4u8),
+            FLOATDP2::FADD_Fd_Fn_Fm(x)               => (x.0, 0u8),
+            FLOATDP2::FADD_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 0u8),
+            FLOATDP2::FSUB_Fd_Fn_Fm(x)               => (x.0, 1u8),
+            FLOATDP2::FSUB_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 1u8),
+            FLOATDP2::FMUL_Fd_Fn_Fm(x)               => (x.0, 2u8),
+            FLOATDP2::FMUL_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 2u8),
+            FLOATDP2::FDIV_Fd_Fn_Fm(x)               => (x.0, 3u8),
+            FLOATDP2::FDIV_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 3u8),
+            FLOATDP2::FNMUL_Fd_Fn_Fm(x)              => (x.0, 4u8),
+            FLOATDP2::FNMUL_Fd_S_S_Fn_S_S_Fm_S_S(x)  => (x.0, 4u8),
+            FLOATDP2::FMIN_Fd_Fn_Fm(x)               => (x.0, 5u8),
+            FLOATDP2::FMIN_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 5u8),
+            FLOATDP2::FMINNM_Fd_Fn_Fm(x)             => (x.0, 5u8),
+            FLOATDP2::FMINNM_Fd_S_S_Fn_S_S_Fm_S_S(x) => (x.0, 5u8),
+            FLOATDP2::FMAX_Fd_Fn_Fm(x)               => (x.0, 6u8),
+            FLOATDP2::FMAX_Fd_S_S_Fn_S_S_Fm_S_S(x)   => (x.0, 6u8),
+            FLOATDP2::FMAXNM_Fd_Fn_Fm(x)             => (x.0, 6u8),
+            FLOATDP2::FMAXNM_Fd_S_S_Fn_S_S_Fm_S_S(x) => (x.0, 6u8),
             _ => unsup!(),
         };
         let dest = rd(w);
@@ -62,7 +76,9 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 0 => &Instruction::F64Add,
                 1 => &Instruction::F64Sub,
                 2 => &Instruction::F64Mul,
-                _ => &Instruction::F64Div,
+                3 => &Instruction::F64Div,
+                5 => &Instruction::F64Min,
+                _ => &Instruction::F64Max,
             };
             rctx.feed(ctx, tail_idx, insn)?;
         }
@@ -242,66 +258,89 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
-            // SCVTF Fd, Xn — signed integer (i64) → double
-            FLOAT2INT::SCVTF_Fd_Rn(x) => {
-                let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64S)?;
-                self.emit_fp_set(ctx, rctx, tail_idx, rd(w))?;
-            }
-            // SCVTF Sd, Wn — signed integer (i32) → single (stored as f64)
+            // SCVTF Hd, {Wn,Xn} — FP16 destination, not modeled; falls through to unsup!().
+            FLOAT2INT::SCVTF_Fd_Rn(_) => unsup!(),
+            // SCVTF {Sd,Dd}, {Wn,Xn} — signed integer → FP.
+            // disarm64 merges all four width combos into this one enum variant
+            // (distinguished only by the raw `sf`/`ftype` bits, not by separate
+            // variants) — must branch on them instead of assuming Wn→single.
             FLOAT2INT::SCVTF_Fd_S_D_Rn_W(x) => {
                 let w = x.0;
                 self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32S)?;
-                rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                let src_is_64 = sf_bit(w) == 1;
+                let dst_is_double = ftype(w) == 1;
+                if !src_is_64 {
+                    rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                }
+                match (src_is_64, dst_is_double) {
+                    (false, false) => {
+                        rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                    }
+                    (false, true) => { rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI32S)?; }
+                    (true, false) => {
+                        rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI64S)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                    }
+                    (true, true) => { rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64S)?; }
+                }
                 self.emit_fp_set(ctx, rctx, tail_idx, rd(w))?;
             }
-            // UCVTF Fd, Xn — unsigned integer (i64) → double
-            FLOAT2INT::UCVTF_Fd_Rn(x) => {
-                let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64U)?;
-                self.emit_fp_set(ctx, rctx, tail_idx, rd(w))?;
-            }
-            // UCVTF Sd, Wn — unsigned integer (i32) → single
+            // UCVTF Hd, {Wn,Xn} — FP16 destination, not modeled; falls through to unsup!().
+            FLOAT2INT::UCVTF_Fd_Rn(_) => unsup!(),
+            // UCVTF {Sd,Dd}, {Wn,Xn} — unsigned integer → FP (see SCVTF comment above).
             FLOAT2INT::UCVTF_Fd_S_D_Rn_W(x) => {
                 let w = x.0;
                 self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32U)?;
-                rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                let src_is_64 = sf_bit(w) == 1;
+                let dst_is_double = ftype(w) == 1;
+                if !src_is_64 {
+                    rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+                }
+                match (src_is_64, dst_is_double) {
+                    (false, false) => {
+                        rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI32U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                    }
+                    (false, true) => { rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI32U)?; }
+                    (true, false) => {
+                        rctx.feed(ctx, tail_idx, &Instruction::F32ConvertI64U)?;
+                        rctx.feed(ctx, tail_idx, &Instruction::F64PromoteF32)?;
+                    }
+                    (true, true) => { rctx.feed(ctx, tail_idx, &Instruction::F64ConvertI64U)?; }
+                }
                 self.emit_fp_set(ctx, rctx, tail_idx, rd(w))?;
             }
-            // FCVTZS Xd, Fn — double → signed i64 (truncate toward zero)
-            FLOAT2INT::FCVTZS_Rd_Fn(x) => {
-                let w = x.0;
-                self.emit_fp_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64S)?;
-                self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
-            }
-            // FCVTZS Wd, Fn — double → signed i32 (truncate), zero-extend to i64
+            // FCVTZS Hd, Fn — FP16 source, not modeled; falls through to unsup!().
+            FLOAT2INT::FCVTZS_Rd_Fn(_) => unsup!(),
+            // FCVTZS {Wd,Xd}, {Sn,Dn} — FP → signed integer (truncate toward zero).
+            // Source precision (ftype) doesn't affect our WASM lowering: V-regs are
+            // always stored f64-promoted-exact, so I64TruncF64S on that value is
+            // bit-identical to I64TruncF32S on the genuine f32 — only the
+            // *destination* width (sf) needs to be read here.
             FLOAT2INT::FCVTZS_Rd_W_Fn_S_D(x) => {
                 let w = x.0;
                 self.emit_fp_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64S)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                if sf_bit(w) == 1 {
+                    rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64S)?;
+                } else {
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                }
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
-            // FCVTZU Xd, Fn — double → unsigned i64 (truncate)
-            FLOAT2INT::FCVTZU_Rd_Fn(x) => {
-                let w = x.0;
-                self.emit_fp_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64U)?;
-                self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
-            }
-            // FCVTZU Wd, Fn — double → unsigned i32 (truncate)
+            // FCVTZU Hd, Fn — FP16 source, not modeled; falls through to unsup!().
+            FLOAT2INT::FCVTZU_Rd_Fn(_) => unsup!(),
+            // FCVTZU {Wd,Xd}, {Sn,Dn} — FP → unsigned integer (see FCVTZS comment above).
             FLOAT2INT::FCVTZU_Rd_W_Fn_S_D(x) => {
                 let w = x.0;
                 self.emit_fp_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64U)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                if sf_bit(w) == 1 {
+                    rctx.feed(ctx, tail_idx, &Instruction::I64TruncF64U)?;
+                } else {
+                    rctx.feed(ctx, tail_idx, &Instruction::I32TruncF64U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                }
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
             _ => unsup!(),

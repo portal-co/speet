@@ -31,6 +31,7 @@ Guides are alignment signals, not hard stops. They work like Claude Code's conte
 | [linker.md](linker.md) | `speet-link-core`, `speet-linker`, `wasm-layout`, `speet-link`, `speet-schedule` | Do not merge two-pass into one; do not add entity declarations inside emit closures; do not add `Reactor` back to `LinkerInner` |
 | [arch-recompilers.md](arch-recompilers.md) | `speet-x86_64`, `speet-riscv`, `speet-mips`, `speet-dex` | Do not remove `ctx: &mut Context` from `setup_traps` |
 | [parallel-api.md](parallel-api.md) | `yecta`, `speet-ordering`, `speet-link`, all arch frontends | Do not revert `feed`/`seal`/`barrier`/`jmp_tail` refactor; replace `&mut self` on hooks with interior mutability |
+| [asm-arch-instruction-sync.md](asm-arch-instruction-sync.md) | `speet-x86_64`, `speet-aarch64` | Do not assume a `WriterCore` method name matches its real encoding — verify against the binary writer impl before concluding something is in sync or a gap |
 
 ---
 

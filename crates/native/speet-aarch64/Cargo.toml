@@ -15,6 +15,11 @@ speet-traps = { path = "../../helper/speet-traps" }
 speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
 
+[dev-dependencies]
+yecta = { path = "../../helper/yecta" }
+speet-link-core = { path = "../../os/speet-link-core" }
+wasm-encoder.workspace = true
+
 [features]
 default = []
 logging = ["dep:log"]
