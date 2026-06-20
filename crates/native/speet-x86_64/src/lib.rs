@@ -754,7 +754,10 @@ where
         param_types.extend((0..6).map(|_| ValType::I32));
         param_types.extend((0..4).map(|_| ValType::I64));
         param_types.extend((0..16).map(|_| ValType::I64)); // XMM0–15 (raw bits)
-        let func_type = FuncType::from_val_types(&param_types, &[]);
+        // Register-file ABI: (register_file) -> (register_file) — results
+        // mirror params. Required by speculative calls' Block/TryTable/Catch
+        // and the ABI-compliant `Return` path (see handle_ret).
+        let func_type = FuncType::from_val_types(&param_types, &param_types);
 
         let base = rctx.base_func_offset();
         let fns = rctx.drain_fns();

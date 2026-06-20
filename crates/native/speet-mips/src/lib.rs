@@ -2221,6 +2221,11 @@ where
         let total_params = rctx.locals_mark().total_locals;
         let param_types: alloc::vec::Vec<ValType> =
             (0..total_params).map(|_| ValType::I32).collect();
+        // MIPS has no speculative-call/escape-tag support (no bare `Return`
+        // pushing a register file to satisfy non-empty results) — keep the
+        // original `-> ()` shape rather than widening it without anything to
+        // verify it against (widening this unconditionally regressed AArch64
+        // for the same reason; see speet-e2e harness's assemble_module).
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
         let base = rctx.base_func_offset();

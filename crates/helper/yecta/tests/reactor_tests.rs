@@ -3,9 +3,84 @@
 //! These tests verify the core functionality of the yecta reactor,
 //! which manages WebAssembly function generation with complex control flow.
 
+use std::cell::Cell;
 use wasm_encoder::{Function, Instruction, ValType};
-use wax_core::build::InstructionSink;
+use wax_core::build::{InstructionSink, InstructionSource};
 use yecta::{EscapeTag, FuncIdx, JumpCallParams, Pool, Reactor, TableIdx, TagIdx, Target, TypeIdx};
+
+/// Test-only condition snippet that emits a single known `i32` constant.
+struct ConstCondition(i32);
+impl<Context, E> InstructionSource<Context, E> for ConstCondition {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::I32Const(self.0))
+    }
+}
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ConstCondition {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        self.emit_instruction(ctx, sink)
+    }
+}
+
+/// Test-only `condition_hook` that records how many times it fired and emits
+/// nothing (an identity hook — see `JumpCallParams::with_condition_hook`'s
+/// contract: it must leave whatever's already on the stack as the single i32
+/// the `if` would consume).
+struct CountingHook<'a>(&'a Cell<u32>);
+impl<Context, E> InstructionSource<Context, E> for CountingHook<'_> {
+    fn emit_instruction(
+        &self,
+        _ctx: &mut Context,
+        _sink: &mut (dyn InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        self.0.set(self.0.get() + 1);
+        Ok(())
+    }
+}
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for CountingHook<'_> {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        self.emit_instruction(ctx, sink)
+    }
+}
+
+/// Test-only `Target::Dynamic` index snippet computing `local(local_idx) + k`
+/// — mirrors the shape of real indirect-target snippets like
+/// `JalrTargetSnippet` (speet-riscv) and `ReturnAddressSnippet` (speet-x86_64).
+struct LocalPlusConst {
+    local_idx: u32,
+    k: i32,
+}
+impl<Context, E> InstructionSource<Context, E> for LocalPlusConst {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::LocalGet(self.local_idx))?;
+        sink.instruction(ctx, &Instruction::I32Const(self.k))?;
+        sink.instruction(ctx, &Instruction::I32Add)
+    }
+}
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for LocalPlusConst {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        self.emit_instruction(ctx, sink)
+    }
+}
 
 #[test]
 fn test_reactor_creation() {
@@ -94,6 +169,175 @@ fn test_jump_with_params_helper() {
     assert!(reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).is_ok());
 }
 
+/// A `ji` conditional jump whose condition is statically known-true must skip
+/// the `If`/`Else` skeleton entirely and degrade straight to the unconditional
+/// `ReturnCall` — while still running `condition_hook` once for its side
+/// effects, and leaving `if_stmts` corrected (no stray `End` at seal time).
+#[test]
+fn test_conditional_jump_known_true_skips_if_skeleton() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+
+    let condition = ConstCondition(1); // always true
+    let hook_calls = Cell::new(0u32);
+    let hook = CountingHook(&hook_calls);
+
+    let params = JumpCallParams::conditional_jump(FuncIdx(1), 2, &condition, pool)
+        .with_condition_hook(&hook);
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count() - 1).is_ok());
+    assert_eq!(hook_calls.get(), 1, "condition_hook must fire exactly once even though the branch folds away");
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    assert!(reactor.seal_to(reactor.fn_count() - 1, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    // Seal the source entry too: if `if_stmts` had been left incorrectly
+    // incremented (the early-fold path failing to correct it), this would
+    // emit one extra `End` that the exact-byte comparison below would catch.
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 2);
+
+    let mut expected = Function::new([(2, ValType::I32)]);
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::LocalGet(1));
+    expected.instruction(&Instruction::ReturnCall(1));
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "known-true condition must degrade straight to ReturnCall, no If/Else");
+}
+
+/// A `Target::Dynamic` index snippet that resolves to a known constant (here,
+/// `local 0 + 2` once local 0 is const-folded to 4) must be converted to
+/// `Target::Static` early, emitting a plain `Call` rather than `CallIndirect`.
+#[test]
+fn test_dynamic_target_resolves_when_base_is_const() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let escape_tag = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+
+    // Fold local 0 to the known constant 4.
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(4)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::LocalSet(0)).unwrap();
+
+    let snippet = LocalPlusConst { local_idx: 0, k: 2 }; // resolves to FuncIdx(6)
+    assert!(reactor.call(&mut ctx, Target::Dynamic { idx: &snippet }, escape_tag, pool, 1, 0).is_ok());
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = escape_tag;
+    let mut expected = Function::new([(1, ValType::I32)]);
+    // The virtual store from `I32Const(4); LocalSet(0)` is materialized for
+    // real here, since `commit_virtual_locals` flushes it before the first
+    // subsequently-fed instruction (`Block`) — it never disappears entirely,
+    // it's just deferred until needed (see docs/guides/yecta.md §1d).
+    expected.instruction(&Instruction::I32Const(4));
+    expected.instruction(&Instruction::LocalSet(0));
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(6)); // resolved static call, not CallIndirect
+    // No `Return` here: the hoisted call region (item 4) falls through on
+    // success instead of returning — `close_call_region` (called from
+    // `seal_to`) closes the region, re-deriving+dropping the 1 register-file
+    // value from locals to satisfy the block's declared results, right
+    // before the final Unreachable/End.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "dynamic target should resolve to a static Call once local 0 is a known constant");
+}
+
+/// The same `Target::Dynamic` snippet, but with local 0 left unknown (no
+/// prior fold): the dynamic `CallIndirect` path must be emitted unchanged —
+/// confirms early resolution doesn't regress the genuinely-dynamic case.
+#[test]
+fn test_dynamic_target_unresolved_when_base_unknown() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let escape_tag = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+    // local 0 left unknown (no prior fold).
+
+    let snippet = LocalPlusConst { local_idx: 0, k: 2 };
+    assert!(reactor.call(&mut ctx, Target::Dynamic { idx: &snippet }, escape_tag, pool, 1, 0).is_ok());
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = escape_tag;
+    let mut expected = Function::new([(1, ValType::I32)]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::I32Const(2));
+    expected.instruction(&Instruction::I32Add);
+    expected.instruction(&Instruction::CallIndirect { type_index: 1, table_index: 0 });
+    // No `Return` here: see the matching comment in
+    // test_dynamic_target_resolves_when_base_is_const. The trailing
+    // LocalGet/Drop pair is `close_call_region` satisfying the block's
+    // declared (register_file) results on the fallthrough path.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "unknown base local must keep the dynamic CallIndirect path unchanged");
+}
+
+/// A `ji` conditional call whose condition is statically known-false must
+/// elide the whole call body (no `Block`/`TryTable`, no predecessor edge) —
+/// while still running `condition_hook` once for its side effects.
+#[test]
+fn test_conditional_call_known_false_still_runs_hook() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let escape_tag = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+
+    let condition = ConstCondition(0); // always false
+    let hook_calls = Cell::new(0u32);
+    let hook = CountingHook(&hook_calls);
+
+    let params = JumpCallParams::call(FuncIdx(1), 0, escape_tag, pool)
+        .with_condition(&condition)
+        .with_condition_hook(&hook);
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count() - 1).is_ok());
+    assert_eq!(hook_calls.get(), 1, "condition_hook must fire exactly once even on a known-false branch");
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let mut expected = Function::new([]);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "known-false condition must elide the call body, leaving nothing but the seal");
+}
+
 #[test]
 fn test_conditional_operations() {
     // Test that conditional operations work correctly
@@ -133,9 +377,194 @@ fn test_call_with_exception_handling() {
         .unwrap();
 
     assert!(
-        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, reactor.fn_count()-1)
+        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, 2, reactor.fn_count()-1)
             .is_ok()
     );
+
+    // Seal (the old version of this test never did, so it couldn't observe
+    // an unclosed hoisted call region) and confirm exactly one Block/TryTable
+    // pair was emitted — the point of item 4's hoisting.
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = escape_tag;
+    let mut expected = Function::new([(2, ValType::I32)]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(1));
+    // `close_call_region` re-derives+drops the 2 register-file values from
+    // locals to satisfy the block's declared results on the fallthrough path.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::LocalGet(1));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "a single speculative call must emit exactly one Block/TryTable pair, no Return");
+}
+
+/// Two speculative calls fed into the same tail entry with no intervening
+/// `next`/conditional branch — the common, valuable straight-line case (e.g.
+/// chained leaf calls in a prologue) — must share one hoisted Block/TryTable
+/// region instead of each getting its own.
+#[test]
+fn test_hoisted_speculative_calls_same_entry() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let escape_tag = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+
+    assert!(reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, 2, 0).is_ok());
+    assert!(reactor.call(&mut ctx, Target::Static { func: FuncIdx(2) }, escape_tag, pool, 2, 0).is_ok());
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = escape_tag;
+    let mut expected = Function::new([(2, ValType::I32)]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(1));
+    expected.instruction(&Instruction::Call(2)); // shares the same region: no End/End/Block/TryTable between calls
+    // `close_call_region` re-derives+drops the 2 register-file values.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::LocalGet(1));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "two consecutive speculative calls must share one hoisted Block/TryTable region");
+}
+
+/// Two speculative calls using *different* `EscapeTag`s cannot safely share
+/// one `try_table`/catch — the region must close and reopen between them.
+#[test]
+fn test_hoisted_speculative_calls_different_tags() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let tag_a = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+    let tag_b = EscapeTag { tag: TagIdx(1), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+
+    assert!(reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, tag_a, pool, 2, 0).is_ok());
+    assert!(reactor.call(&mut ctx, Target::Static { func: FuncIdx(2) }, tag_b, pool, 2, 0).is_ok());
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx_a), ty: TypeIdx(ty_idx_a) } = tag_a;
+    let EscapeTag { tag: TagIdx(tag_idx_b), ty: TypeIdx(ty_idx_b) } = tag_b;
+    let mut expected = Function::new([(2, ValType::I32)]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx_a)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx_a),
+        [wasm_encoder::Catch::One { tag: tag_idx_a, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(1));
+    // Region A closes here (tag mismatch triggers `ensure_call_region_open`'s
+    // close-and-reopen path) — same LocalGet/Drop round-trip as seal_to's.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::LocalGet(1));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx_b)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx_b),
+        [wasm_encoder::Catch::One { tag: tag_idx_b, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(2));
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::LocalGet(1));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "different EscapeTags must close and reopen a fresh region, not share one");
+}
+
+/// A speculative call inside a conditional arm (unknown condition, so the
+/// real `If`/`Else` skeleton is emitted) must close its hoisted region
+/// before `Else` — a second, unconditional call fed right after (landing
+/// inside the still-open `Else` body) must open its own fresh region rather
+/// than straddling the `Else` boundary.
+#[test]
+fn test_hoisted_call_region_closes_before_else() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(1) } };
+    let escape_tag = EscapeTag { tag: TagIdx(0), ty: TypeIdx(1) };
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+
+    // Unknown condition (local 0 was never const-folded) forces the real
+    // If/Else skeleton via Entry::emit_conditional_arm.
+    let condition = LocalPlusConst { local_idx: 0, k: 0 };
+    let params = JumpCallParams::call(FuncIdx(1), 1, escape_tag, pool).with_condition(&condition);
+    assert!(reactor.ji_with_params(&mut ctx, params, 0).is_ok());
+
+    // Lands inside the still-open Else body; must open its own fresh region.
+    assert!(reactor.call(&mut ctx, Target::Static { func: FuncIdx(2) }, escape_tag, pool, 1, 0).is_ok());
+
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let EscapeTag { tag: TagIdx(tag_idx), ty: TypeIdx(ty_idx) } = escape_tag;
+    let mut expected = Function::new([(1, ValType::I32)]);
+    expected.instruction(&Instruction::LocalGet(0)); // condition snippet
+    expected.instruction(&Instruction::I32Const(0));
+    expected.instruction(&Instruction::I32Add);
+    expected.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+    expected.instruction(&Instruction::LocalGet(0)); // param forward for call 1
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)));
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(1));
+    expected.instruction(&Instruction::LocalSet(0)); // restore params after call 1
+    // close_call_region (before Else) re-derives+drops the 1 register-file
+    // value to satisfy region 1's declared results.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::End); // closes region 1's try_table, before Else
+    expected.instruction(&Instruction::End); // closes region 1's block, before Else
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Else);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx))); // fresh region 2
+    expected.instruction(&Instruction::TryTable(
+        wasm_encoder::BlockType::FunctionType(ty_idx),
+        [wasm_encoder::Catch::One { tag: tag_idx, label: 0 }].into_iter().collect(),
+    ));
+    expected.instruction(&Instruction::Call(2));
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::End); // closes region 2 (seal_to's close_call_region)
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Drop);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End); // closes the If/Else (if_stmts == 1)
+    expected.instruction(&Instruction::End); // function-closing End
+    assert_eq!(fns[0], expected, "hoisted region must close before Else, not straddle it");
 }
 
 #[test]
@@ -292,7 +721,7 @@ fn test_call_and_return() {
     assert!(reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(1)).is_ok());
 
     assert!(
-        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, reactor.fn_count()-1)
+        reactor.call(&mut ctx, Target::Static { func: FuncIdx(1) }, escape_tag, pool, 2, reactor.fn_count()-1)
             .is_ok()
     );
 
@@ -484,6 +913,149 @@ fn test_const_if_skipped() {
 
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);
+}
+
+/// Feed `Block` + `I32Const(1)` + `BrIf(0)` + `End`: known-true condition should
+/// rewrite `BrIf` to an unconditional `Br`, eliding the `I32Const`/`BrIf` pair.
+#[test]
+fn test_const_br_if_taken_rewrites_to_br() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+
+    reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Block(wasm_encoder::BlockType::Empty)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(1)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::BrIf(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
+
+    let mut fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let mut expected = Function::new([]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+    expected.instruction(&Instruction::Br(0));
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns.remove(0), expected, "I32Const/BrIf should be replaced by a bare Br");
+}
+
+/// Feed `Block` + `I32Const(0)` + `BrIf(0)` + `Nop` + `End`: known-false condition
+/// means the branch is never taken — unlike `If` there is no else-arm to preserve,
+/// so the BrIf (and its condition) is elided entirely and the following code runs.
+#[test]
+fn test_const_br_if_skipped() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+
+    reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Block(wasm_encoder::BlockType::Empty)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::BrIf(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Nop).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
+
+    let mut fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let mut expected = Function::new([]);
+    expected.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+    expected.instruction(&Instruction::Nop);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns.remove(0), expected, "I32Const/BrIf should be elided entirely; Nop must still run");
+}
+
+/// `BrTable` with a known in-range selector resolves to a single `Br` to the
+/// matching target, mirroring the speet-syscall dispatcher shape (selector loaded
+/// from a local that was just const-folded).
+#[test]
+fn test_const_br_table_resolves_in_range() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+
+    reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(2)).unwrap();
+    reactor.tail().instruction(
+        &mut ctx,
+        &Instruction::BrTable(std::borrow::Cow::Owned(vec![0, 1, 2]), 3),
+    ).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
+
+    let mut fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let mut expected = Function::new([]);
+    expected.instruction(&Instruction::Br(2)); // targets[2] == 2
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns.remove(0), expected, "in-range selector should resolve to Br(targets[selector])");
+}
+
+/// `BrTable` with a known out-of-range selector clamps to `default`, matching real
+/// WASM `br_table` semantics exactly.
+#[test]
+fn test_const_br_table_out_of_range_clamps_to_default() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+
+    reactor.next(&mut ctx, [].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(99)).unwrap(); // out of range
+    reactor.tail().instruction(
+        &mut ctx,
+        &Instruction::BrTable(std::borrow::Cow::Owned(vec![0, 1, 2]), 5),
+    ).unwrap();
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
+
+    let mut fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+
+    let mut expected = Function::new([]);
+    expected.instruction(&Instruction::Br(5)); // clamped to default depth
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns.remove(0), expected, "out-of-range selector should clamp to the default target");
+}
+
+/// `BrIf` inside a `Loop`, fed an *unknown* condition (a plain `LocalGet` of a
+/// local that was never const-folded) — mirrors speet-ordering's CAS retry shape.
+/// Confirms the unknown-condition path is completely untouched: the emitted
+/// function must be byte-identical whether or not the new BrIf/BrTable folding
+/// arms exist.
+#[test]
+fn test_br_if_in_loop_unknown_condition_unaffected() {
+    let build = || {
+        let mut f = Function::new([(1, ValType::I32)]);
+        f.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        f.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // closes Loop
+        f.instruction(&Instruction::End); // closes Block
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End); // function-closing End added by seal_to
+        f
+    };
+
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Block(wasm_encoder::BlockType::Empty)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Loop(wasm_encoder::BlockType::Empty)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::LocalGet(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::BrIf(1)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::Br(0)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap(); // closes Loop
+    reactor.tail().instruction(&mut ctx, &Instruction::End).unwrap(); // closes Block
+    reactor.seal_to(reactor.fn_count()-1, &mut ctx, &Instruction::Unreachable).unwrap();
+
+    let mut fns = reactor.into_fns();
+    assert_eq!(fns.len(), 1);
+    assert_eq!(fns.remove(0), build(), "unknown-condition BrIf must be emitted verbatim, unaffected by folding");
 }
 
 /// Feed `I32Const(7)` + `LocalSet(0)` + `LocalGet(0)` + `I32Const(3)` + `I32Add`:

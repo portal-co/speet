@@ -114,6 +114,10 @@ fn test_linux_to_wasi_write_and_exit() {
     };
 
     let mut types = TypeSection::new();
+    // No exceptions/speculative calls here — see speet-e2e harness's
+    // assemble_module for why widening this unconditionally without
+    // anything to satisfy non-empty results would risk the same regression
+    // that showed up there for AArch64.
     // Type 0: translated function signature: [I64; 32] -> []
     types.ty().function(params.clone(), vec![]);
     // Type 1: fd_write/fd_read signature: [I32, I32, I32, I32] -> [I32]

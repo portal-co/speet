@@ -178,6 +178,21 @@ fn is_known_native_gap(msg: &str) -> bool {
         || msg.contains("not yet implemented") // todo!()/unimplemented!()
 }
 
+/// `wasmi` (pinned to `1.0.9` in this workspace) does not implement the WASM
+/// exception-handling proposal at all — it hard-panics on a `Tag` export
+/// (`crates/module/export.rs`: "wasmi does not support the `exception-handling`
+/// Wasm proposal") and rejects `try_table`/`throw` during validation
+/// ("exceptions proposal not enabled"). This is a tooling limitation, not a
+/// correctness issue in generated code — speculative-call modules (which use
+/// tags/try_table/throw) cannot be *executed* via `run_module` until `wasmi`
+/// gains exception-handling support, even though they validate as legal WASM
+/// and compile fine through the native (wasm-blitz) backend. Tolerated here
+/// the same way `is_known_native_gap` tolerates documented native-backend gaps.
+pub fn is_known_wasmi_exception_gap(msg: &str) -> bool {
+    msg.contains("exceptions proposal not enabled")
+        || msg.contains("does not support the `exception-handling` Wasm proposal")
+}
+
 /// Compile `wasm` (the frontend's recompiled output) through the **native**
 /// backend (wasm-blitz → relocatable object) for every [`NATIVE_TARGETS`] entry.
 ///
@@ -219,7 +234,14 @@ pub fn make_rctx<'r>(
     static T: TableIdx = TableIdx(0);
     let escape_tag = match eh {
         Eh::None => Option::None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
+        Eh::With => Some(EscapeTag { tag: TagIdx(type_idx.0), ty: type_idx }),
+        // Tag index must match `type_idx`: `assemble_module` allocates one
+        // exception tag per unique register-file shape (`unique_params[i]`),
+        // in the same order/index as the register-file type itself — a
+        // hardcoded `TagIdx(0)` would be wrong whenever a linked module
+        // combines binaries with different register-file shapes (e.g.
+        // RV32 + x86-64, or RV32 + RV64), since each needs its own tag
+        // matching its own throw/catch payload shape, not always tag #0.
     };
     let mut rctx = ReactorAdapter {
         reactor,
@@ -299,7 +321,14 @@ pub fn make_trap_rctx<'r>(
     static T: TableIdx = TableIdx(0);
     let escape_tag = match eh {
         Eh::None => Option::None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
+        Eh::With => Some(EscapeTag { tag: TagIdx(type_idx.0), ty: type_idx }),
+        // Tag index must match `type_idx`: `assemble_module` allocates one
+        // exception tag per unique register-file shape (`unique_params[i]`),
+        // in the same order/index as the register-file type itself — a
+        // hardcoded `TagIdx(0)` would be wrong whenever a linked module
+        // combines binaries with different register-file shapes (e.g.
+        // RV32 + x86-64, or RV32 + RV64), since each needs its own tag
+        // matching its own throw/catch payload shape, not always tag #0.
     };
     let mut rctx = TrapReactorAdapter::new(
         reactor,
@@ -328,6 +357,11 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
+/// `speculative` enables `set_speculative_calls(true)` on the recompiler
+/// (x86-64/RISC-V only; ignored for AArch64, which has no such method).
+/// Meaningful only when paired with `eh = Eh::With` — speculative calls
+/// require an escape tag (`Eh::None` leaves `escape_tag` unset, so the
+/// recompiler's speculative path never activates regardless of this flag).
 pub fn translate_rv(
     text: &[u8],
     start_addr: u32,
@@ -335,11 +369,13 @@ pub fn translate_rv(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let rv64 = xlen == Xlen::Rv64;
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         start_addr as u64, false, rv64, true,
     );
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
     let mut ctx = ();
@@ -363,11 +399,13 @@ pub fn translate_rv_with_trap(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let rv64 = xlen == Xlen::Rv64;
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         start_addr as u64, false, rv64, true,
     );
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut jump_trap = JumpEventTrap::new();
     let mut rctx = make_trap_rctx(&mut reactor, base_func_offset, type_idx, eh, &mut jump_trap);
@@ -391,8 +429,10 @@ pub fn translate_x86(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let mut recompiler = X86Recompiler::new_with_base_rip(rip);
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
     let mut ctx = ();
@@ -407,12 +447,16 @@ pub fn translate_x86(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+/// `AArch64Recompiler` has no speculative-call support yet — the parameter
+/// exists only so `translate`'s dispatch signature stays uniform across
+/// architectures; it's ignored here.
 pub fn translate_aarch64(
     text: &[u8],
     start_addr: u64,
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    _speculative: bool,
 ) -> Translated {
     let mut recompiler = AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
@@ -436,12 +480,13 @@ pub fn translate(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     match arch {
-        Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh),
-        Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh),
-        Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh),
-        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh),
+        Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh, speculative),
+        Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh, speculative),
+        Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh, speculative),
     }
 }
 
@@ -467,11 +512,34 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     let n_rv_types = unique_params.len() as u32;
     let hint_ty_idx  = n_rv_types;
     let write_ty_idx = n_rv_types + 1;
+    // Exception tags require a type with *empty* results (a tag describes
+    // only the payload/params shape — WASM rejects "non-empty tag result
+    // type"). That's a different type from the Block/TryTable's own
+    // blocktype below, which needs results to receive the caught payload —
+    // so each register-file shape gets two distinct type entries.
+    let tag_ty_base = write_ty_idx + 1;
 
     let mut types = TypeSection::new();
-    for p in &unique_params { types.ty().function(p.clone(), []); }
+    // Register-file ABI: when exceptions are in play (`Eh::With`), every
+    // generated function is (register_file) -> (register_file) — results
+    // mirror params. This is required for speculative calls' Block/
+    // TryTable/Catch (the exception payload is shaped like the block's
+    // results) and for the ABI-compliant `Return` path (which pushes the
+    // full register file before returning) to validate. Architectures that
+    // never set an escape tag (e.g. AArch64, which doesn't support
+    // speculative calls and always runs with `Eh::None`) never emit code
+    // expecting non-empty results, so leave their declared type at `-> ()`
+    // unchanged — widening it unconditionally regressed AArch64 (its normal
+    // `return`/fallthrough paths don't push a matching result there).
+    for p in &unique_params {
+        let results: Vec<ValType> = if eh == Eh::With { p.clone() } else { Vec::new() };
+        types.ty().function(p.clone(), results);
+    }
     types.ty().function([ValType::I32], []);
     types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+    if eh == Eh::With {
+        for p in &unique_params { types.ty().function(p.clone(), []); }
+    }
 
     let mut imports = ImportSection::new();
     imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(hint_ty_idx));
@@ -501,7 +569,7 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     let mut tags = TagSection::new();
     if eh == Eh::With {
         for i in 0..n_rv_types {
-            tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: i });
+            tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: tag_ty_base + i });
         }
     }
 
@@ -562,7 +630,11 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
 }
 
 pub fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
+    build_single_speculative(text, start_addr, arch, eh, false)
+}
+
+pub fn build_single_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
+    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
     let unsupported = t.unsupported.clone();
     let slice = BinarySlice {
         params: t.params, fns: t.fns,
@@ -572,11 +644,15 @@ pub fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8
 }
 
 pub fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
+    build_single_with_trap_speculative(text, start_addr, arch, eh, false)
+}
+
+pub fn build_single_with_trap_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
     let t = match arch {
-        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh),
-        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh),
+        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh, speculative),
+        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh, speculative),
         Arch::X86_64 | Arch::AArch64 => {
-            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
+            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
             let unsupported = t.unsupported.clone();
             let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
             return (assemble_module(&[slice], eh), unsupported);
@@ -595,6 +671,10 @@ pub struct LinkSpec<'a> {
 }
 
 pub fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
+    build_linked_speculative(specs, eh, false)
+}
+
+pub fn build_linked_speculative(specs: &[LinkSpec<'_>], eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
     let mut unique_params: Vec<Vec<ValType>> = Vec::new();
     for s in specs {
         let p = dry_run_params(s.arch, s.start_addr);
@@ -612,7 +692,7 @@ pub fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
     for s in specs {
         let p = dry_run_params(s.arch, s.start_addr);
         let type_idx = type_idx_of_params(&p);
-        let t = translate(s.text, s.start_addr, s.arch, running_offset, type_idx, eh);
+        let t = translate(s.text, s.start_addr, s.arch, running_offset, type_idx, eh, speculative);
 
         if !t.unsupported.is_empty() {
             all_unsupported.extend(t.unsupported.iter().cloned());

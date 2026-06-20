@@ -1159,7 +1159,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // If equal (ABI-compliant), use regular return; else throw exception
                     rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
-                    // ABI-compliant return - use WASM Return
+                    // ABI-compliant return - use WASM Return. The generated
+                    // function's ABI is (register_file) -> (register_file) —
+                    // a bare `Return` must push the full, current register
+                    // file as its results, matching the shape `ret`'s
+                    // `Throw` below pushes.
+                    for p in 0..rctx.locals_mark().total_locals {
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                    }
                     rctx.feed(ctx, tail_idx, &Instruction::Return)?;
 
                     rctx.feed(ctx, tail_idx, &Instruction::Else)?;

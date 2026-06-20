@@ -151,6 +151,11 @@ pub fn translate(text: &[u8], start_addr: u64, arch: BinArch) -> Translated {
 /// speet-e2e harness `assemble_module` for one slice.
 pub fn assemble_module(t: &Translated) -> Vec<u8> {
     let mut types = TypeSection::new();
+    // This builder's `make_rctx` always sets `escape_tag: None` — no
+    // exceptions/speculative calls ever run through this path, so (unlike
+    // the speet-e2e harness's `assemble_module`, used with `Eh::With`) the
+    // register-file type stays `-> ()`: widening it unconditionally without
+    // anything to satisfy non-empty results regressed AArch64 there.
     types.ty().function(t.params.clone(), []); // type 0: register-file -> ()
     types.ty().function([ValType::I32], []); // type 1: hint/exit
     types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]); // type 2: write
@@ -270,6 +275,7 @@ pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
 /// (`env.exit`/`env.write`), entry exported as `_start`. 32-bit linear memory.
 pub fn assemble_syscall_module(t: &Translated) -> Vec<u8> {
     let mut types = TypeSection::new();
+    // No exceptions/speculative calls here either — see assemble_module above.
     types.ty().function(t.params.clone(), []); // type 0: register-file -> ()
     types.ty().function([ValType::I32], []); // type 1: exit(code)
     types

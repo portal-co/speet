@@ -134,50 +134,57 @@ COND_TRAP_VARIANTS: list[tuple[str, str]] = [
 
 # ── Code builders ─────────────────────────────────────────────────────────────
 
-EH_VARIANTS = [("no_eh", "Eh::None"), ("eh", "Eh::With")]
+# Third element enables `set_speculative_calls(true)` on the recompiler
+# (x86-64/RISC-V only — ignored for AArch64). Only paired with `Eh::With`:
+# speculative calls require an escape tag, which `Eh::None` never sets.
+EH_VARIANTS = [
+    ("no_eh", "Eh::None", "false"),
+    ("eh", "Eh::With", "false"),
+    ("eh_spec", "Eh::With", "true"),
+]
 
 def both_eh(lines_fn):
-    """Call lines_fn(eh_suffix, eh_expr) for each EH variant; return joined."""
+    """Call lines_fn(eh_suffix, eh_expr, spec_expr) for each EH variant; return joined."""
     out = []
-    for suf, expr in EH_VARIANTS:
-        out.extend(lines_fn(suf, expr))
+    for suf, expr, spec in EH_VARIANTS:
+        out.extend(lines_fn(suf, expr, spec))
     return out
 
 def smoke_corpus(ident, rel, arch):
-    def f(suf, eh):
-        return [f'smoke!(smoke_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'smoke!(smoke_{ident}_{suf}, "{rel}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def run_corpus(ident, rel, arch):
-    def f(suf, eh):
-        return [f'run!(run_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'run!(run_{ident}_{suf}, "{rel}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def run_trap_corpus(ident, rel, arch):
-    def f(suf, eh):
-        return [f'run_trap!(run_trap_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'run_trap!(run_trap_{ident}_{suf}, "{rel}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def smoke_c(ident, env, arch):
-    def f(suf, eh):
-        return [f'smoke_c!(smoke_{ident}_{suf}, env="{env}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'smoke_c!(smoke_{ident}_{suf}, env="{env}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def run_c(ident, env, arch):
-    def f(suf, eh):
-        return [f'run_c!(run_{ident}_{suf}, env="{env}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'run_c!(run_{ident}_{suf}, env="{env}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def link_corpus_pair(a, b):
     """Generate link! tests for two corpus binaries."""
     (id_a, rel_a, arch_a), (id_b, rel_b, arch_b) = a, b
     name_base = f"link_{id_a}_x_{id_b}"
-    def f(suf, eh):
+    def f(suf, eh, spec):
         return [
             f'link!({name_base}_{suf},',
             f'    [("{rel_a}", arch={arch_a}, entry="entry_0"),',
             f'     ("{rel_b}", arch={arch_b}, entry="entry_1")],',
-            f'    {eh});',
+            f'    {eh}, speculative={spec});',
         ]
     return both_eh(f)
 
@@ -186,12 +193,12 @@ def link_corpus_c(corpus_entry, c_entry):
     (id_a, rel_a, arch_a) = corpus_entry
     (id_b, env_b, arch_b) = c_entry
     name_base = f"link_{id_a}_x_{id_b}"
-    def f(suf, eh):
+    def f(suf, eh, spec):
         return [
             f'link_c!({name_base}_{suf},',
             f'    [("{rel_a}", is_corpus=true,  arch={arch_a}, entry="entry_0"),',
             f'     ("{env_b}", is_corpus=false, arch={arch_b}, entry="entry_1")],',
-            f'    {eh});',
+            f'    {eh}, speculative={spec});',
         ]
     return both_eh(f)
 
@@ -199,12 +206,12 @@ def link_c_pair(a, b):
     """Generate link_c! tests for two C objects."""
     (id_a, env_a, arch_a), (id_b, env_b, arch_b) = a, b
     name_base = f"link_{id_a}_x_{id_b}"
-    def f(suf, eh):
+    def f(suf, eh, spec):
         return [
             f'link_c!({name_base}_{suf},',
             f'    [("{env_a}", is_corpus=false, arch={arch_a}, entry="entry_0"),',
             f'     ("{env_b}", is_corpus=false, arch={arch_b}, entry="entry_1")],',
-            f'    {eh});',
+            f'    {eh}, speculative={spec});',
         ]
     return both_eh(f)
 
@@ -244,13 +251,13 @@ def wasm_cond_trap_tests(ident, builder, entry):
 # object formats. This crosses every frontend with {wasm, native} backends.
 
 def native_corpus(ident, rel, arch):
-    def f(suf, eh):
-        return [f'native!(native_{ident}_{suf}, "{rel}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'native!(native_{ident}_{suf}, "{rel}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def native_c(ident, env, arch):
-    def f(suf, eh):
-        return [f'native_c!(native_{ident}_{suf}, env="{env}", arch={arch}, {eh});']
+    def f(suf, eh, spec):
+        return [f'native_c!(native_{ident}_{suf}, env="{env}", arch={arch}, {eh}, speculative={spec});']
     return both_eh(f)
 
 def native_wasm_fixture(ident, builder, mapper_suf, mapper_expr, trap_suf, trap_expr):

@@ -2214,6 +2214,12 @@ impl<Context, E> X86Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(8 + stack_cleanup as i64))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
+            // The generated function's ABI is (register_file) -> (register_file)
+            // — a bare `Return` must push the full, current register file as
+            // its results, matching the shape `ret`'s `Throw` below pushes.
+            for p in 0..rctx.locals_mark().total_locals {
+                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+            }
             rctx.feed(ctx, tail_idx, &Instruction::Return)?;
             rctx.feed(ctx, tail_idx, &Instruction::Else)?;
             rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, escape_tag)?;
