@@ -183,33 +183,34 @@ fn test_ret_with_immediate_speculative() {
 
 /// Two back-to-back direct `call` instructions, both targeting an address
 /// inside the translated range (so both go through the speculative-call
-/// path), with speculative calls enabled. Counts `try_table` operators
-/// across every produced function via `wasmparser`.
+/// path), with speculative calls enabled. Counts `try_table`/`call` operators
+/// per produced function via `wasmparser`.
 ///
-/// **Finding from implementing item 4**: yecta's hoisted call region (see
-/// `crates/helper/yecta/tests/reactor_tests.rs::test_hoisted_speculative_calls_same_entry`,
-/// which verifies the merge *does* happen when two calls are fed into the
-/// same `Entry`) only merges calls that land in the same `Entry`. The x86-64
-/// driver creates a fresh `Entry` per instruction slot (one-function-per-
-/// possible-instruction-slot, see docs/guides/yecta.md §1a) and `handle_call`
-/// never establishes a `jmp`-style predecessor edge from the call's slot to
-/// "the next instruction's slot" the way an unconditional jump does — so two
-/// consecutive native `call`s do **not** currently land in the same `Entry`,
-/// and each keeps its own `try_table`. This asserts that *known*, current
-/// per-call-site behavior (two calls, two try_tables) rather than a merge
-/// that doesn't yet have anywhere to fire from this driver — realizing the
-/// benefit here would need a follow-up change to `handle_call` to link
-/// consecutive call sites the way `jmp` already links fall-through jumps,
-/// which is out of scope for yecta's internal hoisting mechanism itself.
+/// Decode-stride means every byte offset in `bytes` is tried as its own
+/// translation slot (see docs/guides/yecta.md §1a) — most of the produced
+/// functions are re-decodes starting at a misaligned offset, not the "real"
+/// instruction stream, and each such slot keeps its own `try_table`. The
+/// slot starting at offset 0 *is* the real entry point: it decodes both
+/// calls in one straight-line run (the first call's return falls straight
+/// through into the second, with no intervening branch), so yecta's call-
+/// region hoisting (item 4 of the yecta optimization plan) merges them into
+/// the same `Entry` sharing a single `try_table`. This asserts that merge
+/// actually fires: somewhere in the output there's a function with 2+ calls
+/// sharing exactly one `try_table`, and merging strictly reduces the total
+/// `try_table` count below the total call count.
 #[test]
-fn test_two_back_to_back_calls_each_keep_their_own_try_table() {
+fn test_two_back_to_back_calls_share_one_try_table_when_hoisted() {
     // call +0 (target = next_ip, i.e. the second call's start address)
     // call -5 (target = the second call's own start address)
     let bytes = vec![
         0xE8, 0x00, 0x00, 0x00, 0x00, // call 0x1005
         0xE8, 0xFB, 0xFF, 0xFF, 0xFF, // call 0x1005
     ];
-    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new();
+    // base_rip must match the `rip` passed to translate_bytes below so the
+    // calls' targets (0x1005) fall inside rip_to_func_idx's translated range
+    // and resolve to a real function instead of tripping the out-of-range
+    // (oob_jump) trap path.
+    let mut recompiler = X86Recompiler::<(), core::convert::Infallible>::new_with_base_rip(0x1000);
     recompiler.set_speculative_calls(true);
 
     let mut ctx = ();
@@ -229,27 +230,37 @@ fn test_two_back_to_back_calls_each_keep_their_own_try_table() {
     rctx.reactor.seal_remaining(&mut ctx).unwrap();
     let fns = rctx.reactor.drain_fns();
 
-    let mut try_table_count = 0usize;
-    let mut call_count = 0usize;
-    for f in &fns {
+    let mut per_fn_counts = Vec::new();
+    for f in fns.iter() {
         let raw = f.clone().into_raw_body();
         let reader = wasmparser::BinaryReader::new(&raw, 0);
         let body = wasmparser::FunctionBody::new(reader);
         let mut ops = body.get_operators_reader().expect("valid function body");
+        let (mut try_tables, mut calls) = (0usize, 0usize);
         while !ops.eof() {
             match ops.read().expect("valid operator") {
-                wasmparser::Operator::TryTable { .. } => try_table_count += 1,
-                wasmparser::Operator::Call { .. } => call_count += 1,
+                wasmparser::Operator::TryTable { .. } => try_tables += 1,
+                wasmparser::Operator::Call { .. } => calls += 1,
                 _ => {}
             }
         }
+        per_fn_counts.push((calls, try_tables));
     }
 
-    assert!(call_count >= 2, "both calls must be translated (saw {call_count})");
-    assert_eq!(
-        try_table_count, call_count,
-        "each call currently lands in its own Entry (no jmp-style predecessor \
-         edge links consecutive call sites), so each keeps its own try_table; \
-         see this test's doc comment for the hoisting-doesn't-fire-here finding"
+    let total_calls: usize = per_fn_counts.iter().map(|&(c, _)| c).sum();
+    let total_try_tables: usize = per_fn_counts.iter().map(|&(_, t)| t).sum();
+
+    assert!(total_calls >= 2, "both calls must be translated (saw {total_calls})");
+    assert!(
+        per_fn_counts.iter().any(|&(c, t)| c >= 2 && t == 1),
+        "expected at least one function with 2+ calls sharing a single hoisted \
+         try_table (the back-to-back calls at the real entry point's slot); \
+         got per-function (calls, try_tables) = {per_fn_counts:?}"
+    );
+    assert!(
+        total_try_tables < total_calls,
+        "hoisting should merge at least one pair of calls into a shared \
+         try_table, so total try_tables ({total_try_tables}) should be less \
+         than total calls ({total_calls})"
     );
 }

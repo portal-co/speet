@@ -78,7 +78,21 @@ macro_rules! run {
                 // Speculative runs are a deliberate, asserted feature — never
                 // soft-skip a failure here, or a real regression would
                 // silently downgrade to a log line instead of failing CI.
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => eprintln!("  ! known wasmi limitation (no exception-handling support): {e}"),
+                // wasmi can't run exception-handling modules at all, so fall
+                // back to wasmtime (which implements that proposal) and
+                // still assert correctness rather than just logging the gap.
+                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                    eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
+                    match run_module_wasmtime(&wasm, "_start") {
+                        Ok(state) => {
+                            println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), $eh);
+                            for (id, snap) in &state.hints {
+                                println!("    hint={id} a0={}", snap.reg("a0"));
+                            }
+                        }
+                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                    }
+                }
                 Err(e) if $spec => panic!("speculative run failed: {e}"),
                 Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
@@ -101,7 +115,17 @@ macro_rules! run_trap {
                     let n_call = state.hints.iter().filter(|(id, _)| *id == HINT_CALL).count();
                     println!("  ✓ trap {:?}: {} returns, {} calls", $eh, n_ret, n_call);
                 }
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => eprintln!("  ! known wasmi limitation (no exception-handling support): {e}"),
+                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                    eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
+                    match run_module_wasmtime(&wasm, "_start") {
+                        Ok(state) => {
+                            let n_ret  = state.hints.iter().filter(|(id, _)| *id == HINT_RETURN).count();
+                            let n_call = state.hints.iter().filter(|(id, _)| *id == HINT_CALL).count();
+                            println!("  ✓ (wasmtime) trap {:?}: {} returns, {} calls", $eh, n_ret, n_call);
+                        }
+                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                    }
+                }
                 Err(e) if $spec => panic!("speculative run failed: {e}"),
                 Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
@@ -124,7 +148,13 @@ macro_rules! run_c {
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
             match run_module(&wasm, "_start") {
                 Ok(state) => println!("  ✓ {} hints, {:?}", state.hints.len(), $eh),
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => eprintln!("  ! known wasmi limitation (no exception-handling support): {e}"),
+                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                    eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
+                    match run_module_wasmtime(&wasm, "_start") {
+                        Ok(state) => println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), $eh),
+                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                    }
+                }
                 Err(e) if $spec => panic!("speculative run failed: {e}"),
                 Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
@@ -155,7 +185,13 @@ macro_rules! link {
             for spec in &specs {
                 match run_module(&wasm, spec.entry) {
                     Ok(state) => println!("  ✓ {}: {} hints", spec.entry, state.hints.len()),
-                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => eprintln!("  ! known wasmi limitation ({}): {e}", spec.entry),
+                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                        eprintln!("  ! wasmi lacks exception-handling support ({}: {e}); retrying under wasmtime", spec.entry);
+                        match run_module_wasmtime(&wasm, spec.entry) {
+                            Ok(state) => println!("  ✓ (wasmtime) {}: {} hints", spec.entry, state.hints.len()),
+                            Err(e) => panic!("speculative run {} failed under wasmtime fallback: {e}", spec.entry),
+                        }
+                    }
                     Err(e) if $spec => panic!("speculative run {} failed: {e}", spec.entry),
                     Err(e) if $eh == Eh::With => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
                     Err(e) => panic!("run {} failed: {e}", spec.entry),
@@ -199,7 +235,13 @@ macro_rules! link_c {
             for spec in &specs {
                 match run_module(&wasm, spec.entry) {
                     Ok(state) => println!("  ✓ {}: {} hints", spec.entry, state.hints.len()),
-                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => eprintln!("  ! known wasmi limitation ({}): {e}", spec.entry),
+                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                        eprintln!("  ! wasmi lacks exception-handling support ({}: {e}); retrying under wasmtime", spec.entry);
+                        match run_module_wasmtime(&wasm, spec.entry) {
+                            Ok(state) => println!("  ✓ (wasmtime) {}: {} hints", spec.entry, state.hints.len()),
+                            Err(e) => panic!("speculative run {} failed under wasmtime fallback: {e}", spec.entry),
+                        }
+                    }
                     Err(e) if $spec => panic!("speculative run {} failed: {e}", spec.entry),
                     Err(e) if $eh == Eh::With => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
                     Err(e) => panic!("run {} failed: {e}", spec.entry),
@@ -421,13 +463,80 @@ macro_rules! run_x86_64 {
     };
 }
 
-// 01: arithmetic only — full smoke+run coverage.
-// 02-05: the x86-64 recompiler has pre-existing issues with control-flow
-//        corpora (unsupported instructions, branch-target index OOB); these
-//        are tracked separately and excluded here until fixed.
 smoke_x86_64!(smoke_x86_64_01_arith_no_eh,  "01_integer_computational");
 run_x86_64!(  run_x86_64_01_arith_no_eh,    "01_integer_computational");
 native_x86_64!(native_x86_64_01_arith,      "01_integer_computational");
+smoke_x86_64!(smoke_x86_64_02_control_no_eh,  "02_control_transfer");
+run_x86_64!(  run_x86_64_02_control_no_eh,    "02_control_transfer");
+native_x86_64!(native_x86_64_02_control,      "02_control_transfer");
+smoke_x86_64!(smoke_x86_64_03_load_store_no_eh,  "03_load_store");
+run_x86_64!(  run_x86_64_03_load_store_no_eh,    "03_load_store");
+native_x86_64!(native_x86_64_03_load_store,      "03_load_store");
+smoke_x86_64!(smoke_x86_64_04_flags_no_eh,  "04_flags_and_setcc");
+run_x86_64!(  run_x86_64_04_flags_no_eh,    "04_flags_and_setcc");
+native_x86_64!(native_x86_64_04_flags,      "04_flags_and_setcc");
+smoke_x86_64!(smoke_x86_64_05_edge_cases_no_eh,  "05_edge_cases");
+run_x86_64!(  run_x86_64_05_edge_cases_no_eh,    "05_edge_cases");
+native_x86_64!(native_x86_64_05_edge_cases,      "05_edge_cases");
+
+// ── MIPS corpus tests ─────────────────────────────────────────────────────────
+
+macro_rules! smoke_mips {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = mips_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::Mips, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            assert!(!wasm.is_empty());
+            wasmparser::validate(&wasm).expect("WASM invalid");
+        }
+    };
+}
+
+macro_rules! run_mips {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = mips_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, _) = build_single(&text, addr, Arch::Mips, Eh::None);
+            wasmparser::validate(&wasm).expect("WASM invalid");
+            run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
+        }
+    };
+}
+
+macro_rules! native_mips {
+    ($name:ident, $rel:expr) => {
+        #[test]
+        fn $name() {
+            let path = mips_corpus($rel);
+            let (text, addr) = load_text(&path);
+            let (wasm, unsupported) = build_single(&text, addr, Arch::Mips, Eh::None);
+            report_unsupported(&unsupported, stringify!($name));
+            if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
+            native_compile_check(&wasm, stringify!($name));
+        }
+    };
+}
+
+smoke_mips!(smoke_mips_01_arith_no_eh,       "01_integer_computational");
+run_mips!(  run_mips_01_arith_no_eh,         "01_integer_computational");
+native_mips!(native_mips_01_arith,           "01_integer_computational");
+smoke_mips!(smoke_mips_02_control_no_eh,     "02_control_transfer");
+run_mips!(  run_mips_02_control_no_eh,       "02_control_transfer");
+native_mips!(native_mips_02_control,         "02_control_transfer");
+smoke_mips!(smoke_mips_03_load_store_no_eh,  "03_load_store");
+run_mips!(  run_mips_03_load_store_no_eh,    "03_load_store");
+native_mips!(native_mips_03_load_store,      "03_load_store");
+smoke_mips!(smoke_mips_04_muldiv_no_eh,      "04_multiply_divide");
+run_mips!(  run_mips_04_muldiv_no_eh,        "04_multiply_divide");
+native_mips!(native_mips_04_muldiv,          "04_multiply_divide");
+smoke_mips!(smoke_mips_05_edge_cases_no_eh,  "05_edge_cases");
+run_mips!(  run_mips_05_edge_cases_no_eh,    "05_edge_cases");
+native_mips!(native_mips_05_edge_cases,      "05_edge_cases");
 
 // @generated-tests-begin
 
@@ -2797,6 +2906,36 @@ native_wasm!(native_wasm_memory_rw_with_mapper_no_cond_trap, wasm_memory_rw(), m
 native_wasm!(native_wasm_memory_rw_with_mapper_with_flip_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
 
 // @generated-tests-end
+
+// ── Wasmtime exception-handling fallback ──────────────────────────────────────
+//
+// No current corpus/C program actually drives a guest `call` through a
+// mismatched-target throw, so none of the `is_known_wasmi_exception_gap`
+// fallback branches above are exercised by the generated tests. This pins
+// down the fallback mechanism itself, independent of any recompiler, using a
+// hand-built try_table/throw/catch module.
+
+#[test]
+fn wasmi_cannot_run_exception_handling_module() {
+    let wasm = wasm_throw_catch();
+    wasmparser::validate(&wasm).expect("hand-built EH module should itself be valid WASM");
+    match run_module(&wasm, "_start") {
+        Err(e) if is_known_wasmi_exception_gap(&e) => {}
+        Err(e) => panic!("expected the documented wasmi exception-handling gap, got: {e}"),
+        Ok(_) => panic!("wasmi unexpectedly ran an exception-handling module — gap may be fixed upstream"),
+    }
+}
+
+#[test]
+fn wasmtime_runs_exception_handling_module() {
+    let wasm = wasm_throw_catch();
+    let state = run_module_wasmtime(&wasm, "_start")
+        .unwrap_or_else(|e| panic!("wasmtime failed to run the EH fixture: {e}"));
+    // No host imports are called in this fixture; this only proves
+    // instantiate+call succeeded (i.e. wasmtime actually executed the
+    // throw/catch), and that the result didn't trap.
+    let _ = state;
+}
 
 // ── Debug / diagnostic helpers ────────────────────────────────────────────────
 

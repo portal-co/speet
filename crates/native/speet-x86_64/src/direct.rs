@@ -321,8 +321,21 @@ impl<Context, E> X86Recompiler<Context, E> {
     fn rip_to_func_idx<F>(&self, rctx: &dyn ReactorContext<Context, E, FnType = F>, rip: u64) -> Option<FuncIdx> {
         if let Some(gate) = &self.slot_assigner {
             gate.slot_for_pc(rip).map(FuncIdx)
-        } else {
+        } else if rip >= self.base_rip && rip < self.base_rip + self.text_len as u64 {
+            // Every byte offset is a potential slot here (no slot assigner
+            // installed), but a target outside the actually-translated
+            // range can never be a real instruction — most commonly a
+            // garbage decode from a misaligned re-decode (the decoder
+            // advances 1 byte at a time to catch every possible slot,
+            // so it also re-decodes from the middle of real instructions,
+            // producing call/jmp targets with meaningless operands).
+            // Returning `None` routes these through `oob_jump`, which
+            // traps at runtime instead of emitting a statically invalid
+            // `Instruction::Call` that fails WASM validation at compile
+            // time.
             Some(FuncIdx((rip.wrapping_sub(self.base_rip)) as u32))
+        } else {
+            None
         }
     }
 
@@ -936,14 +949,34 @@ impl<Context, E> X86Recompiler<Context, E> {
     ) -> Result<(), E> {
         #[cfg(feature = "logging")]
         log::trace!(target: "speet::x86_64", "translate_bytes rip={:#x} len={}", rip, bytes.len());
+        self.text_len = bytes.len() as u32;
         let mut dec = Decoder::with_ip(64, bytes, rip, DecoderOptions::NONE);
-        while dec.can_decode() {
+        // Every byte offset is a potential function slot (x86-64 instructions
+        // aren't fixed-width, so a computed/indirect jump could land mid-
+        // instruction relative to how we happened to disassemble this byte
+        // stream) — `next_pos` tracks that byte stride explicitly.
+        //
+        // `Decoder::set_ip` only changes the *reported* IP, not the decoder's
+        // read cursor (`position`) — using it alone (as this loop used to)
+        // left the cursor advancing by each instruction's real length while
+        // the reported `inst_rip` silently drifted by only 1 byte per
+        // iteration, desyncing after the very first instruction. Explicitly
+        // calling `set_position` keeps the cursor and the reported RIP in
+        // lockstep with the intended 1-byte stride.
+        let mut next_pos: usize = 0;
+        while next_pos < bytes.len() {
+            dec.set_position(next_pos).expect("next_pos < bytes.len()");
+            let inst_rip = rip + next_pos as u64;
+            dec.set_ip(inst_rip);
+            if !dec.can_decode() {
+                break;
+            }
             let inst = dec.decode();
             let inst_len = inst.len() as u32;
-            let inst_rip = dec.ip() - inst_len as u64;
 
             if let Some(gate) = &self.slot_assigner {
                 if gate.slot_for_pc(inst_rip).is_none() {
+                    next_pos += 1;
                     continue;
                 }
             }
@@ -961,6 +994,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                     class: Self::classify_mnemonic(inst.mnemonic()),
                 };
                 if rctx.on_instruction(&insn_info, ctx)? == TrapAction::Skip {
+                    next_pos += 1;
                     continue;
                 }
             }
@@ -1459,13 +1493,14 @@ impl<Context, E> X86Recompiler<Context, E> {
                     )
                 }
                 Mnemonic::Xchg => {
+                    let scratch = rctx.layout().local(self.tmp_slot, 0); // i64 scratch temp
                     if inst.op0_kind() == OpKind::Register && inst.op1_kind() == OpKind::Register {
                         if let (Some((dst_local, _, _, _)), Some((src_local, _, _, _))) = (Self::resolve_reg(inst.op0_register()), Self::resolve_reg(inst.op1_register())) {
                             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst_local))?;
-                            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(17))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(scratch))?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(src_local))?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst_local))?;
-                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(17))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(scratch))?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(src_local))?;
                             Ok(Some(()))
                         } else {
@@ -1475,10 +1510,10 @@ impl<Context, E> X86Recompiler<Context, E> {
                         if let Some((dst_local, _dst_size, _, _)) = Self::resolve_reg(inst.op0_register()) {
                             self.emit_memory_address(ctx, rctx, tail_idx, &inst)?;
                             self.emit_memory_load(ctx, rctx, tail_idx, _dst_size, false)?;
-                            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(17))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(scratch))?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(dst_local))?;
                             rctx.feed(ctx, tail_idx, &Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }))?;
-                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(17))?;
+                            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(scratch))?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst_local))?;
                             Ok(Some(()))
                         } else {
@@ -1682,10 +1717,22 @@ impl<Context, E> X86Recompiler<Context, E> {
             if undecidable_option.is_none() {
                 let name = alloc::format!("{:?}", inst.mnemonic());
                 self.unsupported_insns.insert(name);
-                rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                // Seal (not just feed) the Unreachable: every byte offset is
+                // attempted as a slot, so this is routinely a garbage decode
+                // from a misaligned re-disassembly, not a real instruction.
+                // A bare `feed` leaves the entry open for yecta's fall-
+                // through merge to append the *next* slot's translation
+                // after this Unreachable, which can splice unrelated
+                // control-flow (If/Else/Return/Throw) into a function whose
+                // declared result type no longer matches what actually
+                // falls through — failing WASM validation at compile time
+                // for what should just be a runtime trap.
+                rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
+                next_pos += 1;
+                continue;
             }
 
-            dec.set_ip(inst_rip + 1);
+            next_pos += 1;
         }
         // Seal any functions not explicitly terminated by a branch/call.
         let _ = rctx.seal_remaining(ctx);
@@ -1818,14 +1865,17 @@ impl<Context, E> X86Recompiler<Context, E> {
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(23))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(22))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(63))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
-        rctx.feed(ctx, tail_idx, &Instruction::I32Xor)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Xor)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I32Const(1))?;
         rctx.feed(ctx, tail_idx, &Instruction::I32And)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(Self::OF_LOCAL))?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(24))?;
@@ -1842,7 +1892,11 @@ impl<Context, E> X86Recompiler<Context, E> {
 
     fn handle_jmp<F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let target = match inst.op0_kind() {
-            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => (inst.ip() as i64 + inst.near_branch64() as i64) as u64,
+            // iced-x86's decoder already resolves this to the absolute
+            // target (next_ip + sign-extended displacement) using the ip
+            // we set via `set_ip` before decoding — adding `inst.ip()`
+            // again here double-counts it.
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => inst.near_branch64(),
             _ => return Ok(None),
         };
 
@@ -2124,7 +2178,11 @@ impl<Context, E> X86Recompiler<Context, E> {
         condition_type: ConditionType,
     ) -> Result<Option<()>, E> {
         let target = match inst.op0_kind() {
-            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => (inst.ip() as i64 + inst.near_branch64() as i64) as u64,
+            // iced-x86's decoder already resolves this to the absolute
+            // target (next_ip + sign-extended displacement) using the ip
+            // we set via `set_ip` before decoding — adding `inst.ip()`
+            // again here double-counts it.
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => inst.near_branch64(),
             _ => return Ok(None),
         };
 
@@ -2148,7 +2206,11 @@ impl<Context, E> X86Recompiler<Context, E> {
     fn handle_call<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let return_addr = inst.next_ip();
         let target = match inst.op0_kind() {
-            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => (inst.ip() as i64 + inst.near_branch64() as i64) as u64,
+            // iced-x86's decoder already resolves this to the absolute
+            // target (next_ip + sign-extended displacement) using the ip
+            // we set via `set_ip` before decoding — adding `inst.ip()`
+            // again here double-counts it.
+            OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16 => inst.near_branch64(),
             _ => return Ok(None),
         };
 

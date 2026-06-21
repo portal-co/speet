@@ -14,17 +14,19 @@ use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
 use speet_module_builder::MegabinaryBuilder;
 use speet_aarch64::AArch64Recompiler;
+use speet_mips::MipsRecompiler;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
 use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use speet_wasm::{GuestMemoryConfig, IndexOffsets, WasmFrontend};
 use speet_x86_64::X86Recompiler;
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
+    BlockType, Catch, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
     Function, FunctionSection, ImportSection, MemorySection, MemoryType, Module, RefType,
     TableSection, TableType, TagSection, TagType, TypeSection, ValType,
 };
 use wasmi::{AsContext, Engine, Linker, Module as WasmiModule, Store};
+use wasmtime::AsContext as _;
 use wasmparser::BinaryReaderError;
 use yecta::{EscapeTag, LocalPool, Reactor, TableIdx, TagIdx, TypeIdx};
 use yecta::layout::CellIdx;
@@ -44,7 +46,7 @@ pub const HINT_CALL:   i32 = 0xCA12_u32 as i32;
 pub enum Eh { None, With }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Arch { Rv32, Rv64, X86_64, AArch64 }
+pub enum Arch { Rv32, Rv64, X86_64, AArch64, Mips }
 
 // ── Harness state ─────────────────────────────────────────────────────────────
 
@@ -103,6 +105,13 @@ pub fn aarch64_corpus(rel: &str) -> std::path::PathBuf {
 pub fn x86_64_corpus(rel: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../test-data/x86_64-corpus")
+        .join(format!("{rel}.elf"))
+}
+
+/// Path to a MIPS corpus ELF: `test-data/mips-corpus/<rel>.elf`.
+pub fn mips_corpus(rel: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/mips-corpus")
         .join(format!("{rel}.elf"))
 }
 
@@ -473,6 +482,45 @@ pub fn translate_aarch64(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+/// MIPS has no speculative-call/escape-tag support and no `unsupported_insns()`
+/// tracking (unrecognized opcodes fall through to a bare `Unreachable` with no
+/// name recorded) — the parameter exists only so `translate`'s dispatch
+/// signature stays uniform across architectures; it's ignored here, and the
+/// returned `unsupported` is always empty.
+pub fn translate_mips(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+    _speculative: bool,
+) -> Translated {
+    let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
+        MipsRecompiler::new_with_base_pc(start_addr as u32);
+    recompiler.set_memory64(true);
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_rv_params(&rctx);
+
+    let words = text.len() / 4;
+    for i in 0..words {
+        let offset = i * 4;
+        let word = u32::from_be_bytes([
+            text[offset], text[offset + 1], text[offset + 2], text[offset + 3],
+        ]);
+        let pc = (start_addr as u32).wrapping_add(offset as u32);
+        let inst = rabbitizer::Instruction::new(word, pc, rabbitizer::InstrCategory::CPU);
+        recompiler.translate_instruction(&mut ctx, &mut rctx, &inst,
+            &mut |a| Function::new(a.collect::<Vec<_>>()))
+            .expect("translate_instruction failed");
+    }
+    let _ = rctx.seal_remaining(&mut ctx);
+
+    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
+}
+
 pub fn translate(
     text: &[u8],
     start_addr: u64,
@@ -487,6 +535,7 @@ pub fn translate(
         Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh, speculative),
         Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh, speculative),
         Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::Mips    => translate_mips(text, start_addr, base_func_offset, type_idx, eh, speculative),
     }
 }
 
@@ -626,6 +675,14 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
             recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
+        Arch::Mips => {
+            let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
+                MipsRecompiler::new_with_base_pc(addr as u32);
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
+            recompiler.setup_traps(&mut rctx, &mut ());
+            collect_rv_params(&rctx)
+        }
     }
 }
 
@@ -651,7 +708,7 @@ pub fn build_single_with_trap_speculative(text: &[u8], start_addr: u64, arch: Ar
     let t = match arch {
         Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh, speculative),
         Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh, speculative),
-        Arch::X86_64 | Arch::AArch64 => {
+        Arch::X86_64 | Arch::AArch64 | Arch::Mips => {
             let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
             let unsupported = t.unsupported.clone();
             let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
@@ -796,6 +853,72 @@ pub fn run_module(wasm: &[u8], entry: &str) -> Result<HostState, String> {
         _ => panic!("unexpected param type"),
     }).collect();
     let mut results = vec![wasmi::Val::I32(0); ty.results().len()];
+    let _ = func.call(&mut store, &params, &mut results);
+    Ok(store.into_data())
+}
+
+// ── Wasmtime execution (exception-handling proposal support) ──────────────────
+
+/// Same shape as [`run_module`], but backed by `wasmtime` instead of `wasmi`.
+///
+/// `wasmi` (pinned to `1.0.9`) cannot validate or run modules using the WASM
+/// exception-handling proposal (`try_table`/`throw`) at all — see
+/// [`is_known_wasmi_exception_gap`]. `wasmtime` does implement that proposal
+/// (`Config::wasm_exceptions`), so this is the execution path used wherever a
+/// `run_module` call hits that known gap.
+pub fn run_module_wasmtime(wasm: &[u8], entry: &str) -> Result<HostState, String> {
+    let mut config = wasmtime::Config::default();
+    config.consume_fuel(true);
+    config.wasm_exceptions(true);
+    let engine = wasmtime::Engine::new(&config).map_err(|e| e.to_string())?;
+    let mut store = wasmtime::Store::new(&engine, HostState::new());
+    store.set_fuel(RUN_FUEL).map_err(|e| e.to_string())?;
+    let mut linker: wasmtime::Linker<HostState> = wasmtime::Linker::new(&engine);
+
+    linker.func_wrap("env", "__speet_hint",
+        |mut caller: wasmtime::Caller<'_, HostState>, id: i32| {
+            let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+            let mut regs = [0i32; 32];
+            {
+                let data = mem.data(caller.as_context());
+                let base = REG_SAVE_BASE as usize;
+                for (i, r) in regs.iter_mut().enumerate() {
+                    let off = base + i * 4;
+                    *r = i32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+                }
+            }
+            caller.data_mut().hints.push((id, RegSnapshot { regs }));
+        }).map_err(|e| e.to_string())?;
+
+    linker.func_wrap("env", "write",
+        |mut caller: wasmtime::Caller<'_, HostState>, fd: i32, ptr: i32, len: i32| -> i32 {
+            if fd == 1 || fd == 2 {
+                let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                let mut buf = vec![0u8; len as usize];
+                let _ = mem.read(caller.as_context(), ptr as usize, &mut buf);
+                caller.data_mut().stdout.extend_from_slice(&buf);
+            }
+            len
+        }).map_err(|e| e.to_string())?;
+
+    linker.func_wrap("env", "exit",
+        |mut caller: wasmtime::Caller<'_, HostState>, code: i32| {
+            caller.data_mut().exit_code = Some(code);
+        }).map_err(|e| e.to_string())?;
+
+    let module = wasmtime::Module::new(&engine, wasm).map_err(|e| e.to_string())?;
+    let instance = linker.instantiate(&mut store, &module).map_err(|e| e.to_string())?;
+
+    let func = instance.get_func(&mut store, entry).ok_or("no entry export")?;
+    let ty = func.ty(&store);
+    let params: Vec<wasmtime::Val> = ty.params().map(|vt| match vt {
+        wasmtime::ValType::I32 => wasmtime::Val::I32(0),
+        wasmtime::ValType::I64 => wasmtime::Val::I64(0),
+        wasmtime::ValType::F32 => wasmtime::Val::F32(0),
+        wasmtime::ValType::F64 => wasmtime::Val::F64(0),
+        other => panic!("unexpected param type: {other:?}"),
+    }).collect();
+    let mut results = vec![wasmtime::Val::I32(0); ty.results().len()];
     let _ = func.call(&mut store, &params, &mut results);
     Ok(store.into_data())
 }
@@ -1141,6 +1264,54 @@ pub fn wasm_memory_rw() -> Vec<u8> {
     m.section(&types);
     m.section(&funcs);
     m.section(&mems);
+    m.section(&exports);
+    m.section(&codes);
+    m.finish()
+}
+
+/// ```wat
+/// (module
+///   (tag $exn (param i32))
+///   (func (export "_start") (result i32)
+///     (block (result i32)
+///       (try_table (catch $exn 0)
+///         (throw $exn (i32.const 42))))))
+/// ```
+/// Minimal exception-handling-proposal fixture (`tag`/`try_table`/`throw`/
+/// `catch`): always throws, caught by the enclosing block, which returns the
+/// payload. `wasmi` cannot even validate this (see
+/// [`is_known_wasmi_exception_gap`]); `wasmtime` (via
+/// [`run_module_wasmtime`]) can, since it implements the proposal.
+pub fn wasm_throw_catch() -> Vec<u8> {
+    use wasm_encoder::Instruction as I;
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]); // type 0: ()->(i32) — fn + block/try_table
+    types.ty().function([ValType::I32], []); // type 1: (i32)->() — the tag's payload type
+
+    let mut tags = TagSection::new();
+    tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: 1 });
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+
+    let mut exports = ExportSection::new();
+    exports.export("_start", ExportKind::Func, 0);
+
+    let mut codes = CodeSection::new();
+    let mut f = Function::new([]);
+    f.instruction(&I::Block(BlockType::FunctionType(0)));
+    f.instruction(&I::TryTable(BlockType::FunctionType(0), [Catch::One { tag: 0, label: 0 }].into_iter().collect()));
+    f.instruction(&I::I32Const(42));
+    f.instruction(&I::Throw(0));
+    f.instruction(&I::End); // try_table
+    f.instruction(&I::End); // block
+    f.instruction(&I::End); // function
+    codes.function(&f);
+
+    let mut m = Module::new();
+    m.section(&types);
+    m.section(&funcs);
+    m.section(&tags);
     m.section(&exports);
     m.section(&codes);
     m.finish()

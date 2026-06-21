@@ -12,6 +12,8 @@ rv-asm.workspace = true
 speet-riscv = { path = "../../native/speet-riscv" }
 speet-x86_64 = { path = "../../native/speet-x86_64" }
 speet-aarch64 = { path = "../../native/speet-aarch64" }
+speet-mips = { path = "../../native/speet-mips" }
+rabbitizer.workspace = true
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-traps = { path = "../../helper/speet-traps" }
 speet-module-builder = { path = "../../os/speet-module-builder" }
@@ -26,3 +28,4 @@ speet-linux-wasi = { path = "../../os/speet-linux-wasi" }
 speet-syscall = { path = "../../os/speet-syscall" }
 # Native backend (wasm-blitz) for the wasm-vs-native cross tests; re-exports binary-io.
 speet-recompile = { path = "../../os/speet-recompile" }
+wasmtime = "45.0.2"

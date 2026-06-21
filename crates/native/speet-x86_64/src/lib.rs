@@ -63,6 +63,10 @@ use speet_traps::{
 /// The function-sink type `F` is a per-method generic (not on the struct).
 pub struct X86Recompiler<Context, E> {
     base_rip: u64,
+    /// Length in bytes of the most recent `translate_bytes` call's input.
+    /// Used by `rip_to_func_idx` to bound-check computed call/jump targets
+    /// when no `slot_assigner` is installed — see its doc comment.
+    text_len: u32,
     hints: Vec<u8>,
     enable_speculative_calls: bool,
     /// Optional slot assigner: controls which RIPs get function slots.
@@ -111,6 +115,7 @@ impl<Context, E> X86Recompiler<Context, E> {
     pub fn new_with_base_rip(base_rip: u64) -> Self {
         Self {
             base_rip,
+            text_len: 0,
             hints: Vec::new(),
             gpr_slot: yecta::LocalSlot::default(),
             rip_slot: yecta::LocalSlot::default(),

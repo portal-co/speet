@@ -2725,6 +2725,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                     .function
                     .instruction(ctx, &Instruction::End)?;
             }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of the divergent `Unreachable` before
+                // them — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI).
+                lock[idx as usize]
+                    .function
+                    .instruction(ctx, &Instruction::Unreachable)?;
+            }
             // Close the function body's implicit outer block.
             lock[idx as usize]
                 .function
@@ -2886,6 +2899,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 for _ in 0..ifs {
                     f.function.instruction(ctx, &Instruction::End)?;
                 }
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode
+                // with zero values, regardless of the divergent `ReturnCall`
+                // before them — WASM's unreachable-polymorphism does not
+                // survive past a structured block's own `End`. Re-assert
+                // unreachable immediately before the function's own closing
+                // `End` so it's satisfied even when the function's declared
+                // result type is non-empty (the register-file ABI).
+                f.function.instruction(ctx, &Instruction::Unreachable)?;
                 // Close the function body's implicit outer block.
                 f.function.instruction(ctx, &Instruction::End)?;
                 f.sealed = true;
@@ -3777,6 +3799,21 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             for _ in 0..ifs {
                 func.function.instruction(ctx, &Instruction::End)?;
             }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of how divergent `instruction` (above)
+                // was — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI). When `ifs == 0` there are no intervening
+                // `End`s, so `instruction` above (always a stack-polymorphic
+                // terminator: Return/Unreachable/Br/...) already leaves the
+                // validator in unreachable mode and this would be a redundant
+                // duplicate.
+                func.function.instruction(ctx, &Instruction::Unreachable)?;
+            }
             // Close the function body's implicit outer block.
             func.function.instruction(ctx, &Instruction::End)?;
             func.sealed = true;
@@ -3910,6 +3947,20 @@ where
             entry.function.instruction(ctx, &Instruction::Unreachable)?;
             for _ in 0..ifs {
                 entry.function.instruction(ctx, &Instruction::End)?;
+            }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of the divergent `Unreachable` before
+                // them — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI). When `ifs == 0` there are no intervening
+                // `End`s, so the `Unreachable` above already leaves the
+                // validator in unreachable mode and this would be a redundant
+                // duplicate.
+                entry.function.instruction(ctx, &Instruction::Unreachable)?;
             }
             entry.function.instruction(ctx, &Instruction::End)?;
             entry.sealed = true;

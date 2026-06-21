@@ -563,6 +563,12 @@ fn test_hoisted_call_region_closes_before_else() {
     expected.instruction(&Instruction::Drop);
     expected.instruction(&Instruction::Unreachable);
     expected.instruction(&Instruction::End); // closes the If/Else (if_stmts == 1)
+    // Closing the If/Else's own End resumes "reachable" mode (BlockType::Empty
+    // contributes zero values) regardless of the Unreachable above — WASM's
+    // unreachable-polymorphism doesn't survive past a structured block's own
+    // End. seal_to re-asserts unreachable so the function's closing End
+    // validates under the register-file ABI's non-empty result type.
+    expected.instruction(&Instruction::Unreachable);
     expected.instruction(&Instruction::End); // function-closing End
     assert_eq!(fns[0], expected, "hoisted region must close before Else, not straddle it");
 }
