@@ -114,32 +114,52 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
+/// Which recompiler drives [`translate`]: one of speet's own built-in native
+/// arch frontends, or an external [`ArchPlugin`](speet_plugin_api::ArchPlugin)
+/// (see `docs/guides/plugin-api.md`). `BinArch` is owned by the external
+/// `binary_io` crate and can't grow a plugin variant itself, hence this
+/// wrapper local to `speet-recompile`.
+pub enum RecompilerChoice {
+    Native(BinArch),
+    Plugin(Box<dyn speet_plugin_api::ArchPlugin>),
+}
+
 /// Translate a `.text` blob of guest machine code to speet WASM functions.
-pub fn translate(text: &[u8], start_addr: u64, arch: BinArch) -> Translated {
+pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Translated {
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, N_IMPORTS);
     let mut ctx = ();
 
-    let (params, unsupported) = match arch {
-        BinArch::X86_64 => {
-            let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
-            rc.setup_traps(&mut rctx, &mut ctx);
-            let params = collect_params(&rctx);
-            rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .expect("translate_bytes");
-            (params, rc.unsupported_insns().iter().cloned().collect())
-        }
-        BinArch::AArch64 => {
-            let mut rc = speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
-            rc.setup_traps(&mut rctx, &mut ctx);
-            let params = collect_params(&rctx);
-            rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
-            .expect("translate_bytes");
-            (params, rc.unsupported_insns().iter().cloned().collect())
+    let (params, unsupported) = match choice {
+        RecompilerChoice::Native(arch) => match arch {
+            BinArch::X86_64 => {
+                let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
+                rc.setup_traps(&mut rctx, &mut ctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .expect("translate_bytes");
+                (params, rc.unsupported_insns().iter().cloned().collect())
+            }
+            BinArch::AArch64 => {
+                let mut rc =
+                    speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                rc.setup_traps(&mut rctx, &mut ctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .expect("translate_bytes");
+                (params, rc.unsupported_insns().iter().cloned().collect())
+            }
+        },
+        RecompilerChoice::Plugin(plugin) => {
+            // Activated once `ArchPluginRecompiler` lands in
+            // speet-plugin-adapter (phased after the other resource kinds —
+            // see docs/guides/plugin-api.md).
+            let _ = plugin;
+            unimplemented!("ArchPlugin-backed recompilation lands in a follow-up phase")
         }
     };
 
@@ -221,7 +241,7 @@ pub fn assemble_module(t: &Translated) -> Vec<u8> {
 
 /// Recompile a `.text` blob of guest machine code to a complete WASM module.
 pub fn recompile_to_wasm(text: &[u8], start_addr: u64, arch: BinArch) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, arch);
+    let t = translate(text, start_addr, RecompilerChoice::Native(arch));
     let unsupported = t.unsupported.clone();
     (assemble_module(&t), unsupported)
 }
