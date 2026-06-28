@@ -33,11 +33,10 @@ The trap trait infrastructure in `speet-traps` is complete. Integration into eac
 
 ## Plugin API — remaining work
 
-The external plugin system (`crates/plugin/`) is built and documented: see [docs/guides/plugin-api.md](../docs/guides/plugin-api.md) and [docs/plugin-api.md](../docs/plugin-api.md). All five plugin trait families and all three MVP hosts (in-process static mode, WASM via `wasmi`, subprocess) are implemented and tested end-to-end, including the host-entity-import mechanism in both directions and its negative (denied-import) case. Two pieces remain:
+The external plugin system (`crates/plugin/`) is built and documented: see [docs/guides/plugin-api.md](../docs/guides/plugin-api.md) and [docs/plugin-api.md](../docs/plugin-api.md). All five plugin trait families, all three MVP hosts (in-process static + dylib modes, WASM via `wasmi`, subprocess), the host-entity-import mechanism (both directions, including the negative/denied case), and `ArchPluginRecompiler` (activating `RecompilerChoice::Plugin` in `crates/os/speet-recompile/src/frontend.rs`) are implemented and tested end-to-end. Dylib mode's `extern "C"` ABI is verified against real `cdylib` fixtures compiled on the fly with a bare `rustc` invocation (`crates/plugin/speet-plugin-host-inproc/tests/dylib_plugin.rs`). `ArchPluginRecompiler` resolves `Jump`/`IndirectJump` via explicit `feed`+`seal_fn` rather than `ReactorContext::jmp`/`ji_with_params` — see `docs/plugin-api.md` §3.6 for why. One piece remains:
 
-- [ ] `speet-plugin-host-inproc` dylib mode: the `extern "C"`/`#[repr(C)]` surface + `libloading`-based loader behind the already-scaffolded `"dylib"` feature (see `docs/plugin-api.md` §5.1).
-- [ ] `ArchPluginRecompiler` in `speet-plugin-adapter`: drives a real `Recompile<Context, E, F>` implementation from an `ArchPlugin`'s `step()` calls, activating `crates/os/speet-recompile/src/frontend.rs`'s `RecompilerChoice::Plugin` arm (currently `unimplemented!()`). Sequenced last — see `docs/plugin-api.md` §3.6 for why.
 - [ ] `speet-plugin-host-wasm` `"exceptions"` feature (`wasmtime` engine) — only if/when a real plugin needs the exception-handling proposal; not required alongside the `wasmi` default.
+- [ ] (optional, not required for correctness) Revisit whether `ArchPluginRecompiler`'s `Jump`/`IndirectJump` could use `ReactorContext::jmp`/`ji_with_params` to regain yecta's predecessor-graph optimizations, once a real plugin's performance profile motivates it.
 
 ---
 

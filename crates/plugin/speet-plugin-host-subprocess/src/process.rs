@@ -5,12 +5,8 @@ use std::io::BufReader;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use speet_plugin_api::remote::{
-    dispatch_address_mapper, dispatch_arch, dispatch_memory_access, dispatch_object_model,
-    dispatch_table, dispatch_target, AddressMapperRequest, ArchRequest, ImportRole,
-    MemoryAccessRequest, ObjectModelRequest, TableRequest, TargetRequest,
-};
-use speet_plugin_api::wire::{WireDecode, WireEncode};
+use speet_plugin_api::remote::{dispatch_import, ImportRole};
+use speet_plugin_api::wire::WireDecode;
 use speet_plugin_api::HostImports;
 
 use crate::frame::{Frame, FrameKind};
@@ -126,47 +122,15 @@ impl SubprocessPlugin {
 }
 
 /// Decode an `ImportRequest` payload (`[role: u8][name: String][request
-/// bytes]`), resolve `role`/`name` against `imports`, dispatch, and encode
-/// the response. `None` means "not granted, unknown name, or malformed
-/// request" — the caller sends back an empty `ImportResponse` payload, the
-/// documented denied/failed sentinel a well-behaved plugin must check for
-/// (mirrors `speet-plugin-host-wasm`'s `(0, 0)` pack sentinel for the same
-/// case).
+/// bytes]`) and delegate to the shared `speet_plugin_api::remote::dispatch_import`
+/// — the same "resolve, decode, dispatch, encode" logic the WASM and dylib
+/// hosts use for the identical nested-import-call shape. `None` means "not
+/// granted, unknown name, or malformed request" — the caller sends back an
+/// empty `ImportResponse` payload, the documented denied/failed sentinel a
+/// well-behaved plugin must check for (mirrors `speet-plugin-host-wasm`'s
+/// `(0, 0)` pack sentinel for the same case).
 fn dispatch_import_request(imports: &dyn HostImports, payload: &[u8]) -> Option<Vec<u8>> {
     let (role, rest) = ImportRole::decode(payload).ok()?;
     let (name, req) = String::decode(rest).ok()?;
-    let mut out = Vec::new();
-    match role {
-        ImportRole::Arch => {
-            let plugin = imports.arch(&name)?;
-            let (req, _) = ArchRequest::decode(req).ok()?;
-            dispatch_arch(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::AddressMapper => {
-            let plugin = imports.address_mapper(&name)?;
-            let (req, _) = AddressMapperRequest::decode(req).ok()?;
-            dispatch_address_mapper(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::MemoryAccess => {
-            let plugin = imports.memory_access(&name)?;
-            let (req, _) = MemoryAccessRequest::decode(req).ok()?;
-            dispatch_memory_access(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::Table => {
-            let plugin = imports.table(&name)?;
-            let (req, _) = TableRequest::decode(req).ok()?;
-            dispatch_table(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::ObjectModel => {
-            let plugin = imports.object_model(&name)?;
-            let (req, _) = ObjectModelRequest::decode(req).ok()?;
-            dispatch_object_model(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::Target => {
-            let plugin = imports.target(&name)?;
-            let (req, _) = TargetRequest::decode(req).ok()?;
-            dispatch_target(plugin.as_ref(), req).encode(&mut out);
-        }
-    }
-    Some(out)
+    dispatch_import(imports, role, &name, req)
 }

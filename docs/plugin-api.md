@@ -41,12 +41,12 @@ crates/plugin/
 ├── speet-plugin-adapter/          # bridges plugin-api traits -> existing internal traits.
 │                                   # zero host-crate dependencies.
 ├── speet-plugin-host/             # PluginTransport seam + PluginRegistry + manifest loader.
-├── speet-plugin-host-inproc/      # in-process backend: static linking (+ dylib mode, planned).
+├── speet-plugin-host-inproc/      # in-process backend: static linking + dylib mode (feature "dylib").
 ├── speet-plugin-host-wasm/        # WASM backend: wasmi engine.
 └── speet-plugin-host-subprocess/  # subprocess backend: std::process + framed stdio IPC.
 ```
 
-**Why one crate per host, not one `speet-plugin-hosts`:** each host has a different platform footprint. `speet-plugin-host-wasm` pulls in a WASM engine. `speet-plugin-host-subprocess` needs `std::process`, unavailable on `no_std`/`wasm32` targets. `speet-plugin-host-inproc`'s (planned) dylib mode needs `libloading`, only meaningful where dynamic linking exists. An embedder's `Cargo.toml` simply omits the member it can't use, at zero cost to the rest.
+**Why one crate per host, not one `speet-plugin-hosts`:** each host has a different platform footprint. `speet-plugin-host-wasm` pulls in a WASM engine. `speet-plugin-host-subprocess` needs `std::process`, unavailable on `no_std`/`wasm32` targets. `speet-plugin-host-inproc`'s dylib mode needs `libloading`, only meaningful where dynamic linking exists. An embedder's `Cargo.toml` simply omits the member it can't use, at zero cost to the rest.
 
 `speet-plugin-host` (the `PluginTransport` seam + `PluginRegistry`) has no engine-specific dependencies — only `speet-plugin-api` types and a transport trait object. The backend crates depend on it; it never depends on them. That asymmetry is what lets a 4th host be added later as a new leaf crate without touching `speet-plugin-host` or `speet-plugin-api` (§6).
 
@@ -165,7 +165,7 @@ Architecture recompilation is a stateful decode loop against `ReactorContext` (o
 
 This is **deliberately scoped narrower than the full internal `Recompile`/`ReactorContext` surface for v1**: it covers open/feed/jump/indirect-jump/seal/request-more/done, but does not expose `ji`/`EscapeTag`/speculative-call machinery, lazy-store lookahead, or out-of-bounds lookup-stub dispatch. Those stay host-side adapter defaults a plugin cannot directly invoke. Exact `ArchOp` v2 scope (speculative calls, lazy-store lookahead, OOB dispatch) is deferred until a real plugin author needs them.
 
-**Status:** `ArchPlugin` and `ArchOp` are fully specified and wire-tested (§5/§7), but the adapter that drives a real `Recompile` implementation from `ArchPlugin::step` calls — `ArchPluginRecompiler` — has not been built yet, and `crates/os/speet-recompile/src/frontend.rs`'s `RecompilerChoice::Plugin` arm is an `unimplemented!()` stub. This is intentionally sequenced last (see §9 of the implementation plan referenced in `goals/active.md`): it is the most complex, most stateful resource kind, and benefits from the other four kinds' infrastructure — including host-entity imports — being proven first. Do not read the stub as evidence the design is unfinished or wrong; the other four kinds are complete, tested end-to-end across all three hosts, and `ArchPlugin`'s own wire protocol is exercised by the same test infrastructure.
+**Status:** `ArchPluginRecompiler` (`crates/plugin/speet-plugin-adapter/src/arch.rs`) drives a real `dyn ReactorContext` from `ArchPlugin::step` calls, and `crates/os/speet-recompile/src/frontend.rs`'s `RecompilerChoice::Plugin` arm is wired to it — no longer a stub. One deliberate v1 simplification: `Jump`/`IndirectJump` are resolved via explicit `feed` (param forwarding) + `seal_fn` (a manually-encoded `Instruction::ReturnCall`/`ReturnCallIndirect`), **not** via `ReactorContext::jmp`/`ji_with_params`. Native recompilers use the latter, which defers to yecta's predecessor-graph machinery (and can fold/inline single-predecessor jump targets — see `docs/guides/yecta.md`'s function-merging notes); this adapter instead emits fully explicit, self-contained bytes per function, trading away that optimization for a smaller, more auditable code path for a resource kind that had no prior test coverage to validate against. See `arch.rs`'s module doc for the exact rationale and the PC↔`FuncIdx` arithmetic this implies (it *does* include `base_func_offset`, unlike `jmp`'s own relative `FuncIdx`, since a raw `ReturnCall` needs an absolute index).
 
 ---
 
@@ -203,7 +203,16 @@ pub enum RecompilerChoice {
 
 **Static mode** (always available): construct a plugin struct directly and register it — `registry.register_static(name, PluginHandle::arch(Arc::new(my_plugin)))`. This is the only mode where a real Rust trait object crosses any boundary; there is no boundary, since the plugin lives in the same compilation graph as the host. See `crates/plugin/speet-plugin-host-inproc/src/static_mode.rs`.
 
-**Dylib mode** (feature `"dylib"`, planned, not yet implemented): a runtime-loaded shared library behind a stable `extern "C"`/`#[repr(C)]` surface — no Rust trait object, `Box<dyn Trait>`, `Vec<T>`, or `String` would cross the boundary, only raw pointers/lengths and the §7 wire codec's bytes, so dylib plugins stay binary-stable across `rustc` versions rather than depending on the host and plugin sharing one. The `dylib` Cargo feature (pulling in `libloading`) is already scaffolded in `crates/plugin/speet-plugin-host-inproc/Cargo.toml`.
+**Dylib mode** (feature `"dylib"`): a runtime-loaded shared library behind a stable `extern "C"`/`#[repr(C)]` surface — no Rust trait object, `Box<dyn Trait>`, `Vec<T>`, or `String` crosses the boundary, only raw pointers/lengths and `speet_plugin_api::remote::XRequest`/`XResponse` byte payloads (the same self-describing encoding the WASM and subprocess hosts use), so dylib plugins stay binary-stable across `rustc` versions rather than depending on the host and plugin sharing one. See `crates/plugin/speet-plugin-host-inproc/src/dylib/ffi.rs` for the exact symbol contract:
+
+| Symbol (per role — `arch`, `address_mapper`, `memory_access`, `table`, `object_model`, `target`) | Signature |
+|---|---|
+| `speet_plugin_create_<role>` | `extern "C" fn(imports: HostImportsFfi) -> *mut c_void` |
+| `speet_plugin_call_<role>` | `extern "C" fn(handle: *mut c_void, payload_ptr: *const u8, payload_len: usize) -> PluginBuffer` |
+| `speet_plugin_free_buffer_<role>` | `extern "C" fn(buf: PluginBuffer)` |
+| `speet_plugin_destroy_<role>` | `extern "C" fn(handle: *mut c_void)` |
+
+`PluginBuffer { ptr: *mut u8, len: usize }` carries request/response bytes; `HostImportsFfi { ctx, call, free }` realizes §8's host-entity imports across this boundary, passed once at `create_<role>` time. Buffer ownership follows "the producer frees its own allocation": a buffer `call_<role>` returns was dylib-allocated, so the host frees it via `free_buffer_<role>`; symmetrically, a buffer `HostImportsFfi::call` returns was host-allocated, so the dylib frees it via `HostImportsFfi::free`. Tested in `crates/plugin/speet-plugin-host-inproc/tests/dylib_plugin.rs` against real `cdylib` fixtures compiled on the fly with a bare `rustc` invocation (no shared crate dependency with the host — proving the ABI is genuinely self-describing, not an accidental same-`rustc`-version match), including the host-entity-import mechanism in both the granted and denied cases.
 
 Trust framing: the host process grants an in-process plugin its own full privileges; speet does nothing to contain it.
 

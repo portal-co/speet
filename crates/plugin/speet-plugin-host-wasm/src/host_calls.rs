@@ -7,12 +7,7 @@
 
 use std::sync::Arc;
 
-use speet_plugin_api::remote::{
-    dispatch_address_mapper, dispatch_arch, dispatch_memory_access, dispatch_object_model,
-    dispatch_table, dispatch_target, AddressMapperRequest, ArchRequest, MemoryAccessRequest,
-    ObjectModelRequest, TableRequest, TargetRequest,
-};
-use speet_plugin_api::wire::{WireDecode, WireEncode};
+use speet_plugin_api::remote::dispatch_import;
 use speet_plugin_api::HostImports;
 use wasmi::{Caller, Linker};
 
@@ -102,48 +97,6 @@ fn host_call(
         return abi::pack(0, 0);
     }
     abi::pack(resp_ptr, resp_bytes.len() as u32)
-}
-
-fn dispatch_import(
-    imports: &dyn HostImports,
-    role: ImportRole,
-    name: &str,
-    req: &[u8],
-) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    match role {
-        ImportRole::Arch => {
-            let plugin = imports.arch(name)?;
-            let (req, _) = ArchRequest::decode(req).ok()?;
-            dispatch_arch(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::AddressMapper => {
-            let plugin = imports.address_mapper(name)?;
-            let (req, _) = AddressMapperRequest::decode(req).ok()?;
-            dispatch_address_mapper(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::MemoryAccess => {
-            let plugin = imports.memory_access(name)?;
-            let (req, _) = MemoryAccessRequest::decode(req).ok()?;
-            dispatch_memory_access(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::Table => {
-            let plugin = imports.table(name)?;
-            let (req, _) = TableRequest::decode(req).ok()?;
-            dispatch_table(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::ObjectModel => {
-            let plugin = imports.object_model(name)?;
-            let (req, _) = ObjectModelRequest::decode(req).ok()?;
-            dispatch_object_model(plugin.as_ref(), req).encode(&mut out);
-        }
-        ImportRole::Target => {
-            let plugin = imports.target(name)?;
-            let (req, _) = TargetRequest::decode(req).ok()?;
-            dispatch_target(plugin.as_ref(), req).encode(&mut out);
-        }
-    }
-    Some(out)
 }
 
 fn call_guest_alloc(caller: &mut Caller<'_, HostState>, len: u32) -> Result<u32, wasmi::Error> {

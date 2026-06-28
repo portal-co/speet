@@ -8,6 +8,7 @@ license-file.workspace = true
 [dependencies]
 speet-plugin-api    = { workspace = true }
 speet-module-target = { workspace = true }
+speet-link-core      = { workspace = true }
 speet-syscall        = { path = "../../os/speet-syscall" }
 speet-memory         = { path = "../../helper/speet-memory" }
 speet-object         = { path = "../../managed/speet-object" }
@@ -21,4 +22,3 @@ spin                 = { workspace = true }
 [dev-dependencies]
 speet-module-builder = { path = "../../os/speet-module-builder" }
 speet-linux-wasi     = { path = "../../os/speet-linux-wasi" }
-speet-link-core      = { workspace = true }

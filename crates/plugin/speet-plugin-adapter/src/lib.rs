@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+pub mod arch;
 pub mod memory;
 pub mod object_model;
 pub mod replay;
@@ -21,6 +22,7 @@ pub mod reverse;
 pub mod table;
 pub mod target;
 
+pub use arch::{ArchPluginBinaryArgs, ArchPluginRecompiler};
 pub use memory::{PluginAddressMapper, PluginMemoryAccess};
 pub use object_model::PluginObjectModel;
 pub use replay::replay_snippet;

@@ -26,6 +26,7 @@ speet-syscall = { path = "../speet-syscall" }
 speet-host-syscall = { path = "../speet-host-syscall" }
 speet-link-core = { path = "../speet-link-core" }
 speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
+speet-plugin-adapter = { path = "../../plugin/speet-plugin-adapter" }
 speet-log = { path = "../../helper/speet-log", features = ["log-subscriber"] }
 yecta = { path = "../../helper/yecta" }
 rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }

@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use speet_plugin_api::{
-    AddressMapperPlugin, ArchPlugin, HostImports, MemoryAccessPlugin, ObjectModelPlugin,
-    TablePlugin, TargetPlugin,
+    AddressMapperPlugin, ArchPlugin, MemoryAccessPlugin, ObjectModelPlugin, TablePlugin,
+    TargetPlugin,
 };
 use speet_plugin_host::{PluginHandle, PluginRegistry};
 
@@ -54,7 +54,8 @@ pub fn register_target(
 mod tests {
     use super::*;
     use speet_plugin_api::{
-        snippet::CodeSnippet, target::ModuleManifest, target::PluginSyscallTable, PResult,
+        snippet::CodeSnippet, target::ModuleManifest, target::PluginSyscallTable, HostImports,
+        PResult,
     };
     use std::sync::Mutex;
 

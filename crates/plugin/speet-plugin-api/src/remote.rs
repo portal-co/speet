@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 
 use crate::arch::{ArchOp, ArchPlugin};
 use crate::error::PResult;
+use crate::imports::HostImports;
 use crate::memory::{AddressMapperPlugin, MemoryAccessPlugin, PluginLoadKind, PluginStoreKind};
 use crate::object_model::{ObjectModelPlugin, PluginFieldValType, PluginTypeHash};
 use crate::snippet::{CodeSnippet, PluginValType};
@@ -1116,6 +1117,62 @@ pub fn dispatch_target(plugin: &dyn TargetPlugin, req: TargetRequest) -> TargetR
             table: plugin.syscall_table(),
         },
     }
+}
+
+// ── Host entity imports (§2.7) — shared "resolve, decode, dispatch, encode"
+// helper for every remote host (WASM, subprocess, dylib) ────────────────────
+
+/// Resolve `(role, name)` against `imports`, decode `req` as that role's
+/// `XRequest`, dispatch it, and encode the `XResponse`. `None` means "not
+/// granted, unknown name, or malformed request" — every remote host maps
+/// that to its own documented denied/failed sentinel (the WASM host's
+/// `(0, 0)` packed pointer, the subprocess host's empty `ImportResponse`
+/// payload, the dylib host's empty `PluginBuffer`) rather than inventing a
+/// per-host error shape. Shared by `speet-plugin-host-wasm`,
+/// `speet-plugin-host-subprocess`, and `speet-plugin-host-inproc`'s dylib
+/// mode so the "decode request, call the right trait method, encode the
+/// result" logic for a nested import call lives in exactly one place. See
+/// `docs/guides/plugin-api.md` §7.
+pub fn dispatch_import(
+    imports: &dyn HostImports,
+    role: ImportRole,
+    name: &str,
+    req: &[u8],
+) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    match role {
+        ImportRole::Arch => {
+            let plugin = imports.arch(name)?;
+            let (req, _) = ArchRequest::decode(req).ok()?;
+            dispatch_arch(plugin.as_ref(), req).encode(&mut out);
+        }
+        ImportRole::AddressMapper => {
+            let plugin = imports.address_mapper(name)?;
+            let (req, _) = AddressMapperRequest::decode(req).ok()?;
+            dispatch_address_mapper(plugin.as_ref(), req).encode(&mut out);
+        }
+        ImportRole::MemoryAccess => {
+            let plugin = imports.memory_access(name)?;
+            let (req, _) = MemoryAccessRequest::decode(req).ok()?;
+            dispatch_memory_access(plugin.as_ref(), req).encode(&mut out);
+        }
+        ImportRole::Table => {
+            let plugin = imports.table(name)?;
+            let (req, _) = TableRequest::decode(req).ok()?;
+            dispatch_table(plugin.as_ref(), req).encode(&mut out);
+        }
+        ImportRole::ObjectModel => {
+            let plugin = imports.object_model(name)?;
+            let (req, _) = ObjectModelRequest::decode(req).ok()?;
+            dispatch_object_model(plugin.as_ref(), req).encode(&mut out);
+        }
+        ImportRole::Target => {
+            let plugin = imports.target(name)?;
+            let (req, _) = TargetRequest::decode(req).ok()?;
+            dispatch_target(plugin.as_ref(), req).encode(&mut out);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

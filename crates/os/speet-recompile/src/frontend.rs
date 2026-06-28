@@ -82,11 +82,14 @@ const N_IMPORTS: u32 = 3;
 static REACTOR_TABLE: TableIdx = TableIdx(0);
 
 /// Build a fresh [`ReactorAdapter`] (mirrors the speet-e2e harness `make_rctx`,
-/// with exception handling disabled).
-fn make_rctx<'r>(
-    reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
+/// with exception handling disabled). Generic over `E` so the
+/// `ArchPlugin`-backed path (which needs `E: From<PluginError>`, never
+/// satisfiable by the native path's `Infallible`) can reuse this builder
+/// with its own error type — see `RecompilerChoice::Plugin` below.
+fn make_rctx<'r, E>(
+    reactor: &'r mut Reactor<(), E, Function, LocalPool>,
     base_func_offset: u32,
-) -> ReactorAdapter<'r, (), Infallible, Function, LocalPool> {
+) -> ReactorAdapter<'r, (), E, Function, LocalPool> {
     let mut rctx = ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
@@ -98,7 +101,7 @@ fn make_rctx<'r>(
     rctx
 }
 
-fn collect_params(rctx: &ReactorAdapter<'_, (), Infallible, Function, LocalPool>) -> Vec<ValType> {
+fn collect_params<E>(rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>) -> Vec<ValType> {
     let mark = rctx.locals_mark();
     rctx.layout()
         .iter_before(&mark)
@@ -155,11 +158,30 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Tran
             }
         },
         RecompilerChoice::Plugin(plugin) => {
-            // Activated once `ArchPluginRecompiler` lands in
-            // speet-plugin-adapter (phased after the other resource kinds —
-            // see docs/guides/plugin-api.md).
-            let _ = plugin;
-            unimplemented!("ArchPlugin-backed recompilation lands in a follow-up phase")
+            // `ArchPluginRecompiler` requires `E: From<PluginError>`, which
+            // `Infallible` (this function's native-path error type) can
+            // never satisfy — so the plugin path gets its own, separate
+            // `Reactor`/`ReactorAdapter` instance typed at `E = PluginError`
+            // (trivially `From<PluginError>` via the reflexive identity
+            // impl) instead of reusing `reactor`/`rctx` above. `Function`
+            // itself doesn't depend on `E`, so the two paths' outputs still
+            // unify into the same `Translated`.
+            let mut plugin_reactor: Reactor<(), speet_plugin_api::error::PluginError, Function, LocalPool> =
+                Reactor::default();
+            let mut plugin_rctx = make_rctx(&mut plugin_reactor, N_IMPORTS);
+            let mut plugin_ctx = ();
+            let mut rc = speet_plugin_adapter::ArchPluginRecompiler::<
+                (),
+                speet_plugin_api::error::PluginError,
+                Function,
+            >::new(std::sync::Arc::from(plugin));
+            rc.setup_traps(&mut plugin_rctx, &mut plugin_ctx);
+            let params = collect_params(&plugin_rctx);
+            rc.translate_bytes(&mut plugin_ctx, &mut plugin_rctx, text, start_addr, &mut |a| {
+                Function::new(a.collect::<Vec<_>>())
+            })
+            .expect("ArchPlugin::step");
+            return Translated { fns: plugin_rctx.drain_fns(), params, unsupported: Vec::new() };
         }
     };
 
@@ -364,4 +386,68 @@ pub fn assemble_syscall_module(t: &Translated) -> Vec<u8> {
 pub fn recompile_rv64_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
     let t = translate_rv64(text, start_addr);
     assemble_syscall_module(&t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use speet_plugin_api::arch::{ArchOp, ArchPlugin};
+    use speet_plugin_api::snippet::PluginValType;
+    use speet_plugin_api::PResult;
+    use std::sync::Mutex;
+    use wasm_encoder::Instruction;
+
+    /// One register param, one instruction (`reg0` read then discarded),
+    /// sealed with `Unreachable` — exercises `RecompilerChoice::Plugin`
+    /// end-to-end through the real `translate()` entry point, not just
+    /// `ArchPluginRecompiler` directly (see `speet-plugin-adapter::arch`'s
+    /// own unit tests for that).
+    struct ToyArch {
+        step: Mutex<u32>,
+    }
+    impl ArchPlugin for ToyArch {
+        fn reset_for_next_binary(&self, _args: &[u8]) {}
+        fn count_fns(&self, _bytes: &[u8]) -> u32 {
+            1
+        }
+        fn declare_params(&self) -> Vec<PluginValType> {
+            vec![PluginValType::I64]
+        }
+        fn step(&self, _feedback: Option<&[u8]>) -> PResult<ArchOp> {
+            let mut step = self.step.lock().unwrap();
+            let op = match *step {
+                0 => ArchOp::OpenFn { len: 1 },
+                1 => ArchOp::Feed {
+                    snippet: speet_plugin_api::CodeSnippet::from_instructions(&[
+                        Instruction::LocalGet(0),
+                        Instruction::Drop,
+                    ]),
+                },
+                2 => ArchOp::Seal {
+                    snippet: speet_plugin_api::CodeSnippet::from_instructions(&[
+                        Instruction::Unreachable,
+                    ]),
+                },
+                _ => ArchOp::Done,
+            };
+            *step += 1;
+            Ok(op)
+        }
+    }
+
+    #[test]
+    fn recompiler_choice_plugin_produces_one_function() {
+        let plugin: Box<dyn ArchPlugin> = Box::new(ToyArch { step: Mutex::new(0) });
+        let t = translate(&[0u8; 1], 0x1000, RecompilerChoice::Plugin(plugin));
+        assert_eq!(t.fns.len(), 1);
+        assert_eq!(t.params, vec![ValType::I64]);
+        assert!(t.unsupported.is_empty());
+
+        let mut expected = Function::new([]);
+        expected.instruction(&Instruction::LocalGet(0));
+        expected.instruction(&Instruction::Drop);
+        expected.instruction(&Instruction::Unreachable);
+        expected.instruction(&Instruction::End);
+        assert_eq!(t.fns[0], expected);
+    }
 }
