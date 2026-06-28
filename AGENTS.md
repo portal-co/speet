@@ -71,6 +71,20 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
+## 7. Plugin API (`speet-plugin-api`, `speet-plugin-adapter`, `speet-plugin-host*`)
+
+**Guide:** [docs/guides/plugin-api.md](docs/guides/plugin-api.md)
+**Design doc:** [docs/plugin-api.md](docs/plugin-api.md)
+
+- Do not let plugin-facing traits in `speet-plugin-api` leak `Context`/`E`/`F` generics — plugins must stay host-instantiation-agnostic.
+- Do not bypass the `PluginTransport` seam to call a specific host backend directly from the adapter crate or any arch/resource crate.
+- Do not let in-process dylib plugins cross the FFI boundary with anything but the fixed `extern "C"`/`#[repr(C)]` surface in the guide — no Rust trait objects, no relying on matching `rustc` versions.
+- Do not add serde/bincode/rkyv to any plugin crate — the wire format is an intentional hand-rolled codec, shared by the WASM, subprocess, and dylib transports alike.
+- Do not change `speet-plugin-api::arch::ArchOp`'s vocabulary or any wire format without updating `docs/plugin-api.md` and `docs/guides/plugin-api.md` in the same change.
+- Do not grant a WASM or subprocess plugin a host-entity import (§2.7) outside its manifest-declared, embedder-approved allowlist.
+
+---
+
 ## Compression-aware logging
 
 Token compression proxies can sit between this tool and an LLM provider, compressing

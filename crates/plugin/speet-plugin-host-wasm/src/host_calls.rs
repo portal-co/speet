@@ -81,7 +81,7 @@ fn host_call(
         return abi::pack(0, 0);
     }
 
-    let Some(role) = ImportRole::from_i32(role) else {
+    let Some(role) = u8::try_from(role).ok().and_then(ImportRole::from_u8) else {
         return abi::pack(0, 0);
     };
 

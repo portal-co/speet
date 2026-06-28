@@ -38,6 +38,7 @@ members = [
     "crates/plugin/speet-plugin-host",
     "crates/plugin/speet-plugin-host-inproc",
     "crates/plugin/speet-plugin-host-wasm",
+    "crates/plugin/speet-plugin-host-subprocess",
     # End-to-end integration tests
     "crates/test/speet-e2e",
 ]

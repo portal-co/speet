@@ -31,6 +31,16 @@ The trap trait infrastructure in `speet-traps` is complete. Integration into eac
 
 ---
 
+## Plugin API — remaining work
+
+The external plugin system (`crates/plugin/`) is built and documented: see [docs/guides/plugin-api.md](../docs/guides/plugin-api.md) and [docs/plugin-api.md](../docs/plugin-api.md). All five plugin trait families and all three MVP hosts (in-process static mode, WASM via `wasmi`, subprocess) are implemented and tested end-to-end, including the host-entity-import mechanism in both directions and its negative (denied-import) case. Two pieces remain:
+
+- [ ] `speet-plugin-host-inproc` dylib mode: the `extern "C"`/`#[repr(C)]` surface + `libloading`-based loader behind the already-scaffolded `"dylib"` feature (see `docs/plugin-api.md` §5.1).
+- [ ] `ArchPluginRecompiler` in `speet-plugin-adapter`: drives a real `Recompile<Context, E, F>` implementation from an `ArchPlugin`'s `step()` calls, activating `crates/os/speet-recompile/src/frontend.rs`'s `RecompilerChoice::Plugin` arm (currently `unimplemented!()`). Sequenced last — see `docs/plugin-api.md` §3.6 for why.
+- [ ] `speet-plugin-host-wasm` `"exceptions"` feature (`wasmtime` engine) — only if/when a real plugin needs the exception-handling proposal; not required alongside the `wasmi` default.
+
+---
+
 ## Documentation for undocumented crates
 
 - [ ] Write `docs/speet-memory.md`

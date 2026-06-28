@@ -33,6 +33,53 @@ use crate::table::{PluginIndirectJumpKind, TablePlugin};
 use crate::target::{ModuleManifest, PluginSyscallTable, TargetPlugin};
 use crate::wire::{WireDecode, WireEncode, WireError};
 
+/// Which of the six remote-callable plugin roles a nested host-entity-import
+/// call (§2.7) targets — shared by every remote transport (`wasm`,
+/// `subprocess`, and any future host) so a guest/subprocess plugin author
+/// only has to learn one numbering. Finer-grained than [`crate::PluginKind`]
+/// — that type intentionally conflates `AddressMapper`/`MemoryAccess` under
+/// one `Memory` tag for import-grant bookkeeping (see
+/// `speet_plugin_host::RestrictedHostImports`), but the wire ABI must
+/// address them separately since they're different traits with different
+/// request shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ImportRole {
+    Arch = 0,
+    AddressMapper = 1,
+    MemoryAccess = 2,
+    Table = 3,
+    ObjectModel = 4,
+    Target = 5,
+}
+
+impl ImportRole {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ImportRole::Arch),
+            1 => Some(ImportRole::AddressMapper),
+            2 => Some(ImportRole::MemoryAccess),
+            3 => Some(ImportRole::Table),
+            4 => Some(ImportRole::ObjectModel),
+            5 => Some(ImportRole::Target),
+            _ => None,
+        }
+    }
+}
+
+impl WireEncode for ImportRole {
+    fn encode(&self, out: &mut Vec<u8>) {
+        (*self as u8).encode(out);
+    }
+}
+impl WireDecode for ImportRole {
+    fn decode(input: &[u8]) -> Result<(Self, &[u8]), WireError> {
+        let (tag, rest) = u8::decode(input)?;
+        let role = ImportRole::from_u8(tag).ok_or(WireError)?;
+        Ok((role, rest))
+    }
+}
+
 // ── Arch ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]

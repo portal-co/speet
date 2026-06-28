@@ -50,36 +50,11 @@ pub fn unpack(packed: i64) -> (u32, u32) {
     (ptr, len)
 }
 
-/// Which of the six remote-callable plugin roles a `speet_host_call`
-/// targets, or a `.wasm` module is loaded as. Finer-grained than
-/// [`speet_plugin_api::PluginKind`] — that type intentionally conflates
-/// `AddressMapper`/`MemoryAccess` under one `Memory` tag for import-grant
-/// bookkeeping (see `RestrictedHostImports`), but the wire ABI must address
-/// them separately since they're different traits with different request
-/// shapes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportRole {
-    Arch = 0,
-    AddressMapper = 1,
-    MemoryAccess = 2,
-    Table = 3,
-    ObjectModel = 4,
-    Target = 5,
-}
-
-impl ImportRole {
-    pub fn from_i32(v: i32) -> Option<Self> {
-        match v {
-            0 => Some(ImportRole::Arch),
-            1 => Some(ImportRole::AddressMapper),
-            2 => Some(ImportRole::MemoryAccess),
-            3 => Some(ImportRole::Table),
-            4 => Some(ImportRole::ObjectModel),
-            5 => Some(ImportRole::Target),
-            _ => None,
-        }
-    }
-}
+/// Re-exported from `speet_plugin_api::remote`, which a guest fixture and a
+/// future subprocess host both also need — it's a wire-level concept, not a
+/// WASM-specific one. See that module's docs for why it's finer-grained than
+/// [`speet_plugin_api::PluginKind`].
+pub use speet_plugin_api::remote::ImportRole;
 
 #[cfg(test)]
 mod tests {

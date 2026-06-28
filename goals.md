@@ -9,7 +9,7 @@ AI agents: add subgoals to the relevant file in `goals/` as you work.
 
 | Area | File | Status |
 |------|------|--------|
-| **Active work** | [goals/active.md](goals/active.md) | Parallel API interior mutability; trap integration; new docs |
+| **Active work** | [goals/active.md](goals/active.md) | Parallel API interior mutability; trap integration; new docs; plugin API dylib mode + `ArchPluginRecompiler` |
 | **Architecture frontends** | [goals/arch.md](goals/arch.md) | x86_64 FP/SIMD; aarch64; WASM-GC (urgent); powerpc stub |
 | **OS emulation & container megabinary** | [goals/os.md](goals/os.md) | Phase 0 target: ls/cat/echo megabinary demo |
 | **Security** | [goals/security.md](goals/security.md) | No-JIT; signed megabinary; ROP/CFI traps; syscall whitelisting |
@@ -25,3 +25,4 @@ AI agents: add subgoals to the relevant file in `goals/` as you work.
 - [docs/parallel-api-migration.md](docs/parallel-api-migration.md) — API migration history and invariants
 - [docs/container-plan.md](docs/container-plan.md) — container megabinary architecture and threat model
 - [docs/guides/](docs/guides/) — per-component alignment guides
+- [docs/plugin-api.md](docs/plugin-api.md) — external plugin system design doc (architecture/memory/table/object-model/target plugins; in-process/WASM/subprocess hosts)
