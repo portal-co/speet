@@ -43,6 +43,7 @@ members = [
     "crates/plugin/speet-plugin-host-subprocess",
     # End-to-end integration tests
     "crates/test/speet-e2e",
+    "crates/test/speet-corpus-harness",
 ]
 resolver = "3"
 

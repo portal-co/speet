@@ -1383,7 +1383,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     {
                         return Ok(());
                     }
-                    // For indirect jumps, seal with unreachable as we can't statically determine target
+                    // Non-call JALR (including `ret` = jalr x0, ra, 0): end the
+                    // current WASM function.  Corpus / standalone entry uses a
+                    // void-return host export, so a bare `return` is sufficient.
+                    if dest.0 == 0 {
+                        rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                        return Ok(());
+                    }
+                    // Other indirect jumps need a runtime target; seal as unreachable.
                     rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
                     return Ok(());
                 }
@@ -2977,8 +2984,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // For most instructions that don't explicitly handle control flow,
-        // yecta automatically handles fallthrough based on the len parameter in init_function
+        // Fallthrough to the next instruction start, skipping intermediate junk
+        // slots that exist for 4-byte encodings (see `translate_bytes`).
+        let next_pc = pc.wrapping_add(inst_len * 2);
+        if let Some(target_func) = self.pc_to_func_idx(next_pc as u64) {
+            let fall_info =
+                JumpInfo::direct(pc as u64, next_pc as u64, JumpKind::DirectJump);
+            if rctx.on_jump(&fall_info, ctx)? != TrapAction::Skip {
+                rctx.jmp(ctx, tail_idx, target_func, rctx.locals_mark().total_locals)?;
+            }
+        } else {
+            rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
+        }
         Ok(())
     }
 

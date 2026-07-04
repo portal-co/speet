@@ -152,11 +152,16 @@ There is no top-level binary or CLI. The project is a library workspace; consume
 
 Tests are spread across individual crates. The RISC-V and MIPS crates have corpus tests that feed pre-assembled ELF sections through the recompiler. The x86-64 crate similarly uses pre-built ELF objects from `test-data/x86_64-corpus/`. An rv-corpus test suite is included as a git submodule (`test-data/rv-corpus`).
 
+**C compiler-output corpuses** (Clang `-O1`, in-repo): `test-data/c-corpus/` (x86_64 + aarch64) and `test-data/rv-c-corpus/` (RV32/RV64, sibling to the asm `rv-corpus` submodule). Recompiler integration tests use runtime `unreachable`-trap detection via `speet-corpus-harness` — no static `unsupported_insns()` gate.
+
 ```
 cargo test -p speet-riscv
 cargo test -p speet-x86_64
+cargo test -p speet-aarch64 --test c_corpus_tests
+cargo test -p speet-riscv --test rv_c_corpus_tests
 cargo test -p speet-mips
 cargo test -p yecta
+cargo test -p speet-runtime --test c_corpus_e2e
 ```
 
 ## Dependencies (notable)

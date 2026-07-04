@@ -773,7 +773,11 @@ where
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
     ) -> Result<usize, E> {
         let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
-        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
+        let addr_type = if self.use_memory64 || self.enable_rv64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
         let temps_slot = rctx.layout_mut().append(num_temps, int_type);

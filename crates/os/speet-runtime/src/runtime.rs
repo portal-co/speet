@@ -4,6 +4,7 @@ use crate::cache::{load_binary, load_text_from_object, ArtifactCache};
 use crate::link::link_guest;
 use crate::toolchain::LlvmToolchain;
 use binary_io::{BinArch, BinOs};
+use object::Object;
 use speet_host_api::HostApi;
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{assert_same_platform, recompile_rv64_to_wasm, recompile_to_wasm};
@@ -90,6 +91,22 @@ impl Runtime {
         arch: BinArch,
         os: BinOs,
     ) -> Result<ExitStatus, String> {
+        if let Ok((text, start)) = load_text_from_object(path) {
+            let guest_arch = guest_arch_from_object_path(path)?;
+            let wasm = match guest_arch {
+                BinArch::X86_64 | BinArch::AArch64 => {
+                    let (w, unsupported) = recompile_to_wasm(&text, start, guest_arch);
+                    if !unsupported.is_empty() {
+                        eprintln!("recompile unsupported: {:?}", unsupported);
+                    }
+                    w
+                }
+            };
+            validate_wasm(&wasm)?;
+            let obj = self.compile_to_object(&wasm, arch, os)?;
+            return self.link_and_run(&obj, arch, os);
+        }
+
         let bin = load_binary(path)?;
         assert_same_platform(&bin)?;
         let text = bin
@@ -168,5 +185,22 @@ fn os_label(o: BinOs) -> &'static str {
     match o {
         BinOs::Linux => "linux",
         BinOs::MacOs => "macos",
+    }
+}
+
+fn guest_arch_from_object_path(path: &Path) -> Result<BinArch, String> {
+    let s = path.to_string_lossy();
+    if s.contains("aarch64") || s.contains("arm64") {
+        return Ok(BinArch::AArch64);
+    }
+    if s.contains("x86_64") {
+        return Ok(BinArch::X86_64);
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let obj = object::File::parse(&*bytes).map_err(|e| e.to_string())?;
+    match obj.architecture() {
+        object::Architecture::Aarch64 => Ok(BinArch::AArch64),
+        object::Architecture::X86_64 => Ok(BinArch::X86_64),
+        other => Err(format!("unsupported guest arch in {}: {other:?}", path.display())),
     }
 }

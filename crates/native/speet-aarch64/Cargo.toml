@@ -18,7 +18,9 @@ speet-link-core = { path = "../../os/speet-link-core" }
 [dev-dependencies]
 yecta = { path = "../../helper/yecta" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
 wasm-encoder.workspace = true
+wasmparser = { workspace = true }
 
 [features]
 default = []

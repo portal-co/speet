@@ -25,11 +25,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                      self.unsupported_insns.insert(alloc::format!("{:?}", mnemonic));
                      return Ok(()); }};
         }
-        let (w, is_sub, set_flags) = match inner {
-            ADDSUB_IMM::ADD_Rd_SP_Rn_SP_AIMM(x)  => (x.0, false, false),
-            ADDSUB_IMM::ADDS_Rd_Rn_SP_AIMM(x)    => (x.0, false, true),
-            ADDSUB_IMM::SUB_Rd_SP_Rn_SP_AIMM(x)  => (x.0, true,  false),
-            ADDSUB_IMM::SUBS_Rd_Rn_SP_AIMM(x)    => (x.0, true,  true),
+        let (w, is_sub, set_flags, src_uses_sp, dest_uses_sp) = match inner {
+            ADDSUB_IMM::ADD_Rd_SP_Rn_SP_AIMM(x)  => (x.0, false, false, true,  false),
+            ADDSUB_IMM::ADDS_Rd_Rn_SP_AIMM(x)    => (x.0, false, true,  false, false),
+            ADDSUB_IMM::SUB_Rd_SP_Rn_SP_AIMM(x)  => (x.0, true,  false, true,  true),
+            ADDSUB_IMM::SUBS_Rd_Rn_SP_AIMM(x)    => (x.0, true,  true,  false, false),
             _ => unsup!(),
         };
         let dest = rd(w);
@@ -38,7 +38,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 
         if set_flags {
             let tmp1 = rctx.layout().local(self.tmp_slot, 1);
-            self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            if src_uses_sp {
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, src)?;
+            } else {
+                self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            }
             rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp1))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm))?;
             if is_sub {
@@ -49,11 +53,19 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 self.set_nzcv_add(ctx, rctx, tail_idx, dest, Some(imm))?;
             }
         } else {
-            self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            if src_uses_sp {
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, src)?;
+            } else {
+                self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            }
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm))?;
             let op = if is_sub { &Instruction::I64Sub } else { &Instruction::I64Add };
             rctx.feed(ctx, tail_idx, op)?;
-            self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
+            if dest_uses_sp {
+                self.emit_addr_reg_set(ctx, rctx, tail_idx, dest)?;
+            } else {
+                self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
+            }
         }
         Ok(())
     }
