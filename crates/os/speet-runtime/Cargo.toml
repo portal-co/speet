@@ -1,0 +1,20 @@
+[package]
+name = "speet-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Thin runtime driver: recompile guest binaries to native and spawn via tunneled HostApi."
+
+[dependencies]
+binary-io = { path = "../../../../binary-io" }
+speet-host-api = { path = "../speet-host-api" }
+speet-host-syscall = { path = "../speet-host-syscall" }
+speet-recompile = { path = "../speet-recompile" }
+speet-rt = { path = "../speet-rt" }
+tunnel = { path = "../../../../tunnel" }
+object = "0.36"
+wasmparser = "0.240.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]

@@ -168,7 +168,7 @@ This dev host is **macOS / aarch64**, so the first *runnable* artifact must be
 Mach-O + aarch64 + libSystem (the plan's "M4" stack), even though the x86_64/ELF paths
 can be unit-tested (object round-trips) without executing.
 
-## Next integration steps (M1)
+- **`speet-runtime`** (`crates/os/speet-runtime`): thin runtime driver — LLVM link, tunneled `HostApi`, corpus tests. See [docs/thin-runtime-plan.md](../../../docs/thin-runtime-plan.md).
 
 1. Backend drive loop in `backend.rs`: feed a `MegabinaryOutput` through
    `mach_operators`/`handle_op` into one `AArch64Writer<AArch64Label>` (this host),

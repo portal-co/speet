@@ -32,3 +32,6 @@ yecta = { path = "../../helper/yecta" }
 rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }
 wasmparser = "0.240.0"
+
+[dev-dependencies]
+speet-runtime = { path = "../speet-runtime" }

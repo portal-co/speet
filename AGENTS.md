@@ -85,6 +85,16 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
+## 8. Thin runtime (`speet-runtime`, `speet-host-api`, `speet-rt`)
+
+**Guide:** [docs/thin-runtime-plan.md](docs/thin-runtime-plan.md)
+
+- Do not conflate thin runtime with container megabinary — container is pure WASM with no host JIT; thin runtime produces native linked executables.
+- Do not bypass `HostApi` for guest→host calls — tunnelled-by-default is the Phase 0 contract.
+- Do not require macOS Xcode toolchain for link — LLVM `clang` + `lld` only.
+
+---
+
 ## Compression-aware logging
 
 Token compression proxies can sit between this tool and an LLM provider, compressing

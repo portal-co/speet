@@ -6,8 +6,12 @@
 //! libc / kernel). The recompiler renders these imports as `env__{name}` symbols
 //! that the system linker resolves against the shim.
 //!
-//! v1 scope: `exit` (93) and `write` (64) — enough for a recompiled guest to
+//! v1 scope: `exit` and `write` — enough for a recompiled guest to
 //! terminate with a code and emit output.
+
+mod x86_64;
+
+pub use x86_64::{linux_x86_64_table, RAX, RDI, RDX, RSI, SYS_EXIT, SYS_WRITE};
 
 use speet_syscall::{ParamSource, SyscallEntry, SyscallTable};
 

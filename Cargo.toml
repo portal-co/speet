@@ -31,7 +31,9 @@ members = [
     "crates/os/speet-linux-wasi",
     "crates/os/speet-rt",
     "crates/os/speet-host-syscall",
+    "crates/os/speet-host-api",
     "crates/os/speet-recompile",
+    "crates/os/speet-runtime",
     # Plugin API (external/proprietary arch, memory, table, object-model, target plugins)
     "crates/plugin/speet-plugin-api",
     "crates/plugin/speet-plugin-adapter",

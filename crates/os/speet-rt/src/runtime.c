@@ -85,6 +85,7 @@ extern void __speet_data_init(void) __attribute__((weak));
  */
 extern void __guest_entry(void);
 
+#ifndef SPEET_RT_NO_MAIN
 /* Provided by libc crt; we hook in via the standard C `main`. */
 int main(int argc, char **argv) {
     (void)argc;
@@ -108,3 +109,4 @@ int main(int argc, char **argv) {
     __guest_entry();
     return 0;
 }
+#endif /* SPEET_RT_NO_MAIN */

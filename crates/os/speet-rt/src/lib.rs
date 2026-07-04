@@ -8,6 +8,10 @@
 //!
 //! See [`RUNTIME_C`] for the source and [`write_runtime_c`] to materialize it.
 
+mod shim;
+
+pub use shim::{generate_memory_tu, generate_shim};
+
 /// The C source of the runtime shim. Compile with the system C compiler and link
 /// with the generated guest object plus the tunneled host dylib (`-lc` on Linux,
 /// `-lSystem` on macOS).
