@@ -1,15 +1,19 @@
 //! C compiler-output corpus tests (runtime unreachable-trap detection).
 
 use core::convert::Infallible;
-use speet_corpus_harness::{run_c_corpus_file, CorpusArch};
+use speet_corpus_harness::{run_c_program_text, CorpusArch};
 use speet_link_core::ReactorAdapter;
 use speet_x86_64::X86Recompiler;
 use std::path::Path;
 use wasm_encoder::{Function, ValType};
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
+fn corpus_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/c-corpus")
+}
+
 fn corpus_dir() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/c-corpus/x86_64-linux")
+    corpus_root().join("x86_64-linux")
 }
 
 fn make_rctx(reactor: &mut Reactor<(), Infallible, Function, LocalPool>)
@@ -50,8 +54,11 @@ fn translate_x86(text: &[u8], base: u64) -> (Vec<Function>, Vec<ValType>) {
 
 #[test]
 fn c_corpus_arith() {
-    run_c_corpus_file(
+    run_c_program_text(
         CorpusArch::X86_64,
+        &corpus_root(),
+        "arith",
+        "x86_64-linux-gnu",
         &corpus_dir().join("arith.text.elf"),
         |text, base| translate_x86(text, base),
     );
@@ -59,8 +66,11 @@ fn c_corpus_arith() {
 
 #[test]
 fn c_corpus_frame() {
-    run_c_corpus_file(
+    run_c_program_text(
         CorpusArch::X86_64,
+        &corpus_root(),
+        "frame",
+        "x86_64-linux-gnu",
         &corpus_dir().join("frame.text.elf"),
         |text, base| translate_x86(text, base),
     );

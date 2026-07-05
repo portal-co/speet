@@ -1,0 +1,8 @@
+[[triple]]
+name = "x86_64-linux-gnu"
+# Deterministic FNV-1a over fill_buffer(16, 7); value may vary by triple — set after first build.
+main_return = 0
+
+[[triple]]
+name = "aarch64-linux-gnu"
+main_return = 0

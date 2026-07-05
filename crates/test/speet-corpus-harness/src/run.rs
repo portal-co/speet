@@ -1,61 +1,68 @@
 //! Execute instrumented corpus modules under wasmi.
 
-use std::sync::{Arc, Mutex};
-
 const RUN_FUEL: u64 = 50_000_000;
 
 #[derive(Debug, Default)]
 pub struct RunState {
     pub unreachable_trap_hits: Vec<i32>,
     pub exit_code: Option<i32>,
+    pub main_return: Option<i32>,
+    pub stdout: Vec<u8>,
 }
 
 #[derive(Default)]
-struct HostInner {
+struct HostState {
     unreachable_trap_hits: Vec<i32>,
     exit_code: Option<i32>,
+    stdout: Vec<u8>,
 }
 
 pub fn run_corpus_module(wasm: &[u8], entry: &str) -> Result<RunState, String> {
-    let inner = Arc::new(Mutex::new(HostInner::default()));
-    let inner_trap = inner.clone();
-    let inner_exit = inner.clone();
-
     let mut config = wasmi::Config::default();
     config.consume_fuel(true);
     let engine = wasmi::Engine::new(&config);
-    let mut store = wasmi::Store::new(&engine, ());
+    let mut store = wasmi::Store::new(&engine, HostState::default());
     store.set_fuel(RUN_FUEL).map_err(|e| e.to_string())?;
-    let mut linker: wasmi::Linker<()> = wasmi::Linker::new(&engine);
+    let mut linker: wasmi::Linker<HostState> = wasmi::Linker::new(&engine);
 
     linker
-        .func_wrap("env", "__speet_hint", |_caller: wasmi::Caller<'_, ()>, _id: i32| Ok(()))
+        .func_wrap("env", "__speet_hint", |_caller: wasmi::Caller<'_, HostState>, _id: i32| Ok(()))
         .map_err(|e| e.to_string())?;
     linker
         .func_wrap(
             "env",
             "write",
-            |_caller: wasmi::Caller<'_, ()>, _fd: i32, _ptr: i32, len: i32| Ok(len),
+            |mut caller: wasmi::Caller<'_, HostState>, fd: i32, ptr: i32, len: i32| -> i32 {
+                if (fd == 1 || fd == 2) && len > 0 {
+                    if let Some(mem) = caller
+                        .get_export("memory")
+                        .and_then(|e| e.into_memory())
+                    {
+                        let mut buf = vec![0u8; len as usize];
+                        let _ = mem.read(caller.as_context(), ptr as usize, &mut buf);
+                        caller.data_mut().stdout.extend_from_slice(&buf);
+                    }
+                }
+                len
+            },
         )
         .map_err(|e| e.to_string())?;
     linker
-        .func_wrap("env", "exit", move |caller: wasmi::Caller<'_, ()>, code: i32| {
-            if let Ok(mut g) = inner_exit.lock() {
-                g.exit_code = Some(code);
-            }
-            Ok(())
-        })
+        .func_wrap(
+            "env",
+            "exit",
+            |mut caller: wasmi::Caller<'_, HostState>, code: i32| {
+                caller.data_mut().exit_code = Some(code);
+            },
+        )
         .map_err(|e| e.to_string())?;
     linker
         .func_wrap(
             "env",
             "__speet_unreachable_trap",
-            move |_caller: wasmi::Caller<'_, ()>, func_idx: i32| {
+            |mut caller: wasmi::Caller<'_, HostState>, func_idx: i32| {
                 eprintln!("speet: unreachable trap at func {func_idx}");
-                if let Ok(mut g) = inner_trap.lock() {
-                    g.unreachable_trap_hits.push(func_idx);
-                }
-                Ok(())
+                caller.data_mut().unreachable_trap_hits.push(func_idx);
             },
         )
         .map_err(|e| e.to_string())?;
@@ -83,9 +90,20 @@ pub fn run_corpus_module(wasm: &[u8], entry: &str) -> Result<RunState, String> {
     let mut results = vec![wasmi::Val::I32(0); ty.results().len()];
     let _ = func.call(&mut store, &params, &mut results);
 
-    let g = inner.lock().map_err(|e| e.to_string())?;
+    let main_return = if results.len() == 1 {
+        match results[0] {
+            wasmi::Val::I32(v) => Some(v),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let host = store.into_data();
     Ok(RunState {
-        unreachable_trap_hits: g.unreachable_trap_hits.clone(),
-        exit_code: g.exit_code,
+        unreachable_trap_hits: host.unreachable_trap_hits,
+        exit_code: host.exit_code,
+        main_return,
+        stdout: host.stdout,
     })
 }

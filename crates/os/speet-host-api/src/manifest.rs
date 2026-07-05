@@ -16,10 +16,14 @@ pub struct ImportManifest {
 }
 
 impl ImportManifest {
-    /// Standard native-syscall shim imports (`env.exit`, `env.write`).
+    /// Standard native-syscall shim imports (`env.exit`, `env.write`, `env.__speet_hint`).
     pub fn native_syscall() -> Self {
         Self {
             func_imports: vec![
+                FuncImport {
+                    module: "env".into(),
+                    name: "__speet_hint".into(),
+                },
                 FuncImport {
                     module: "env".into(),
                     name: "exit".into(),

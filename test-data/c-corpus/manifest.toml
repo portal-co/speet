@@ -1,0 +1,81 @@
+[[artifact]]
+program = "arith"
+triple = "x86_64-linux-gnu"
+linked = "x86_64-linux/arith.linked.elf"
+text = "x86_64-linux/arith.text.elf"
+entry = "x86_64-linux/arith.entry"
+arch = "x86_64"
+os = "linux"
+
+[[artifact]]
+program = "frame"
+triple = "x86_64-linux-gnu"
+linked = "x86_64-linux/frame.linked.elf"
+text = "x86_64-linux/frame.text.elf"
+entry = "x86_64-linux/frame.entry"
+arch = "x86_64"
+os = "linux"
+
+[[artifact]]
+program = "checksum"
+triple = "x86_64-linux-gnu"
+linked = "x86_64-linux/checksum.linked.elf"
+text = "x86_64-linux/checksum.text.elf"
+entry = "x86_64-linux/checksum.entry"
+arch = "x86_64"
+os = "linux"
+
+[[artifact]]
+program = "arith"
+triple = "aarch64-linux-gnu"
+linked = "aarch64-linux/arith.linked.elf"
+text = "aarch64-linux/arith.text.elf"
+entry = "aarch64-linux/arith.entry"
+arch = "aarch64"
+os = "linux"
+
+[[artifact]]
+program = "frame"
+triple = "aarch64-linux-gnu"
+linked = "aarch64-linux/frame.linked.elf"
+text = "aarch64-linux/frame.text.elf"
+entry = "aarch64-linux/frame.entry"
+arch = "aarch64"
+os = "linux"
+
+[[artifact]]
+program = "pairs"
+triple = "aarch64-linux-gnu"
+linked = "aarch64-linux/pairs.linked.elf"
+text = "aarch64-linux/pairs.text.elf"
+entry = "aarch64-linux/pairs.entry"
+arch = "aarch64"
+os = "linux"
+
+[[artifact]]
+program = "checksum"
+triple = "aarch64-linux-gnu"
+linked = "aarch64-linux/checksum.linked.elf"
+text = "aarch64-linux/checksum.text.elf"
+entry = "aarch64-linux/checksum.entry"
+arch = "aarch64"
+os = "linux"
+
+[[artifact]]
+program = "exit42"
+triple = "x86_64-apple-macosx"
+linked = "x86_64-macos/exit42.linked.macho"
+text = "x86_64-macos/exit42.text.elf"
+entry = "x86_64-macos/exit42.entry"
+arch = "x86_64"
+os = "macos"
+
+[[artifact]]
+program = "exit42"
+triple = "aarch64-apple-darwin"
+linked = "aarch64-macos/exit42.linked.macho"
+text = "aarch64-macos/exit42.text.elf"
+entry = "aarch64-macos/exit42.entry"
+arch = "aarch64"
+os = "macos"
+

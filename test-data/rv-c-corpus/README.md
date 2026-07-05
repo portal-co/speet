@@ -1,13 +1,6 @@
 # RISC-V C compiler-output corpus (`test-data/rv-c-corpus/`)
 
-Clang-generated RV32/RV64 guests in the **main repo** (not a submodule). Sibling to the hand-written asm submodule at `test-data/rv-corpus/`.
-
-## Layout
-
-```
-rv32/   arith.text.elf, frame.text.elf, *.entry
-rv64/   arith.text.elf, frame.text.elf, exit.c (+ exit.elf when link succeeds)
-```
+Mirrors `test-data/c-corpus/` layout: shared `lib/common/` + `programs/` sources, RV-specific build outputs under `rv32/` and `rv64/`.
 
 ## Rebuild
 
@@ -15,12 +8,7 @@ rv64/   arith.text.elf, frame.text.elf, exit.c (+ exit.elf when link succeeds)
 ./compile_corpus.sh
 ```
 
-Targets:
-
-- rv32: `--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32`
-- rv64: `--target=riscv64-unknown-elf -march=rv64im -mabi=lp64`
-
-Same `-O1` / anti-vectorization profile as `test-data/c-corpus/`.
+Sources live in `../c-corpus/lib/` and `../c-corpus/programs/`; this tree holds `rv32/*.text.elf`, `rv64/*.text.elf`, and `manifest.toml`.
 
 ## Tests
 
@@ -28,14 +16,10 @@ Same `-O1` / anti-vectorization profile as `test-data/c-corpus/`.
 cargo test -p speet-riscv --test rv_c_corpus_tests
 ```
 
-Uses the shared runtime unreachable-trap harness (`speet-corpus-harness`): translate full slot model → instrument → wasmi → assert no `__speet_unreachable_trap` hits.
+Equivalence (when `rv64/exit42.linked.elf` is committed):
 
-RV tests enable **memory64** in the harness to match the corpus WASM memory model.
+```bash
+cargo test -p speet-runtime --test c_program_equiv_e2e
+```
 
-## vs `rv-corpus` submodule
-
-| | `rv-corpus` | `rv-c-corpus` |
-|---|-------------|---------------|
-| Source | Hand-written asm (submodule) | Clang C (in-repo) |
-| Tests | `rv_corpus_tests` (translate-only) | `rv_c_corpus_tests` (runtime trap) |
-| Purpose | ISA extension coverage | Compiler-selected encodings |
+RV Linux guests use the same `PathPlanner` as native c-corpus: `[Native]` on riscv hosts, `[Blink, QemuUser(rv64)]` on VM dev machines.

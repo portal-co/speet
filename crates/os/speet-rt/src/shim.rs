@@ -64,6 +64,9 @@ fn emit_import_stub(out: &mut String, imp: &FuncImport) {
 }}\n\n"
             ));
         }
+        ("env", "__speet_hint") => {
+            out.push_str(&format!("void {sym}(int id) {{ (void)id; }}\n\n"));
+        }
         _ => {
             out.push_str(&format!(
                 "/* TODO: stub for {} */\nvoid {sym}(void) {{ abort(); }}\n\n",
@@ -112,6 +115,7 @@ mod tests {
         let src = generate_shim(&ImportManifest::native_syscall());
         assert!(src.contains("env__exit"));
         assert!(src.contains("env__write"));
+        assert!(src.contains("env____speet_hint"));
         assert!(src.contains("_exit(code)"));
     }
 }

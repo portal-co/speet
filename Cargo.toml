@@ -44,6 +44,8 @@ members = [
     # End-to-end integration tests
     "crates/test/speet-e2e",
     "crates/test/speet-corpus-harness",
+    "crates/test/speet-guest-runner",
+    "crates/test/speet-program-equivalence",
 ]
 resolver = "3"
 

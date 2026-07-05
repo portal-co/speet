@@ -1,0 +1,13 @@
+[package]
+name = "speet-guest-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../COPYING.md"
+description = "Nestable guest runner paths for C corpus original-guest execution"
+
+[dependencies]
+binary-io = { path = "../../../../binary-io" }
+
+[dev-dependencies]
+tempfile = "3"

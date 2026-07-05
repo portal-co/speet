@@ -2,14 +2,18 @@
 
 use core::convert::Infallible;
 use speet_aarch64::AArch64Recompiler;
-use speet_corpus_harness::{run_c_corpus_file, CorpusArch};
+use speet_corpus_harness::{run_c_program_text, CorpusArch};
 use speet_link_core::ReactorAdapter;
 use std::path::Path;
 use wasm_encoder::{Function, ValType};
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
+fn corpus_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/c-corpus")
+}
+
 fn corpus_dir() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/c-corpus/aarch64-linux")
+    corpus_root().join("aarch64-linux")
 }
 
 fn make_rctx(reactor: &mut Reactor<(), Infallible, Function, LocalPool>)
@@ -50,8 +54,11 @@ fn translate_aarch64(text: &[u8], base: u64) -> (Vec<Function>, Vec<ValType>) {
 
 #[test]
 fn c_corpus_arith() {
-    run_c_corpus_file(
+    run_c_program_text(
         CorpusArch::AArch64,
+        &corpus_root(),
+        "arith",
+        "aarch64-linux-gnu",
         &corpus_dir().join("arith.text.elf"),
         |text, base| translate_aarch64(text, base),
     );
@@ -59,8 +66,11 @@ fn c_corpus_arith() {
 
 #[test]
 fn c_corpus_frame() {
-    run_c_corpus_file(
+    run_c_program_text(
         CorpusArch::AArch64,
+        &corpus_root(),
+        "frame",
+        "aarch64-linux-gnu",
         &corpus_dir().join("frame.text.elf"),
         |text, base| translate_aarch64(text, base),
     );
@@ -68,8 +78,11 @@ fn c_corpus_frame() {
 
 #[test]
 fn c_corpus_pairs() {
-    run_c_corpus_file(
+    run_c_program_text(
         CorpusArch::AArch64,
+        &corpus_root(),
+        "pairs",
+        "aarch64-linux-gnu",
         &corpus_dir().join("pairs.text.elf"),
         |text, base| translate_aarch64(text, base),
     );

@@ -16,5 +16,8 @@ wasmparser = "0.240.0"
 
 [dev-dependencies]
 tempfile = "3"
+speet-program-equivalence = { path = "../../test/speet-program-equivalence" }
+speet-guest-runner = { path = "../../test/speet-guest-runner" }
+speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
 
 [build-dependencies]

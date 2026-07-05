@@ -11,3 +11,4 @@ object = "0.36"
 wasmparser = { workspace = true, features = ["validate"] }
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmi = "1"
+sha2 = "0.10"
