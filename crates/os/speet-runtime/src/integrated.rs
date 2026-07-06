@@ -9,8 +9,9 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, host_platform, recompile_to_wasm_instrumented, ExternalTargets,
+    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt, ExternalTargets,
 };
+use speet_recompile::plt::PltCallPlan;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -144,12 +145,16 @@ impl IntegratedNativeRuntime {
             })
             .ok_or_else(|| "no .text section".to_string())?;
         let start = text.addr;
-        let _targets = ExternalTargets::from_imports(&bin.imports);
+        let targets = ExternalTargets::from_imports(&bin.imports);
+        let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
 
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => {
-                recompile_to_wasm_instrumented(&text.data, start, guest_arch)
-            }
+            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt(
+                &text.data,
+                start,
+                guest_arch,
+                Some(&plt_plan),
+            ),
         };
         self.cache.put_wasm(&input_hash, wasm.clone());
         Ok(wasm)

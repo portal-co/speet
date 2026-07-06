@@ -88,6 +88,10 @@ impl<H: HostApi> HostApi for FilteredHostApi<H> {
         recipe
     }
 
+    fn resolve_plt_redirect(&self, guest_symbol: &str) -> Option<crate::PltRedirect> {
+        self.inner.resolve_plt_redirect(guest_symbol)
+    }
+
     fn syscall(&mut self, nr: u64, args: &[u64]) -> i64 {
         if !self.allowed_syscalls.contains(&nr) {
             return -1; // ENOSYS

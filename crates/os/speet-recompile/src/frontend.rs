@@ -67,6 +67,7 @@ pub fn assert_same_platform(bin: &LoadedBinary) -> Result<(), String> {
 
 // ── speet translate: guest machine code -> WASM module ───────────────────────
 
+use crate::plt::PltCallPlan;
 use core::convert::Infallible;
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
 use wasm_encoder::{
@@ -129,6 +130,16 @@ pub enum RecompilerChoice {
 
 /// Translate a `.text` blob of guest machine code to speet WASM functions.
 pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Translated {
+    translate_with_plt(text, start_addr, choice, None)
+}
+
+/// Like [`translate`], but redirects PLT/external calls per `plt_plan`.
+pub fn translate_with_plt(
+    text: &[u8],
+    start_addr: u64,
+    choice: RecompilerChoice,
+    plt_plan: Option<&PltCallPlan>,
+) -> Translated {
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, N_IMPORTS);
     let mut ctx = ();
@@ -137,6 +148,9 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Tran
         RecompilerChoice::Native(arch) => match arch {
             BinArch::X86_64 => {
                 let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
+                if let Some(plan) = plt_plan {
+                    rc.set_plt_plan(plan.by_addr.clone(), plan.import_by_symbol.clone());
+                }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);
                 rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
@@ -148,6 +162,9 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Tran
             BinArch::AArch64 => {
                 let mut rc =
                     speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                if let Some(plan) = plt_plan {
+                    rc.set_plt_plan(plan.by_addr.clone(), plan.import_by_symbol.clone());
+                }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);
                 rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
@@ -189,7 +206,7 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Tran
 }
 
 /// Imports for the integrated thin-runtime WASM module.
-pub const N_INTEGRATED_IMPORTS: u32 = 4;
+pub const N_INTEGRATED_IMPORTS: u32 = 5;
 
 /// Assemble with runtime unreachable logging (integrated thin runtime).
 pub fn assemble_module_instrumented(t: &Translated, arch: BinArch) -> Vec<u8> {
@@ -202,6 +219,7 @@ pub fn assemble_module_instrumented(t: &Translated, arch: BinArch) -> Vec<u8> {
     types.ty().function(t.params.clone(), []);
     types.ty().function([ValType::I32], []);
     types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+    types.ty().function([ValType::I64, ValType::I64, ValType::I64], [ValType::I32]);
 
     let mut imports = ImportSection::new();
     imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(1));
@@ -212,6 +230,7 @@ pub fn assemble_module_instrumented(t: &Translated, arch: BinArch) -> Vec<u8> {
         "__speet_log_unreachable",
         wasm_encoder::EntityType::Function(1),
     );
+    imports.import("env", "__speet_execve", wasm_encoder::EntityType::Function(3));
 
     let mut funcs = FunctionSection::new();
     for _ in &fns {
@@ -267,13 +286,22 @@ pub fn assemble_module_instrumented(t: &Translated, arch: BinArch) -> Vec<u8> {
     module.finish()
 }
 
-/// Recompile with integrated unreachable instrumentation.
+/// Recompile with integrated unreachable instrumentation and optional PLT hooks.
 pub fn recompile_to_wasm_instrumented(
     text: &[u8],
     start_addr: u64,
     arch: BinArch,
 ) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, RecompilerChoice::Native(arch));
+    recompile_to_wasm_instrumented_plt(text, start_addr, arch, None)
+}
+
+pub fn recompile_to_wasm_instrumented_plt(
+    text: &[u8],
+    start_addr: u64,
+    arch: BinArch,
+    plt_plan: Option<&PltCallPlan>,
+) -> (Vec<u8>, Vec<String>) {
+    let t = translate_with_plt(text, start_addr, RecompilerChoice::Native(arch), plt_plan);
     let unsupported = t.unsupported.clone();
     (assemble_module_instrumented(&t, arch), unsupported)
 }

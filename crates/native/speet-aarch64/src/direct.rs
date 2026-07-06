@@ -189,6 +189,12 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                     let info = JumpInfo::direct(pc, target, kind);
                     if rctx.on_jump(&info, ctx)? == TrapAction::Skip { return Ok(()); }
                 }
+                if is_bl {
+                    if let Some((import_idx, sym)) = self.lookup_plt_import(target) {
+                        self.emit_plt_import_call(ctx, rctx, tail_idx, import_idx, sym)?;
+                        return Ok(());
+                    }
+                }
                 match self.pc_to_func_idx(target) {
                     Some(f_idx) => rctx.jmp(ctx, tail_idx, f_idx, total)?,
                     None        => rctx.oob_jump(ctx, tail_idx, target, total)?,

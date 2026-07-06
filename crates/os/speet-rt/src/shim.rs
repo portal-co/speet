@@ -76,6 +76,14 @@ fn emit_import_stub(out: &mut String, imp: &FuncImport) {
 }}\n\n"
             ));
         }
+        ("env", "__speet_execve") => {
+            out.push_str(&format!(
+                "extern int __speet_execve_hook(const char *path, char *const argv[], char *const envp[]);
+int {sym}(long path, long argv, long envp) {{
+    return __speet_execve_hook((const char *)path, (char *const *)argv, (char *const *)envp);
+}}\n\n"
+            ));
+        }
         _ => {
             out.push_str(&format!(
                 "/* TODO: stub for {} */\nvoid {sym}(void) {{ abort(); }}\n\n",

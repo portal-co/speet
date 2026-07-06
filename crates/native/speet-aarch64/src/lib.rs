@@ -69,6 +69,8 @@ pub struct AArch64Recompiler<Context, E> {
     /// Stack pointer (1 × i64).  AArch64 encodes SP as register 31 in load/store and
     /// `ADD`/`SUB` immediate forms; x31 remains XZR everywhere else.
     pub(crate) sp_slot: LocalSlot,
+    plt_by_addr: Option<alloc::collections::BTreeMap<u64, String>>,
+    plt_imports: Option<alloc::collections::BTreeMap<String, u32>>,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
@@ -83,7 +85,19 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             tmp_slot: LocalSlot::default(),
             fp_slot: LocalSlot::default(),
             sp_slot: LocalSlot::default(),
+            plt_by_addr: None,
+            plt_imports: None,
         }
+    }
+
+    /// Redirect PLT/external calls to WASM imports (integrated runtime hooks).
+    pub fn set_plt_plan(
+        &mut self,
+        by_addr: alloc::collections::BTreeMap<u64, String>,
+        import_by_symbol: alloc::collections::BTreeMap<String, u32>,
+    ) {
+        self.plt_by_addr = Some(by_addr);
+        self.plt_imports = Some(import_by_symbol);
     }
 
     pub fn new() -> Self {
@@ -173,6 +187,34 @@ impl<Context, E> AArch64Recompiler<Context, E> {
     pub(crate) fn pc_to_func_idx(&self, pc: u64) -> Option<FuncIdx> {
         let offset = pc.checked_sub(self.base_pc)?;
         Some(FuncIdx((offset / 4) as u32))
+    }
+
+    pub(crate) fn lookup_plt_import(&self, target: u64) -> Option<(u32, &str)> {
+        let by_addr = self.plt_by_addr.as_ref()?;
+        let imports = self.plt_imports.as_ref()?;
+        let sym = by_addr.get(&target)?;
+        let idx = imports.get(sym)?;
+        Some((*idx, sym.as_str()))
+    }
+
+    pub(crate) fn emit_plt_import_call<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        import_idx: u32,
+        symbol: &str,
+    ) -> Result<(), E> {
+        let args = match symbol.strip_prefix('_').unwrap_or(symbol) {
+            "execve" => [0u32, 1, 2], // x0, x1, x2
+            _ => return Ok(()),
+        };
+        for reg in args {
+            self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
+        }
+        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
+        self.emit_gpr_set(ctx, rctx, tail_idx, 0)?; // x0 result
+        Ok(())
     }
 
     // ── GPR emit helpers ──────────────────────────────────────────────────────

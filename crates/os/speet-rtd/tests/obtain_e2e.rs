@@ -1,7 +1,9 @@
 //! Daemon obtain cache test (Linux ELF guests only).
 
 use speet_rtd::{bind_socket, Daemon};
-use std::io::{BufRead, Write};
+use speet_runtime::rtd_protocol::{
+    decode_response, encode_request, read_frame, write_frame, Request, Response,
+};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use tempfile::tempdir;
@@ -30,36 +32,36 @@ fn daemon_obtain_linux_elf() {
     });
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    let path_json = guest.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
     let mut sock = UnixStream::connect(&sock).expect("connect");
-    writeln!(
-        sock,
-        r#"{{"op":"obtain","path":"{path_json}","host_id":"tunneled"}}"#
-    )
-    .unwrap();
-    sock.flush().unwrap();
-    let resp = read_line(&mut sock);
-    if resp.contains("error") || resp.contains("unsuitable") {
-        eprintln!("SKIP obtain: {resp}");
-        return;
+    let resp = roundtrip(
+        &mut sock,
+        &encode_request(&Request::Obtain {
+            path: guest.display().to_string(),
+            host_id: "integrated".into(),
+        }),
+    );
+    match decode_response(&resp).unwrap() {
+        Response::Ready { .. } => {}
+        Response::Error { message } => {
+            eprintln!("SKIP obtain error: {message}");
+        }
+        Response::Unsuitable { .. } => {
+            eprintln!("SKIP obtain: unsuitable");
+        }
+        other => panic!("unexpected obtain response: {other:?}"),
     }
-    assert!(resp.contains("ready"), "obtain={resp}");
 }
 
 fn handle_one(daemon: &Daemon, stream: UnixStream) -> Result<(), String> {
-    let mut reader = std::io::BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-    let mut line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
-    let resp = daemon.handle_line(&line);
+    let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
+    let frame = read_frame(&mut reader)?;
+    let resp = daemon.handle_frame(&frame);
     let mut sock = stream;
-    sock.write_all(resp.as_bytes())
-        .and_then(|_| sock.write_all(b"\n"))
-        .map_err(|e| e.to_string())?;
+    write_frame(&mut sock, &resp)?;
     Ok(())
 }
 
-fn read_line(sock: &mut UnixStream) -> String {
-    let mut buf = [0u8; 8192];
-    let n = sock.read(&mut buf).expect("read");
-    String::from_utf8_lossy(&buf[..n]).trim().to_string()
+fn roundtrip(sock: &mut UnixStream, req: &[u8]) -> Vec<u8> {
+    write_frame(sock, req).expect("write");
+    read_frame(sock).expect("read")
 }

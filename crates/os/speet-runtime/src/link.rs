@@ -20,7 +20,7 @@ pub fn link_guest(
     link_guest_integrated(tc, host, guest_obj, arch, os, work_dir, out_exe)
 }
 
-/// Integrated link: shim + entry bridge + execve hook + ambient aliases.
+/// Integrated link: shim + entry bridge + execve hook.
 pub fn link_guest_integrated(
     tc: &LlvmToolchain,
     host: &dyn HostApi,
@@ -85,42 +85,6 @@ fn dylib_flags_for_os(os: BinOs, recipe_flags: &[String]) -> Vec<String> {
     }
 }
 
-fn alias_link_flags(os: BinOs, aliases: &[(String, String)]) -> Vec<String> {
-    let mut flags = Vec::new();
-    for (alias, real) in aliases {
-        flags.push(alias_flag(os, alias, real));
-    }
-    flags
-}
-
-fn execve_alias_flags(os: BinOs) -> Vec<String> {
-    vec![
-        alias_flag(os, "execve", "__speet_execve_hook"),
-        alias_flag(os, "_execve", "__speet_execve_hook"),
-    ]
-}
-
-fn alias_flag(os: BinOs, alias: &str, real: &str) -> String {
-    match os {
-        BinOs::MacOs => {
-            format!(
-                "-Wl,-alias,{},{}",
-                mangle_macho(alias),
-                mangle_macho(real)
-            )
-        }
-        BinOs::Linux => format!("-Wl,--defsym,{alias}={real}"),
-    }
-}
-
-fn mangle_macho(name: &str) -> String {
-    if name.starts_with('_') {
-        name.to_string()
-    } else {
-        format!("_{name}")
-    }
-}
-
 /// Convenience: write guest bytes to `work_dir/guest.o` path.
 pub fn write_guest_object(work_dir: &Path, guest_obj: &[u8]) -> Result<PathBuf, String> {
     let p = work_dir.join("guest.o");
@@ -133,15 +97,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn macho_alias_mangles() {
-        assert_eq!(mangle_macho("write"), "_write");
-        assert_eq!(mangle_macho("_write"), "_write");
-    }
-
-    #[test]
     fn integrated_shim_uses_speet_start() {
         let src = generate_shim_integrated(&speet_host_api::ImportManifest::integrated_native());
         assert!(src.contains("int main(int argc, char **argv)"));
         assert!(src.contains("__speet_start(argc, argv)"));
+        assert!(src.contains("__speet_execve_hook"));
     }
 }

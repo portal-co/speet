@@ -87,6 +87,10 @@ pub struct X86Recompiler<Context, E> {
     /// Slot for XMM0–XMM15, stored as raw `i64` bit patterns (low 64 bits;
     /// scalar SSE only). FP handlers reinterpret around WASM FP ops.
     xmm_slot: yecta::LocalSlot,
+    /// Guest PLT address → external symbol name (compile-time hook table).
+    plt_by_addr: Option<alloc::collections::BTreeMap<u64, alloc::string::String>>,
+    /// Hooked symbol → WASM import function index.
+    plt_imports: Option<alloc::collections::BTreeMap<alloc::string::String, u32>>,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -126,7 +130,19 @@ impl<Context, E> X86Recompiler<Context, E> {
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
             memory_access: None,
+            plt_by_addr: None,
+            plt_imports: None,
         }
+    }
+
+    /// Redirect PLT/external calls to WASM imports (integrated runtime hooks).
+    pub fn set_plt_plan(
+        &mut self,
+        by_addr: alloc::collections::BTreeMap<u64, alloc::string::String>,
+        import_by_symbol: alloc::collections::BTreeMap<alloc::string::String, u32>,
+    ) {
+        self.plt_by_addr = Some(by_addr);
+        self.plt_imports = Some(import_by_symbol);
     }
 
     /// Returns the set of instruction mnemonics that had no translation and

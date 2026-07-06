@@ -36,12 +36,16 @@ impl ImportManifest {
         }
     }
 
-    /// Integrated thin-runtime manifest: syscall imports + unreachable logging.
+    /// Integrated thin-runtime manifest: syscall imports + unreachable logging + hooks.
     pub fn integrated_native() -> Self {
         let mut m = Self::native_syscall();
         m.func_imports.push(FuncImport {
             module: "env".into(),
             name: "__speet_log_unreachable".into(),
+        });
+        m.func_imports.push(FuncImport {
+            module: "env".into(),
+            name: "__speet_execve".into(),
         });
         m
     }

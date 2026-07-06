@@ -339,6 +339,34 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
     }
 
+    fn lookup_plt_import(&self, target: u64) -> Option<(u32, &str)> {
+        let by_addr = self.plt_by_addr.as_ref()?;
+        let imports = self.plt_imports.as_ref()?;
+        let sym = by_addr.get(&target)?;
+        let idx = imports.get(sym)?;
+        Some((*idx, sym.as_str()))
+    }
+
+    fn emit_plt_import_call<F>(
+        &self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        import_idx: u32,
+        symbol: &str,
+    ) -> Result<(), E> {
+        let args = match symbol.strip_prefix('_').unwrap_or(symbol) {
+            "execve" => [7u32, 6, 2], // RDI, RSI, RDX
+            _ => return Ok(()),
+        };
+        for local in args {
+            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+        }
+        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(0))?; // RAX
+        Ok(())
+    }
+
     fn init_function<F>(
         &mut self,
         ctx: &mut Context,
@@ -2251,6 +2279,10 @@ impl<Context, E> X86Recompiler<Context, E> {
                 if rctx.on_jump(&call_info, ctx)? == TrapAction::Skip {
                     return Ok(Some(()));
                 }
+            }
+            if let Some((import_idx, sym)) = self.lookup_plt_import(target) {
+                self.emit_plt_import_call(ctx, rctx, tail_idx, import_idx, sym)?;
+                return Ok(Some(()));
             }
             let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
                 rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;

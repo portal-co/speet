@@ -6,11 +6,13 @@
 
 mod filtered;
 mod manifest;
+mod redirecting;
 mod registry;
 mod tunneled;
 
 pub use filtered::{FilteredHostApi, HostPolicy};
 pub use manifest::{FuncImport, ImportManifest, LinkRecipe};
+pub use redirecting::{PltRedirect, RedirectingHostApi};
 pub use registry::HostApiRegistry;
 pub use tunneled::TunneledHostApi;
 
@@ -27,6 +29,11 @@ pub trait HostApi: Send + Sync {
 
     /// Dylib and linker flags for the final link step.
     fn link_recipe(&self) -> LinkRecipe;
+
+    /// Compile-time redirect for a guest PLT/external symbol (integrated hooks).
+    fn resolve_plt_redirect(&self, _guest_symbol: &str) -> Option<PltRedirect> {
+        None
+    }
 
     /// Optional dynamic syscall dispatch for unknown numbers (vkernel path).
     fn syscall(&mut self, _nr: u64, _args: &[u64]) -> i64 {
@@ -48,9 +55,11 @@ pub fn default_host_api() -> TunneledHostApi {
     TunneledHostApi::for_host()
 }
 
-/// Default [`HostApi`] for the integrated thin runtime.
-pub fn integrated_host_api() -> TunneledHostApi {
-    TunneledHostApi::for_host().with_manifest(ImportManifest::integrated_native())
+/// Default [`HostApi`] for the integrated thin runtime (with PLT hooks).
+pub fn integrated_host_api() -> RedirectingHostApi<TunneledHostApi> {
+    RedirectingHostApi::integrated(
+        TunneledHostApi::for_host().with_manifest(ImportManifest::integrated_native()),
+    )
 }
 
 /// Target arch/OS for linking recompiled output on this host.

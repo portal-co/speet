@@ -1,7 +1,7 @@
 //! Daemon IPC and cache tests.
 
 use speet_rtd::{bind_socket, Daemon};
-use std::io::{Read, Write};
+use speet_runtime::rtd_protocol::{decode_response, encode_request, read_frame, write_frame, Request};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use tempfile::tempdir;
@@ -33,39 +33,38 @@ fn daemon_ping_analyze_obtain() {
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let mut sock = UnixStream::connect(&sock).expect("connect");
-    writeln!(sock, r#"{{"op":"ping"}}"#).unwrap();
-    sock.flush().unwrap();
-    let pong = read_line(&mut sock);
-    assert!(pong.contains("pong"), "pong={pong}");
+    let pong = roundtrip(&mut sock, &encode_request(&Request::Ping));
+    match decode_response(&pong).unwrap() {
+        speet_runtime::rtd_protocol::Response::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
 
     let Some(guest) = linked_exit42() else {
         eprintln!("SKIP: no exit42 artifact");
         return;
     };
-    let path_json = guest.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    writeln!(sock, r#"{{"op":"analyze","path":"{path_json}"}}"#).unwrap();
-    sock.flush().unwrap();
-    let analyze = read_line(&mut sock);
-    assert!(
-        analyze.contains("suitable"),
-        "analyze={analyze}"
+    let analyze = roundtrip(
+        &mut sock,
+        &encode_request(&Request::Analyze {
+            path: guest.display().to_string(),
+        }),
     );
+    match decode_response(&analyze).unwrap() {
+        speet_runtime::rtd_protocol::Response::Suitable => {}
+        other => panic!("expected suitable, got {other:?}"),
+    }
 }
 
 fn handle_one(daemon: &Daemon, stream: UnixStream) -> Result<(), String> {
-    let mut reader = std::io::BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-    let mut line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
-    let resp = daemon.handle_line(&line);
+    let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
+    let frame = read_frame(&mut reader)?;
+    let resp = daemon.handle_frame(&frame);
     let mut sock = stream;
-    sock.write_all(resp.as_bytes())
-        .and_then(|_| sock.write_all(b"\n"))
-        .map_err(|e| e.to_string())?;
+    write_frame(&mut sock, &resp)?;
     Ok(())
 }
 
-fn read_line(sock: &mut UnixStream) -> String {
-    let mut buf = [0u8; 4096];
-    let n = sock.read(&mut buf).expect("read");
-    String::from_utf8_lossy(&buf[..n]).trim().to_string()
+fn roundtrip(sock: &mut UnixStream, req: &[u8]) -> Vec<u8> {
+    write_frame(sock, req).expect("write");
+    read_frame(sock).expect("read")
 }

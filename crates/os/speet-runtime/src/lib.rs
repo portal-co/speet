@@ -4,6 +4,7 @@ mod cache;
 mod execve_hook;
 mod integrated;
 mod link;
+pub mod rtd_protocol;
 mod runtime;
 mod suitability;
 mod toolchain;
@@ -20,5 +21,5 @@ pub use toolchain::LlvmToolchain;
 
 pub use speet_host_api::{
     default_host_api, integrated_host_api, FilteredHostApi, HostApi, HostApiRegistry, HostPolicy,
-    ImportManifest, TunneledHostApi,
+    ImportManifest, PltRedirect, RedirectingHostApi, TunneledHostApi,
 };
