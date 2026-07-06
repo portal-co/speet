@@ -66,8 +66,8 @@ pub(crate) fn run_subprocess(
     let start = std::time::Instant::now();
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let stdout = read_child_pipe(&mut child.stdout);
-            let stderr = read_child_pipe(&mut child.stderr);
+            let stdout = read_child_stdout(&mut child.stdout);
+            let stderr = read_child_stderr(&mut child.stderr);
             return Ok(RunOutcome::from_status(status, stdout, stderr));
         }
         if start.elapsed() > timeout {
@@ -78,7 +78,15 @@ pub(crate) fn run_subprocess(
     }
 }
 
-fn read_child_pipe(pipe: &mut Option<std::process::ChildStdout>) -> Vec<u8> {
+fn read_child_stdout(pipe: &mut Option<std::process::ChildStdout>) -> Vec<u8> {
+    read_pipe(pipe)
+}
+
+fn read_child_stderr(pipe: &mut Option<std::process::ChildStderr>) -> Vec<u8> {
+    read_pipe(pipe)
+}
+
+fn read_pipe<R: std::io::Read>(pipe: &mut Option<R>) -> Vec<u8> {
     use std::io::Read;
     let mut buf = Vec::new();
     if let Some(p) = pipe {
@@ -102,7 +110,7 @@ pub(crate) fn guest_arch_hint(name: &str) -> Option<BinArch> {
     } else if name.contains("aarch64") || name.contains("arm64") {
         Some(BinArch::AArch64)
     } else if name.contains("riscv64") || name.contains("rv64") {
-        Some(BinArch::Riscv64)
+        None
     } else {
         None
     }

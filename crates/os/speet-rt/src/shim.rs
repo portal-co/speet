@@ -8,6 +8,7 @@ use speet_host_api::{FuncImport, ImportManifest};
 pub fn generate_shim(manifest: &ImportManifest) -> String {
     let mut out = String::from(
         r#"#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -19,6 +20,7 @@ pub fn generate_shim(manifest: &ImportManifest) -> String {
 extern uint8_t *__wasm_mem;
 extern uint32_t __wasm_mem_pages;
 extern long __guest_entry(void);
+extern void __speet_start(int argc, char **argv);
 
 "#,
     );
@@ -66,6 +68,13 @@ fn emit_import_stub(out: &mut String, imp: &FuncImport) {
         }
         ("env", "__speet_hint") => {
             out.push_str(&format!("void {sym}(int id) {{ (void)id; }}\n\n"));
+        }
+        ("env", "__speet_log_unreachable") => {
+            out.push_str(&format!(
+                "void {sym}(int pc) {{
+    fprintf(stderr, \"speet: unsupported instruction at guest pc=0x%x\\n\", (unsigned)pc);
+}}\n\n"
+            ));
         }
         _ => {
             out.push_str(&format!(

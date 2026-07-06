@@ -14,6 +14,7 @@
 pub mod backend;
 pub mod drive;
 pub mod frontend;
+pub mod instrument;
 
 /// Re-exports of the abstracted components this driver is built on.
 pub use binary_io;

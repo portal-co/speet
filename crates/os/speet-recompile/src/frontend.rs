@@ -188,6 +188,96 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice) -> Tran
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+/// Imports for the integrated thin-runtime WASM module.
+pub const N_INTEGRATED_IMPORTS: u32 = 4;
+
+/// Assemble with runtime unreachable logging (integrated thin runtime).
+pub fn assemble_module_instrumented(t: &Translated, arch: BinArch) -> Vec<u8> {
+    use crate::instrument::{instrument_unreachable_logging, GuestPcRef};
+
+    let mut fns = t.fns.clone();
+    instrument_unreachable_logging(&mut fns, GuestPcRef::for_arch(arch));
+
+    let mut types = TypeSection::new();
+    types.ty().function(t.params.clone(), []);
+    types.ty().function([ValType::I32], []);
+    types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+
+    let mut imports = ImportSection::new();
+    imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(1));
+    imports.import("env", "write", wasm_encoder::EntityType::Function(2));
+    imports.import("env", "exit", wasm_encoder::EntityType::Function(1));
+    imports.import(
+        "env",
+        "__speet_log_unreachable",
+        wasm_encoder::EntityType::Function(1),
+    );
+
+    let mut funcs = FunctionSection::new();
+    for _ in &fns {
+        funcs.function(0);
+    }
+
+    let total = fns.len() as u32;
+    let table_size = N_INTEGRATED_IMPORTS + total;
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        minimum: table_size as u64,
+        maximum: Some(table_size as u64),
+        table64: true,
+        shared: false,
+    });
+
+    let mut mems = MemorySection::new();
+    mems.memory(MemoryType {
+        minimum: 64,
+        maximum: None,
+        memory64: true,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    let mut exports = ExportSection::new();
+    exports.export("memory", ExportKind::Memory, 0);
+    exports.export("_start", ExportKind::Func, N_INTEGRATED_IMPORTS);
+
+    let indices: Vec<u32> = (N_INTEGRATED_IMPORTS..N_INTEGRATED_IMPORTS + total).collect();
+    let mut elems = ElementSection::new();
+    elems.active(
+        Some(0),
+        &ConstExpr::i64_const(N_INTEGRATED_IMPORTS as i64),
+        Elements::Functions(std::borrow::Cow::Borrowed(&indices)),
+    );
+
+    let mut code = CodeSection::new();
+    for f in &fns {
+        code.function(f);
+    }
+
+    let mut module = Module::new();
+    module.section(&types);
+    module.section(&imports);
+    module.section(&funcs);
+    module.section(&tables);
+    module.section(&mems);
+    module.section(&exports);
+    module.section(&elems);
+    module.section(&code);
+    module.finish()
+}
+
+/// Recompile with integrated unreachable instrumentation.
+pub fn recompile_to_wasm_instrumented(
+    text: &[u8],
+    start_addr: u64,
+    arch: BinArch,
+) -> (Vec<u8>, Vec<String>) {
+    let t = translate(text, start_addr, RecompilerChoice::Native(arch));
+    let unsupported = t.unsupported.clone();
+    (assemble_module_instrumented(&t, arch), unsupported)
+}
+
 /// Assemble a single translated binary into a complete WASM module (no exception
 /// handling). The entry (first function) is exported as `_start`. Mirrors the
 /// speet-e2e harness `assemble_module` for one slice.

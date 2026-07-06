@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct ArtifactCache {
     wasm: HashMap<(String, String), Vec<u8>>,
     objects: HashMap<(String, String, String), Vec<u8>>,
+    executables: HashMap<String, PathBuf>,
     root: Option<PathBuf>,
 }
 
@@ -70,6 +71,25 @@ impl ArtifactCache {
             ),
             obj,
         );
+    }
+
+    pub fn get_executable(&self, cache_key: &str) -> Option<PathBuf> {
+        self.executables.get(cache_key).cloned()
+    }
+
+    pub fn put_executable(&mut self, cache_key: &str, path: PathBuf) {
+        if let Some(root) = &self.root {
+            let dest = root.join(format!("{cache_key}.exe"));
+            let _ = std::fs::create_dir_all(root);
+            let _ = std::fs::copy(&path, &dest);
+            self.executables.insert(cache_key.to_string(), dest);
+        } else {
+            self.executables.insert(cache_key.to_string(), path);
+        }
+    }
+
+    pub fn executable_dir(&self) -> Option<PathBuf> {
+        self.root.clone()
     }
 
     /// BLAKE3 hex digest of input bytes (falls back to length tag if hasher unavailable).

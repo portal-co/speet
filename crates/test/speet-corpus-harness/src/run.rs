@@ -1,5 +1,7 @@
 //! Execute instrumented corpus modules under wasmi.
 
+use wasmi::AsContext;
+
 const RUN_FUEL: u64 = 50_000_000;
 
 #[derive(Debug, Default)]

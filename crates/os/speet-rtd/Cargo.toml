@@ -1,0 +1,17 @@
+[package]
+name = "speet-rtd"
+version = "0.1.0"
+edition = "2021"
+description = "Thin-runtime recompile daemon with artifact cache."
+
+[[bin]]
+name = "speet-rtd"
+path = "src/main.rs"
+
+[dependencies]
+speet-runtime = { path = "../speet-runtime" }
+speet-host-api = { path = "../speet-host-api" }
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -170,6 +170,11 @@ impl Runtime {
 }
 
 fn validate_wasm(wasm: &[u8]) -> Result<(), String> {
+    validate_wasm_public(wasm)
+}
+
+/// Validate a WASM module (public for integrated runtime).
+pub fn validate_wasm_public(wasm: &[u8]) -> Result<(), String> {
     let mut v = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     v.validate_all(wasm).map(|_| ()).map_err(|e| e.to_string())
 }

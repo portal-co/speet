@@ -48,6 +48,11 @@ pub fn default_host_api() -> TunneledHostApi {
     TunneledHostApi::for_host()
 }
 
+/// Default [`HostApi`] for the integrated thin runtime.
+pub fn integrated_host_api() -> TunneledHostApi {
+    TunneledHostApi::for_host().with_manifest(ImportManifest::integrated_native())
+}
+
 /// Target arch/OS for linking recompiled output on this host.
 pub fn host_link_target() -> (BinArch, BinOs) {
     let os = if cfg!(target_os = "macos") {

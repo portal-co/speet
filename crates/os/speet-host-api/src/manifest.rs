@@ -36,6 +36,16 @@ impl ImportManifest {
         }
     }
 
+    /// Integrated thin-runtime manifest: syscall imports + unreachable logging.
+    pub fn integrated_native() -> Self {
+        let mut m = Self::native_syscall();
+        m.func_imports.push(FuncImport {
+            module: "env".into(),
+            name: "__speet_log_unreachable".into(),
+        });
+        m
+    }
+
     /// Render a wasm-blitz external symbol name (`env__exit`).
     pub fn external_symbol(imp: &FuncImport) -> String {
         format!("{}__{}", imp.module, imp.name)

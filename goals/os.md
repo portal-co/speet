@@ -66,8 +66,8 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 
 ### Phase 1 — Real binary loading + cache
 - [x] `binary_io::load_auto` wrapper in `speet-runtime::load_binary`
-- [ ] `ExternalTargets` PLT tunneling in driver
-- [x] Artifact cache (`ArtifactCache` keyed by input hash + pipeline version)
+- [x] `ExternalTargets` PLT tunneling scaffold (`from_imports` wired in integrated recompile)
+- [x] Artifact cache (`ArtifactCache` keyed by input hash + pipeline version; final exe tier)
 - [x] Expand `speet-host-syscall` (x86_64 Linux table)
 
 ### Phase 2 — Pluggable HostApi
@@ -80,3 +80,9 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 - [ ] Host JIT asm→asm — [docs/future/host-jit.md](../docs/future/host-jit.md)
 - [ ] Direct in-process linking — [docs/future/direct-linking.md](../docs/future/direct-linking.md)
 - [ ] ptrace emulation — [docs/future/ptrace-emulation.md](../docs/future/ptrace-emulation.md)
+
+### Integrated thin runtime (2026)
+- [x] Runtime unreachable instrumentation (`__speet_log_unreachable` + WASM post-pass)
+- [x] `IntegratedNativeRuntime` + import-based suitability gate
+- [x] `speet-rtd` recompile daemon with disk cache
+- [x] argv-aware shim (`__speet_start`) + `execve` hook TU (`__speet_execve_hook`; link alias deferred)
