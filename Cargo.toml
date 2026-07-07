@@ -32,6 +32,7 @@ members = [
     "crates/os/speet-rt",
     "crates/os/speet-host-syscall",
     "crates/os/speet-host-api",
+    "crates/os/speet-abi-spec",
     "crates/os/speet-recompile",
     "crates/os/speet-runtime",
     "crates/os/speet-rtd",

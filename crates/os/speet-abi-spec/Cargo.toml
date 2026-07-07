@@ -1,0 +1,11 @@
+[package]
+name = "speet-abi-spec"
+version = "0.1.0"
+edition = "2021"
+description = "ABI description ingestion for thin-runtime redirect stubs (BridgeSupport first)."
+publish = false
+license-file = "../../../COPYING.md"
+
+[dependencies]
+quick-xml = "0.37"
+speet-host-api = { path = "../speet-host-api" }

@@ -1,26 +1,37 @@
 //! Rewrite `unreachable` opcodes to call `env.__speet_unreachable_trap` first.
 
-use crate::assemble::TRAP_IMPORT_IDX;
 use wasm_encoder::{Function, Instruction};
 use wasmparser::{FunctionBody, Operator};
 
 /// Patch every translated function before module assembly.
-pub fn instrument_functions(fns: &mut [Function], import_count: u32) {
+///
+/// `trap_import_idx` must be the WASM import index of
+/// `env.__speet_unreachable_trap` — derive it via
+/// `ImportManifest::corpus_harness().index_of("env", "__speet_unreachable_trap")`.
+pub fn instrument_functions(fns: &mut [Function], import_count: u32, trap_import_idx: u32) {
     for (i, f) in fns.iter_mut().enumerate() {
         let module_func_idx = import_count + i as u32;
         let raw = std::mem::replace(f, Function::new([])).into_raw_body();
-        *f = patch_function_body_bytes(&raw, module_func_idx)
+        *f = patch_function_body_bytes(&raw, module_func_idx, trap_import_idx)
             .unwrap_or_else(|e| panic!("instrument func {module_func_idx}: {e}"));
     }
 }
 
-fn patch_function_body_bytes(raw: &[u8], module_func_idx: u32) -> Result<Function, String> {
+fn patch_function_body_bytes(
+    raw: &[u8],
+    module_func_idx: u32,
+    trap_import_idx: u32,
+) -> Result<Function, String> {
     let reader = wasmparser::BinaryReader::new(raw, 0);
     let body = FunctionBody::new(reader);
-    patch_function_body(body, module_func_idx)
+    patch_function_body(body, module_func_idx, trap_import_idx)
 }
 
-fn patch_function_body(body: FunctionBody<'_>, module_func_idx: u32) -> Result<Function, String> {
+fn patch_function_body(
+    body: FunctionBody<'_>,
+    module_func_idx: u32,
+    trap_import_idx: u32,
+) -> Result<Function, String> {
     let locals_reader = body.get_locals_reader().map_err(|e| e.to_string())?;
     let mut locals = Vec::new();
     let mut lr = locals_reader;
@@ -36,7 +47,7 @@ fn patch_function_body(body: FunctionBody<'_>, module_func_idx: u32) -> Result<F
         match op {
             Operator::Unreachable => {
                 out.instruction(&Instruction::I32Const(module_func_idx as i32));
-                out.instruction(&Instruction::Call(TRAP_IMPORT_IDX));
+                out.instruction(&Instruction::Call(trap_import_idx));
                 out.instruction(&Instruction::Unreachable);
             }
             other => {

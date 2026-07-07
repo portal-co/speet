@@ -2,7 +2,7 @@
 
 use core::convert::Infallible;
 use speet_aarch64::AArch64Recompiler;
-use speet_corpus_harness::{run_c_program_text, CorpusArch, N_CORPUS_IMPORTS};
+use speet_corpus_harness::{corpus_n_imports, run_c_program_text, CorpusArch};
 use speet_link_core::{BaseContext, ReactorAdapter};
 use std::path::Path;
 use wasm_encoder::{Function, ValType};
@@ -41,14 +41,10 @@ fn translate_aarch64(text: &[u8], base: u64) -> (Vec<Function>, Vec<ValType>) {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
-    // Must match `assemble_corpus_module`'s import count: the table's `elem`
-    // segment populates `[N_CORPUS_IMPORTS, N_CORPUS_IMPORTS + n_fns)`, and
-    // every runtime-computed indirect-call/return table index (see
-    // `A64IndirectTarget`) is `local_slot + base_func_offset` — leaving this
-    // at the `Reactor`'s default of 0 desyncs the two and reproduces the
-    // "speet emission gap" (`uninitialized element N`) on any register-
-    // indirect `ret`/`br`/`blr`.
-    rctx.set_base_func_offset(N_CORPUS_IMPORTS);
+    // Must match corpus module assembly: table `elem` populates
+    // `[n_imports, n_imports + n_fns)`, and every runtime-computed indirect-
+    // call/return table index is `local_slot + base_func_offset`.
+    rctx.set_base_func_offset(corpus_n_imports());
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
     recompiler

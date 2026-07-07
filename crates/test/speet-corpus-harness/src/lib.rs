@@ -8,7 +8,7 @@ pub mod load;
 pub mod manifest;
 pub mod run;
 
-pub use assemble::{assemble_corpus_module, N_CORPUS_IMPORTS, TRAP_IMPORT_IDX};
+pub use assemble::{assemble_corpus_module, corpus_manifest, corpus_n_imports};
 pub use digest::sha256_hex;
 pub use expected::{expectation_for_triple, load_expected, ProgramExpectations, TripleExpectation};
 pub use instrument::instrument_functions;
@@ -19,6 +19,9 @@ pub use manifest::{load_manifest, parse_manifest, Artifact};
 pub use pipeline::{run_c_corpus_file, run_c_corpus_file_with_expected, run_c_program_text};
 
 /// WASM module index for a guest PC under the default slot formulas (no slot assigner).
+///
+/// When `n_imports` is zero, returns the 0-based local function slot; pass
+/// [`crate::corpus_n_imports`] to obtain the absolute module function index.
 pub fn guest_pc_to_func_idx(arch: CorpusArch, base_pc: u64, guest_pc: u64, n_imports: u32) -> u32 {
     let offset = guest_pc.wrapping_sub(base_pc);
     let slot = match arch {

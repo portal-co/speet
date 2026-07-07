@@ -96,6 +96,47 @@ impl ImportManifest {
         m
     }
 
+    /// Corpus harness manifest: syscall imports plus a wasmi-side unreachable
+    /// trap hook (`env.__speet_unreachable_trap`) used by
+    /// `speet-corpus-harness` instead of the integrated runtime's
+    /// `__speet_log_unreachable`. Order matches historical corpus tests:
+    /// hint, write, exit, trap.
+    pub fn corpus_harness() -> Self {
+        use WasmValType::I32;
+        Self {
+            func_imports: vec![
+                FuncImport {
+                    module: "env".into(),
+                    name: "__speet_hint".into(),
+                    params: vec![I32],
+                    results: vec![],
+                    intercepts: vec![],
+                },
+                FuncImport {
+                    module: "env".into(),
+                    name: "write".into(),
+                    params: vec![I32, I32, I32],
+                    results: vec![I32],
+                    intercepts: vec!["write".into(), "_write".into()],
+                },
+                FuncImport {
+                    module: "env".into(),
+                    name: "exit".into(),
+                    params: vec![I32],
+                    results: vec![],
+                    intercepts: vec!["exit".into(), "_exit".into(), "_Exit".into()],
+                },
+                FuncImport {
+                    module: "env".into(),
+                    name: "__speet_unreachable_trap".into(),
+                    params: vec![I32],
+                    results: vec![],
+                    intercepts: vec![],
+                },
+            ],
+        }
+    }
+
     /// RV64 native-syscall-lowering manifest: just `env.exit`/`env.write`, in
     /// that order (no `__speet_hint`) — a different, smaller import set from
     /// [`native_syscall`](Self::native_syscall), used by the RV64 `ecall`
@@ -200,6 +241,16 @@ mod tests {
         assert_eq!(m.index_of("env", "__speet_log_unreachable"), Some(3));
         assert_eq!(m.index_of("env", "__speet_execve"), Some(4));
         assert_eq!(m.index_of("env", "nonexistent"), None);
+    }
+
+    #[test]
+    fn corpus_harness_trap_import_index() {
+        let m = ImportManifest::corpus_harness();
+        assert_eq!(m.index_of("env", "__speet_hint"), Some(0));
+        assert_eq!(m.index_of("env", "write"), Some(1));
+        assert_eq!(m.index_of("env", "exit"), Some(2));
+        assert_eq!(m.index_of("env", "__speet_unreachable_trap"), Some(3));
+        assert_eq!(m.func_imports.len(), 4);
     }
 
     #[test]

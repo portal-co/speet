@@ -90,6 +90,45 @@ fn wasm_val_type(t: WasmValType) -> ValType {
     }
 }
 
+/// Total host-capability slots declared for `manifest`. Read this back from
+/// [`EntityIndexSpace`] rather than assuming it equals
+/// `manifest.func_imports.len()` — see `docs/guides/thin-runtime-genericity.md`
+/// principle 1.
+pub fn host_capability_total(manifest: &ImportManifest) -> u32 {
+    let mut space = EntityIndexSpace::empty();
+    for _ in &manifest.func_imports {
+        space.host_capabilities.append(1);
+    }
+    space.host_capabilities.total()
+}
+
+/// Assemble pre-translated function bodies into a runnable WASM module.
+///
+/// `entry_func_idx` is 0-based among translated functions only (before
+/// `n_imports`), matching [`finish_module`].
+pub fn assemble_translated_module(
+    manifest: &ImportManifest,
+    fns: &[Function],
+    register_file_params: Vec<ValType>,
+    entry_func_idx: u32,
+    memory64: bool,
+) -> Vec<u8> {
+    let total = fns.len() as u32;
+    let n_params = register_file_params.len() as u32;
+    let (types, imports, space, func_slot) =
+        build_import_section(manifest, register_file_params, total);
+    finish_module(
+        types,
+        imports,
+        &space,
+        func_slot,
+        fns,
+        memory64,
+        entry_func_idx,
+        n_params,
+    )
+}
+
 /// Build the register-file type (type 0) plus one function type per
 /// `manifest` import, the import section itself, and the
 /// [`EntityIndexSpace`] that allocates host-capability slots (one per

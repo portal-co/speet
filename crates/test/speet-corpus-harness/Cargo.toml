@@ -12,6 +12,7 @@ wasmparser = { workspace = true, features = ["validate"] }
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmi = "1"
 sha2 = "0.10"
+speet-host-api = { path = "../../os/speet-host-api" }
 speet-aarch64 = { path = "../../native/speet-aarch64" }
 speet-x86_64 = { path = "../../native/speet-x86_64" }
 speet-riscv = { path = "../../native/speet-riscv" }

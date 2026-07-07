@@ -5,7 +5,7 @@ use std::path::Path;
 use wasm_encoder::{Function, ValType};
 
 use crate::{
-    assemble::{assemble_corpus_module, N_CORPUS_IMPORTS},
+    assemble::{assemble_corpus_module, corpus_manifest, corpus_n_imports},
     digest::sha256_hex,
     expected::{expectation_for_triple, load_expected, TripleExpectation},
     guest_pc_to_func_idx, instrument_functions, load::entry_pc, run::run_corpus_module, CorpusArch,
@@ -29,8 +29,14 @@ pub fn run_c_corpus_file_with_expected(
     let (mut fns, params) = translate(&text, base);
     assert!(!fns.is_empty(), "{}: no functions translated", text_elf.display());
 
-    instrument_functions(&mut fns, N_CORPUS_IMPORTS);
-    let entry_func_idx = guest_pc_to_func_idx(arch, base, main_pc, N_CORPUS_IMPORTS);
+    let manifest = corpus_manifest();
+    let n_imports = corpus_n_imports();
+    let trap_idx = manifest
+        .index_of("env", "__speet_unreachable_trap")
+        .expect("corpus manifest declares env.__speet_unreachable_trap");
+
+    instrument_functions(&mut fns, n_imports, trap_idx);
+    let entry_func_idx = guest_pc_to_func_idx(arch, base, main_pc, 0);
     let wasm = assemble_corpus_module(&fns, &params, entry_func_idx);
 
     wasmparser::validate(&wasm)
@@ -55,9 +61,10 @@ pub fn run_c_corpus_file_with_expected(
     }
 
     println!(
-        "  ✓ {} — {} funcs, entry #{entry_func_idx}",
+        "  ✓ {} — {} funcs, entry #{}",
         text_elf.file_name().unwrap().to_string_lossy(),
-        fns.len()
+        fns.len(),
+        n_imports + entry_func_idx
     );
 }
 
