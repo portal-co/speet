@@ -9,7 +9,8 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt, ExternalTargets,
+    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt,
+    external_targets_from_imports,
 };
 use speet_recompile::plt::PltCallPlan;
 use std::ffi::OsStr;
@@ -151,7 +152,7 @@ impl IntegratedNativeRuntime {
             })
             .ok_or_else(|| "no .text section".to_string())?;
         let start = text.addr;
-        let targets = ExternalTargets::from_imports(&bin.imports);
+        let targets = external_targets_from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
 

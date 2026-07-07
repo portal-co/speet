@@ -1,5 +1,5 @@
 use binary_io::{BinArch, BinOs};
-use speet_recompile::frontend::{recompile_to_wasm_instrumented_plt, ExternalTargets};
+use speet_recompile::frontend::{recompile_to_wasm_instrumented_plt, external_targets_from_imports};
 use speet_recompile::plt::PltCallPlan;
 use speet_runtime::{default_host_api, load_binary, HostApi, Runtime};
 
@@ -19,10 +19,10 @@ fn debug_probe() {
         .iter()
         .find(|s| s.name == "__text")
         .unwrap();
-    let targets = ExternalTargets::from_imports(&bin.imports);
+    let targets = external_targets_from_imports(&bin.imports);
     let plt_plan = PltCallPlan::from_targets(&targets, rt.host.as_ref());
-    eprintln!("plt_plan.by_addr = {:?}", plt_plan.by_addr);
-    eprintln!("plt_plan.import_by_symbol = {:?}", plt_plan.import_by_symbol);
+    eprintln!("plt_plan.wasm_import_by_addr = {:?}", plt_plan.wasm_import_by_addr);
+    eprintln!("plt_plan.ambient_labels = {:?}", plt_plan.ambient_labels);
     let manifest = rt.host.import_manifest();
     let (wasm, unsupported) = recompile_to_wasm_instrumented_plt(
         &text.data,

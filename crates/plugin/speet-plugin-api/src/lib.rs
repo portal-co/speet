@@ -43,7 +43,7 @@ pub use arch::ArchPlugin;
 pub use error::{PResult, PluginError};
 pub use external_target::{
     CallingConvention, ExternalTargetEntry, ExternalTargetPlugin, ExternalTargetTable,
-    LibraryId, PltHook, PltHookTable,
+    LibraryId, PltHook, PltHookTable, PltHookTarget,
 };
 pub use imports::HostImports;
 pub use memory::{AddressMapperPlugin, MemoryAccessPlugin};

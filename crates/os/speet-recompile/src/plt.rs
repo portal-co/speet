@@ -2,70 +2,75 @@
 
 use binary_io::BinArch;
 use speet_host_api::{HostApi, PltRedirect};
-use speet_plugin_api::external_target::{CallingConvention, PltHook, PltHookTable};
+use speet_plugin_api::external_target::{
+    CallingConvention, ExternalTargetTable, LibraryId, PltHook, PltHookTable, PltHookTarget,
+};
 use std::collections::BTreeMap;
 
-use crate::frontend::ExternalTargets;
-
-/// Per-guest-address PLT table plus symbol → WASM import index map.
+/// Resolved redirect plan: guest `(library, address)` hooks plus per-symbol
+/// metadata. Only [`PltHookTarget::WasmImport`] entries become PC-check hooks
+/// in the interim path; [`PltHookTarget::Ambient`] is link-time only until
+/// virtual-GOT shims land — see `docs/future/redirect-shim-got.md`.
 #[derive(Debug, Clone, Default)]
 pub struct PltCallPlan {
-    pub by_addr: BTreeMap<u64, String>,
-    pub import_by_symbol: BTreeMap<String, u32>,
+    pub targets: ExternalTargetTable,
+    /// Guest addresses that resolve to a WASM-import redirect (PC-check).
+    pub wasm_import_by_addr: BTreeMap<(LibraryId, u64), u32>,
+    /// Symbols resolved to ambient link aliases (not PC-check emitted).
+    pub ambient_labels: BTreeMap<String, ()>,
 }
 
 impl PltCallPlan {
-    /// Resolve every hooked guest symbol's WASM import index against
-    /// `host.import_manifest()`'s own `index_of` — never a separately
-    /// hand-maintained `match name { "x" => 4, ... }` table (see
-    /// `docs/guides/thin-runtime-genericity.md` principle 1). This also
-    /// generalizes past the old "module must be `env`" restriction: any
-    /// module name the manifest actually declares works.
-    pub fn from_targets(targets: &ExternalTargets, host: &dyn HostApi) -> Self {
+    /// Resolve every hooked guest symbol against `host.import_manifest()`'s
+    /// `index_of` — never a hand-maintained match table (principle 1).
+    pub fn from_targets(targets: &ExternalTargetTable, host: &dyn HostApi) -> Self {
         let manifest = host.import_manifest();
-        let mut import_by_symbol = BTreeMap::new();
-        for sym in targets.by_plt_addr.values() {
-            if import_by_symbol.contains_key(sym) {
-                continue;
-            }
-            let Some(PltRedirect::WasmImport { module, name }) = host.resolve_plt_redirect(sym)
-            else {
+        let mut wasm_import_by_addr = BTreeMap::new();
+        let mut ambient_labels = BTreeMap::new();
+
+        for entry in targets.iter() {
+            let Some(redirect) = host.resolve_plt_redirect(&entry.label) else {
                 continue;
             };
-            if let Some(idx) = manifest.index_of(&module, &name) {
-                import_by_symbol.insert(sym.clone(), idx);
+            match redirect {
+                PltRedirect::WasmImport { module, name } => {
+                    if let Some(idx) = manifest.index_of(&module, &name) {
+                        wasm_import_by_addr.insert((entry.library, entry.address), idx);
+                    }
+                }
+                PltRedirect::Ambient => {
+                    ambient_labels.insert(entry.label.clone(), ());
+                }
             }
         }
+
         Self {
-            by_addr: targets.by_plt_addr.clone(),
-            import_by_symbol,
+            targets: targets.clone(),
+            wasm_import_by_addr,
+            ambient_labels,
         }
     }
 
-    pub fn lookup_import(&self, target: u64) -> Option<(u32, &str)> {
-        let sym = self.by_addr.get(&target)?;
-        let idx = self.import_by_symbol.get(sym)?;
-        Some((*idx, sym.as_str()))
+    pub fn lookup_wasm_import(&self, library: LibraryId, target: u64) -> Option<u32> {
+        self.wasm_import_by_addr.get(&(library, target)).copied()
     }
 
-    /// Realize this plan as a [`PltHookTable`] for `arch`'s calling
-    /// convention — the single shared type `speet-x86_64`/`speet-aarch64`
-    /// hold by composition (`Option<PltHookTable>`) instead of each
-    /// independently declaring its own `plt_by_addr` + `plt_imports` pair
-    /// and a duplicated `lookup_plt_import`/`emit_plt_import_call` pair.
-    /// See `docs/guides/thin-runtime-genericity.md` principle 1.
+    /// Realize WASM-import hooks as a [`PltHookTable`] for `arch`.
     pub fn to_hook_table(&self, arch: BinArch) -> PltHookTable {
         let mut table = PltHookTable::new();
-        for (&addr, sym) in &self.by_addr {
-            let Some(&import_idx) = self.import_by_symbol.get(sym) else {
-                continue;
-            };
+        for (&(library, addr), &import_idx) in &self.wasm_import_by_addr {
+            let label = self
+                .targets
+                .lookup(library, addr)
+                .unwrap_or("?")
+                .to_string();
             table.insert(
+                library,
                 addr,
                 PltHook {
-                    label: sym.clone(),
-                    import_idx,
-                    convention: calling_convention_for(arch, sym),
+                    label,
+                    target: PltHookTarget::WasmImport { import_idx },
+                    convention: calling_convention_for(arch, self.targets.lookup(library, addr).unwrap_or("")),
                 },
             );
         }
@@ -73,29 +78,78 @@ impl PltCallPlan {
     }
 }
 
-/// Per-arch calling convention for a hooked guest symbol's redirected call.
-///
-/// Delegates to checked-in ABI-spec stubs when available (`speet-abi-stubs`),
-/// then falls back to hand-maintained entries for symbols not yet generated.
-/// See `docs/future/abi-spec-redirects.md`.
 fn calling_convention_for(arch: BinArch, symbol: &str) -> CallingConvention {
-    if let Some(cc) = speet_abi_stubs::calling_convention(arch, symbol) {
-        return cc;
+    match arch {
+        BinArch::X86_64 => speet_x86_64::plt_calling_convention(symbol),
+        BinArch::AArch64 => speet_aarch64::plt_calling_convention(symbol),
+        _ => speet_abi_stubs::calling_convention(arch, symbol).unwrap_or_default(),
     }
-    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
-    match (arch, bare) {
-        (BinArch::X86_64, "execve") => CallingConvention {
-            arg_locals: vec![7, 6, 2], // RDI, RSI, RDX
-            arg_wrap_i32: vec![false, false, false],
-            result_local: Some(0), // RAX
-            result_extend_i32: true,
-        },
-        (BinArch::AArch64, "execve") => CallingConvention {
-            arg_locals: vec![0, 1, 2], // x0, x1, x2
-            arg_wrap_i32: vec![false, false, false],
-            result_local: Some(0), // x0
-            result_extend_i32: true,
-        },
-        _ => CallingConvention::default(),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use speet_host_api::{HostApi, ImportManifest, PltRedirect, RedirectingHostApi, TunneledHostApi};
+
+    #[test]
+    fn execve_becomes_wasm_import_hook() {
+        let mut targets = ExternalTargetTable::new();
+        targets.insert(LibraryId::MAIN_IMAGE, 0x3000, "execve");
+        let host = RedirectingHostApi::integrated(
+            TunneledHostApi::for_host().with_manifest(ImportManifest::integrated_native()),
+        );
+        let plan = PltCallPlan::from_targets(&targets, &host);
+        assert_eq!(plan.wasm_import_by_addr.get(&(LibraryId::MAIN_IMAGE, 0x3000)), Some(&4));
+        let table = plan.to_hook_table(BinArch::AArch64);
+        let hook = table.lookup_main(0x3000).expect("hook");
+        assert_eq!(hook.import_idx(), Some(4));
+    }
+
+    #[test]
+    fn ambient_redirect_not_in_hook_table() {
+        struct AmbientWriteHost;
+        impl HostApi for AmbientWriteHost {
+            fn import_manifest(&self) -> ImportManifest {
+                ImportManifest::native_syscall()
+            }
+            fn resolve_ambient(
+                &self,
+                guest_name: &str,
+            ) -> Option<tunnel::TunnelResolution> {
+                if guest_name == "write" || guest_name == "_write" {
+                    Some(tunnel::TunnelResolution {
+                        host_symbol: "write".into(),
+                    })
+                } else {
+                    None
+                }
+            }
+            fn link_recipe(&self) -> speet_host_api::LinkRecipe {
+                speet_host_api::LinkRecipe {
+                    arch: binary_io::BinArch::X86_64,
+                    os: binary_io::BinOs::Linux,
+                    dylib_flags: vec![],
+                    ambient_aliases: vec![("write".into(), "write".into())],
+                }
+            }
+            fn resolve_plt_redirect(&self, guest_symbol: &str) -> Option<PltRedirect> {
+                let bare = guest_symbol.strip_prefix('_').unwrap_or(guest_symbol);
+                if bare == "write" {
+                    Some(PltRedirect::Ambient)
+                } else {
+                    None
+                }
+            }
+            fn supports_ambient_linking(&self) -> bool {
+                true
+            }
+        }
+
+        let mut targets = ExternalTargetTable::new();
+        targets.insert(LibraryId::MAIN_IMAGE, 0x4000, "write");
+        let host = AmbientWriteHost;
+        let plan = PltCallPlan::from_targets(&targets, &host);
+        assert!(plan.wasm_import_by_addr.is_empty());
+        assert!(plan.ambient_labels.contains_key("write"));
     }
 }

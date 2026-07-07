@@ -12,31 +12,22 @@
 //! 5. Resolve the entry point to a megabinary export (`__guest_entry`).
 
 use binary_io::{BinArch, BinOs, ImportSym, LoadedBinary};
+use speet_plugin_api::external_target::{ExternalTargetTable, LibraryId};
 
-/// External call targets discovered in the loaded binary: guest address (PLT
-/// stub or relocation site target) -> external symbol name to tunnel.
-#[derive(Debug, Default, Clone)]
-pub struct ExternalTargets {
-    pub by_plt_addr: std::collections::BTreeMap<u64, String>,
-}
-
-impl ExternalTargets {
-    /// Build the table from a loaded binary's import list (PLT addresses).
-    pub fn from_imports(imports: &[ImportSym]) -> Self {
-        let mut by_plt_addr = std::collections::BTreeMap::new();
-        for imp in imports {
-            if let Some(addr) = imp.plt_addr {
-                by_plt_addr.insert(addr, imp.name.clone());
-            }
+/// Build an [`ExternalTargetTable`] from a loaded binary's import list (PLT
+/// addresses in [`LibraryId::MAIN_IMAGE`]).
+pub fn external_targets_from_imports(imports: &[ImportSym]) -> ExternalTargetTable {
+    let mut table = ExternalTargetTable::new();
+    for imp in imports {
+        if let Some(addr) = imp.plt_addr {
+            table.insert(LibraryId::MAIN_IMAGE, addr, imp.name.clone());
         }
-        Self { by_plt_addr }
     }
-
-    /// Look up an external symbol name for a call/jmp target address.
-    pub fn lookup(&self, target: u64) -> Option<&str> {
-        self.by_plt_addr.get(&target).map(|s| s.as_str())
-    }
+    table
 }
+
+/// Alias kept for call-site brevity — prefer [`ExternalTargetTable`] in new code.
+pub type ExternalTargets = ExternalTargetTable;
 
 /// Returns the current host (OS, arch) so the driver can enforce same-platform.
 pub fn host_platform() -> (BinOs, BinArch) {

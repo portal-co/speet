@@ -32,10 +32,9 @@ impl LibraryId {
 
 /// Minimal calling-convention description needed to marshal arguments/results
 /// around a redirected call, without hand-matching an instruction shape at
-/// the call site. A plugin arch supplies its own via
-/// [`crate::arch::ArchPlugin::calling_convention_for`] instead of requiring
-/// a new hand-written match arm in `speet-recompile` every time a new
-/// architecture is added.
+/// the call site. Each native arch crate supplies symbol conventions via
+/// its own `plt_calling_convention` helper — see `speet-x86_64` /
+/// `speet-aarch64` and `speet_abi_stubs`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CallingConvention {
     /// Local indices (register slots) holding the callee's arguments, in
@@ -76,8 +75,6 @@ pub struct ExternalTargetEntry {
 }
 
 /// A table of address-to-label entries for one or more libraries.
-/// Generalizes the old flat "one address space, one `env` module"
-/// assumption in `speet_recompile::frontend::ExternalTargets`.
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTargetTable {
     entries: BTreeMap<(LibraryId, u64), String>,
@@ -121,40 +118,44 @@ impl ExternalTargetTable {
 /// A plugin-supplied source of address-to-label entries for one library —
 /// e.g. a specific libc/libSystem build, or a guest binary's own PLT.
 ///
-/// This is the trait a future out-of-process transport (subprocess/dylib/
-/// WASM) would adapt; wiring it into `speet-plugin-host*`/`speet-plugin-adapter`
-/// as a sixth `PluginKind` is intentionally left as follow-up work (adding a
-/// sixth kind is a documented version bump — see `docs/plugin-api.md`), not
-/// implemented in this pass. In-process consumers (native arch recompilers)
-/// can use [`ExternalTargetTable`]/[`CallingConvention`] directly today.
+/// Wiring into `speet-plugin-host*` as a sixth `PluginKind` is follow-up
+/// work — see `docs/plugin-api.md`. In-process consumers can use
+/// [`ExternalTargetTable`] / [`PltHookTable`] directly today.
 pub trait ExternalTargetPlugin: Send + Sync {
-    /// Human-readable identity for diagnostics (e.g. `"libSystem.B.dylib"`).
     fn library_name(&self) -> &str;
-    /// All address-to-label entries this plugin knows about.
     fn entries(&self) -> ExternalTargetTable;
 }
 
-/// A resolved redirect hook: which WASM import (or other host-capability
-/// slot) to call for a hooked guest address, and what calling convention to
-/// marshal arguments/results with.
-///
-/// This is the *single shared type* `speet-x86_64` and `speet-aarch64` hold
-/// by composition (`Option<PltHookTable>`) instead of each independently
-/// declaring `plt_by_addr: BTreeMap<u64, String>` +
-/// `plt_imports: BTreeMap<String, u32>` and a duplicated `lookup_plt_import`
-/// method. See `docs/guides/thin-runtime-genericity.md` principle 1 — one
-/// arch adding its own copy of this pair was exactly the drift this
-/// consolidation prevents for a third/future arch.
+/// How a PC-check hook realizes the redirect at recompile time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PltHookTarget {
+    /// Call a WASM import (host tunnel / integrated hook).
+    WasmImport { import_idx: u32 },
+    /// Link-time ambient alias only — **not** emitted by the interim
+    /// PC-check path; see `docs/future/redirect-shim-got.md`.
+    Ambient,
+}
+
+/// A resolved redirect hook for one guest address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PltHook {
     pub label: String,
-    pub import_idx: u32,
+    pub target: PltHookTarget,
     pub convention: CallingConvention,
+}
+
+impl PltHook {
+    pub fn import_idx(&self) -> Option<u32> {
+        match self.target {
+            PltHookTarget::WasmImport { import_idx } => Some(import_idx),
+            PltHookTarget::Ambient => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PltHookTable {
-    hooks: BTreeMap<u64, PltHook>,
+    hooks: BTreeMap<(LibraryId, u64), PltHook>,
 }
 
 impl PltHookTable {
@@ -162,12 +163,16 @@ impl PltHookTable {
         Self::default()
     }
 
-    pub fn insert(&mut self, address: u64, hook: PltHook) {
-        self.hooks.insert(address, hook);
+    pub fn insert(&mut self, library: LibraryId, address: u64, hook: PltHook) {
+        self.hooks.insert((library, address), hook);
     }
 
-    pub fn lookup(&self, address: u64) -> Option<&PltHook> {
-        self.hooks.get(&address)
+    pub fn lookup(&self, library: LibraryId, address: u64) -> Option<&PltHook> {
+        self.hooks.get(&(library, address))
+    }
+
+    pub fn lookup_main(&self, address: u64) -> Option<&PltHook> {
+        self.lookup(LibraryId::MAIN_IMAGE, address)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -187,7 +192,7 @@ mod tests {
     fn table_keys_by_library_and_address() {
         let mut t = ExternalTargetTable::new();
         t.insert(LibraryId::MAIN_IMAGE, 0x1000, "execve");
-        t.insert(LibraryId(1), 0x1000, "other_lib_fn"); // same address, different library
+        t.insert(LibraryId(1), 0x1000, "other_lib_fn");
         assert_eq!(t.lookup_main(0x1000), Some("execve"));
         assert_eq!(t.lookup(LibraryId(1), 0x1000), Some("other_lib_fn"));
         assert_eq!(t.lookup(LibraryId(2), 0x1000), None);
@@ -195,13 +200,14 @@ mod tests {
     }
 
     #[test]
-    fn hook_table_roundtrip() {
+    fn hook_table_keys_by_library_and_address() {
         let mut hooks = PltHookTable::new();
         hooks.insert(
+            LibraryId::MAIN_IMAGE,
             0x2000,
             PltHook {
                 label: "execve".into(),
-                import_idx: 4,
+                target: PltHookTarget::WasmImport { import_idx: 4 },
                 convention: CallingConvention {
                     arg_locals: alloc::vec![7, 6, 2],
                     result_local: Some(0),
@@ -209,9 +215,8 @@ mod tests {
                 },
             },
         );
-        let hook = hooks.lookup(0x2000).expect("hook present");
-        assert_eq!(hook.import_idx, 4);
-        assert_eq!(hook.convention.arg_locals, alloc::vec![7, 6, 2]);
-        assert!(hooks.lookup(0x3000).is_none());
+        assert!(hooks.lookup(LibraryId(1), 0x2000).is_none());
+        let hook = hooks.lookup_main(0x2000).expect("hook present");
+        assert_eq!(hook.import_idx(), Some(4));
     }
 }

@@ -93,6 +93,7 @@ pub struct X86Recompiler<Context, E> {
     /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
     /// `docs/guides/thin-runtime-genericity.md` principle 1.
     hooks: Option<speet_plugin_api::external_target::PltHookTable>,
+    hook_library: speet_plugin_api::external_target::LibraryId,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -133,6 +134,7 @@ impl<Context, E> X86Recompiler<Context, E> {
             unsupported_insns: alloc::collections::BTreeSet::new(),
             memory_access: None,
             hooks: None,
+            hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
         }
     }
 
@@ -141,6 +143,11 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
     pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
         self.hooks = Some(hooks);
+    }
+
+    /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
+    pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
+        self.hook_library = library;
     }
 
     /// Returns the set of instruction mnemonics that had no translation and
@@ -801,5 +808,23 @@ where
             data_segments: alloc::vec![],
             data_init_fn: None,
         }
+    }
+}
+
+/// Calling convention for a compile-time PLT redirect of `symbol` on x86-64.
+pub fn plt_calling_convention(symbol: &str) -> speet_plugin_api::external_target::CallingConvention {
+    use binary_io::BinArch;
+    if let Some(cc) = speet_abi_stubs::calling_convention(BinArch::X86_64, symbol) {
+        return cc;
+    }
+    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
+    match bare {
+        "execve" => speet_plugin_api::external_target::CallingConvention {
+            arg_locals: alloc::vec![7, 6, 2],
+            arg_wrap_i32: alloc::vec![false, false, false],
+            result_local: Some(0),
+            result_extend_i32: true,
+        },
+        _ => speet_plugin_api::external_target::CallingConvention::default(),
     }
 }

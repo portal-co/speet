@@ -358,7 +358,7 @@ impl<Context, E> X86Recompiler<Context, E> {
     }
 
     fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
-        self.hooks.as_ref()?.lookup(target)
+        self.hooks.as_ref()?.lookup(self.hook_library, target)
     }
 
     /// Emit "make the redirected host call, then behave like a `ret`" for a
@@ -378,13 +378,17 @@ impl<Context, E> X86Recompiler<Context, E> {
         inst_ip: u64,
         hook: &speet_plugin_api::external_target::PltHook,
     ) -> Result<Option<()>, E> {
+        use speet_plugin_api::external_target::PltHookTarget;
+        let PltHookTarget::WasmImport { import_idx } = hook.target else {
+            return Ok(Some(()));
+        };
         for (i, &local) in hook.convention.arg_locals.iter().enumerate() {
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
             if hook.convention.wraps_i32(i) {
                 rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(hook.import_idx))?;
+        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
         if let Some(result_local) = hook.convention.result_local {
             if hook.convention.result_extend_i32 {
                 rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;

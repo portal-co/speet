@@ -76,6 +76,7 @@ pub struct AArch64Recompiler<Context, E> {
     /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
     /// `docs/guides/thin-runtime-genericity.md` principle 1.
     hooks: Option<speet_plugin_api::external_target::PltHookTable>,
+    hook_library: speet_plugin_api::external_target::LibraryId,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
@@ -120,6 +121,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             fp_slot: LocalSlot::default(),
             sp_slot: LocalSlot::default(),
             hooks: None,
+            hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
         }
     }
 
@@ -128,6 +130,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
     /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
     pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
         self.hooks = Some(hooks);
+    }
+
+    /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
+    pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
+        self.hook_library = library;
     }
 
     pub fn new() -> Self {
@@ -220,7 +227,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
     }
 
     pub(crate) fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
-        self.hooks.as_ref()?.lookup(target)
+        self.hooks.as_ref()?.lookup(self.hook_library, target)
     }
 
     /// Emit "make the redirected host call, then behave like a `ret`" for a
@@ -238,13 +245,17 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         pc: u64,
         hook: &speet_plugin_api::external_target::PltHook,
     ) -> Result<(), E> {
+        use speet_plugin_api::external_target::PltHookTarget;
+        let PltHookTarget::WasmImport { import_idx } = hook.target else {
+            return Ok(());
+        };
         for (i, &reg) in hook.convention.arg_locals.iter().enumerate() {
             self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
             if hook.convention.wraps_i32(i) {
                 rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(hook.import_idx))?;
+        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
         if let Some(result_reg) = hook.convention.result_local {
             if hook.convention.result_extend_i32 {
                 rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
@@ -617,5 +628,23 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp0))?;
         self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
         Ok(())
+    }
+}
+
+/// Calling convention for a compile-time PLT redirect of `symbol` on AArch64.
+pub fn plt_calling_convention(symbol: &str) -> speet_plugin_api::external_target::CallingConvention {
+    use binary_io::BinArch;
+    if let Some(cc) = speet_abi_stubs::calling_convention(BinArch::AArch64, symbol) {
+        return cc;
+    }
+    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
+    match bare {
+        "execve" => speet_plugin_api::external_target::CallingConvention {
+            arg_locals: alloc::vec![0, 1, 2],
+            arg_wrap_i32: alloc::vec![false, false, false],
+            result_local: Some(0),
+            result_extend_i32: true,
+        },
+        _ => speet_plugin_api::external_target::CallingConvention::default(),
     }
 }

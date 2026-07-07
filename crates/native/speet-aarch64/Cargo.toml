@@ -15,6 +15,8 @@ speet-traps = { path = "../../helper/speet-traps" }
 speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
+speet-abi-stubs = { path = "../../os/speet-abi-stubs" }
+binary-io = { path = "../../../../binary-io" }
 
 [dev-dependencies]
 yecta = { path = "../../helper/yecta" }
