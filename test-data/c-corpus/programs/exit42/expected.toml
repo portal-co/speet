@@ -1,0 +1,15 @@
+[[triple]]
+name = "x86_64-linux-gnu"
+exit_code = 42
+
+[[triple]]
+name = "aarch64-linux-gnu"
+exit_code = 42
+
+[[triple]]
+name = "x86_64-apple-macosx"
+exit_code = 42
+
+[[triple]]
+name = "aarch64-apple-darwin"
+exit_code = 42

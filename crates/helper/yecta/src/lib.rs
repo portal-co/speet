@@ -915,6 +915,19 @@ enum Optimizer {
     ConstFold(ConstFoldState),
 }
 
+/// Result of [`ConstFoldState::try_fold`] for one instruction.
+enum FoldOutcome {
+    /// Fully elided: nothing should be emitted for the fed instruction.
+    Handled,
+    /// Emit this instruction instead of the one that was fed in (e.g. a
+    /// known-true `BrIf`/`BrTable` rewritten to an unconditional `Br`).
+    /// Always `'static` in practice: the replacements this crate constructs
+    /// (`Br`) own all their data.
+    EmitInstead(Instruction<'static>),
+    /// Not folded: emit the fed instruction verbatim.
+    NotFolded,
+}
+
 /// Internal entry representing a function being generated.
 struct Entry<F> {
     function: F,
@@ -941,6 +954,29 @@ struct Entry<F> {
     /// uses this to emit `unreachable; end` for any functions that were never
     /// explicitly sealed (e.g. the final instructions of a translated region).
     sealed: bool,
+    /// Currently-open hoisted speculative-call exception region, if any.
+    /// See [`Entry::ensure_call_region_open`]/[`Entry::close_call_region`].
+    hoisted_call_region: Option<HoistedCallRegion>,
+}
+
+/// State of a lazily-opened `Block`/`TryTable` region shared by one or more
+/// speculative calls inlined into the same merged `Entry`.  See
+/// [`Entry::ensure_call_region_open`] for the hoisting rationale.
+struct HoistedCallRegion {
+    tag: EscapeTag,
+    /// The fixup-key set used by every call folded into this region so far.
+    /// Calls sharing one region must restore the same set of "fixed up"
+    /// parameter slots (`Drop`, not `LocalSet`) on the shared catch path,
+    /// regardless of which call in the region actually threw — see
+    /// `restore_params_after_call`. A region is closed and reopened if a
+    /// later call uses a different tag or fixup-key set.
+    fixup_keys: BTreeSet<u32>,
+    /// Register-file width (the `params` passed to `emit_call_body`). The
+    /// region's `Block`/`TryTable` blocktype is `(register_file) ->
+    /// (register_file)`, so closing it on the success/fallthrough path
+    /// requires exactly this many values to be present — see
+    /// `close_call_region`.
+    params: u32,
 }
 
 impl ConstFoldState {
@@ -985,7 +1021,7 @@ impl ConstFoldState {
                 // but it won't be emitted — correct the count.
                 *if_stmts = if_stmts.saturating_sub(1);
             }
-            Instruction::Block(_) | Instruction::Loop(_) => {
+            Instruction::Block(_) | Instruction::Loop(_) | Instruction::TryTable(_, _) => {
                 self.skip_depth += 1;
             }
             Instruction::End => {
@@ -996,28 +1032,26 @@ impl ConstFoldState {
         true
     }
 
-    /// Try to constant-fold `insn`.
-    /// Returns `true` if the instruction was fully handled (not emitted, not counted).
-    /// Returns `false` if the instruction should be emitted normally.
+    /// Try to constant-fold `insn`. See [`FoldOutcome`] for the result shape.
     /// `if_stmts` is the owning entry's open-`if` counter, corrected when a
     /// known-true `if` is elided.
-    fn try_fold(&mut self, insn: &Instruction<'_>, if_stmts: &mut usize) -> bool {
+    fn try_fold(&mut self, insn: &Instruction<'_>, if_stmts: &mut usize) -> FoldOutcome {
         match insn {
             // ── Constant pushes: defer, push Some(v) ──────────────────
             Instruction::I32Const(v) => {
                 self.const_stack.push(Some((*v as u64, ValType::I32)));
-                return true;
+                return FoldOutcome::Handled;
             }
             Instruction::I64Const(v) => {
                 self.const_stack.push(Some((*v as u64, ValType::I64)));
-                return true;
+                return FoldOutcome::Handled;
             }
 
             // ── Drop: if top is a known constant, elide both ──────────
             Instruction::Drop => {
                 if let Some(Some(_)) = self.const_stack.last() {
                     self.const_stack.pop();
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
 
@@ -1053,7 +1087,7 @@ impl ConstFoldState {
                         };
                         self.const_stack.truncate(len - 2);
                         self.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
             }
@@ -1090,7 +1124,7 @@ impl ConstFoldState {
                         };
                         self.const_stack.truncate(len - 2);
                         self.const_stack.push(Some((result as u64, ValType::I64)));
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
             }
@@ -1131,7 +1165,7 @@ impl ConstFoldState {
                         };
                         self.const_stack.truncate(len - 2);
                         self.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
             }
@@ -1172,7 +1206,7 @@ impl ConstFoldState {
                         };
                         self.const_stack.truncate(len - 2);
                         self.const_stack.push(Some((result as u64, ValType::I32)));
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
             }
@@ -1183,7 +1217,7 @@ impl ConstFoldState {
                     self.const_stack.pop();
                     let result = (v as i32 == 0) as i32;
                     self.const_stack.push(Some((result as u64, ValType::I32)));
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
 
@@ -1193,7 +1227,7 @@ impl ConstFoldState {
                     self.const_stack.pop();
                     let result = (v as i64 == 0) as i32;
                     self.const_stack.push(Some((result as u64, ValType::I32)));
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
 
@@ -1202,7 +1236,7 @@ impl ConstFoldState {
                 if let Some(Some((v, _))) = self.const_stack.last().cloned() {
                     self.const_stack.pop();
                     self.const_stack.push(Some((v as i32 as u64, ValType::I32)));
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
             Instruction::I64ExtendI32S => {
@@ -1210,14 +1244,14 @@ impl ConstFoldState {
                     self.const_stack.pop();
                     self.const_stack
                         .push(Some((v as i32 as i64 as u64, ValType::I64)));
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
             Instruction::I64ExtendI32U => {
                 if let Some(Some((v, _))) = self.const_stack.last().cloned() {
                     self.const_stack.pop();
                     self.const_stack.push(Some((v as u32 as u64, ValType::I64)));
-                    return true;
+                    return FoldOutcome::Handled;
                 }
             }
 
@@ -1228,7 +1262,7 @@ impl ConstFoldState {
                     self.const_stack.pop();
                     self.locals_const.insert(n, (v, ty));
                     self.locals_virtual.insert(n);
-                    return true; // Virtual store: don't emit local.set
+                    return FoldOutcome::Handled; // Virtual store: don't emit local.set
                 }
                 // Unknown value: clear tracking for this local.
                 self.locals_const.remove(&n);
@@ -1243,7 +1277,7 @@ impl ConstFoldState {
                     // Keep Some(v) on shadow stack (tee leaves value on stack).
                     self.locals_const.insert(n, (v, ty));
                     self.locals_virtual.insert(n);
-                    return true; // Virtual tee
+                    return FoldOutcome::Handled; // Virtual tee
                 }
                 self.locals_const.remove(&n);
                 self.locals_virtual.remove(&n);
@@ -1254,7 +1288,7 @@ impl ConstFoldState {
             Instruction::LocalGet(n) => {
                 if let Some(&(v, ty)) = self.locals_const.get(n) {
                     self.const_stack.push(Some((v, ty)));
-                    return true; // Replaced with inline const
+                    return FoldOutcome::Handled; // Replaced with inline const
                 }
                 // Unknown local: push None (update_shadow_stack will handle).
                 // Fall through to emit + update_shadow_stack.
@@ -1273,7 +1307,7 @@ impl ConstFoldState {
                         *if_stmts = if_stmts.saturating_sub(1);
                         self.const_stack.pop(); // consume condition
                         self.block_frames.push(true); // TakenIf
-                        return true; // Don't emit If
+                        return FoldOutcome::Handled; // Don't emit If
                     }
                     _ => {
                         // Unknown condition OR known-false: emit If normally.
@@ -1286,8 +1320,50 @@ impl ConstFoldState {
                 }
             }
 
-            // ── Block / Loop: track block frames ──────────────────────
-            Instruction::Block(_) | Instruction::Loop(_) => {
+            // ── BrIf: constant-condition branch elimination ────────────
+            Instruction::BrIf(label) => {
+                match self.const_stack.last().cloned() {
+                    Some(Some((v, _))) if v != 0 => {
+                        // Known-true: condition consumed, rewrite to an
+                        // unconditional Br to the same label.
+                        self.const_stack.pop();
+                        return FoldOutcome::EmitInstead(Instruction::Br(*label));
+                    }
+                    Some(Some(_)) => {
+                        // Known-false: branch never taken. Unlike `If` there is
+                        // no else-arm to preserve — just drop the condition and
+                        // emit nothing.
+                        self.const_stack.pop();
+                        return FoldOutcome::Handled;
+                    }
+                    _ => {
+                        // Unknown condition: emit BrIf normally.
+                    }
+                }
+            }
+
+            // ── BrTable: resolve a known selector to a single Br ───────
+            Instruction::BrTable(targets, default) => {
+                if let Some(Some((v, _))) = self.const_stack.last().cloned() {
+                    self.const_stack.pop();
+                    // WASM br_table semantics: out-of-range selectors clamp to
+                    // the default target.
+                    let resolved = targets
+                        .get(v as u32 as usize)
+                        .copied()
+                        .unwrap_or(*default);
+                    return FoldOutcome::EmitInstead(Instruction::Br(resolved));
+                }
+                // Unknown selector: emit BrTable normally.
+            }
+
+            // ── Block / Loop / TryTable: track block frames ───────────
+            // TryTable opens a nesting level exactly like Block/Loop and
+            // needs a matching frame so the End that closes it (e.g. via
+            // Entry::close_call_region's hoisted-region End) doesn't
+            // consume the wrong frame and desync block_frames relative to
+            // real WASM nesting depth.
+            Instruction::Block(_) | Instruction::Loop(_) | Instruction::TryTable(_, _) => {
                 self.block_frames.push(false); // Normal
                 // Fall through to emit.
             }
@@ -1297,7 +1373,7 @@ impl ConstFoldState {
                 if let Some(taken) = self.block_frames.pop() {
                     if taken {
                         // This End closes a taken-if; don't emit it.
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
                 // Normal End: emit it.
@@ -1313,7 +1389,7 @@ impl ConstFoldState {
                         // Remove the TakenIf frame and enter skip mode.
                         self.block_frames.pop();
                         self.skip_depth += 1;
-                        return true;
+                        return FoldOutcome::Handled;
                     }
                 }
                 // Normal Else: emit it.
@@ -1321,7 +1397,7 @@ impl ConstFoldState {
 
             _ => {}
         }
-        false
+        FoldOutcome::NotFolded
     }
 
     /// Materialize any deferred constants that the instruction needs from the
@@ -1334,9 +1410,17 @@ impl ConstFoldState {
         insn: &Instruction<'_>,
     ) -> Result<(), E> {
         // Flush the entire const_stack whenever the instruction interacts with
-        // the value stack (pushes, pops, or is a call).  This keeps the
-        // invariant that no deferred constant sits below a concrete runtime
-        // value on the abstract stack.
+        // the value stack (pushes, pops, or is a call), OR opens a structured
+        // control-flow construct (Block/Loop/If/TryTable). The latter is
+        // required even though these instructions' own `stack_pops`/
+        // `stack_pushes` are 0 (If aside): their `BlockType::FunctionType`
+        // may declare non-empty *params*, which the validator expects to
+        // already be present as real, materialized values on the operand
+        // stack at the point the construct opens — a value still sitting in
+        // the deferred shadow stack does not count. This was previously
+        // unobservable because every Block/Loop/TryTable in this codebase
+        // used an empty-params blocktype; `Entry::ensure_call_region_open`'s
+        // hoisted call region is the first one with non-empty params.
         let needs_flush = Self::stack_pops(insn) > 0
             || Self::stack_pushes(insn) > 0
             || matches!(
@@ -1347,6 +1431,10 @@ impl ConstFoldState {
                     | Instruction::ReturnCallIndirect { .. }
                     | Instruction::CallRef(_)
                     | Instruction::ReturnCallRef(_)
+                    | Instruction::Block(_)
+                    | Instruction::Loop(_)
+                    | Instruction::If(_)
+                    | Instruction::TryTable(_, _)
             );
 
         if needs_flush {
@@ -1816,6 +1904,46 @@ impl ConstFoldState {
     }
 }
 
+/// Statically evaluate `snippet`'s emitted instructions against a snapshot of
+/// `locals_const`, reusing [`ConstFoldState::try_fold`]'s existing folding rules
+/// rather than duplicating arithmetic.  Returns the single resulting constant
+/// if the whole snippet folds cleanly to one value left on the shadow stack;
+/// `None` otherwise (any unfoldable instruction, or the snippet leaves zero or
+/// more than one stack value).
+///
+/// Always lets `emit_snippet` run to completion: there is no way to abort
+/// mid-emission other than returning `Err(E)`, which this must never fabricate.
+fn try_const_eval<Context, E>(
+    locals_const: &BTreeMap<u32, (u64, ValType)>,
+    ctx: &mut Context,
+    snippet: &(dyn Snippet<Context, E> + '_),
+) -> Result<Option<i64>, E> {
+    let mut scratch = ConstFoldState {
+        locals_const: locals_const.clone(),
+        ..Default::default()
+    };
+    let mut unfoldable = false;
+    let mut dummy_if_stmts = 0usize;
+    snippet.emit_snippet(ctx, &mut |_ctx, insn| {
+        if !unfoldable
+            && matches!(
+                scratch.try_fold(insn, &mut dummy_if_stmts),
+                FoldOutcome::NotFolded
+            )
+        {
+            unfoldable = true;
+        }
+        Ok(())
+    })?;
+    if unfoldable {
+        return Ok(None);
+    }
+    match scratch.const_stack.as_slice() {
+        [Some((v, _))] => Ok(Some(*v as i64)),
+        _ => Ok(None),
+    }
+}
+
 impl Optimizer {
     /// Access the constant-folding state (the only variant today).
     #[inline]
@@ -1879,18 +2007,36 @@ impl<F> Entry<F> {
             return Ok(());
         }
         // Try constant folding.
-        if self.opt.cf().try_fold(insn, &mut self.if_stmts) {
-            return Ok(());
+        match self.opt.cf().try_fold(insn, &mut self.if_stmts) {
+            FoldOutcome::Handled => return Ok(()),
+            FoldOutcome::NotFolded => {
+                // Materialize any deferred constants the instruction needs.
+                self.opt
+                    .cf()
+                    .materialize(ctx, &mut self.function, &mut self.inst_count, insn)?;
+                // Emit the instruction.
+                self.function.instruction(ctx, insn)?;
+                self.inst_count += 1;
+                // Update shadow stack for stack-pushing / stack-popping instructions.
+                self.opt.cf().update_shadow_stack(insn);
+            }
+            FoldOutcome::EmitInstead(repl) => {
+                // Materialize/emit/update against the replacement (e.g. `Br`),
+                // not the original BrIf/BrTable — the condition/selector was
+                // already popped by try_fold, and the replacement's own
+                // stack-pop/push counts (0/0 for `Br`) are what materialize
+                // and update_shadow_stack must account for.
+                self.opt.cf().materialize(
+                    ctx,
+                    &mut self.function,
+                    &mut self.inst_count,
+                    &repl,
+                )?;
+                self.function.instruction(ctx, &repl)?;
+                self.inst_count += 1;
+                self.opt.cf().update_shadow_stack(&repl);
+            }
         }
-        // Materialize any deferred constants the instruction needs.
-        self.opt
-            .cf()
-            .materialize(ctx, &mut self.function, &mut self.inst_count, insn)?;
-        // Emit the instruction.
-        self.function.instruction(ctx, insn)?;
-        self.inst_count += 1;
-        // Update shadow stack for stack-pushing / stack-popping instructions.
-        self.opt.cf().update_shadow_stack(insn);
         Ok(())
     }
 
@@ -1936,20 +2082,35 @@ impl<F> Entry<F> {
         Ok(())
     }
 
-    /// Emit the try-table call skeleton (`block; try_table; <call>; return; end;
-    /// end`) for this entry.  Does **not** flush deferred stores — that is the
-    /// Reactor's cross-entry responsibility before the loop.
-    fn emit_call_body<Context, E>(
+    /// Ensure a hoisted speculative-call region tagged `tag` is open for this
+    /// entry, reusing an already-open region if its tag and fixup-key set
+    /// match.  If a region is open with a *different* tag or fixup-key set,
+    /// close it first (emitting its `end; end`) before opening a fresh one —
+    /// calls using different exception tags, or fixing up different
+    /// parameter slots, cannot safely share one `try_table`/catch (see
+    /// [`HoistedCallRegion`]).
+    ///
+    /// This is the "outermost scope" hoist: instead of every speculative
+    /// call wrapping itself in its own `Block`/`TryTable`, consecutive calls
+    /// inlined into this merged entry (with no intervening conditional
+    /// branch — see `close_call_region`'s call site in
+    /// [`emit_conditional_arm`](Self::emit_conditional_arm)) share one.
+    fn ensure_call_region_open<Context, E>(
         &mut self,
         ctx: &mut Context,
-        target: Target<Context, E>,
         tag: EscapeTag,
-        pool: Pool<'_, Context, E>,
-        base_func_offset: u32,
+        fixup_keys: &BTreeSet<u32>,
+        params: u32,
     ) -> Result<(), E>
     where
         F: InstructionSink<Context, E>,
     {
+        if let Some(region) = &self.hoisted_call_region {
+            if region.tag == tag && &region.fixup_keys == fixup_keys && region.params == params {
+                return Ok(());
+            }
+            self.close_call_region(ctx)?;
+        }
         let EscapeTag {
             tag: TagIdx(tag_idx),
             ty: TypeIdx(ty_idx),
@@ -1967,6 +2128,70 @@ impl<F> Entry<F> {
                 .collect(),
             ),
         )?;
+        self.hoisted_call_region = Some(HoistedCallRegion {
+            tag,
+            fixup_keys: fixup_keys.clone(),
+            params,
+        });
+        Ok(())
+    }
+
+    /// Close the currently-open hoisted call region (`end; end`), if any.
+    /// Idempotent — a no-op when no region is open.
+    ///
+    /// The region's blocktype is `(register_file) -> (register_file)`: on
+    /// the success/fallthrough path, `restore_params_after_call` has already
+    /// drained the call's results into locals (so the *next* call's setup or
+    /// the function's natural continuation can read them normally), which
+    /// leaves nothing on the operand stack to satisfy the block's declared
+    /// results at this closing boundary. Re-derive them from locals, then
+    /// drop them again immediately — the values themselves are unneeded here
+    /// (they're already safely in locals), this purely satisfies the
+    /// structural requirement that a block falling through to its own `end`
+    /// leave exactly its declared result types on the stack. (On the
+    /// exception path, `catch` already supplies these values naturally, so
+    /// this fallthrough-only padding composes correctly with that path.)
+    fn close_call_region<Context, E>(&mut self, ctx: &mut Context) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        if let Some(region) = self.hoisted_call_region.take() {
+            for p in 0..region.params {
+                self.feed_one(ctx, &Instruction::LocalGet(p))?;
+            }
+            self.feed_one(ctx, &Instruction::End)?; // closes try_table
+            self.feed_one(ctx, &Instruction::End)?; // closes block
+            for _ in 0..region.params {
+                self.feed_one(ctx, &Instruction::Drop)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the bare `call`/`call_indirect`/`call_ref` for a speculative call
+    /// into this entry's currently-open (or lazily-opened) hoisted exception
+    /// region — see [`ensure_call_region_open`](Self::ensure_call_region_open).
+    /// Does **not** emit `Return` or close the region: on the success path,
+    /// execution falls through to whatever is fed next (typically the
+    /// caller's `restore_params_after_call`, now running unconditionally
+    /// instead of only on the exception path — that's the point of hoisting).
+    /// Does **not** flush deferred stores — that is the Reactor's cross-entry
+    /// responsibility before the loop.
+    fn emit_call_body<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        target: Target<Context, E>,
+        tag: EscapeTag,
+        pool: Pool<'_, Context, E>,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        params: u32,
+        base_func_offset: u32,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        let fixup_keys: BTreeSet<u32> = fixups.keys().copied().collect();
+        self.ensure_call_region_open(ctx, tag, &fixup_keys, params)?;
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -1995,9 +2220,6 @@ impl<F> Entry<F> {
                 }
             }
         }
-        self.feed_one(ctx, &Instruction::Return)?;
-        self.feed_one(ctx, &Instruction::End)?;
-        self.feed_one(ctx, &Instruction::End)?;
         Ok(())
     }
 
@@ -2043,38 +2265,67 @@ impl<F> Entry<F> {
         match call {
             Some(escape_tag) => {
                 self.emit_params_with_fixups(ctx, params, fixups)?;
-                self.emit_call_body(ctx, target, escape_tag, pool, base_func_offset)?;
+                self.emit_call_body(ctx, target, escape_tag, pool, fixups, params, base_func_offset)?;
                 self.restore_params_after_call(ctx, params, fixups)?;
             }
-            None => match target {
-                Target::Static {
-                    func: FuncIdx(func_idx),
-                } => {
-                    self.emit_params_with_fixups(ctx, params, fixups)?;
-                    self.feed_one(ctx, &Instruction::ReturnCall(func_idx + base_func_offset))?;
-                }
-                Target::Dynamic { idx } => {
-                    self.emit_params_with_fixups(ctx, params, fixups)?;
-                    idx.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
-                    let Pool {
-                        ty: TypeIdx(pool_ty),
-                        handler,
-                    } = pool;
-                    let instr = match handler.indirect_jump(ctx, &mut *self)? {
-                        IndirectJumpKind::Table(TableIdx(pool_table)) => {
-                            Instruction::ReturnCallIndirect {
-                                type_index: pool_ty,
-                                table_index: pool_table,
-                            }
-                        }
-                        IndirectJumpKind::Ref => Instruction::ReturnCallRef(pool_ty),
-                    };
-                    self.feed_one(ctx, &instr)?;
-                }
-            },
+            None => {
+                self.emit_unconditional_jump_body(ctx, params, fixups, target, pool, base_func_offset)?;
+            }
         }
 
+        // A hoisted call region cannot validly straddle this `Else` — WASM
+        // block nesting must stay balanced within each arm of an `If`. Any
+        // region opened above (inside this arm's `Some(escape_tag)` body) is
+        // closed here; a later call in a *different* arm (or after this
+        // whole `If`/`Else` closes) opens its own fresh region.
+        self.close_call_region(ctx)?;
         self.feed_one(ctx, &Instruction::Else)?;
+        Ok(())
+    }
+
+    /// Emit an unconditional `return_call`/`return_call_indirect`/`return_call_ref`
+    /// for `target` into this entry (no `if`/`else` skeleton).  Shared by
+    /// [`emit_conditional_arm`](Self::emit_conditional_arm)'s unconditional-jump
+    /// arm and by the Reactor's early-folded known-true `ji` condition path
+    /// (see `Reactor::emit_conditional_jump`).
+    fn emit_unconditional_jump_body<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        params: u32,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        target: Target<Context, E>,
+        pool: Pool<'_, Context, E>,
+        base_func_offset: u32,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        match target {
+            Target::Static {
+                func: FuncIdx(func_idx),
+            } => {
+                self.emit_params_with_fixups(ctx, params, fixups)?;
+                self.feed_one(ctx, &Instruction::ReturnCall(func_idx + base_func_offset))?;
+            }
+            Target::Dynamic { idx } => {
+                self.emit_params_with_fixups(ctx, params, fixups)?;
+                idx.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+                let Pool {
+                    ty: TypeIdx(pool_ty),
+                    handler,
+                } = pool;
+                let instr = match handler.indirect_jump(ctx, &mut *self)? {
+                    IndirectJumpKind::Table(TableIdx(pool_table)) => {
+                        Instruction::ReturnCallIndirect {
+                            type_index: pool_ty,
+                            table_index: pool_table,
+                        }
+                    }
+                    IndirectJumpKind::Ref => Instruction::ReturnCallRef(pool_ty),
+                };
+                self.feed_one(ctx, &instr)?;
+            }
+        }
         Ok(())
     }
 }
@@ -2421,6 +2672,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             inst_count: 0,
             bundles: Vec::new(),
             transitive_preds: None,
+            hoisted_call_region: None,
             opt: Optimizer::ConstFold(ConstFoldState::default()),
             sealed: false,
         });
@@ -2460,6 +2712,10 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
         }
         for &FuncIdx(idx) in &reachable {
+            // Close any still-open hoisted call region before closing pending
+            // `if` frames — per the close-before-`Else` rule, a region still
+            // open here is always the innermost active scope.
+            lock[idx as usize].close_call_region(ctx)?;
             let ifs = lock[idx as usize].if_stmts; // each entry closes its own open If frames
             lock[idx as usize]
                 .function
@@ -2468,6 +2724,19 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 lock[idx as usize]
                     .function
                     .instruction(ctx, &Instruction::End)?;
+            }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of the divergent `Unreachable` before
+                // them — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI).
+                lock[idx as usize]
+                    .function
+                    .instruction(ctx, &Instruction::Unreachable)?;
             }
             // Close the function body's implicit outer block.
             lock[idx as usize]
@@ -2630,6 +2899,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 for _ in 0..ifs {
                     f.function.instruction(ctx, &Instruction::End)?;
                 }
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode
+                // with zero values, regardless of the divergent `ReturnCall`
+                // before them — WASM's unreachable-polymorphism does not
+                // survive past a structured block's own `End`. Re-assert
+                // unreachable immediately before the function's own closing
+                // `End` so it's satisfied even when the function's declared
+                // result type is non-empty (the register-file ABI).
+                f.function.instruction(ctx, &Instruction::Unreachable)?;
                 // Close the function body's implicit outer block.
                 f.function.instruction(ctx, &Instruction::End)?;
                 f.sealed = true;
@@ -2773,37 +3051,24 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     /// * `target` - The function to call (static or dynamic)
     /// * `tag` - Exception tag configuration for escape handling
     /// * `pool` - Pool configuration for indirect calls
+    /// * `params` - Register-file width; the hoisted call region's
+    ///   `Block`/`TryTable` is `(register_file) -> (register_file)`, and
+    ///   closing it (e.g. at `seal_to`) needs to know how many values to
+    ///   re-derive from locals to satisfy that on the success path.
     pub fn call(
         &self,
         ctx: &mut Context,
         target: Target<Context, E>,
         tag: EscapeTag,
         pool: Pool<'_, Context, E>,
+        params: u32,
         tail_idx: usize,
     ) -> Result<(), E> {
         self.flush_bundles(ctx, tail_idx)?;
-        let EscapeTag {
-            tag: TagIdx(tag_idx),
-            ty: TypeIdx(ty_idx),
-        } = tag;
-        self.feed_to(
-            tail_idx,
-            ctx,
-            &Instruction::Block(wasm_encoder::BlockType::FunctionType(ty_idx)),
-        )?;
-        self.feed_to(
-            tail_idx,
-            ctx,
-            &Instruction::TryTable(
-                wasm_encoder::BlockType::FunctionType(ty_idx),
-                [Catch::One {
-                    tag: tag_idx,
-                    label: 0,
-                }]
-                .into_iter()
-                .collect(),
-            ),
-        )?;
+        let target = self.try_resolve_static_if_unambiguous(ctx, tail_idx, target)?;
+        // Open (or reuse) the hoisted call region in every reachable entry —
+        // this API takes no `fixups`, so the key set is always empty.
+        self.ensure_call_region_open_fanned_out(ctx, tail_idx, tag, &BTreeSet::new(), params)?;
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -2840,10 +3105,6 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 }
             }
         }
-        self.feed_to(tail_idx, ctx, &Instruction::Return)?;
-        self.feed_to(tail_idx, ctx, &Instruction::End)?;
-
-        self.feed_to(tail_idx, ctx, &Instruction::End)?;
         Ok(())
     }
     /// Emit a return via exception throw.
@@ -3034,13 +3295,144 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         Ok(())
     }
 
+    /// Per-entry static evaluation of a `ji` condition snippet.  Returns
+    /// `Some(true/false)` if the condition is statically known for entry `idx`
+    /// given its current constant-folding state; `None` if runtime-determined.
+    fn try_resolve_condition(
+        &self,
+        ctx: &mut Context,
+        idx: u32,
+        condition: &(dyn Snippet<Context, E> + '_),
+    ) -> Result<Option<bool>, E> {
+        let locals_const = self.lock_entry(idx as usize, true).opt.cf_ref().locals_const.clone();
+        Ok(try_const_eval(&locals_const, ctx, condition)?.map(|v| v != 0))
+    }
+
+    /// Per-entry resolution of a `Target::Dynamic` to `Target::Static`, when
+    /// the index snippet is statically known for entry `idx` given its
+    /// current constant-folding state.  The indirect-call table is populated
+    /// 1:1 with absolute WASM function indices (the table-population code
+    /// elsewhere in this workspace assigns table slot `N_IMPORTS + i` the
+    /// function index `N_IMPORTS + i`), so a resolved constant maps to a
+    /// local `FuncIdx` by subtracting `base_func_offset` — no `SlotAssigner`
+    /// involvement needed.
+    ///
+    /// Deliberately does **not** upper-bound-check against `fn_count()`:
+    /// forward jumps to a not-yet-created function are normal in this
+    /// architecture (functions are created incrementally; `total_slots()` on
+    /// the configured `SlotAssigner` would be the correct bound, but that
+    /// panics on the default `PassthroughSlots` sentinel used by most
+    /// tests/simple callers). An out-of-range index is no less safe than
+    /// today's dynamic path — both ultimately rely on WASM module validation
+    /// or a runtime trap to catch a genuinely invalid target. Falls back to
+    /// the original `target` unchanged on any other failure (unfoldable
+    /// snippet, or a resolved value below `base_func_offset`).
+    fn try_resolve_static<'a>(
+        &self,
+        ctx: &mut Context,
+        idx: u32,
+        target: Target<'a, Context, E>,
+    ) -> Result<Target<'a, Context, E>, E> {
+        let Target::Dynamic { idx: snippet } = target else {
+            return Ok(target);
+        };
+        let locals_const = self.lock_entry(idx as usize, true).opt.cf_ref().locals_const.clone();
+        let Some(v) = try_const_eval(&locals_const, ctx, snippet)? else {
+            return Ok(target);
+        };
+        match v.checked_sub(self.base_func_offset as i64).filter(|&x| x >= 0) {
+            Some(local_idx) => Ok(Target::Static {
+                func: FuncIdx(local_idx as u32),
+            }),
+            None => Ok(target),
+        }
+    }
+
+    /// Like [`try_resolve_static`](Self::try_resolve_static), but only
+    /// attempts resolution when `tail_idx` has exactly one reachable
+    /// (transitive-predecessor) entry — the case where "the current entry's
+    /// constant-folding state" unambiguously describes every entry this
+    /// call/jump will be fanned out to.  Used by the fully unconditional
+    /// call/jump paths (`Reactor::call`, the unconditional arm of
+    /// `emit_conditional_jump`), which apply one shared `Target`/snippet
+    /// across the whole reachable set via `feed_to` rather than looping
+    /// per-entry like the conditional paths do — resolving against just one
+    /// arbitrary entry would be unsound if other reachable entries have
+    /// different constant-folding state.
+    fn try_resolve_static_if_unambiguous<'a>(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        target: Target<'a, Context, E>,
+    ) -> Result<Target<'a, Context, E>, E> {
+        let reachable = self.transitive_preds_of(tail_idx);
+        if reachable.len() != 1 {
+            return Ok(target);
+        }
+        let FuncIdx(idx) = *reachable.iter().next().unwrap();
+        self.try_resolve_static(ctx, idx, target)
+    }
+
+    /// Reactor-level fan-out version of
+    /// [`Entry::ensure_call_region_open`](Entry::ensure_call_region_open):
+    /// opens (or reuses, or closes-and-reopens) the hoisted speculative-call
+    /// region in every entry reachable from `tail_idx`. Used by
+    /// [`Reactor::call`](Self::call), which — unlike the per-entry
+    /// conditional-call path — applies one shared call across the whole
+    /// reachable set via `feed_to` rather than looping per-entry itself.
+    fn ensure_call_region_open_fanned_out(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        tag: EscapeTag,
+        fixup_keys: &BTreeSet<u32>,
+        params: u32,
+    ) -> Result<(), E> {
+        let reachable = self.transitive_preds_of(tail_idx).clone();
+        for FuncIdx(idx) in reachable {
+            self.lock_entry(idx as usize, false)
+                .ensure_call_region_open(ctx, tag, fixup_keys, params)?;
+        }
+        Ok(())
+    }
+
+    /// Emit the condition (and hook) for their side effects / shadow-stack
+    /// bookkeeping when a `ji` condition has been statically resolved for one
+    /// entry, then correct `if_stmts` since no `If` will be emitted.  Mirrors
+    /// the known-true `If` fold in `ConstFoldState::try_fold`.
+    ///
+    /// Exactly one `Drop` is emitted, *after* both `cond` and `hook` have run —
+    /// matching where the `If` they're feeding would otherwise have consumed
+    /// the (possibly hook-transformed) condition value.  `condition_hook`'s
+    /// contract is to consume-and-transform whatever is already on the stack
+    /// (an identity hook emits nothing), so it must run before that one value
+    /// is dropped, not after it's already gone.
+    fn emit_resolved_condition_side_effects(
+        e: &mut Entry<F>,
+        ctx: &mut Context,
+        cond: &(dyn Snippet<Context, E> + '_),
+        condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+    ) -> Result<(), E> {
+        cond.emit_snippet(ctx, &mut |ctx, i| e.feed_one(ctx, i))?;
+        if let Some(hook) = condition_hook {
+            hook.emit_snippet(ctx, &mut |ctx, i| e.feed_one(ctx, i))?;
+        }
+        e.feed_one(ctx, &Instruction::Drop)?;
+        e.if_stmts = e.if_stmts.saturating_sub(1);
+        Ok(())
+    }
+
     /// Emit a conditional or unconditional call with exception handling.
     ///
-    /// When `condition` is `Some`, the per-entry conditional skeleton is emitted
-    /// through the Reactor↔Entry handshake ([`Entry::emit_conditional_arm`]);
-    /// otherwise the call body is emitted unconditionally into every reachable
-    /// entry.  Either way the Reactor owns the reachable-set computation; each
-    /// `Entry` emits its own body.
+    /// When `condition` is `Some`, each reachable entry's condition is first
+    /// checked for a statically-known value (see [`try_resolve_condition`]).
+    /// If known, the `if`/`else` skeleton is skipped entirely (degrading to
+    /// the unconditional call body, or to nothing if the branch is known
+    /// never-taken) — otherwise the per-entry handshake
+    /// ([`Entry::emit_conditional_arm`]) emits the faithful skeleton.  When
+    /// `condition` is `None`, the call body is emitted unconditionally into
+    /// every reachable entry.  Either way the Reactor owns the reachable-set
+    /// computation; each `Entry` emits its own body.
     fn emit_conditional_call(
         &self,
         ctx: &mut Context,
@@ -3055,25 +3447,47 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     ) -> Result<(), E> {
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable {
-            let mut e = self.lock_entry(idx as usize, false);
+            // Resolve the (possibly dynamic) target before taking the
+            // exclusive entry lock below — `try_resolve_static` takes its own
+            // short-lived read lock on this same entry, which would deadlock
+            // against an already-held exclusive lock.  A no-op for
+            // `Target::Static`.
+            let target = self.try_resolve_static(ctx, idx, target)?;
             match condition {
                 Some(cond) => {
-                    e.emit_conditional_arm(
-                        ctx,
-                        params,
-                        fixups,
-                        target,
-                        Some(escape_tag),
-                        pool,
-                        cond,
-                        condition_hook,
-                        self.base_func_offset,
-                        SOLE_EXIT,
-                    )?;
+                    // Same reasoning as above for the condition.
+                    let resolved = self.try_resolve_condition(ctx, idx, cond)?;
+                    let mut e = self.lock_entry(idx as usize, false);
+                    match resolved {
+                        Some(known) => {
+                            Self::emit_resolved_condition_side_effects(&mut e, ctx, cond, condition_hook)?;
+                            if known {
+                                e.emit_params_with_fixups(ctx, params, fixups)?;
+                                e.emit_call_body(ctx, target, escape_tag, pool, fixups, params, self.base_func_offset)?;
+                                e.restore_params_after_call(ctx, params, fixups)?;
+                            }
+                            // else: branch never taken — nothing else to emit.
+                        }
+                        None => {
+                            e.emit_conditional_arm(
+                                ctx,
+                                params,
+                                fixups,
+                                target,
+                                Some(escape_tag),
+                                pool,
+                                cond,
+                                condition_hook,
+                                self.base_func_offset,
+                                SOLE_EXIT,
+                            )?;
+                        }
+                    }
                 }
                 None => {
+                    let mut e = self.lock_entry(idx as usize, false);
                     e.emit_params_with_fixups(ctx, params, fixups)?;
-                    e.emit_call_body(ctx, target, escape_tag, pool, self.base_func_offset)?;
+                    e.emit_call_body(ctx, target, escape_tag, pool, fixups, params, self.base_func_offset)?;
                     e.restore_params_after_call(ctx, params, fixups)?;
                 }
             }
@@ -3082,7 +3496,8 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     }
 
     /// Emit a conditional jump (no exception handling), or dispatch to the
-    /// unconditional jump path.
+    /// unconditional jump path.  Mirrors [`emit_conditional_call`](Self::emit_conditional_call)'s
+    /// early condition-folding.
     fn emit_conditional_jump(
         &self,
         ctx: &mut Context,
@@ -3096,27 +3511,56 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     ) -> Result<(), E> {
         if let Some(cond) = condition {
             // Conditional: per-entry handshake.  Each reachable entry emits its
-            // own branch arm for `SOLE_EXIT` (the only exit today).
+            // own branch arm for `SOLE_EXIT` (the only exit today), unless its
+            // condition is statically known, in which case the `If`/`Else`
+            // skeleton is skipped entirely for that entry.
             let reachable = self.transitive_preds_of(tail_idx).clone();
             for FuncIdx(idx) in reachable {
+                // Resolve both the (possibly dynamic) target and the
+                // condition *before* taking the exclusive entry lock below —
+                // see the matching comment in `emit_conditional_call`.
+                let target = self.try_resolve_static(ctx, idx, target)?;
+                let resolved = self.try_resolve_condition(ctx, idx, cond)?;
                 let mut e = self.lock_entry(idx as usize, false);
-                e.emit_conditional_arm(
-                    ctx,
-                    params,
-                    fixups,
-                    target,
-                    None,
-                    pool,
-                    cond,
-                    condition_hook,
-                    self.base_func_offset,
-                    SOLE_EXIT,
-                )?;
+                match resolved {
+                    Some(known) => {
+                        Self::emit_resolved_condition_side_effects(&mut e, ctx, cond, condition_hook)?;
+                        if known {
+                            e.emit_unconditional_jump_body(
+                                ctx,
+                                params,
+                                fixups,
+                                target,
+                                pool,
+                                self.base_func_offset,
+                            )?;
+                        }
+                    }
+                    None => {
+                        e.emit_conditional_arm(
+                            ctx,
+                            params,
+                            fixups,
+                            target,
+                            None,
+                            pool,
+                            cond,
+                            condition_hook,
+                            self.base_func_offset,
+                            SOLE_EXIT,
+                        )?;
+                    }
+                }
             }
             return Ok(());
         }
         // Unconditional: cross-entry predecessor-graph operations stay on the
-        // Reactor.
+        // Reactor.  Resolution here only fires when `tail_idx` has exactly
+        // one reachable entry (see `try_resolve_static_if_unambiguous`) —
+        // this path applies one shared target across the whole reachable
+        // set via `feed_to` rather than looping per-entry, so it's only safe
+        // to resolve when there's no per-entry ambiguity to worry about.
+        let target = self.try_resolve_static_if_unambiguous(ctx, tail_idx, target)?;
         match target {
             Target::Static { func } => self.emit_static_jump(ctx, params, fixups, func, tail_idx),
             Target::Dynamic { idx } => {
@@ -3346,10 +3790,29 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
             let mut func = self.lock_entry(idx as usize,false);
+            // Close any still-open hoisted call region before closing pending
+            // `if` frames — per the close-before-`Else` rule, a region still
+            // open here is always the innermost active scope.
+            func.close_call_region(ctx)?;
             let ifs = func.if_stmts; // each entry closes its own open If frames
             func.function.instruction(ctx, instruction)?;
             for _ in 0..ifs {
                 func.function.instruction(ctx, &Instruction::End)?;
+            }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of how divergent `instruction` (above)
+                // was — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI). When `ifs == 0` there are no intervening
+                // `End`s, so `instruction` above (always a stack-polymorphic
+                // terminator: Return/Unreachable/Br/...) already leaves the
+                // validator in unreachable mode and this would be a redundant
+                // duplicate.
+                func.function.instruction(ctx, &Instruction::Unreachable)?;
             }
             // Close the function body's implicit outer block.
             func.function.instruction(ctx, &Instruction::End)?;
@@ -3479,10 +3942,25 @@ where
     /// so the WASM validator sees a properly terminated function body.
     pub fn seal_remaining(&mut self, ctx: &mut Context) -> Result<(), E> {
         for entry in self.fns.get_mut().iter_mut().filter(|e| !e.sealed) {
+            entry.close_call_region(ctx)?;
             let ifs = entry.if_stmts;
             entry.function.instruction(ctx, &Instruction::Unreachable)?;
             for _ in 0..ifs {
                 entry.function.instruction(ctx, &Instruction::End)?;
+            }
+            if ifs > 0 {
+                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
+                // so each if-closing `End` above resumes "reachable" mode with
+                // zero values, regardless of the divergent `Unreachable` before
+                // them — WASM's unreachable-polymorphism does not survive past a
+                // structured block's own `End`. Re-assert unreachable immediately
+                // before the function's own closing `End` so it's satisfied even
+                // when the function's declared result type is non-empty (the
+                // register-file ABI). When `ifs == 0` there are no intervening
+                // `End`s, so the `Unreachable` above already leaves the
+                // validator in unreachable mode and this would be a redundant
+                // duplicate.
+                entry.function.instruction(ctx, &Instruction::Unreachable)?;
             }
             entry.function.instruction(ctx, &Instruction::End)?;
             entry.sealed = true;
@@ -3492,7 +3970,20 @@ where
 
     pub fn drain_fns(&mut self) -> Vec<F> {
         let count = self.lock_global().len() as u32;
-        let result = self.lock_global().drain(..).map(|e| e.function).collect();
+        let result = self
+            .lock_global()
+            .drain(..)
+            .map(|e| {
+                // An unclosed hoisted call region here would silently
+                // corrupt the WASM module (unbalanced Block/TryTable) — this
+                // should never happen since every seal path closes it first.
+                debug_assert!(
+                    e.hoisted_call_region.is_none(),
+                    "drained entry with an unclosed hoisted call region"
+                );
+                e.function
+            })
+            .collect();
         self.base_func_offset += count;
         self.lens.get_mut().clear();
         result

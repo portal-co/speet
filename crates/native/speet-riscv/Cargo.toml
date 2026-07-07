@@ -25,3 +25,7 @@ speet-interp = {path = "../../helper/speet-interp"}
 
 [dev-dependencies]
 object = "0.36"
+rv-asm.workspace = true
+speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
+wasm-encoder.workspace = true
+wasmparser = { workspace = true }

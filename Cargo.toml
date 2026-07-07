@@ -9,6 +9,7 @@ members = [
     "crates/helper/speet-wasm-helpers",
     "crates/helper/speet-reach",
     "crates/helper/speet-interp",
+    "crates/helper/speet-log",
     # Native architecture crates
     "crates/native/speet-x86_64",
     "crates/native/speet-riscv",
@@ -28,18 +29,37 @@ members = [
     "crates/os/speet-module-target",
     "crates/os/speet-module-builder",
     "crates/os/speet-linux-wasi",
+    "crates/os/speet-rt",
+    "crates/os/speet-host-syscall",
+    "crates/os/speet-host-api",
+    "crates/os/speet-recompile",
+    "crates/os/speet-runtime",
+    # Plugin API (external/proprietary arch, memory, table, object-model, target plugins)
+    "crates/plugin/speet-plugin-api",
+    "crates/plugin/speet-plugin-adapter",
+    "crates/plugin/speet-plugin-host",
+    "crates/plugin/speet-plugin-host-inproc",
+    "crates/plugin/speet-plugin-host-wasm",
+    "crates/plugin/speet-plugin-host-subprocess",
     # End-to-end integration tests
     "crates/test/speet-e2e",
+    "crates/test/speet-corpus-harness",
+    "crates/test/speet-guest-runner",
+    "crates/test/speet-program-equivalence",
 ]
 resolver = "3"
 
 [workspace.package]
 description = "Fast static recompiler"
 license-file = "COPYING.md"
+publish = false
 
 [workspace.dependencies]
 wasm-layout = { path = "crates/helper/wasm-layout" }
 speet-reach = { path = "crates/helper/speet-reach" }
+speet-plugin-api    = { path = "crates/plugin/speet-plugin-api" }
+speet-plugin-adapter = { path = "crates/plugin/speet-plugin-adapter" }
+speet-plugin-host   = { path = "crates/plugin/speet-plugin-host" }
 speet-link-core     = { path = "crates/os/speet-link-core" }
 speet-linker        = { path = "crates/os/speet-linker" }
 speet-syscall       = { path = "crates/os/speet-syscall" }

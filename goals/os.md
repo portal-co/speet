@@ -4,9 +4,11 @@
 
 Full architecture, formats, pipeline, security model, and phased rollout: [docs/container-plan.md](../docs/container-plan.md).
 
+**Thin runtime** (native-to-native, on-demand recompilation): [docs/thin-runtime-plan.md](../docs/thin-runtime-plan.md). Future enhancements: [docs/future-features.md](../docs/future-features.md).
+
 ---
 
-## Phased rollout
+## Container megabinary — phased rollout
 
 ### Phase 0 — Hello Megabinary
 - [ ] Recompile `ls`, `cat`, `echo` into one megabinary
@@ -52,3 +54,29 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 - `osctx`: `OS::syscall` / `OS::osfuncall` need concrete vkernel implementations
 - `speet-traps`: `RopDetectTrap` + `CfiReturnTrap` as standard hooks in all frontends
 - `speet-linux-wasi`: WASI preview1 bindings for the Linux target
+
+---
+
+## Thin runtime — phased rollout
+
+### Phase 0 — LLVM corpus MVP
+- [x] `test-data/thin-runtime-corpus/` with ELF + Mach-O guests (LLVM `compile_corpus.sh`)
+- [x] `speet-host-api` + `speet-runtime` driver (tunneled default, LLVM link, spawn child)
+- [x] Corpus roundtrip: RV64 `exit(42)` → x86_64/ELF (link) and aarch64/Mach-O (run)
+
+### Phase 1 — Real binary loading + cache
+- [x] `binary_io::load_auto` wrapper in `speet-runtime::load_binary`
+- [ ] `ExternalTargets` PLT tunneling in driver
+- [x] Artifact cache (`ArtifactCache` keyed by input hash + pipeline version)
+- [x] Expand `speet-host-syscall` (x86_64 Linux table)
+
+### Phase 2 — Pluggable HostApi
+- [x] `HostApiRegistry` + `FilteredHostApi` + `HostPolicy` (manifest-style lists)
+
+### Phase 3 — Convergence
+- [ ] `OsctxHostApi` bridge to vkernel; `TargetPlugin` at recompile time
+
+### Future (documented, not implemented)
+- [ ] Host JIT asm→asm — [docs/future/host-jit.md](../docs/future/host-jit.md)
+- [ ] Direct in-process linking — [docs/future/direct-linking.md](../docs/future/direct-linking.md)
+- [ ] ptrace emulation — [docs/future/ptrace-emulation.md](../docs/future/ptrace-emulation.md)

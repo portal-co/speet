@@ -773,7 +773,11 @@ where
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> RC::FnType + '_),
     ) -> Result<usize, E> {
         let int_type = if self.enable_rv64 { ValType::I64 } else { ValType::I32 };
-        let addr_type = if self.use_memory64 { ValType::I64 } else { ValType::I32 };
+        let addr_type = if self.use_memory64 || self.enable_rv64 {
+            ValType::I64
+        } else {
+            ValType::I32
+        };
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
         let temps_slot = rctx.layout_mut().append(num_temps, int_type);
@@ -2647,7 +2651,10 @@ where
         // RISC-V: all params are i64 (int regs, fp regs, PC).
         let total_params = rctx.locals_mark().total_locals;
         let param_types: Vec<ValType> = (0..total_params).map(|_| ValType::I64).collect();
-        let func_type = FuncType::from_val_types(&param_types, &[]);
+        // Register-file ABI: (register_file) -> (register_file) — results
+        // mirror params. Required by speculative calls' Block/TryTable/Catch
+        // and the ABI-compliant `Return` path.
+        let func_type = FuncType::from_val_types(&param_types, &param_types);
 
         let base = rctx.base_func_offset();
         let fns = rctx.drain_fns();

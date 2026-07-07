@@ -6,6 +6,7 @@ license-file = "../../COPYING.md"
 description = "x86_64 to WebAssembly recompiler (basic integer ops)"
 
 [dependencies]
+log = { version = "0.4", optional = true }
 iced-x86 = "1.18.0"
 wasm-encoder = { workspace = true }
 yecta = { path = "../../helper/yecta" }
@@ -20,7 +21,10 @@ speet-link-core = { path = "../../os/speet-link-core" }
 object = "0.36"
 yecta = { path = "../../helper/yecta" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
 wasm-encoder = { workspace = true }
+wasmparser = { workspace = true }
 
 [features]
 default = []
+logging = ["dep:log"]

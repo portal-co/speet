@@ -762,3 +762,9 @@ The typical end-to-end flow for a two-binary megabinary:
 The panic-on-count-mismatch invariant from `FuncSchedule::execute` applies here: if an emit closure produces a different function count than declared in Phase 1, `speet-schedule` panics rather than producing a silently corrupt module.
 
 **Do not** compute `base_func_offset` inside a Phase 2 closure — all offsets must be known before any emission begins.
+
+---
+
+## External plugins
+
+Each of the four principal APIs above (§3a–§3d) — and the architecture-recompiler trait from §2a — has an external, `Context`/`E`-erased equivalent that a third party can implement outside this workspace, in Rust or otherwise, without forking it: `AddressMapperPlugin`/`MemoryAccessPlugin` mirrors §3a's mapper API, `TablePlugin` mirrors `IndirectJumpHandler`, `ObjectModelPlugin` mirrors the object-model integration described in §2b, `TargetPlugin` mirrors `ModuleTarget`/`SyscallTable`, and `ArchPlugin` mirrors `Recompile` itself. See [docs/plugin-api.md](plugin-api.md) for the external-facing design doc, or [docs/guides/plugin-api.md](guides/plugin-api.md) for the short agent-alignment version.

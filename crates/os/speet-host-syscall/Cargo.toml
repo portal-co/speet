@@ -1,0 +1,8 @@
+[package]
+name = "speet-host-syscall"
+version = "0.1.0"
+edition = "2021"
+description = "Host-ambient syscall tables for the speet full-binary recompiler (libc/native imports instead of WASI)."
+
+[dependencies]
+speet-syscall = { path = "../speet-syscall" }

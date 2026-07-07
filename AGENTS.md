@@ -54,3 +54,64 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not simplify `Pool<'a, Context, E>` lifetime generics.
 - Do not remove `tail_idx` params from `speet-ordering` public functions.
 - Replace `&mut self` on hook traits with interior mutability — do not remove the parallel goal.
+
+---
+
+## 6. asm-arch ↔ speet instruction sync (`speet-x86_64`, `speet-aarch64`)
+
+**Guide:** [docs/guides/asm-arch-instruction-sync.md](docs/guides/asm-arch-instruction-sync.md)
+
+- speet's frontends must be able to decode every instruction family asm-arch's `WriterCore`
+  emitter trait can produce — that's the invariant this sync maintains, not general ISA
+  completeness.
+- Do not assume a `WriterCore` method name matches its real encoding — verify against the
+  binary writer impl (`iced.rs`/`bin.rs`) before concluding something is a gap.
+- Do not assume one disarm64 enum variant = one instruction form — some merge multiple
+  width/precision combinations, distinguished only by raw instruction bits.
+
+---
+
+## 7. Plugin API (`speet-plugin-api`, `speet-plugin-adapter`, `speet-plugin-host*`)
+
+**Guide:** [docs/guides/plugin-api.md](docs/guides/plugin-api.md)
+**Design doc:** [docs/plugin-api.md](docs/plugin-api.md)
+
+- Do not let plugin-facing traits in `speet-plugin-api` leak `Context`/`E`/`F` generics — plugins must stay host-instantiation-agnostic.
+- Do not bypass the `PluginTransport` seam to call a specific host backend directly from the adapter crate or any arch/resource crate.
+- Do not let in-process dylib plugins cross the FFI boundary with anything but the fixed `extern "C"`/`#[repr(C)]` surface in the guide — no Rust trait objects, no relying on matching `rustc` versions.
+- Do not add serde/bincode/rkyv to any plugin crate — the wire format is an intentional hand-rolled codec, shared by the WASM, subprocess, and dylib transports alike.
+- Do not change `speet-plugin-api::arch::ArchOp`'s vocabulary or any wire format without updating `docs/plugin-api.md` and `docs/guides/plugin-api.md` in the same change.
+- Do not grant a WASM or subprocess plugin a host-entity import (§2.7) outside its manifest-declared, embedder-approved allowlist.
+
+---
+
+## 8. Thin runtime (`speet-runtime`, `speet-host-api`, `speet-rt`)
+
+**Guide:** [docs/thin-runtime-plan.md](docs/thin-runtime-plan.md)
+
+- Do not conflate thin runtime with container megabinary — container is pure WASM with no host JIT; thin runtime produces native linked executables.
+- Do not bypass `HostApi` for guest→host calls — tunnelled-by-default is the Phase 0 contract.
+- Do not require macOS Xcode toolchain for link — LLVM `clang` + `lld` only.
+
+---
+
+## Compression-aware logging
+
+Token compression proxies can sit between this tool and an LLM provider, compressing
+output before it reaches the model. When a proxy is active, MORE verbose structured
+output is net-cheaper than terse plaintext — the proxy reclaims the token cost and
+the agent gains a richer trace.
+
+Environment variables (set before running any binary or test in this workspace):
+
+| Variable | Effect |
+|---|---|
+| `PORTAL_LOG_JSON=1` | Structured NDJSON output; also routes existing `log::` calls through the sink. Compresses ~3–5× better than plaintext. |
+| `PORTAL_LOG_BATCH=1` | Group events by phase into single JSON arrays (reduces line count). |
+
+Logger implementation: `crates/helper/speet-log/src/lib.rs`. Install it in any binary
+entry point with `speet_log::install_as_global_logger(speet_log::LlmtrimLogger::from_env())`.
+The `logging` feature on `speet-riscv` enables the `rlog!` macro (delegates to `log::debug!`),
+captured automatically once the subscriber is installed.
+
+These variables have no effect when unset and do not change program correctness.

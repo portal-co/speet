@@ -6,6 +6,7 @@ description.workspace = true
 license-file.workspace = true
 
 [dependencies]
+log = { version = "0.4", optional = true }
 disarm64.workspace = true
 wasm-encoder.workspace = true
 wax-core.workspace = true
@@ -14,5 +15,13 @@ speet-traps = { path = "../../helper/speet-traps" }
 speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
 
+[dev-dependencies]
+yecta = { path = "../../helper/yecta" }
+speet-link-core = { path = "../../os/speet-link-core" }
+speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
+wasm-encoder.workspace = true
+wasmparser = { workspace = true }
+
 [features]
 default = []
+logging = ["dep:log"]

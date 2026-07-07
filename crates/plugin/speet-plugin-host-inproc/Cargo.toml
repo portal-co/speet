@@ -1,0 +1,21 @@
+[package]
+name = "speet-plugin-host-inproc"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[features]
+default = []
+# Runtime-loaded cdylib plugins via a stable extern "C" / #[repr(C)] surface
+# (no Rust trait objects cross the boundary — see docs/guides/plugin-api.md).
+# Off by default: only meaningful on platforms with dynamic-linking support.
+dylib = ["libloading"]
+
+[dependencies]
+speet-plugin-api = { workspace = true }
+speet-plugin-host = { workspace = true }
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+wasm-encoder = { workspace = true }

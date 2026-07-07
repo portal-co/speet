@@ -1,0 +1,14 @@
+[package]
+name = "speet-corpus-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../COPYING.md"
+description = "Shared C corpus test harness: WASM unreachable instrumentation + wasmi execution"
+
+[dependencies]
+object = "0.36"
+wasmparser = { workspace = true, features = ["validate"] }
+wasm-encoder = { workspace = true, features = ["wasmparser"] }
+wasmi = "1"
+sha2 = "0.10"

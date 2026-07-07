@@ -1,0 +1,13 @@
+[package]
+name = "speet-plugin-host-subprocess"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-plugin-api = { workspace = true }
+speet-plugin-host = { workspace = true }
+
+[dev-dependencies]
+wasm-encoder = { workspace = true }

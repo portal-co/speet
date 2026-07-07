@@ -98,6 +98,10 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Tabl
         sink.instruction(ctx, &WasmInstruction::I32Sub)?;
         sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
         sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
+        // The call-indirect table is table64 — its index operand must be i64
+        // (see speet-x86_64's `ReturnAddressSnippet`: "indirect jump plumbing
+        // expects architecture state words").
+        sink.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
         Ok(())
     }
 }
@@ -115,6 +119,7 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for TableIndexSn
         sink.instruction(ctx, &WasmInstruction::I32Sub)?;
         sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
         sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
+        sink.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
         Ok(())
     }
 }
@@ -233,6 +238,9 @@ pub struct MipsRecompiler<
     memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
     /// Whether to enable MIPS64 instruction support (disabled by default)
     enable_mips64: bool,
+    /// Whether memory operations use i64 addresses (wasm `memory64`) instead
+    /// of i32 addresses. Disabled by default.
+    use_memory64: bool,
     /// Memory ordering mode for load/store emission.
     ///
     /// `MemOrder::Strong` (default) emits all stores eagerly.
@@ -292,6 +300,7 @@ where
             break_callback: None,
             memory_access: None,
             enable_mips64,
+            use_memory64: false,
             mem_order: MemOrder::Strong,
             atomic_opts: AtomicOpts::NONE,
             gpr_slot: LocalSlot::default(),
@@ -340,6 +349,22 @@ where
     /// * `base_pc` - Base PC address - this is subtracted from instruction PCs to compute function indices
     pub fn new_with_base_pc(base_pc: u32) -> Self {
         Self::new_with_config(base_pc)
+    }
+
+    /// Enable or disable memory64 mode
+    ///
+    /// When enabled, memory operations use i64 addresses instead of i32
+    /// addresses, matching a wasm `memory64` linear memory.
+    ///
+    /// # Arguments
+    /// * `enable` - Whether to enable memory64 mode
+    pub fn set_memory64(&mut self, enable: bool) {
+        self.use_memory64 = enable;
+    }
+
+    /// Check if memory64 mode is enabled
+    pub fn is_memory64_enabled(&self) -> bool {
+        self.use_memory64
     }
 
     /// Set a callback for SYSCALL instructions
@@ -573,7 +598,7 @@ where
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
         self.temps_slot = rctx.layout_mut().append(num_temps, gpr_type);
-        self.addr_scratch_slot = rctx.layout_mut().append(1, ValType::I32);
+        self.addr_scratch_slot = rctx.layout_mut().append(1, self.addr_val_type());
         self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
         self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
         let mut unit = ();
@@ -607,10 +632,12 @@ where
 
     /// The wasm [`ValType`] of an effective (post-mapper) memory address.
     ///
-    /// MIPS linear memory addresses are always 32-bit (`i32`) — there is no
-    /// memory64 mode for MIPS yet.
+    /// MIPS computes effective addresses in 32-bit arithmetic regardless of
+    /// `use_memory64`; when memory64 mode is enabled the i32 result is
+    /// widened to i64 before it reaches the actual load/store instruction
+    /// (see callers of this function).
     fn addr_val_type(&self) -> ValType {
-        ValType::I32
+        if self.use_memory64 { ValType::I64 } else { ValType::I32 }
     }
 
     /// Get the local index for a general-purpose register.
@@ -726,6 +753,21 @@ where
         } else {
             rctx.feed(ctx, tail_idx, &WasmInstruction::I32Add)
         }
+    }
+
+    /// Reconcile a freshly-computed effective address (top of stack, in
+    /// `emit_add`'s width: i64 under MIPS64 GPRs, i32 otherwise) with
+    /// `addr_val_type()` (i64 under memory64, i32 otherwise). Mirrors
+    /// speet-riscv's RV32/RV64 x memory64 address width handling.
+    fn emit_addr_widen<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(&self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize) -> Result<(), E> {
+        if self.enable_mips64 {
+            if !self.use_memory64 {
+                rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+            }
+        } else if self.use_memory64 {
+            rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
+        }
+        Ok(())
     }
 
     /// Emit a sub instruction (I32Sub or I64Sub depending on MIPS64 mode)
@@ -1264,6 +1306,7 @@ where
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
+                    self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
@@ -1284,7 +1327,7 @@ where
                         ctx,
                         rctx,
                         load_addr,
-                        ValType::I32,
+                        self.addr_val_type(),
                         self.atomic_opts,
                         WasmInstruction::I32Load8S(wasm_encoder::MemArg {
                             offset: 0,
@@ -1311,6 +1354,7 @@ where
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
+                    self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
@@ -1331,7 +1375,7 @@ where
                         ctx,
                         rctx,
                         load_addr,
-                        ValType::I32,
+                        self.addr_val_type(),
                         self.atomic_opts,
                         WasmInstruction::I32Load8U(wasm_encoder::MemArg {
                             offset: 0,
@@ -1357,6 +1401,7 @@ where
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
+                    self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
@@ -1377,7 +1422,7 @@ where
                         ctx,
                         rctx,
                         load_addr,
-                        ValType::I32,
+                        self.addr_val_type(),
                         self.atomic_opts,
                         WasmInstruction::I32Load16S(wasm_encoder::MemArg {
                             offset: 0,
@@ -1403,6 +1448,7 @@ where
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
+                    self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
@@ -1423,7 +1469,7 @@ where
                         ctx,
                         rctx,
                         load_addr,
-                        ValType::I32,
+                        self.addr_val_type(),
                         self.atomic_opts,
                         WasmInstruction::I32Load16U(wasm_encoder::MemArg {
                             offset: 0,
@@ -1448,6 +1494,7 @@ where
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
+                self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                 let rt_instrs_sb = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
@@ -1478,7 +1525,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1493,7 +1540,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store8(wasm_encoder::MemArg {
                             offset: 0,
                             align: 0,
@@ -1513,6 +1560,7 @@ where
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
+                self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                 let rt_instrs_sh = rctx.layout().emit_get(self.gpr_slot, rt as u32);
                 if let Some(ma) = self.memory_access.as_deref_mut() {
@@ -1543,7 +1591,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1558,7 +1606,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store16(wasm_encoder::MemArg {
                             offset: 0,
                             align: 1,
@@ -1580,6 +1628,7 @@ where
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                     self.emit_add(ctx, rctx, tail_idx)?;
+                    self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                     if let Some(ma) = self.memory_access.as_deref_mut() {
                         use speet_ordering::EagerMemorySink;
@@ -1600,7 +1649,7 @@ where
                         ctx,
                         rctx,
                         load_addr,
-                        ValType::I32,
+                        self.addr_val_type(),
                         self.atomic_opts,
                         WasmInstruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
@@ -1626,6 +1675,7 @@ where
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
                 self.emit_add(ctx, rctx, tail_idx)?;
+                self.emit_addr_widen(ctx, rctx, tail_idx)?;
 
                 // invoke mapper callback if present (virtual -> physical)
                 let rt_instrs_sw = rctx.layout().emit_get(self.gpr_slot, rt as u32);
@@ -1657,7 +1707,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -1672,7 +1722,7 @@ where
                         rctx,
                         self.mem_order,
                         self.atomic_opts,
-                        ValType::I32,
+                        self.addr_val_type(),
                         WasmInstruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -1821,6 +1871,7 @@ where
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local(rctx.layout());
                 self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                self.emit_addr_widen(ctx, rctx, tail_idx)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(scratch))?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Drop)?;
 
@@ -1861,6 +1912,7 @@ where
                 // Tee rs into load_addr_scratch_local for the jump trap.
                 let scratch = self.load_addr_scratch_local(rctx.layout());
                 self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
+                self.emit_addr_widen(ctx, rctx, tail_idx)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(scratch))?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Drop)?;
 
@@ -2221,6 +2273,11 @@ where
         let total_params = rctx.locals_mark().total_locals;
         let param_types: alloc::vec::Vec<ValType> =
             (0..total_params).map(|_| ValType::I32).collect();
+        // MIPS has no speculative-call/escape-tag support (no bare `Return`
+        // pushing a register file to satisfy non-empty results) — keep the
+        // original `-> ()` shape rather than widening it without anything to
+        // verify it against (widening this unconditionally regressed AArch64
+        // for the same reason; see speet-e2e harness's assemble_module).
         let func_type = FuncType::from_val_types(&param_types, &[]);
 
         let base = rctx.base_func_offset();

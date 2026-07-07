@@ -19,6 +19,10 @@ pub(super) fn field(word: u32, lo: u8, hi: u8) -> u32 {
 #[inline(always)] pub(super) fn rm(w: u32) -> u32 { (w >> 16) & 0x1F }
 /// Ra (bits 14:10) — third source for DP_3SRC.
 #[inline(always)] pub(super) fn ra(w: u32) -> u32 { (w >> 10) & 0x1F }
+/// sf (bit 31) — scalar int↔FP convert: 0 = 32-bit GPR (Wn/Wd), 1 = 64-bit (Xn/Xd).
+#[inline(always)] pub(super) fn sf_bit(w: u32) -> u32 { (w >> 31) & 1 }
+/// ftype (bits 23:22) — scalar int↔FP convert: 0b00 = single, 0b01 = double.
+#[inline(always)] pub(super) fn ftype(w: u32) -> u32 { (w >> 22) & 0x3 }
 /// Rt2 (bits 14:10) — second register for load/store pairs.
 #[inline(always)] pub(super) fn rt2(w: u32) -> u32 { (w >> 10) & 0x1F }
 

@@ -152,11 +152,18 @@ There is no top-level binary or CLI. The project is a library workspace; consume
 
 Tests are spread across individual crates. The RISC-V and MIPS crates have corpus tests that feed pre-assembled ELF sections through the recompiler. The x86-64 crate similarly uses pre-built ELF objects from `test-data/x86_64-corpus/`. An rv-corpus test suite is included as a git submodule (`test-data/rv-corpus`).
 
+**C compiler-output corpuses** (Clang `-O1`, multi-TU programs): `test-data/c-corpus/` (`lib/`, `programs/`, `manifest.toml`) and `test-data/rv-c-corpus/` (RV32/RV64 outputs, shared sources). Semantic WASM tests use `speet-corpus-harness` (trap-free + `expected.toml`). Original vs recompiled equivalence uses nestable runner paths in `speet-guest-runner` (`[Native]` → `[Blink, QemuUser]` on VM hosts); tests fail only when **all** paths are exhausted.
+
 ```
 cargo test -p speet-riscv
 cargo test -p speet-x86_64
+cargo test -p speet-aarch64 --test c_corpus_tests
+cargo test -p speet-riscv --test rv_c_corpus_tests
 cargo test -p speet-mips
 cargo test -p yecta
+cargo test -p speet-runtime --test c_corpus_e2e
+cargo test -p speet-runtime --test c_program_equiv_e2e   # needs Blink/qemu for cross-arch
+scripts/install-corpus-emulators.sh all                   # optional emulator cache
 ```
 
 ## Dependencies (notable)

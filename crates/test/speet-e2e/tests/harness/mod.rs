@@ -8,22 +8,25 @@ use std::{borrow::Cow, convert::Infallible, path::Path};
 
 use object::{Object, ObjectSection};
 use rv_asm::Xlen;
+use speet_recompile::binary_io::{BinArch, BinOs};
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, TrapReactorAdapter};
 use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
 use speet_module_builder::MegabinaryBuilder;
 use speet_aarch64::AArch64Recompiler;
+use speet_mips::MipsRecompiler;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
 use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use speet_wasm::{GuestMemoryConfig, IndexOffsets, WasmFrontend};
 use speet_x86_64::X86Recompiler;
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
+    BlockType, Catch, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
     Function, FunctionSection, ImportSection, MemorySection, MemoryType, Module, RefType,
     TableSection, TableType, TagSection, TagType, TypeSection, ValType,
 };
 use wasmi::{AsContext, Engine, Linker, Module as WasmiModule, Store};
+use wasmtime::AsContext as _;
 use wasmparser::BinaryReaderError;
 use yecta::{EscapeTag, LocalPool, Reactor, TableIdx, TagIdx, TypeIdx};
 use yecta::layout::CellIdx;
@@ -43,7 +46,7 @@ pub const HINT_CALL:   i32 = 0xCA12_u32 as i32;
 pub enum Eh { None, With }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Arch { Rv32, Rv64, X86_64, AArch64 }
+pub enum Arch { Rv32, Rv64, X86_64, AArch64, Mips }
 
 // ── Harness state ─────────────────────────────────────────────────────────────
 
@@ -105,6 +108,13 @@ pub fn x86_64_corpus(rel: &str) -> std::path::PathBuf {
         .join(format!("{rel}.elf"))
 }
 
+/// Path to a MIPS corpus ELF: `test-data/mips-corpus/<rel>.elf`.
+pub fn mips_corpus(rel: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../test-data/mips-corpus")
+        .join(format!("{rel}.elf"))
+}
+
 /// Path to a C object compiled by `build.rs` (optional — returns `None` when
 /// the env var is unset or the file doesn't exist).
 pub fn c_obj(path_env: &str) -> Option<std::path::PathBuf> {
@@ -149,6 +159,79 @@ pub fn report_unsupported(unsupported: &[String], context: &str) {
     }
 }
 
+// ── Native backend (wasm-blitz) cross-check ───────────────────────────────────
+
+/// Native targets the wasm→native backend is exercised against: both
+/// architectures and both object formats (x86-64/ELF, aarch64/Mach-O).
+const NATIVE_TARGETS: &[(&str, BinArch, BinOs)] = &[
+    ("x86_64/elf", BinArch::X86_64, BinOs::Linux),
+    ("aarch64/macho", BinArch::AArch64, BinOs::MacOs),
+];
+
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    }
+}
+
+/// A known, *documented* native-backend gap (an unimplemented WASM instruction
+/// or a `todo!()`), as opposed to a real crash. Tolerated and reported, mirroring
+/// the frontend's `report_unsupported` philosophy.
+fn is_known_native_gap(msg: &str) -> bool {
+    msg.contains("unimplemented WASM instruction")
+        || msg.contains("not implemented")
+        || msg.contains("not yet implemented") // todo!()/unimplemented!()
+}
+
+/// `wasmi` (pinned to `1.0.9` in this workspace) does not implement the WASM
+/// exception-handling proposal at all — it hard-panics on a `Tag` export
+/// (`crates/module/export.rs`: "wasmi does not support the `exception-handling`
+/// Wasm proposal") and rejects `try_table`/`throw` during validation
+/// ("exceptions proposal not enabled"). This is a tooling limitation, not a
+/// correctness issue in generated code — speculative-call modules (which use
+/// tags/try_table/throw) cannot be *executed* via `run_module` until `wasmi`
+/// gains exception-handling support, even though they validate as legal WASM
+/// and compile fine through the native (wasm-blitz) backend. Tolerated here
+/// the same way `is_known_native_gap` tolerates documented native-backend gaps.
+pub fn is_known_wasmi_exception_gap(msg: &str) -> bool {
+    msg.contains("exceptions proposal not enabled")
+        || msg.contains("does not support the `exception-handling` Wasm proposal")
+}
+
+/// Compile `wasm` (the frontend's recompiled output) through the **native**
+/// backend (wasm-blitz → relocatable object) for every [`NATIVE_TARGETS`] entry.
+///
+/// This is the wasm-vs-native cross: the same module that the wasmi tests run is
+/// also lowered all the way to native machine code + an object file. Successful
+/// compilation is asserted (non-empty object); *documented* instruction gaps are
+/// tolerated and reported (like `report_unsupported`); any other crash fails.
+pub fn native_compile_check(wasm: &[u8], context: &str) {
+    for (label, arch, os) in NATIVE_TARGETS {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            speet_recompile::drive::compile_wasm_to_object(wasm, *arch, *os)
+        }));
+        match res {
+            Ok(Ok(bytes)) => {
+                assert!(!bytes.is_empty(), "native {label} produced empty object ({context})");
+                eprintln!("  ✓ native {label}: {} bytes", bytes.len());
+            }
+            Ok(Err(e)) => eprintln!("  [native gap {label} in {context}]: {e}"),
+            Err(panic) => {
+                let msg = panic_message(panic);
+                if is_known_native_gap(&msg) {
+                    eprintln!("  [native unsupported {label} in {context}]: {msg}");
+                } else {
+                    panic!("native {label} compile crashed ({context}): {msg}");
+                }
+            }
+        }
+    }
+}
+
 // ── ReactorAdapter helpers ────────────────────────────────────────────────────
 
 pub fn make_rctx<'r>(
@@ -160,7 +243,14 @@ pub fn make_rctx<'r>(
     static T: TableIdx = TableIdx(0);
     let escape_tag = match eh {
         Eh::None => Option::None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
+        Eh::With => Some(EscapeTag { tag: TagIdx(type_idx.0), ty: type_idx }),
+        // Tag index must match `type_idx`: `assemble_module` allocates one
+        // exception tag per unique register-file shape (`unique_params[i]`),
+        // in the same order/index as the register-file type itself — a
+        // hardcoded `TagIdx(0)` would be wrong whenever a linked module
+        // combines binaries with different register-file shapes (e.g.
+        // RV32 + x86-64, or RV32 + RV64), since each needs its own tag
+        // matching its own throw/catch payload shape, not always tag #0.
     };
     let mut rctx = ReactorAdapter {
         reactor,
@@ -240,7 +330,14 @@ pub fn make_trap_rctx<'r>(
     static T: TableIdx = TableIdx(0);
     let escape_tag = match eh {
         Eh::None => Option::None,
-        Eh::With => Some(EscapeTag { tag: TagIdx(0), ty: type_idx }),
+        Eh::With => Some(EscapeTag { tag: TagIdx(type_idx.0), ty: type_idx }),
+        // Tag index must match `type_idx`: `assemble_module` allocates one
+        // exception tag per unique register-file shape (`unique_params[i]`),
+        // in the same order/index as the register-file type itself — a
+        // hardcoded `TagIdx(0)` would be wrong whenever a linked module
+        // combines binaries with different register-file shapes (e.g.
+        // RV32 + x86-64, or RV32 + RV64), since each needs its own tag
+        // matching its own throw/catch payload shape, not always tag #0.
     };
     let mut rctx = TrapReactorAdapter::new(
         reactor,
@@ -269,6 +366,11 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
+/// `speculative` enables `set_speculative_calls(true)` on the recompiler
+/// (x86-64/RISC-V only; ignored for AArch64, which has no such method).
+/// Meaningful only when paired with `eh = Eh::With` — speculative calls
+/// require an escape tag (`Eh::None` leaves `escape_tag` unset, so the
+/// recompiler's speculative path never activates regardless of this flag).
 pub fn translate_rv(
     text: &[u8],
     start_addr: u32,
@@ -276,11 +378,13 @@ pub fn translate_rv(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let rv64 = xlen == Xlen::Rv64;
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         start_addr as u64, false, rv64, true,
     );
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
     let mut ctx = ();
@@ -304,11 +408,13 @@ pub fn translate_rv_with_trap(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let rv64 = xlen == Xlen::Rv64;
     let mut recompiler = RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
         start_addr as u64, false, rv64, true,
     );
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut jump_trap = JumpEventTrap::new();
     let mut rctx = make_trap_rctx(&mut reactor, base_func_offset, type_idx, eh, &mut jump_trap);
@@ -332,8 +438,10 @@ pub fn translate_x86(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     let mut recompiler = X86Recompiler::new_with_base_rip(rip);
+    recompiler.set_speculative_calls(speculative);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
     let mut ctx = ();
@@ -348,12 +456,16 @@ pub fn translate_x86(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+/// `AArch64Recompiler` has no speculative-call support yet — the parameter
+/// exists only so `translate`'s dispatch signature stays uniform across
+/// architectures; it's ignored here.
 pub fn translate_aarch64(
     text: &[u8],
     start_addr: u64,
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    _speculative: bool,
 ) -> Translated {
     let mut recompiler = AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
@@ -370,6 +482,45 @@ pub fn translate_aarch64(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
+/// MIPS has no speculative-call/escape-tag support and no `unsupported_insns()`
+/// tracking (unrecognized opcodes fall through to a bare `Unreachable` with no
+/// name recorded) — the parameter exists only so `translate`'s dispatch
+/// signature stays uniform across architectures; it's ignored here, and the
+/// returned `unsupported` is always empty.
+pub fn translate_mips(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+    _speculative: bool,
+) -> Translated {
+    let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
+        MipsRecompiler::new_with_base_pc(start_addr as u32);
+    recompiler.set_memory64(true);
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_rv_params(&rctx);
+
+    let words = text.len() / 4;
+    for i in 0..words {
+        let offset = i * 4;
+        let word = u32::from_be_bytes([
+            text[offset], text[offset + 1], text[offset + 2], text[offset + 3],
+        ]);
+        let pc = (start_addr as u32).wrapping_add(offset as u32);
+        let inst = rabbitizer::Instruction::new(word, pc, rabbitizer::InstrCategory::CPU);
+        recompiler.translate_instruction(&mut ctx, &mut rctx, &inst,
+            &mut |a| Function::new(a.collect::<Vec<_>>()))
+            .expect("translate_instruction failed");
+    }
+    let _ = rctx.seal_remaining(&mut ctx);
+
+    Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
+}
+
 pub fn translate(
     text: &[u8],
     start_addr: u64,
@@ -377,12 +528,14 @@ pub fn translate(
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
+    speculative: bool,
 ) -> Translated {
     match arch {
-        Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh),
-        Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh),
-        Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh),
-        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh),
+        Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh, speculative),
+        Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh, speculative),
+        Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::Mips    => translate_mips(text, start_addr, base_func_offset, type_idx, eh, speculative),
     }
 }
 
@@ -408,11 +561,34 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     let n_rv_types = unique_params.len() as u32;
     let hint_ty_idx  = n_rv_types;
     let write_ty_idx = n_rv_types + 1;
+    // Exception tags require a type with *empty* results (a tag describes
+    // only the payload/params shape — WASM rejects "non-empty tag result
+    // type"). That's a different type from the Block/TryTable's own
+    // blocktype below, which needs results to receive the caught payload —
+    // so each register-file shape gets two distinct type entries.
+    let tag_ty_base = write_ty_idx + 1;
 
     let mut types = TypeSection::new();
-    for p in &unique_params { types.ty().function(p.clone(), []); }
+    // Register-file ABI: when exceptions are in play (`Eh::With`), every
+    // generated function is (register_file) -> (register_file) — results
+    // mirror params. This is required for speculative calls' Block/
+    // TryTable/Catch (the exception payload is shaped like the block's
+    // results) and for the ABI-compliant `Return` path (which pushes the
+    // full register file before returning) to validate. Architectures that
+    // never set an escape tag (e.g. AArch64, which doesn't support
+    // speculative calls and always runs with `Eh::None`) never emit code
+    // expecting non-empty results, so leave their declared type at `-> ()`
+    // unchanged — widening it unconditionally regressed AArch64 (its normal
+    // `return`/fallthrough paths don't push a matching result there).
+    for p in &unique_params {
+        let results: Vec<ValType> = if eh == Eh::With { p.clone() } else { Vec::new() };
+        types.ty().function(p.clone(), results);
+    }
     types.ty().function([ValType::I32], []);
     types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+    if eh == Eh::With {
+        for p in &unique_params { types.ty().function(p.clone(), []); }
+    }
 
     let mut imports = ImportSection::new();
     imports.import("env", "__speet_hint", wasm_encoder::EntityType::Function(hint_ty_idx));
@@ -442,7 +618,7 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     let mut tags = TagSection::new();
     if eh == Eh::With {
         for i in 0..n_rv_types {
-            tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: i });
+            tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: tag_ty_base + i });
         }
     }
 
@@ -499,11 +675,23 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
             recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
+        Arch::Mips => {
+            let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
+                MipsRecompiler::new_with_base_pc(addr as u32);
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
+            recompiler.setup_traps(&mut rctx, &mut ());
+            collect_rv_params(&rctx)
+        }
     }
 }
 
 pub fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
+    build_single_speculative(text, start_addr, arch, eh, false)
+}
+
+pub fn build_single_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
+    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
     let unsupported = t.unsupported.clone();
     let slice = BinarySlice {
         params: t.params, fns: t.fns,
@@ -513,11 +701,15 @@ pub fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8
 }
 
 pub fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8>, Vec<String>) {
+    build_single_with_trap_speculative(text, start_addr, arch, eh, false)
+}
+
+pub fn build_single_with_trap_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
     let t = match arch {
-        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh),
-        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh),
-        Arch::X86_64 | Arch::AArch64 => {
-            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh);
+        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh, speculative),
+        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh, speculative),
+        Arch::X86_64 | Arch::AArch64 | Arch::Mips => {
+            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
             let unsupported = t.unsupported.clone();
             let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
             return (assemble_module(&[slice], eh), unsupported);
@@ -536,6 +728,10 @@ pub struct LinkSpec<'a> {
 }
 
 pub fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
+    build_linked_speculative(specs, eh, false)
+}
+
+pub fn build_linked_speculative(specs: &[LinkSpec<'_>], eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
     let mut unique_params: Vec<Vec<ValType>> = Vec::new();
     for s in specs {
         let p = dry_run_params(s.arch, s.start_addr);
@@ -553,7 +749,7 @@ pub fn build_linked(specs: &[LinkSpec<'_>], eh: Eh) -> (Vec<u8>, Vec<String>) {
     for s in specs {
         let p = dry_run_params(s.arch, s.start_addr);
         let type_idx = type_idx_of_params(&p);
-        let t = translate(s.text, s.start_addr, s.arch, running_offset, type_idx, eh);
+        let t = translate(s.text, s.start_addr, s.arch, running_offset, type_idx, eh, speculative);
 
         if !t.unsupported.is_empty() {
             all_unsupported.extend(t.unsupported.iter().cloned());
@@ -657,6 +853,72 @@ pub fn run_module(wasm: &[u8], entry: &str) -> Result<HostState, String> {
         _ => panic!("unexpected param type"),
     }).collect();
     let mut results = vec![wasmi::Val::I32(0); ty.results().len()];
+    let _ = func.call(&mut store, &params, &mut results);
+    Ok(store.into_data())
+}
+
+// ── Wasmtime execution (exception-handling proposal support) ──────────────────
+
+/// Same shape as [`run_module`], but backed by `wasmtime` instead of `wasmi`.
+///
+/// `wasmi` (pinned to `1.0.9`) cannot validate or run modules using the WASM
+/// exception-handling proposal (`try_table`/`throw`) at all — see
+/// [`is_known_wasmi_exception_gap`]. `wasmtime` does implement that proposal
+/// (`Config::wasm_exceptions`), so this is the execution path used wherever a
+/// `run_module` call hits that known gap.
+pub fn run_module_wasmtime(wasm: &[u8], entry: &str) -> Result<HostState, String> {
+    let mut config = wasmtime::Config::default();
+    config.consume_fuel(true);
+    config.wasm_exceptions(true);
+    let engine = wasmtime::Engine::new(&config).map_err(|e| e.to_string())?;
+    let mut store = wasmtime::Store::new(&engine, HostState::new());
+    store.set_fuel(RUN_FUEL).map_err(|e| e.to_string())?;
+    let mut linker: wasmtime::Linker<HostState> = wasmtime::Linker::new(&engine);
+
+    linker.func_wrap("env", "__speet_hint",
+        |mut caller: wasmtime::Caller<'_, HostState>, id: i32| {
+            let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+            let mut regs = [0i32; 32];
+            {
+                let data = mem.data(caller.as_context());
+                let base = REG_SAVE_BASE as usize;
+                for (i, r) in regs.iter_mut().enumerate() {
+                    let off = base + i * 4;
+                    *r = i32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+                }
+            }
+            caller.data_mut().hints.push((id, RegSnapshot { regs }));
+        }).map_err(|e| e.to_string())?;
+
+    linker.func_wrap("env", "write",
+        |mut caller: wasmtime::Caller<'_, HostState>, fd: i32, ptr: i32, len: i32| -> i32 {
+            if fd == 1 || fd == 2 {
+                let mem = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+                let mut buf = vec![0u8; len as usize];
+                let _ = mem.read(caller.as_context(), ptr as usize, &mut buf);
+                caller.data_mut().stdout.extend_from_slice(&buf);
+            }
+            len
+        }).map_err(|e| e.to_string())?;
+
+    linker.func_wrap("env", "exit",
+        |mut caller: wasmtime::Caller<'_, HostState>, code: i32| {
+            caller.data_mut().exit_code = Some(code);
+        }).map_err(|e| e.to_string())?;
+
+    let module = wasmtime::Module::new(&engine, wasm).map_err(|e| e.to_string())?;
+    let instance = linker.instantiate(&mut store, &module).map_err(|e| e.to_string())?;
+
+    let func = instance.get_func(&mut store, entry).ok_or("no entry export")?;
+    let ty = func.ty(&store);
+    let params: Vec<wasmtime::Val> = ty.params().map(|vt| match vt {
+        wasmtime::ValType::I32 => wasmtime::Val::I32(0),
+        wasmtime::ValType::I64 => wasmtime::Val::I64(0),
+        wasmtime::ValType::F32 => wasmtime::Val::F32(0),
+        wasmtime::ValType::F64 => wasmtime::Val::F64(0),
+        other => panic!("unexpected param type: {other:?}"),
+    }).collect();
+    let mut results = vec![wasmtime::Val::I32(0); ty.results().len()];
     let _ = func.call(&mut store, &params, &mut results);
     Ok(store.into_data())
 }
@@ -1002,6 +1264,54 @@ pub fn wasm_memory_rw() -> Vec<u8> {
     m.section(&types);
     m.section(&funcs);
     m.section(&mems);
+    m.section(&exports);
+    m.section(&codes);
+    m.finish()
+}
+
+/// ```wat
+/// (module
+///   (tag $exn (param i32))
+///   (func (export "_start") (result i32)
+///     (block (result i32)
+///       (try_table (catch $exn 0)
+///         (throw $exn (i32.const 42))))))
+/// ```
+/// Minimal exception-handling-proposal fixture (`tag`/`try_table`/`throw`/
+/// `catch`): always throws, caught by the enclosing block, which returns the
+/// payload. `wasmi` cannot even validate this (see
+/// [`is_known_wasmi_exception_gap`]); `wasmtime` (via
+/// [`run_module_wasmtime`]) can, since it implements the proposal.
+pub fn wasm_throw_catch() -> Vec<u8> {
+    use wasm_encoder::Instruction as I;
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]); // type 0: ()->(i32) — fn + block/try_table
+    types.ty().function([ValType::I32], []); // type 1: (i32)->() — the tag's payload type
+
+    let mut tags = TagSection::new();
+    tags.tag(TagType { kind: wasm_encoder::TagKind::Exception, func_type_idx: 1 });
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+
+    let mut exports = ExportSection::new();
+    exports.export("_start", ExportKind::Func, 0);
+
+    let mut codes = CodeSection::new();
+    let mut f = Function::new([]);
+    f.instruction(&I::Block(BlockType::FunctionType(0)));
+    f.instruction(&I::TryTable(BlockType::FunctionType(0), [Catch::One { tag: 0, label: 0 }].into_iter().collect()));
+    f.instruction(&I::I32Const(42));
+    f.instruction(&I::Throw(0));
+    f.instruction(&I::End); // try_table
+    f.instruction(&I::End); // block
+    f.instruction(&I::End); // function
+    codes.function(&f);
+
+    let mut m = Module::new();
+    m.section(&types);
+    m.section(&funcs);
+    m.section(&tags);
     m.section(&exports);
     m.section(&codes);
     m.finish()

@@ -18,7 +18,8 @@
 //! scalar loads/stores unsigned-offset (`LDR`, `LDRB`, `LDRH`, `LDRSW`,
 //! `STR`, `STRB`, `STRH`), pre/post-index loads/stores, register-offset
 //! loads/stores, load/store pairs (`LDP`, `STP`, `LDPSW`),
-//! floating-point arithmetic (`FADD`, `FSUB`, `FMUL`, `FDIV`, `FMADD`, `FMSUB`),
+//! floating-point arithmetic (`FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FMIN`,
+//! `FMAX`, `FMINNM`, `FMAXNM`, `FMADD`, `FMSUB`, `FNMADD`, `FNMSUB`),
 //! FP unary (`FABS`, `FNEG`, `FSQRT`, `FMOV`), FP conversions
 //! (`SCVTF`, `UCVTF`, `FCVTZS`, `FCVTZU`), FP compare (`FCMP`), FP select (`FCSEL`).
 //!
@@ -65,6 +66,9 @@ pub struct AArch64Recompiler<Context, E> {
     pub(crate) tmp_slot: LocalSlot,
     /// V0–V31 floating-point registers (32 × f64).
     pub(crate) fp_slot: LocalSlot,
+    /// Stack pointer (1 × i64).  AArch64 encodes SP as register 31 in load/store and
+    /// `ADD`/`SUB` immediate forms; x31 remains XZR everywhere else.
+    pub(crate) sp_slot: LocalSlot,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
@@ -78,6 +82,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             nzcv_slot: LocalSlot::default(),
             tmp_slot: LocalSlot::default(),
             fp_slot: LocalSlot::default(),
+            sp_slot: LocalSlot::default(),
         }
     }
 
@@ -109,6 +114,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         self.nzcv_slot = rctx.layout_mut().append(4,  ValType::I32); // N, Z, C, V
         self.tmp_slot  = rctx.layout_mut().append(3,  ValType::I64); // 3 scratch i64
         self.fp_slot   = rctx.layout_mut().append(32, ValType::F64); // V0–V31
+        self.sp_slot   = rctx.layout_mut().append(1,  ValType::I64); // SP
 
         let mut unit = ();
         let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
@@ -203,6 +209,62 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &instr)?;
         }
         Ok(())
+    }
+
+    /// Push SP onto the WASM stack.
+    pub(crate) fn emit_sp_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        for instr in rctx.layout().emit_get(self.sp_slot, 0) {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        Ok(())
+    }
+
+    /// Pop the stack top into SP.
+    pub(crate) fn emit_sp_set<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        for instr in rctx.layout().emit_set(self.sp_slot, 0) {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        Ok(())
+    }
+
+    /// Load/store base register: encoding 31 is SP, not XZR.
+    pub(crate) fn emit_addr_reg_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        reg: u32,
+    ) -> Result<(), E> {
+        if reg == 31 {
+            self.emit_sp_get(ctx, rctx, tail_idx)
+        } else {
+            self.emit_gpr_get(ctx, rctx, tail_idx, reg)
+        }
+    }
+
+    /// Load/store base writeback: encoding 31 is SP, not XZR.
+    pub(crate) fn emit_addr_reg_set<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+        reg: u32,
+    ) -> Result<(), E> {
+        if reg == 31 {
+            self.emit_sp_set(ctx, rctx, tail_idx)
+        } else {
+            self.emit_gpr_set(ctx, rctx, tail_idx, reg)
+        }
     }
 
     // ── FP register emit helpers ──────────────────────────────────────────────

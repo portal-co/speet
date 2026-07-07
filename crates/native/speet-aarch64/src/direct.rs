@@ -68,6 +68,8 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         start_pc: u64,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<usize, ()> {
+        #[cfg(feature = "logging")]
+        log::trace!(target: "speet::aarch64", "translate_bytes pc={:#x} len={}", start_pc, bytes.len());
         let mut offset = 0usize;
         while offset + 4 <= bytes.len() {
             let word = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());

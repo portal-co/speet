@@ -1,0 +1,14 @@
+[package]
+name = "speet-program-equivalence"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../../COPYING.md"
+description = "Original vs recompiled outcome comparison for C corpus programs"
+
+[dependencies]
+binary-io = { path = "../../../../binary-io" }
+speet-corpus-harness = { path = "../speet-corpus-harness" }
+speet-guest-runner = { path = "../speet-guest-runner" }
+speet-runtime = { path = "../../os/speet-runtime" }
+speet-host-api = { path = "../../os/speet-host-api" }

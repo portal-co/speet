@@ -1159,7 +1159,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     // If equal (ABI-compliant), use regular return; else throw exception
                     rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
-                    // ABI-compliant return - use WASM Return
+                    // ABI-compliant return - use WASM Return. The generated
+                    // function's ABI is (register_file) -> (register_file) —
+                    // a bare `Return` must push the full, current register
+                    // file as its results, matching the shape `ret`'s
+                    // `Throw` below pushes.
+                    for p in 0..rctx.locals_mark().total_locals {
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                    }
                     rctx.feed(ctx, tail_idx, &Instruction::Return)?;
 
                     rctx.feed(ctx, tail_idx, &Instruction::Else)?;
@@ -1202,6 +1209,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         offset: i32,
                         enable_rv64: bool,
                         base_pc: u64,
+                        // The call-indirect table holds every function from every
+                        // linked binary unit at a single, shared global index — so
+                        // the local (within-this-unit) function index computed from
+                        // the PC must be shifted into that global space the same way
+                        // a `Target::Static` call already is (`func_idx +
+                        // base_func_offset`, see yecta's `emit_call_body`). Omitting
+                        // this caused `call_indirect` to land on a *different* unit's
+                        // function (wrong register-file type) when linking multiple
+                        // binaries together.
+                        base_func_offset: u32,
                     }
 
                     impl<Context, E> wax_core::build::InstructionSource<Context, E> for JalrTargetSnippet {
@@ -1210,7 +1227,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             ctx: &mut Context,
                             sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
                         ) -> Result<(), E> {
-                            // Compute: ((base + offset) & ~1 - base_pc) / 2
+                            // Compute: ((base + offset) & ~1 - base_pc) / 2 + base_func_offset
                             // This gives us the function index from the PC
                             sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
                             if self.enable_rv64 {
@@ -1239,6 +1256,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                 sink.instruction(ctx, &Instruction::I32Const(1))?;
                                 sink.instruction(ctx, &Instruction::I32ShrU)?;
                             }
+                            sink.instruction(ctx, &Instruction::I32Const(self.base_func_offset as i32))?;
+                            sink.instruction(ctx, &Instruction::I32Add)?;
                             Ok(())
                         }
                     }
@@ -1251,7 +1270,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                      dyn wax_core::build::InstructionOperatorSink<Context, E> + '_
                                  ),
                         ) -> Result<(), E> {
-                            // Compute: ((base + offset) & ~1 - base_pc) / 2
+                            // Compute: ((base + offset) & ~1 - base_pc) / 2 + base_func_offset
                             // This gives us the function index from the PC
                             sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
                             if self.enable_rv64 {
@@ -1280,6 +1299,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                 sink.instruction(ctx, &Instruction::I32Const(1))?;
                                 sink.instruction(ctx, &Instruction::I32ShrU)?;
                             }
+                            sink.instruction(ctx, &Instruction::I32Const(self.base_func_offset as i32))?;
+                            sink.instruction(ctx, &Instruction::I32Add)?;
                             Ok(())
                         }
                     }
@@ -1289,6 +1310,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         offset: offset.as_i32(),
                         enable_rv64: self.enable_rv64,
                         base_pc: self.base_pc,
+                        base_func_offset: rctx.base_func_offset(),
                     };
 
                     // Use fixups to set expected_ra only for this call
@@ -1361,7 +1383,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     {
                         return Ok(());
                     }
-                    // For indirect jumps, seal with unreachable as we can't statically determine target
+                    // Non-call JALR (including `ret` = jalr x0, ra, 0): end the
+                    // current WASM function.  Corpus / standalone entry uses a
+                    // void-return host export, so a bare `return` is sufficient.
+                    if dest.0 == 0 {
+                        rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                        return Ok(());
+                    }
+                    // Other indirect jumps need a runtime target; seal as unreachable.
                     rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
                     return Ok(());
                 }
@@ -2955,8 +2984,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             }
         }
 
-        // For most instructions that don't explicitly handle control flow,
-        // yecta automatically handles fallthrough based on the len parameter in init_function
+        // Fallthrough to the next instruction start, skipping intermediate junk
+        // slots that exist for 4-byte encodings (see `translate_bytes`).
+        let next_pc = pc.wrapping_add(inst_len * 2);
+        if let Some(target_func) = self.pc_to_func_idx(next_pc as u64) {
+            let fall_info =
+                JumpInfo::direct(pc as u64, next_pc as u64, JumpKind::DirectJump);
+            if rctx.on_jump(&fall_info, ctx)? != TrapAction::Skip {
+                rctx.jmp(ctx, tail_idx, target_func, rctx.locals_mark().total_locals)?;
+            }
+        } else {
+            rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
+        }
         Ok(())
     }
 

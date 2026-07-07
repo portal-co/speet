@@ -1,0 +1,37 @@
+[package]
+name = "speet-recompile"
+version = "0.1.0"
+edition = "2021"
+description = "Full-binary recompiler driver: load host binary -> speet (WASM) -> wasm-blitz (native) -> object -> system link."
+
+[dependencies]
+binary-io = { path = "../../../../binary-io" }
+tunnel = { path = "../../../../tunnel" }
+speet-rt = { path = "../speet-rt" }
+
+# wasm-blitz backends (local path: carries the MemBase + SysV stack-param fixes
+# not yet on the published git repo). Their transitive asm-arch deps unify with
+# the workspace's git+patch asm-arch.
+portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64" }
+portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x86-64" }
+portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
+portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
+portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"] }
+
+# speet frontend (native machine code -> WASM)
+speet-x86_64 = { path = "../../native/speet-x86_64" }
+speet-aarch64 = { path = "../../native/speet-aarch64" }
+speet-riscv = { path = "../../native/speet-riscv", features = ["logging"] }
+speet-syscall = { path = "../speet-syscall" }
+speet-host-syscall = { path = "../speet-host-syscall" }
+speet-link-core = { path = "../speet-link-core" }
+speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
+speet-plugin-adapter = { path = "../../plugin/speet-plugin-adapter" }
+speet-log = { path = "../../helper/speet-log", features = ["log-subscriber"] }
+yecta = { path = "../../helper/yecta" }
+rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
+wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }
+wasmparser = "0.240.0"
+
+[dev-dependencies]
+speet-runtime = { path = "../speet-runtime" }

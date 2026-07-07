@@ -27,7 +27,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         match inner {
             LDST_POS::LDR_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 8))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?;
@@ -35,7 +35,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::LDRB_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 rctx.feed(ctx, tail_idx, &Instruction::I32Load8U(memarg(0)))?;
@@ -44,7 +44,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::LDRH_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 2))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 rctx.feed(ctx, tail_idx, &Instruction::I32Load16U(memarg(1)))?;
@@ -53,7 +53,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::LDRSW_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 4))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2)))?;
@@ -61,7 +61,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::STR_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 8))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
@@ -69,7 +69,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::STRB_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
@@ -78,7 +78,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::STRH_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rn(w))?;
+                self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 2))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
                 self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
@@ -130,7 +130,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 
         if pre_index {
             // pre-index: addr = Rn + imm9; Rn ← addr; then access [addr]
-            self.emit_gpr_get(ctx, rctx, tail_idx, src_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, src_reg)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalTee(addr_tmp))?;
@@ -138,19 +138,19 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             // (addr_tmp is on stack after tee, consume it)
             rctx.feed(ctx, tail_idx, &Instruction::Drop)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(addr_tmp))?;
-            self.emit_gpr_set(ctx, rctx, tail_idx, src_reg)?;
+            self.emit_addr_reg_set(ctx, rctx, tail_idx, src_reg)?;
             // Load/store from addr_tmp
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(addr_tmp))?;
             self.emit_ldst_access(ctx, rctx, tail_idx, is_load, load_width, data_reg)?;
         } else {
             // post-index: access [Rn], then Rn ← Rn + imm9
-            self.emit_gpr_get(ctx, rctx, tail_idx, src_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, src_reg)?;
             self.emit_ldst_access(ctx, rctx, tail_idx, is_load, load_width, data_reg)?;
             // Update Rn
-            self.emit_gpr_get(ctx, rctx, tail_idx, src_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, src_reg)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-            self.emit_gpr_set(ctx, rctx, tail_idx, src_reg)?;
+            self.emit_addr_reg_set(ctx, rctx, tail_idx, src_reg)?;
         }
         Ok(())
     }
@@ -245,7 +245,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         let scale = match load_width { 1 | 0xB1 => 0u32, 2 | 0xB2 => 1, 4 | 0xB4 => 2, _ => 3 };
 
         // Emit: base + extend(off_reg) [<< scale if S=1]
-        self.emit_gpr_get(ctx, rctx, tail_idx, base_reg)?;
+        self.emit_addr_reg_get(ctx, rctx, tail_idx, base_reg)?;
         self.emit_gpr_get(ctx, rctx, tail_idx, off_reg)?;
         match option {
             0b010 => { // UXTW: zero-extend 32 bits
@@ -344,17 +344,17 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         // Compute base address (before or at access)
         let base_addr = if writeback && pre_index {
             // pre: addr = Rn + off, then Rn ← addr
-            self.emit_gpr_get(ctx, rctx, tail_idx, base_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, base_reg)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalTee(addr_tmp))?;
             rctx.feed(ctx, tail_idx, &Instruction::Drop)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(addr_tmp))?;
-            self.emit_gpr_set(ctx, rctx, tail_idx, base_reg)?;
+            self.emit_addr_reg_set(ctx, rctx, tail_idx, base_reg)?;
             addr_tmp
         } else {
             // post or no writeback: addr = Rn + off
-            self.emit_gpr_get(ctx, rctx, tail_idx, base_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, base_reg)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalTee(addr_tmp))?;
@@ -396,10 +396,10 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 
         // Post-index writeback: Rn ← Rn + off
         if writeback && !pre_index {
-            self.emit_gpr_get(ctx, rctx, tail_idx, base_reg)?;
+            self.emit_addr_reg_get(ctx, rctx, tail_idx, base_reg)?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-            self.emit_gpr_set(ctx, rctx, tail_idx, base_reg)?;
+            self.emit_addr_reg_set(ctx, rctx, tail_idx, base_reg)?;
         }
         Ok(())
     }

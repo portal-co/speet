@@ -1,0 +1,24 @@
+[package]
+name = "speet-plugin-adapter"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-plugin-api    = { workspace = true }
+speet-module-target = { workspace = true }
+speet-link-core      = { workspace = true }
+speet-syscall        = { path = "../../os/speet-syscall" }
+speet-memory         = { path = "../../helper/speet-memory" }
+speet-object         = { path = "../../managed/speet-object" }
+speet-ordering       = { path = "../../helper/speet-ordering" }
+yecta                = { path = "../../helper/yecta" }
+wasm-encoder         = { workspace = true }
+wasmparser           = { workspace = true }
+wax-core             = { workspace = true }
+spin                 = { workspace = true }
+
+[dev-dependencies]
+speet-module-builder = { path = "../../os/speet-module-builder" }
+speet-linux-wasi     = { path = "../../os/speet-linux-wasi" }

@@ -1,0 +1,15 @@
+[package]
+name = "speet-plugin-host-wasm"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+speet-plugin-api = { workspace = true }
+speet-plugin-host = { workspace = true }
+wasmi = "1"
+
+[dev-dependencies]
+wasm-encoder = { workspace = true }
+wasmparser = { version = "0.240.0", features = ["validate"] }

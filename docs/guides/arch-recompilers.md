@@ -55,9 +55,15 @@ MIPS uses the same weak-memory ordering as RISC-V (see §4 above). MIPS has dela
 
 **Code:** `crates/native/speet-x86_64/src/`
 
-FP and SIMD instructions are currently stubbed as `unreachable`. This is intentional — the stubs mark what remains to be implemented. See [goals/arch.md](../../goals/arch.md).
+Scalar SSE FP is implemented: XMM0–15 are modeled as raw-bits `i64` locals (`xmm_slot`,
+`BASE_PARAMS = 42`), and FP handlers reinterpret i64→f64/f32 around native WASM FP ops and back.
+This covers the scalar arith/move/compare/convert families asm-arch's backend can emit — see
+[asm-arch-instruction-sync.md](asm-arch-instruction-sync.md) for the full per-instruction
+matrix. Packed/vector SIMD (the `xmm` registers' non-scalar lanes) is not modeled and still
+falls through to `unreachable`.
 
-**Do not** remove the `unreachable` stubs silently — replace them with implementations when adding FP/SIMD support.
+**Do not** remove the `xmm_slot` register file or the i64 bit-reinterpret pattern — other FP
+handlers depend on the exact-bits round-trip it provides (NaN payloads, f32 low half).
 
 ---
 

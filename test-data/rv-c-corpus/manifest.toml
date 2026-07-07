@@ -1,0 +1,36 @@
+[[artifact]]
+program = "arith"
+triple = "riscv32-unknown-linux-gnu"
+linked = "rv32/arith.linked.elf"
+text = "rv32/arith.text.elf"
+entry = "rv32/arith.entry"
+arch = "rv32"
+os = "linux"
+
+[[artifact]]
+program = "frame"
+triple = "riscv32-unknown-linux-gnu"
+linked = "rv32/frame.linked.elf"
+text = "rv32/frame.text.elf"
+entry = "rv32/frame.entry"
+arch = "rv32"
+os = "linux"
+
+[[artifact]]
+program = "arith"
+triple = "riscv64-unknown-linux-gnu"
+linked = "rv64/arith.linked.elf"
+text = "rv64/arith.text.elf"
+entry = "rv64/arith.entry"
+arch = "rv64"
+os = "linux"
+
+[[artifact]]
+program = "frame"
+triple = "riscv64-unknown-linux-gnu"
+linked = "rv64/frame.linked.elf"
+text = "rv64/frame.text.elf"
+entry = "rv64/frame.entry"
+arch = "rv64"
+os = "linux"
+
