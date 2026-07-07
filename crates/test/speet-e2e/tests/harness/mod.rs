@@ -35,7 +35,16 @@ use yecta::layout::CellIdx;
 
 pub const REG_SAVE_BASE: u32 = 0x100;
 pub const IMPORT_HINT: u32 = 0;
-pub const N_IMPORTS: u32 = 3; // hint, write, exit
+
+/// Number of imports this harness's `assemble_module` declares (hint, write,
+/// exit). Computed from `speet_host_api::ImportManifest::native_syscall()`
+/// (the same manifest `speet-recompile::frontend` builds its own default
+/// module against) rather than a bare literal, so this count can never
+/// silently drift out of sync with the actual `imports.import(...)` calls
+/// below it — see `docs/guides/thin-runtime-genericity.md` principle 1.
+pub fn n_imports() -> u32 {
+    speet_host_api::ImportManifest::native_syscall().func_imports.len() as u32
+}
 
 pub const HINT_RETURN: i32 = 0xCA11_u32 as i32;
 pub const HINT_CALL:   i32 = 0xCA12_u32 as i32;
@@ -602,7 +611,7 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     }
 
     let total_fns: u32 = slices.iter().map(|s| s.fns.len() as u32).sum();
-    let table_size = N_IMPORTS + total_fns;
+    let table_size = n_imports() + total_fns;
     let mut tables = TableSection::new();
     tables.table(TableType {
         element_type: RefType::FUNCREF,
@@ -626,9 +635,9 @@ pub fn assemble_module(slices: &[BinarySlice], eh: Eh) -> Vec<u8> {
     exports.export("memory", ExportKind::Memory, 0);
     for s in slices { exports.export(&s.entry_name, ExportKind::Func, s.start_func_idx); }
 
-    let all_indices: Vec<u32> = (N_IMPORTS..N_IMPORTS + total_fns).collect();
+    let all_indices: Vec<u32> = (n_imports()..n_imports() + total_fns).collect();
     let mut elems = ElementSection::new();
-    elems.active(Some(0), &ConstExpr::i64_const(N_IMPORTS as i64),
+    elems.active(Some(0), &ConstExpr::i64_const(n_imports() as i64),
         Elements::Functions(Cow::Borrowed(&all_indices)));
 
     let mut code = CodeSection::new();
@@ -691,11 +700,11 @@ pub fn build_single(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) -> (Vec<u8
 }
 
 pub fn build_single_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
-    let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
+    let t = translate(text, start_addr, arch, n_imports(), TypeIdx(0), eh, speculative);
     let unsupported = t.unsupported.clone();
     let slice = BinarySlice {
         params: t.params, fns: t.fns,
-        start_func_idx: N_IMPORTS, entry_name: "_start".into(),
+        start_func_idx: n_imports(), entry_name: "_start".into(),
     };
     (assemble_module(&[slice], eh), unsupported)
 }
@@ -706,17 +715,17 @@ pub fn build_single_with_trap(text: &[u8], start_addr: u64, arch: Arch, eh: Eh) 
 
 pub fn build_single_with_trap_speculative(text: &[u8], start_addr: u64, arch: Arch, eh: Eh, speculative: bool) -> (Vec<u8>, Vec<String>) {
     let t = match arch {
-        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, N_IMPORTS, TypeIdx(0), eh, speculative),
-        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, N_IMPORTS, TypeIdx(0), eh, speculative),
+        Arch::Rv32 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv32, n_imports(), TypeIdx(0), eh, speculative),
+        Arch::Rv64 => translate_rv_with_trap(text, start_addr as u32, Xlen::Rv64, n_imports(), TypeIdx(0), eh, speculative),
         Arch::X86_64 | Arch::AArch64 | Arch::Mips => {
-            let t = translate(text, start_addr, arch, N_IMPORTS, TypeIdx(0), eh, speculative);
+            let t = translate(text, start_addr, arch, n_imports(), TypeIdx(0), eh, speculative);
             let unsupported = t.unsupported.clone();
-            let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
+            let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: n_imports(), entry_name: "_start".into() };
             return (assemble_module(&[slice], eh), unsupported);
         }
     };
     let unsupported = t.unsupported.clone();
-    let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: N_IMPORTS, entry_name: "_start".into() };
+    let slice = BinarySlice { params: t.params, fns: t.fns, start_func_idx: n_imports(), entry_name: "_start".into() };
     (assemble_module(&[slice], eh), unsupported)
 }
 
@@ -743,7 +752,7 @@ pub fn build_linked_speculative(specs: &[LinkSpec<'_>], eh: Eh, speculative: boo
 
     let mut builder = MegabinaryBuilder::<Function>::new();
     let mut slices: Vec<BinarySlice> = Vec::new();
-    let mut running_offset = N_IMPORTS;
+    let mut running_offset = n_imports();
     let mut all_unsupported: Vec<String> = Vec::new();
 
     for s in specs {
@@ -777,11 +786,11 @@ pub fn build_linked_speculative(specs: &[LinkSpec<'_>], eh: Eh, speculative: boo
     let output = builder.finish();
     let mut fn_iter = output.fns.into_iter();
     for (i, s) in specs.iter().enumerate() {
-        let start = slices[i].start_func_idx - N_IMPORTS;
+        let start = slices[i].start_func_idx - n_imports();
         let end = if i + 1 < specs.len() {
-            slices[i + 1].start_func_idx - N_IMPORTS
+            slices[i + 1].start_func_idx - n_imports()
         } else {
-            running_offset - N_IMPORTS
+            running_offset - n_imports()
         };
         let _ = s;
         slices[i].fns = fn_iter.by_ref().take((end - start) as usize).collect();

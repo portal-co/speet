@@ -5,10 +5,24 @@ use std::collections::BTreeMap;
 use tunnel::TunnelResolution;
 
 /// Where a guest PLT/external call is redirected at compile time.
+///
+/// The two variants are symmetric alternatives for the *same* redirect
+/// decision, not a fixed split by symbol — see
+/// `docs/thin-runtime-plan.md`'s "HostApi" section and
+/// `docs/guides/thin-runtime-genericity.md`. Which one a given `HostApi`
+/// backend picks for a given symbol is a compile-time construction choice
+/// (gated by [`HostApi::supports_ambient_linking`]), never runtime
+/// auto-discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PltRedirect {
     /// Lower to a WASM import call; the link shim implements the symbol.
     WasmImport { module: String, name: String },
+    /// Alias the guest symbol directly to the real host symbol at link
+    /// time (`tunnel`'s `__ambient_*` mechanism) — no WASM import, no C
+    /// shim indirection. Only meaningful when the backend actually has a
+    /// live host image to alias against; see
+    /// [`HostApi::supports_ambient_linking`].
+    Ambient,
 }
 
 /// Wraps an inner [`HostApi`] and redirects selected guest externals to
@@ -23,18 +37,15 @@ impl<H: HostApi> RedirectingHostApi<H> {
         Self { inner, hooks }
     }
 
-    /// Integrated thin-runtime hooks (`execve` → `env.__speet_execve`).
+    /// Integrated thin-runtime hooks, derived from `inner.import_manifest()`'s
+    /// own [`FuncImport::intercepts`] lists — never a separately
+    /// hand-maintained `["execve", "_execve"]`-style symbol table. Every
+    /// manifest slot that declares at least one intercepted guest symbol
+    /// (today: `exit`/`_exit`/`_Exit`, `write`/`_write`,
+    /// `execve`/`_execve`) becomes a `WasmImport` hook automatically. See
+    /// `docs/guides/thin-runtime-genericity.md` principle 1.
     pub fn integrated(inner: H) -> Self {
-        let mut hooks = BTreeMap::new();
-        for sym in ["execve", "_execve"] {
-            hooks.insert(
-                sym.into(),
-                PltRedirect::WasmImport {
-                    module: "env".into(),
-                    name: "__speet_execve".into(),
-                },
-            );
-        }
+        let hooks = derive_hooks_from_manifest(&inner.import_manifest());
         Self::new(inner, hooks)
     }
 
@@ -42,6 +53,27 @@ impl<H: HostApi> RedirectingHostApi<H> {
         let bare = guest_symbol.strip_prefix('_').unwrap_or(guest_symbol);
         self.hooks.contains_key(guest_symbol) || self.hooks.contains_key(bare)
     }
+}
+
+/// Walk every [`FuncImport`](crate::FuncImport)'s `intercepts` list and
+/// build a guest-symbol → [`PltRedirect::WasmImport`] map — the shared
+/// derivation `RedirectingHostApi::integrated` and [`TunneledHostApi`](crate::TunneledHostApi)'s
+/// own `resolve_plt_redirect` both use, so there is exactly one place that
+/// turns "a manifest slot intercepts symbol X" into an actual redirect.
+pub(crate) fn derive_hooks_from_manifest(manifest: &ImportManifest) -> BTreeMap<String, PltRedirect> {
+    let mut hooks = BTreeMap::new();
+    for imp in &manifest.func_imports {
+        for sym in &imp.intercepts {
+            hooks.insert(
+                sym.clone(),
+                PltRedirect::WasmImport {
+                    module: imp.module.clone(),
+                    name: imp.name.clone(),
+                },
+            );
+        }
+    }
+    hooks
 }
 
 impl<H: HostApi> HostApi for RedirectingHostApi<H> {
@@ -71,6 +103,10 @@ impl<H: HostApi> HostApi for RedirectingHostApi<H> {
 
     fn syscall(&mut self, nr: u64, args: &[u64]) -> i64 {
         self.inner.syscall(nr, args)
+    }
+
+    fn supports_ambient_linking(&self) -> bool {
+        self.inner.supports_ambient_linking()
     }
 }
 

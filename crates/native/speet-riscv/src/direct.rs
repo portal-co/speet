@@ -1383,14 +1383,98 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     {
                         return Ok(());
                     }
-                    // Non-call JALR (including `ret` = jalr x0, ra, 0): end the
-                    // current WASM function.  Corpus / standalone entry uses a
-                    // void-return host export, so a bare `return` is sufficient.
+                    // Non-call JALR (including `ret` = jalr x0, ra, 0): the
+                    // runtime target in `scratch` decides where control
+                    // actually goes next — it is NOT necessarily "the end of
+                    // the program". A `ret` from a non-leaf function (e.g.
+                    // `add`/`mul` returning into `main`) must land back in
+                    // the *caller*'s continuation, exactly like a guest `ret`
+                    // that genuinely is the final return must land on the
+                    // reserved halt stub (see
+                    // `docs/guides/thin-runtime-genericity.md` principle 4
+                    // and `speet_recompile::frontend::halt_addr`) — both are
+                    // just "whatever table slot the address-to-slot formula
+                    // maps `scratch`'s value to", dispatched the same way
+                    // AArch64/x86-64 do via `return_call_indirect`
+                    // (`A64IndirectTarget`/`ReturnAddressSnippet`). A bare
+                    // `Return` here (the previous implementation) silently
+                    // treated *every* non-call JALR as "the program has
+                    // ended", which is only correct for the outermost `ret`
+                    // — any nested call/return chain (the overwhelmingly
+                    // common case) never actually returned to its caller.
                     if dest.0 == 0 {
-                        rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                        struct RetTargetSnippet {
+                            scratch_local: u32,
+                            scratch_is_i64: bool,
+                            base_pc: u64,
+                            base_func_offset: u32,
+                        }
+                        fn emit_ret_target<Context, E, S>(
+                            ctx: &mut Context,
+                            sink: &mut S,
+                            scratch_local: u32,
+                            scratch_is_i64: bool,
+                            base_pc: u64,
+                            base_func_offset: u32,
+                        ) -> Result<(), E>
+                        where
+                            S: wax_core::build::InstructionSink<Context, E> + ?Sized,
+                        {
+                            // table_idx = ((scratch - base_pc) >> 1) + base_func_offset,
+                            // kept as i64 — the indirect call table is table64
+                            // (see `assemble_corpus_module`/`finish_module`),
+                            // so `return_call_indirect` requires an i64 index.
+                            // Mirrors AArch64's `A64IndirectTarget` exactly
+                            // (granularity 2 here for RVC 2-byte alignment vs
+                            // AArch64's 4).
+                            sink.instruction(ctx, &Instruction::LocalGet(scratch_local))?;
+                            if !scratch_is_i64 {
+                                sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                            }
+                            sink.instruction(ctx, &Instruction::I64Const(base_pc as i64))?;
+                            sink.instruction(ctx, &Instruction::I64Sub)?;
+                            sink.instruction(ctx, &Instruction::I64Const(1))?;
+                            sink.instruction(ctx, &Instruction::I64ShrU)?;
+                            sink.instruction(ctx, &Instruction::I64Const(base_func_offset as i64))?;
+                            sink.instruction(ctx, &Instruction::I64Add)?;
+                            Ok(())
+                        }
+                        impl<Context, E> wax_core::build::InstructionSource<Context, E> for RetTargetSnippet {
+                            fn emit_instruction(
+                                &self,
+                                ctx: &mut Context,
+                                sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+                            ) -> Result<(), E> {
+                                emit_ret_target(ctx, sink, self.scratch_local, self.scratch_is_i64, self.base_pc, self.base_func_offset)
+                            }
+                        }
+                        impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for RetTargetSnippet {
+                            fn emit(
+                                &self,
+                                ctx: &mut Context,
+                                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+                            ) -> Result<(), E> {
+                                emit_ret_target(ctx, sink, self.scratch_local, self.scratch_is_i64, self.base_pc, self.base_func_offset)
+                            }
+                        }
+                        let target_snippet = RetTargetSnippet {
+                            scratch_local: scratch,
+                            scratch_is_i64: self.use_memory64 || self.enable_rv64,
+                            base_pc: self.base_pc,
+                            base_func_offset: rctx.base_func_offset(),
+                        };
+                        let params = yecta::JumpCallParams::indirect_jump(
+                            &target_snippet,
+                            rctx.locals_mark().total_locals,
+                            rctx.pool(),
+                        );
+                        rctx.ji_with_params(ctx, tail_idx, params)?;
                         return Ok(());
                     }
-                    // Other indirect jumps need a runtime target; seal as unreachable.
+                    // Other indirect jumps (e.g. an indirect *call* through a
+                    // function pointer) need a runtime target this frontend
+                    // doesn't yet compute a call/return continuation for;
+                    // seal as unreachable rather than silently misexecuting.
                     rctx.seal_fn(ctx, tail_idx, &Instruction::Unreachable)?;
                     return Ok(());
                 }

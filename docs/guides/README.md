@@ -20,6 +20,8 @@ Guides are alignment signals, not hard stops. They work like Claude Code's conte
 
 **Alignment with goals over rigidity of process.**
 
+**Why skipping is the actual failure mode, concretely:** the mistakes these guides document did not come from agents being careless in some abstract sense — they came from agents producing edits that looked correct, compiled, and passed the tests that existed, while removing an invariant that no test exercised (a hand-counted index that only one caller currently uses; a redirect that only fires for one instruction shape; an entry point that happens to be function 0 in every binary tried so far). Reading the guide first is cheaper than finding this out from a production crash, because the guide states the invariant the passing tests don't. This is a reasoned tradeoff, not a instruction to comply with louder wording — a lower-effort model should stop here because the expected cost of skipping is high, not because the text says so twice.
+
 ---
 
 ## Available guides
@@ -33,6 +35,17 @@ Guides are alignment signals, not hard stops. They work like Claude Code's conte
 | [parallel-api.md](parallel-api.md) | `yecta`, `speet-ordering`, `speet-link`, all arch frontends | Do not revert `feed`/`seal`/`barrier`/`jmp_tail` refactor; replace `&mut self` on hooks with interior mutability |
 | [asm-arch-instruction-sync.md](asm-arch-instruction-sync.md) | `speet-x86_64`, `speet-aarch64` | Do not assume a `WriterCore` method name matches its real encoding — verify against the binary writer impl before concluding something is in sync or a gap |
 | [plugin-api.md](plugin-api.md) | `speet-plugin-api`, `speet-plugin-adapter`, `speet-plugin-host*` | Do not let plugin traits gain `Context`/`E`/`F` generics; do not bypass `PluginTransport`; do not add serde/bincode/rkyv; do not grant host-entity imports outside the manifest-declared allowlist |
+| [thin-runtime-genericity.md](thin-runtime-genericity.md) | `speet-recompile`, `speet-host-api`, `speet-plugin-api`, future `speet-abi-spec`/`speet-abi-codegen` | Do not hand-count a WASM import index; do not intercept external calls by instruction shape instead of PC; do not treat `unsupported_ops` as a correctness proof |
+
+---
+
+## Guide structure
+
+New guides should follow the shape `thin-runtime-genericity.md` uses, which is the target for retrofitting older guides opportunistically (not required immediately):
+
+1. **Core principles** — a short, numbered list of the actual invariants, each with *why* it matters (not just *what* to avoid). A principle without a reason is indistinguishable from an arbitrary style rule and gets skipped by the same reasoning that skips the whole guide.
+2. **Examples drawn from git history** — cite real commits (`git show <hash>`) that show the mistake and its fix, rather than restating them in prose. This keeps the guide's evidence auditable and never requires rewriting/rebasing history to "clean up" an example.
+3. **Cross-links** — where a guide's principle builds on or reuses a pattern from another guide, link it explicitly rather than restating that guide's content.
 
 ---
 

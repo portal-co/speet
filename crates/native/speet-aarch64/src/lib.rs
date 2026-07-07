@@ -47,9 +47,10 @@ use speet_traps::{
     LocalDeclarator,
 };
 use wasm_encoder::{Ieee64, Instruction, ValType};
-use yecta::{FuncIdx, LocalLayout, LocalSlot, Mark};
+use yecta::{FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark};
 
 pub mod direct;
+use direct::A64IndirectTarget;
 
 /// AArch64 to WebAssembly recompiler.
 pub struct AArch64Recompiler<Context, E> {
@@ -69,11 +70,44 @@ pub struct AArch64Recompiler<Context, E> {
     /// Stack pointer (1 × i64).  AArch64 encodes SP as register 31 in load/store and
     /// `ADD`/`SUB` immediate forms; x31 remains XZR everywhere else.
     pub(crate) sp_slot: LocalSlot,
-    plt_by_addr: Option<alloc::collections::BTreeMap<u64, String>>,
-    plt_imports: Option<alloc::collections::BTreeMap<String, u32>>,
+    /// Guest-address → symbolic-label hook table (compile-time PLT/
+    /// external-call redirects). Shared type with `speet-x86_64` via
+    /// `speet_plugin_api::external_target` instead of each arch keeping
+    /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
+    /// `docs/guides/thin-runtime-genericity.md` principle 1.
+    hooks: Option<speet_plugin_api::external_target::PltHookTable>,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
+    /// AArch64 base parameter count: 31 GPRs (i64) + PC (i64) + 4 NZCV flags
+    /// (i32) + 3 scratch temporaries (i64) + 32 FP registers (f64) + SP
+    /// (i64) = 72. See the module doc's local-variable layout.
+    pub const BASE_PARAMS: u32 = 72;
+
+    /// WASM param/local index of the guest SP register. Stable regardless of
+    /// trap params, which `setup_traps` always appends *after*
+    /// `BASE_PARAMS` (SP is the last of the fixed slots). A C-callable entry
+    /// (e.g. `speet-rt`'s shim) must seed this argument position with a
+    /// valid, freshly allocated guest stack — guest registers are WASM
+    /// params (see `docs/guides/thin-runtime-genericity.md`), so an
+    /// externally-invoked entry function is only correctly callable if the
+    /// caller supplies real initial values for every one of them, not just
+    /// whatever a bare C prototype leaves as garbage.
+    pub const SP_PARAM_INDEX: u32 = Self::BASE_PARAMS - 1;
+
+    /// WASM param/local index of the guest link register (X30/LR) — always
+    /// `30`, since `setup_traps` appends the 31 GPRs (x0–x30) first (see the
+    /// module doc's local-variable layout), stable regardless of trap
+    /// params appended afterward. A C-callable entry must seed this
+    /// position with the **halt sentinel** address (see
+    /// `speet_recompile::frontend::halt_addr` and
+    /// `docs/guides/thin-runtime-genericity.md` principle 4) so a guest
+    /// `ret` that's never overwritten LR — i.e. really is the program's
+    /// final return, most commonly `main` returning with no crt0 chain —
+    /// lands on the reserved halt stub instead of on whatever garbage LR
+    /// held at entry.
+    pub const LR_PARAM_INDEX: u32 = 30;
+
     pub fn new_with_base_pc(base_pc: u64) -> Self {
         Self {
             base_pc,
@@ -85,19 +119,15 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             tmp_slot: LocalSlot::default(),
             fp_slot: LocalSlot::default(),
             sp_slot: LocalSlot::default(),
-            plt_by_addr: None,
-            plt_imports: None,
+            hooks: None,
         }
     }
 
-    /// Redirect PLT/external calls to WASM imports (integrated runtime hooks).
-    pub fn set_plt_plan(
-        &mut self,
-        by_addr: alloc::collections::BTreeMap<u64, String>,
-        import_by_symbol: alloc::collections::BTreeMap<String, u32>,
-    ) {
-        self.plt_by_addr = Some(by_addr);
-        self.plt_imports = Some(import_by_symbol);
+    /// Install compile-time PLT/external-call hooks (integrated runtime).
+    /// Checked at every decode slot's PC, not just resolved `bl`/`b`
+    /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
+    pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
+        self.hooks = Some(hooks);
     }
 
     pub fn new() -> Self {
@@ -189,31 +219,54 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         Some(FuncIdx((offset / 4) as u32))
     }
 
-    pub(crate) fn lookup_plt_import(&self, target: u64) -> Option<(u32, &str)> {
-        let by_addr = self.plt_by_addr.as_ref()?;
-        let imports = self.plt_imports.as_ref()?;
-        let sym = by_addr.get(&target)?;
-        let idx = imports.get(sym)?;
-        Some((*idx, sym.as_str()))
+    pub(crate) fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
+        self.hooks.as_ref()?.lookup(target)
     }
 
-    pub(crate) fn emit_plt_import_call<RC: ReactorContext<Context, E> + ?Sized>(
-        &self,
+    /// Emit "make the redirected host call, then behave like a `ret`" for a
+    /// hooked guest address — correct regardless of whether it was reached
+    /// via `bl` (which just set `x30 = pc+4`) or a tail `b` (whose caller's
+    /// `x30` is preserved unchanged through the chain): either way, `x30`
+    /// holds a valid return address at this point, so jumping to it is
+    /// safe. See `docs/guides/thin-runtime-genericity.md` principle 2 and
+    /// `speet_plugin_api::external_target::CallingConvention`.
+    pub(crate) fn emit_hook_call_and_return<F>(
+        &mut self,
         ctx: &mut Context,
-        rctx: &RC,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         tail_idx: usize,
-        import_idx: u32,
-        symbol: &str,
+        pc: u64,
+        hook: &speet_plugin_api::external_target::PltHook,
     ) -> Result<(), E> {
-        let args = match symbol.strip_prefix('_').unwrap_or(symbol) {
-            "execve" => [0u32, 1, 2], // x0, x1, x2
-            _ => return Ok(()),
-        };
-        for reg in args {
+        for (i, &reg) in hook.convention.arg_locals.iter().enumerate() {
             self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
+            if hook.convention.wraps_i32(i) {
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+            }
         }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
-        self.emit_gpr_set(ctx, rctx, tail_idx, 0)?; // x0 result
+        rctx.feed(ctx, tail_idx, &Instruction::Call(hook.import_idx))?;
+        if let Some(result_reg) = hook.convention.result_local {
+            if hook.convention.result_extend_i32 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+            }
+            self.emit_gpr_set(ctx, rctx, tail_idx, result_reg)?;
+        }
+
+        let total = rctx.locals_mark().total_locals;
+        let lr_local = rctx.layout().local(self.gpr_slot, 30);
+        {
+            let info = JumpInfo::indirect(pc, lr_local, JumpKind::Return);
+            if rctx.on_jump(&info, ctx)? == TrapAction::Skip {
+                return Ok(());
+            }
+        }
+        let target_snippet = A64IndirectTarget {
+            gpr_local: lr_local,
+            base_pc: self.base_pc,
+            base_func_offset: rctx.base_func_offset(),
+        };
+        let params = JumpCallParams::indirect_jump(&target_snippet, total, rctx.pool());
+        rctx.ji_with_params(ctx, tail_idx, params)?;
         Ok(())
     }
 

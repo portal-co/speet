@@ -12,6 +12,22 @@ pub(super) fn field(word: u32, lo: u8, hi: u8) -> u32 {
 }
 
 /// Rd / Rt (bits 4:0).
+/// The plain-`Rt` GPR load/store variants (`LDR`/`STR`/`LDUR`/`STUR` — as
+/// opposed to the explicitly-narrow `LDRB`/`LDRH`/`LDURSW`/etc mnemonics,
+/// which are fixed-width and separately-enumerated disarm64 variants) cover
+/// *both* the 32-bit (`Wt`) and 64-bit (`Xt`) register forms as a single
+/// enum variant — disarm64 does not split them the way it splits `LDP`/`STP`
+/// into `_W_`/`_X_` twins. Bit 30 (`size[1]`, with `size[0]` fixed by the
+/// mnemonic's own opcode bits) is the only thing that distinguishes them:
+/// 0 = 32-bit (4-byte access, zero-extended into the 64-bit GPR slot on
+/// load), 1 = 64-bit (8-byte access). Every access-width decision for these
+/// mnemonics (memory load/store width *and*, for the scaled/`LDST_POS` immediate
+/// form, the immediate's scale factor) must key off this bit — hardcoding
+/// 8-byte/`imm*8` unconditionally (as if `size` were always 1) silently
+/// corrupts adjacent stack slots for any 32-bit access, which is the common
+/// case for `int`-sized locals/spills.
+#[inline(always)] pub(super) fn is_64bit_ldst(w: u32) -> bool { field(w, 30, 30) != 0 }
+
 #[inline(always)] pub(super) fn rd(w: u32) -> u32 { w & 0x1F }
 /// Rn (bits 9:5).
 #[inline(always)] pub(super) fn rn(w: u32) -> u32 { (w >> 5) & 0x1F }
@@ -231,11 +247,27 @@ where S: wax_core::build::InstructionSink<Context, E> + ?Sized
 
 // ── Indirect branch target snippet ───────────────────────────────────────────
 
-/// Emits a WASM function index from an AArch64 register:
-///   func_idx = (gpr_value - base_pc) / 4
+/// Emits a WASM table index from an AArch64 register holding a guest
+/// address:
+///   table_idx = (gpr_value - base_pc) / 4 + base_func_offset
+///
+/// `base_func_offset` is **required**, not optional: the WASM table's
+/// `elem` segment populates indices `[n_imports, n_imports + n_fns)` (see
+/// `finish_module`/`assemble_corpus_module`), not `[0, n_fns)` — a
+/// `call_indirect`/`return_call_indirect` computed without this offset
+/// targets a reserved-for-imports, permanently-`ref.null` table slot for
+/// any low-numbered guest slot, and the *wrong guest function* (off by
+/// exactly `base_func_offset`) for everything else. This is the "speet
+/// emission gap" real multi-function programs hit immediately on any
+/// register-indirect `ret`/`br`/`blr` — see
+/// `docs/guides/thin-runtime-genericity.md` principle 1: the index-space
+/// abstraction (which already knows this offset) must be consulted for
+/// *every* table-index computation, not just the statically-resolved ones
+/// `Target::Static`/`rctx.jmp` cover automatically.
 pub(crate) struct A64IndirectTarget {
     pub(crate) gpr_local: u32,
     pub(crate) base_pc: u64,
+    pub(crate) base_func_offset: u32,
 }
 
 impl<Context, E> InstructionSource<Context, E> for A64IndirectTarget {
@@ -243,7 +275,7 @@ impl<Context, E> InstructionSource<Context, E> for A64IndirectTarget {
         &self, ctx: &mut Context,
         sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
     ) -> Result<(), E> {
-        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc)
+        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc, self.base_func_offset)
     }
 }
 impl<Context, E> InstructionOperatorSource<Context, E> for A64IndirectTarget {
@@ -251,23 +283,26 @@ impl<Context, E> InstructionOperatorSource<Context, E> for A64IndirectTarget {
         &self, ctx: &mut Context,
         sink: &mut (dyn InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
-        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc)
+        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc, self.base_func_offset)
     }
 }
 
 pub(super) fn emit_indirect_target<Context, E, S>(
-    ctx: &mut Context, sink: &mut S, gpr_local: u32, base_pc: u64,
+    ctx: &mut Context, sink: &mut S, gpr_local: u32, base_pc: u64, base_func_offset: u32,
 ) -> Result<(), E>
 where S: wax_core::build::InstructionSink<Context, E> + ?Sized
 {
-    // func_idx = (gpr - base_pc) >> 2.  Leave the result as i64: the indirect
-    // call table is a 64-bit table (`table64`), so `return_call_indirect`
-    // consumes an i64 index.  (Do NOT wrap to i32.)
+    // table_idx = ((gpr - base_pc) >> 2) + base_func_offset.  Leave the
+    // result as i64: the indirect call table is a 64-bit table
+    // (`table64`), so `return_call_indirect` consumes an i64 index.  (Do
+    // NOT wrap to i32.)
     sink.instruction(ctx, &Instruction::LocalGet(gpr_local))?;
     sink.instruction(ctx, &Instruction::I64Const(base_pc as i64))?;
     sink.instruction(ctx, &Instruction::I64Sub)?;
     sink.instruction(ctx, &Instruction::I64Const(2))?;
     sink.instruction(ctx, &Instruction::I64ShrU)?;
+    sink.instruction(ctx, &Instruction::I64Const(base_func_offset as i64))?;
+    sink.instruction(ctx, &Instruction::I64Add)?;
     Ok(())
 }
 

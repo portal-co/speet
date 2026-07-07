@@ -205,6 +205,31 @@ where
 /// The lifetime parameters:
 /// - `'cb` represents the lifetime of the callback reference
 /// - `'ctx` represents the lifetime of data the callback may capture
+/// The number of wasm parameters in a translated function type with no
+/// traps installed. Free-standing equivalent of
+/// [`RiscVRecompiler::BASE_PARAMS`] for callers that don't want to
+/// instantiate the (2-lifetime, 3-type-param) generic struct just to read a
+/// constant — e.g. `speet-runtime`'s link step, which only needs this to
+/// build a C-callable entry bridge (see
+/// `docs/guides/thin-runtime-genericity.md` in the `speet` repo).
+pub const RV64_BASE_PARAMS: u32 = 66;
+
+/// WASM param/local index of the guest SP register (`x2`). Free-standing
+/// equivalent of [`RiscVRecompiler::SP_PARAM_INDEX`] — see
+/// [`RV64_BASE_PARAMS`] for why this exists alongside the associated const.
+pub const RV64_SP_PARAM_INDEX: u32 = 2;
+
+/// WASM param/local index of the guest return-address register (`x1`/`ra`).
+/// Free-standing equivalent of a hypothetical `RiscVRecompiler::RA_PARAM_INDEX`
+/// — see [`RV64_BASE_PARAMS`] for why this exists alongside an associated
+/// const would. A C-callable entry must seed this position with the halt
+/// sentinel (see `speet_recompile::frontend::halt_addr` and
+/// `docs/guides/thin-runtime-genericity.md` principle 4 in the `speet`
+/// repo) — RISC-V's `ret` (`jalr x0, ra, 0`) reads the return address
+/// directly from this register, the same register-based contract as
+/// AArch64's LR, unlike x86-64's memory-based return address.
+pub const RV64_RA_PARAM_INDEX: u32 = 1;
+
 pub struct RiscVRecompiler<
     'cb,
     'ctx,
@@ -590,6 +615,17 @@ where
     /// The number of wasm parameters in a translated function type with no
     /// traps installed (32 int regs + 32 float regs + PC + expected_RA = 66).
     pub const BASE_PARAMS: u32 = 66;
+
+    /// WASM param/local index of the guest SP register (`x2`, per the RISC-V
+    /// calling convention — it's an ordinary GPR here, unlike AArch64 where
+    /// SP needs a dedicated slot). Stable regardless of trap params, which
+    /// `setup_traps` always appends *after* `BASE_PARAMS`. A C-callable
+    /// entry must seed this argument position with a valid, freshly
+    /// allocated guest stack — guest registers are WASM params (see
+    /// `docs/guides/thin-runtime-genericity.md` in the `speet` repo), so an
+    /// externally-invoked entry function is only correctly callable if the
+    /// caller supplies real initial values for every one of them.
+    pub const SP_PARAM_INDEX: u32 = 2;
 
 
     /// **Phase 1** — register trap parameters and compute [`total_params`].

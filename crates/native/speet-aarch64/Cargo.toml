@@ -14,6 +14,7 @@ yecta = { path = "../../helper/yecta" }
 speet-traps = { path = "../../helper/speet-traps" }
 speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
+speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 
 [dev-dependencies]
 yecta = { path = "../../helper/yecta" }

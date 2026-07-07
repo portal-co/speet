@@ -1,6 +1,6 @@
 # Agent Guide — Speet Recompiler
 
-This file is a hub index. Each section links to a per-component guide in `docs/guides/` that documents design decisions which may look wrong or over-engineered at first glance. **Read the relevant guide before changing the component it covers.**
+This file is a hub index. Each section links to a per-component guide in `docs/guides/` that documents design decisions which may look wrong or over-engineered at first glance. **Read the relevant guide before changing the component it covers** — these guides exist because agents have previously made confident-looking edits that silently broke an invariant no test caught; skimming the code without the guide reproduces the same mistake, not a faster version of the right fix.
 
 See [docs/guides/README.md](docs/guides/README.md) for how guides work and what they are.
 
@@ -92,6 +92,19 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not conflate thin runtime with container megabinary — container is pure WASM with no host JIT; thin runtime produces native linked executables.
 - Do not bypass `HostApi` for guest→host calls — tunnelled-by-default is the Phase 0 contract.
 - Do not require macOS Xcode toolchain for link — LLVM `clang` + `lld` only.
+
+---
+
+## 9. Thin runtime genericity (`speet-recompile`, `speet-host-api`, `speet-plugin-api`, future `speet-abi-spec`/`speet-abi-codegen`)
+
+**Guide:** [docs/guides/thin-runtime-genericity.md](docs/guides/thin-runtime-genericity.md)
+
+- Do not hand-count a WASM import position (`N_IMPORTS`, `N_INTEGRATED_IMPORTS`, a `match name { "x" => 4, ... }` table) — allocate through `EntityIndexSpace`/`IndexSpace` and read `base()`/`total()` back; if two pieces of code need to agree on an index, share the same `IndexSpace`/manifest instance.
+- Do not intercept external/PLT calls by matching a `call`/`jmp`/`bl` instruction's resolved target — check the current decode PC against the address-to-label table at every slot, since a computed jump, jump table, or fallthrough can reach the same address.
+- Do not treat `unsupported_ops`/`unsupported_insns` as a correctness or suitability proof — it is a debugging/coverage signal only ("didn't immediately bail," not "translated correctly").
+- Scope policy for ABI-spec-generated redirect stubs (`speet-abi-codegen`): only generate-and-check-in stubs for genuinely cross-platform behavior plus a small, deliberately curated set of easily-ported per-OS surfaces (e.g. libSystem and other easily-ported macOS stubs, low-risk Linux stubs). Do not check in generated stubs for the entirety of any OS's API surface — each addition is a deliberate, individually reviewed inclusion, never a bulk import.
+- Every speet-emitted function shares one WASM type, `(registers) -> (registers)` — never `(registers) -> ()`. A guest `ret`/indirect return past the end of the translated set (most commonly `main` returning with no crt0 chain) is normal, not an error: it lands on a reserved **halt stub** (one slot past the last translated function) that surfaces the live register file as the call's results, the same way `crt0` calls `exit(main())`. Do not special-case this at runtime — the symmetric type is what lets `wasmparser::validate()` itself catch any code path that terminates without pushing the full register file first.
+- Do not compute a table/`call_indirect`/`return_call_indirect` index from a runtime register/memory value without adding the space's `base_func_offset` — the table's `elem` segment populates `[n_imports, n_imports + n_fns)`, not `[0, n_fns)`; omitting the offset is the "speet emission gap" (`uninitialized element N` traps, or silently the *wrong guest function*) any multi-function guest hits on its first register-indirect `ret`/`br`/`blr`/`jalr`.
 
 ---
 

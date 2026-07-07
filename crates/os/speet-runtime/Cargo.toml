@@ -9,6 +9,7 @@ binary-io = { path = "../../../../binary-io" }
 speet-host-api = { path = "../speet-host-api" }
 speet-host-syscall = { path = "../speet-host-syscall" }
 speet-recompile = { path = "../speet-recompile" }
+speet-riscv = { path = "../../native/speet-riscv" }
 speet-rt = { path = "../speet-rt" }
 tunnel = { path = "../../../../tunnel" }
 object = "0.36"

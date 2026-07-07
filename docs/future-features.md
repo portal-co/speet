@@ -9,5 +9,6 @@ Umbrella index for capabilities planned across **both** the container megabinary
 | ptrace emulation | [future/ptrace-emulation.md](future/ptrace-emulation.md) | Planned | Container vkernel + thin runtime |
 | execve interception | (thin-runtime-plan Phase 4+) | Planned | Thin runtime |
 | Cross-arch recompilation | (container-plan multi-arch) | Planned | Both |
+| ABI-spec redirect stubs | [future/abi-spec-redirects.md](future/abi-spec-redirects.md) | Planned | Thin runtime |
 
 When a feature ships, update its doc with the implementing crates and flip the status here.

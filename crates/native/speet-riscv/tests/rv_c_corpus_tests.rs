@@ -2,8 +2,8 @@
 
 use core::convert::Infallible;
 use rv_asm::Xlen;
-use speet_corpus_harness::{run_c_program_text, CorpusArch};
-use speet_link_core::ReactorAdapter;
+use speet_corpus_harness::{run_c_program_text, CorpusArch, N_CORPUS_IMPORTS};
+use speet_link_core::{BaseContext, ReactorAdapter};
 use speet_riscv::RiscVRecompiler;
 use std::path::Path;
 use wasm_encoder::{Function, ValType};
@@ -44,6 +44,11 @@ fn translate_riscv(text: &[u8], base: u64, xlen: Xlen) -> (Vec<Function>, Vec<Va
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
+    // Must match `assemble_corpus_module`'s import count — see the AArch64
+    // corpus test's identical comment for why this is load-bearing (RISC-V's
+    // own speculative-call indirect target, `JalrTargetSnippet`, already
+    // depends on it too).
+    rctx.set_base_func_offset(N_CORPUS_IMPORTS);
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
     recompiler

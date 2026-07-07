@@ -36,7 +36,11 @@ pub fn run_c_corpus_file_with_expected(
     wasmparser::validate(&wasm)
         .unwrap_or_else(|e| panic!("invalid wasm for {}: {e}", text_elf.display()));
 
-    let state = run_corpus_module(&wasm, "_start")
+    // Seed the halt sentinel (principle 4) so a guest `ret` past the end of
+    // the translated set — the normal case for these crt0-less corpus
+    // programs — lands on the reserved halt stub instead of on garbage.
+    let halt_addr = speet_recompile::frontend::halt_addr(base, text.len());
+    let state = run_corpus_module(&wasm, "_start", arch, halt_addr)
         .unwrap_or_else(|e| panic!("run {} failed: {e}", text_elf.display()));
 
     assert!(

@@ -18,7 +18,7 @@ use helpers::*;
 use disarm64::decoder_full::{
     ADDSUB_EXT, ADDSUB_IMM, ADDSUB_SHIFT, BITFIELD, BRANCH_IMM, BRANCH_REG,
     COMPBRANCH, CONDSEL, CONDBRANCH, DP_2SRC, DP_3SRC, EXCEPTION, IC_SYSTEM,
-    LDST_IMM9, LDST_POS, LDST_REGOFF, LDSTPAIR_INDEXED, LDSTPAIR_OFF,
+    LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF,
     LOG_IMM, LOG_SHIFT, MOVEWIDE, PCRELADDR,
     FLOAT2INT, FLOATCMP, FLOATDP1, FLOATDP2, FLOATDP3, FLOATIMM, FLOATSEL,
     Operation,
@@ -93,6 +93,17 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                     offset += 4;
                     continue;
                 }
+            }
+
+            // Check the *current* PC against the hook table before decoding
+            // anything else at this slot — a hooked address reached by
+            // fallthrough (rather than a `bl`/`b` whose target we resolved
+            // ourselves) still needs the same redirect. See
+            // `docs/guides/thin-runtime-genericity.md` principle 2.
+            if let Some(hook) = self.lookup_hook(pc).cloned() {
+                self.emit_hook_call_and_return(ctx, rctx, tail_idx, pc, &hook).map_err(|_| ())?;
+                offset += 4;
+                continue;
             }
 
             match opcode {
@@ -189,11 +200,15 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                     let info = JumpInfo::direct(pc, target, kind);
                     if rctx.on_jump(&info, ctx)? == TrapAction::Skip { return Ok(()); }
                 }
-                if is_bl {
-                    if let Some((import_idx, sym)) = self.lookup_plt_import(target) {
-                        self.emit_plt_import_call(ctx, rctx, tail_idx, import_idx, sym)?;
-                        return Ok(());
-                    }
+                // A tail-call `B` can reach a hooked PLT/external-call
+                // address just as validly as `BL` — see
+                // `docs/guides/thin-runtime-genericity.md` principle 2. `x30`
+                // still holds the *original* caller's return address either
+                // way (a bare `B` never touches it), so the same
+                // call-then-jump-to-lr sequence applies unchanged.
+                if let Some(hook) = self.lookup_hook(target).cloned() {
+                    self.emit_hook_call_and_return(ctx, rctx, tail_idx, pc, &hook)?;
+                    return Ok(());
                 }
                 match self.pc_to_func_idx(target) {
                     Some(f_idx) => rctx.jmp(ctx, tail_idx, f_idx, total)?,
@@ -222,7 +237,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                     if rctx.on_jump(&info, ctx)? == TrapAction::Skip { return Ok(()); }
                 }
 
-                let target_snippet = A64IndirectTarget { gpr_local, base_pc: self.base_pc };
+                let target_snippet = A64IndirectTarget {
+                    gpr_local,
+                    base_pc: self.base_pc,
+                    base_func_offset: rctx.base_func_offset(),
+                };
                 let params = JumpCallParams::indirect_jump(&target_snippet, total, rctx.pool());
                 rctx.ji_with_params(ctx, tail_idx, params)?;
             }
@@ -287,6 +306,13 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 
             // ── Scalar loads/stores — pre/post-index ──────────────────────────
             Operation::LDST_IMM9(ref i) => self.translate_ldst_imm9(ctx, rctx, tail_idx, i, mn)?,
+
+            // ── Scalar loads/stores — unscaled immediate (LDUR/STUR family) ────
+            // Compiler-emitted stack-frame accesses (spills, negative-offset
+            // locals/arrays relative to SP/FP) very commonly use this form
+            // rather than the scaled `LDST_POS` — any C program with a
+            // stack-allocated array or enough locals to spill will emit it.
+            Operation::LDST_UNSCALED(ref i) => self.translate_ldst_unscaled(ctx, rctx, tail_idx, i, mn)?,
 
             // ── Scalar loads/stores — register offset ─────────────────────────
             Operation::LDST_REGOFF(ref i) => self.translate_ldst_regoff(ctx, rctx, tail_idx, i, mn)?,

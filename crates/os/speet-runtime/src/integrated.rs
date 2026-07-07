@@ -111,8 +111,14 @@ impl IntegratedNativeRuntime {
         Ok(ArtifactCache::hash_input(&bytes))
     }
 
+    /// The manifest to translate/assemble/link against — always the actual
+    /// host's own `import_manifest()`, never a hardcoded
+    /// `ImportManifest::integrated_native()` assumption, so a differently
+    /// configured `HostApi` (e.g. one with a different host-capability set)
+    /// stays self-consistent across recompile, PLT-index resolution, and
+    /// link-shim generation. See `docs/guides/thin-runtime-genericity.md`.
     fn manifest(&self) -> ImportManifest {
-        ImportManifest::integrated_native()
+        self.host.import_manifest()
     }
 
     pub fn analyze_binary(&self, bin: &binary_io::LoadedBinary) -> SuitabilityReport {
@@ -147,6 +153,7 @@ impl IntegratedNativeRuntime {
         let start = text.addr;
         let targets = ExternalTargets::from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
+        let manifest = self.manifest();
 
         let (wasm, _unsupported) = match guest_arch {
             BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt(
@@ -154,10 +161,34 @@ impl IntegratedNativeRuntime {
                 start,
                 guest_arch,
                 Some(&plt_plan),
+                Some(bin.entry),
+                &manifest,
             ),
         };
         self.cache.put_wasm(&input_hash, wasm.clone());
         Ok(wasm)
+    }
+
+    /// Halt-sentinel guest address (see
+    /// `speet_recompile::frontend::halt_addr` and
+    /// `docs/guides/thin-runtime-genericity.md` principle 4) for `path`'s
+    /// `.text` span. Re-reads/re-parses the binary rather than threading
+    /// this through the wasm disk cache — mirrors [`Self::recompile_wasm`]'s
+    /// own section lookup; cheap relative to the recompile/compile/link
+    /// steps this always runs alongside.
+    fn halt_addr_for(&self, path: &Path) -> Result<u64, String> {
+        let bin = load_binary(path)?;
+        let text = bin
+            .sections
+            .iter()
+            .find(|s| {
+                s.name == ".text"
+                    || s.name == "__TEXT,__text"
+                    || s.name == "__text"
+                    || matches!(s.kind, binary_io::SectionKind::Text)
+            })
+            .ok_or_else(|| "no .text section".to_string())?;
+        Ok(speet_recompile::frontend::halt_addr(text.addr, text.data.len()))
     }
 
     fn compile_and_link(
@@ -202,12 +233,26 @@ impl IntegratedNativeRuntime {
         let exe = out_dir.join(format!("{cache_key}.exe"));
 
         let host = self.host.clone();
+        let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+        // Same-platform only (see `assert_same_platform` in `recompile_wasm`),
+        // so `self.out_arch` is also the guest arch here.
+        let sp_idx = speet_recompile::drive::sp_param_index(self.out_arch);
+        let lr_idx = speet_recompile::drive::lr_param_index(self.out_arch);
+        // Halt-sentinel address (see `docs/guides/thin-runtime-genericity.md`
+        // principle 4): re-derived from the original binary's `.text` span
+        // rather than threaded through the wasm cache, matching
+        // `recompile_wasm`'s own section lookup above.
+        let halt_addr = self.halt_addr_for(path)?;
         link_guest_integrated(
             tc,
             host.as_ref(),
             &obj,
             self.out_arch,
             self.out_os,
+            entry_param_count,
+            sp_idx,
+            halt_addr,
+            lr_idx,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;

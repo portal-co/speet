@@ -1,15 +1,15 @@
 [[triple]]
 name = "x86_64-linux-gnu"
-main_return = 40
+main_return = 46
 
 [[triple]]
 name = "aarch64-linux-gnu"
-main_return = 40
+main_return = 46
 
 [[triple]]
 name = "riscv32-unknown-linux-gnu"
-main_return = 40
+main_return = 46
 
 [[triple]]
 name = "riscv64-unknown-linux-gnu"
-main_return = 40
+main_return = 46

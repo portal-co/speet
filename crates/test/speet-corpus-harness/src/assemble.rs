@@ -14,13 +14,26 @@ pub const N_CORPUS_IMPORTS: u32 = 4;
 pub const TRAP_IMPORT_IDX: u32 = 3;
 
 /// Build a runnable module exporting `_start` at `entry_func_idx`.
+///
+/// Type 0 (the register-file type every translated function shares) is
+/// **symmetric** — `(registers) -> (registers)`, never `-> ()` — per
+/// `docs/guides/thin-runtime-genericity.md` principle 4 in the `speet`
+/// repo: "every speet-emitted function has type `(registers) -> (registers)`
+/// — no exceptions". A module appends one **halt stub** past the last
+/// translated function (see `speet_recompile::frontend::{build_halt_stub,
+/// halt_addr}`) so a guest `ret`/indirect return past the end of the
+/// translated set — e.g. `main` returning with no crt0 chain, the common
+/// case for this harness's `arith`/`pairs`/`frame` corpus programs — has
+/// somewhere to land that surfaces the live register file as the call's
+/// WASM results, instead of the previous `-> ()` type silently discarding
+/// the final return value.
 pub fn assemble_corpus_module(
     fns: &[Function],
     params: &[ValType],
     entry_func_idx: u32,
 ) -> Vec<u8> {
     let mut types = TypeSection::new();
-    types.ty().function(params.to_vec(), []);
+    types.ty().function(params.to_vec(), params.to_vec());
     types.ty().function([ValType::I32], []);
     types
         .ty()
@@ -37,13 +50,16 @@ pub fn assemble_corpus_module(
         wasm_encoder::EntityType::Function(3),
     );
 
+    let halt_stub = speet_recompile::frontend::build_halt_stub(params.len() as u32);
+
     let mut funcs = FunctionSection::new();
     for _ in fns {
         funcs.function(0);
     }
+    funcs.function(0); // halt stub: also type 0, (registers) -> (registers)
 
     let total = fns.len() as u32;
-    let table_size = N_CORPUS_IMPORTS + total;
+    let table_size = N_CORPUS_IMPORTS + total + 1;
     let mut tables = TableSection::new();
     tables.table(TableType {
         element_type: RefType::FUNCREF,
@@ -66,7 +82,7 @@ pub fn assemble_corpus_module(
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("_start", ExportKind::Func, entry_func_idx);
 
-    let indices: Vec<u32> = (N_CORPUS_IMPORTS..N_CORPUS_IMPORTS + total).collect();
+    let indices: Vec<u32> = (N_CORPUS_IMPORTS..N_CORPUS_IMPORTS + total + 1).collect();
     let mut elems = ElementSection::new();
     elems.active(
         Some(0),
@@ -78,6 +94,7 @@ pub fn assemble_corpus_module(
     for f in fns {
         code.function(f);
     }
+    code.function(&halt_stub);
 
     let mut module = Module::new();
     module.section(&types);

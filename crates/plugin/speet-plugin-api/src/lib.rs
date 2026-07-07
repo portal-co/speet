@@ -29,6 +29,7 @@ extern crate alloc;
 
 pub mod arch;
 pub mod error;
+pub mod external_target;
 pub mod imports;
 pub mod memory;
 pub mod object_model;
@@ -40,6 +41,10 @@ pub mod wire;
 
 pub use arch::ArchPlugin;
 pub use error::{PResult, PluginError};
+pub use external_target::{
+    CallingConvention, ExternalTargetEntry, ExternalTargetPlugin, ExternalTargetTable,
+    LibraryId, PltHook, PltHookTable,
+};
 pub use imports::HostImports;
 pub use memory::{AddressMapperPlugin, MemoryAccessPlugin};
 pub use object_model::ObjectModelPlugin;

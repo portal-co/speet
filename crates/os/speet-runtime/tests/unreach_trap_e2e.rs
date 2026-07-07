@@ -58,12 +58,20 @@ fn unreach_trap_logs_guest_pc() {
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("trap_guest");
     let host = integrated_host_api();
+    let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+    let sp_idx = speet_recompile::drive::sp_param_index(guest_arch);
+    let lr_idx = speet_recompile::drive::lr_param_index(guest_arch);
+    let halt_addr = speet_recompile::frontend::halt_addr(start, text.len());
     link_guest_integrated(
         &tc,
         &host,
         &obj,
         out_arch,
         out_os,
+        entry_param_count,
+        sp_idx,
+        halt_addr,
+        lr_idx,
         &dir.join("work"),
         &exe,
     )

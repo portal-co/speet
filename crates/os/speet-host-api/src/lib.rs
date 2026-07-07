@@ -11,7 +11,7 @@ mod registry;
 mod tunneled;
 
 pub use filtered::{FilteredHostApi, HostPolicy};
-pub use manifest::{FuncImport, ImportManifest, LinkRecipe};
+pub use manifest::{FuncImport, ImportManifest, LinkRecipe, WasmValType};
 pub use redirecting::{PltRedirect, RedirectingHostApi};
 pub use registry::HostApiRegistry;
 pub use tunneled::TunneledHostApi;
@@ -33,6 +33,19 @@ pub trait HostApi: Send + Sync {
     /// Compile-time redirect for a guest PLT/external symbol (integrated hooks).
     fn resolve_plt_redirect(&self, _guest_symbol: &str) -> Option<PltRedirect> {
         None
+    }
+
+    /// Whether this backend has a live host image to alias guest symbols
+    /// against at link time (`PltRedirect::Ambient`'s precondition) — e.g.
+    /// `TunneledHostApi::for_host()` links straight against the running
+    /// host's own libc/libSystem, so `true`. A backend targeting a
+    /// different or absent host image (a cross-compiled container target,
+    /// a sandboxed embedding with no ambient libc at all) must return
+    /// `false`: this is a compile-time construction fact about the
+    /// backend, never something to auto-detect at redirect-resolution
+    /// time. See `docs/thin-runtime-plan.md`'s "HostApi" section.
+    fn supports_ambient_linking(&self) -> bool {
+        false
     }
 
     /// Optional dynamic syscall dispatch for unknown numbers (vkernel path).

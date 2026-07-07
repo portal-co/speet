@@ -1,6 +1,6 @@
 //! Tunnelled-by-default host API.
 
-use crate::{HostApi, ImportManifest, LinkRecipe};
+use crate::{HostApi, ImportManifest, LinkRecipe, PltRedirect};
 use binary_io::{BinArch, BinOs};
 use tunnel::{dylib_link_flag, Tunnel, TunnelResolution};
 
@@ -54,6 +54,26 @@ impl HostApi for TunneledHostApi {
                 .collect(),
             ambient_aliases: self.tunnel.aliases(),
         }
+    }
+
+    /// Derived from `self.manifest`'s own `intercepts` lists (via
+    /// [`ImportManifest::resolve_intercept`]) — see
+    /// `docs/guides/thin-runtime-genericity.md` principle 1. A guest call
+    /// to a PLT stub whose target lies outside the recompiled `.text`
+    /// (any dynamically-imported libc symbol) needs *some* redirect to
+    /// stay resolvable; this is what makes `exit`/`write`/etc. resolvable
+    /// even for the plain (non-`RedirectingHostApi`-wrapped) default host.
+    fn resolve_plt_redirect(&self, guest_symbol: &str) -> Option<PltRedirect> {
+        let (module, name) = self.manifest.resolve_intercept(guest_symbol)?;
+        Some(PltRedirect::WasmImport { module: module.into(), name: name.into() })
+    }
+
+    /// `for_host()`/`new()` always link the recompiled guest straight
+    /// against the invoking host's own libc/libSystem image — the
+    /// Phase-0 "same-user, same-platform, explicit invocation" threat
+    /// model (`docs/thin-runtime-plan.md`).
+    fn supports_ambient_linking(&self) -> bool {
+        true
     }
 }
 

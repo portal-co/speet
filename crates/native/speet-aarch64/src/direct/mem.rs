@@ -3,7 +3,7 @@
 use crate::*;
 use super::helpers::*;
 use disarm64::decoder_full::{
-    LDST_IMM9, LDST_POS, LDST_REGOFF, LDSTPAIR_INDEXED, LDSTPAIR_OFF,
+    LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF,
 };
 use disarm64::decoder_full::Mnemonic;
 
@@ -27,11 +27,12 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         match inner {
             LDST_POS::LDR_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
+                let is64 = is_64bit_ldst(w);
+                let scale = if is64 { 8i64 } else { 4i64 };
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 8))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * scale))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?;
-                self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
+                self.emit_ldst_access(ctx, rctx, tail_idx, true, if is64 { 8 } else { 4 }, rd(w))?;
             }
             LDST_POS::LDRB_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
@@ -61,11 +62,12 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             }
             LDST_POS::STR_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
+                let is64 = is_64bit_ldst(w);
+                let scale = if is64 { 8i64 } else { 4i64 };
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 8))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * scale))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3)))?;
+                self.emit_ldst_access(ctx, rctx, tail_idx, false, if is64 { 8 } else { 4 }, rd(w))?;
             }
             LDST_POS::STRB_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
@@ -108,15 +110,17 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                      self.unsupported_insns.insert(alloc::format!("{:?}", mnemonic));
                      return Ok(()); }};
         }
-        // Each variant carries the raw word; we dispatch on load/store and width.
+        // Each variant carries the raw word; we dispatch on load/store and
+        // width. The bare `Rt` (no B/H/S-suffix) forms cover both 32- and
+        // 64-bit GPRs in one disarm64 variant — see `is_64bit_ldst`'s doc.
         let (w, is_load, load_width) = match inner {
-            LDST_IMM9::LDR_Rt_ADDR_SIMM9(x)   => (x.0, true,  8u8),
+            LDST_IMM9::LDR_Rt_ADDR_SIMM9(x)   => (x.0, true,  if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
             LDST_IMM9::LDRB_Rt_ADDR_SIMM9(x)  => (x.0, true,  1u8),
             LDST_IMM9::LDRH_Rt_ADDR_SIMM9(x)  => (x.0, true,  2u8),
             LDST_IMM9::LDRSB_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB1), // 1-byte signed
             LDST_IMM9::LDRSH_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB2), // 2-byte signed
             LDST_IMM9::LDRSW_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB4), // 4-byte signed
-            LDST_IMM9::STR_Rt_ADDR_SIMM9(x)   => (x.0, false, 8u8),
+            LDST_IMM9::STR_Rt_ADDR_SIMM9(x)   => (x.0, false, if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
             LDST_IMM9::STRB_Rt_ADDR_SIMM9(x)  => (x.0, false, 1u8),
             LDST_IMM9::STRH_Rt_ADDR_SIMM9(x)  => (x.0, false, 2u8),
             _ => unsup!(),
@@ -152,6 +156,50 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             self.emit_addr_reg_set(ctx, rctx, tail_idx, src_reg)?;
         }
+        Ok(())
+    }
+
+    // ── LDST_UNSCALED (LDUR/STUR — unscaled immediate, no writeback) ──────────
+    //
+    // Bit-identical operand layout to `LDST_IMM9` (Rn [9:5], imm9 [20:12],
+    // Rt [4:0]) but semantically simpler: always `addr = Rn + imm9`, access
+    // `[addr]`, and — unlike LDR/STR's `LDST_IMM9` encoding — *never* writes
+    // back to Rn (there is no pre/post-index form of LDUR/STUR).
+
+    pub(super) fn translate_ldst_unscaled<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        inner: &LDST_UNSCALED,
+        mnemonic: Mnemonic,
+    ) -> Result<(), E> {
+        macro_rules! unsup {
+            () => {{ rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                     self.unsupported_insns.insert(alloc::format!("{:?}", mnemonic));
+                     return Ok(()); }};
+        }
+        let (w, is_load, load_width) = match inner {
+            LDST_UNSCALED::LDUR_Rt_ADDR_SIMM9(x)   => (x.0, true,  if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
+            LDST_UNSCALED::LDURB_Rt_ADDR_SIMM9(x)  => (x.0, true,  1u8),
+            LDST_UNSCALED::LDURH_Rt_ADDR_SIMM9(x)  => (x.0, true,  2u8),
+            LDST_UNSCALED::LDURSB_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB1), // 1-byte signed
+            LDST_UNSCALED::LDURSH_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB2), // 2-byte signed
+            LDST_UNSCALED::LDURSW_Rt_ADDR_SIMM9(x) => (x.0, true,  0xB4), // 4-byte signed
+            LDST_UNSCALED::STUR_Rt_ADDR_SIMM9(x)   => (x.0, false, if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
+            LDST_UNSCALED::STURB_Rt_ADDR_SIMM9(x)  => (x.0, false, 1u8),
+            LDST_UNSCALED::STURH_Rt_ADDR_SIMM9(x)  => (x.0, false, 2u8),
+            _ => unsup!(),
+        };
+
+        let base_reg = rn(w);
+        let data_reg = rd(w);
+        let off      = imm9_signed(w);
+
+        self.emit_addr_reg_get(ctx, rctx, tail_idx, base_reg)?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(off))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
+        self.emit_ldst_access(ctx, rctx, tail_idx, is_load, load_width, data_reg)?;
         Ok(())
     }
 
@@ -224,13 +272,13 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                      return Ok(()); }};
         }
         let (w, is_load, load_width) = match inner {
-            LDST_REGOFF::LDR_Rt_ADDR_REGOFF(x)   => (x.0, true,  8u8),
+            LDST_REGOFF::LDR_Rt_ADDR_REGOFF(x)   => (x.0, true,  if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
             LDST_REGOFF::LDRB_Rt_ADDR_REGOFF(x)  => (x.0, true,  1u8),
             LDST_REGOFF::LDRH_Rt_ADDR_REGOFF(x)  => (x.0, true,  2u8),
             LDST_REGOFF::LDRSB_Rt_ADDR_REGOFF(x) => (x.0, true,  0xB1u8),
             LDST_REGOFF::LDRSH_Rt_ADDR_REGOFF(x) => (x.0, true,  0xB2u8),
             LDST_REGOFF::LDRSW_Rt_ADDR_REGOFF(x) => (x.0, true,  0xB4u8),
-            LDST_REGOFF::STR_Rt_ADDR_REGOFF(x)   => (x.0, false, 8u8),
+            LDST_REGOFF::STR_Rt_ADDR_REGOFF(x)   => (x.0, false, if is_64bit_ldst(x.0) { 8u8 } else { 4u8 }),
             LDST_REGOFF::STRB_Rt_ADDR_REGOFF(x)  => (x.0, false, 1u8),
             LDST_REGOFF::STRH_Rt_ADDR_REGOFF(x)  => (x.0, false, 2u8),
             _ => unsup!(),

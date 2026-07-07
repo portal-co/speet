@@ -34,9 +34,22 @@ struct ConditionSnippet {
     condition_type: ConditionType,
 }
 
-/// Snippet that computes function index from return address stored in local 23
+/// Snippet that computes a WASM table index from the return address stored
+/// in local 23:
+///   table_idx = (return_addr - base_rip) + base_func_offset
+///
+/// `base_func_offset` is **required**: the WASM table's `elem` segment
+/// populates indices `[n_imports, n_imports + n_fns)` (see
+/// `finish_module`/`assemble_corpus_module`), not `[0, n_fns)`. Omitting
+/// this offset makes every register-indirect `ret` target either an
+/// unpopulated (imports-reserved) table slot or the wrong guest function,
+/// off by exactly `base_func_offset` — the "speet emission gap" any
+/// multi-function guest hits on its first `ret`. See
+/// `docs/guides/thin-runtime-genericity.md` principle 1 and the AArch64
+/// analog, `A64IndirectTarget`, in `speet-aarch64`.
 struct ReturnAddressSnippet {
     base_rip: u64,
+    base_func_offset: u32,
 }
 
 /// Snippet for setting expected_ra to a constant return address in speculative calls
@@ -80,6 +93,9 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ReturnAddres
         // Subtract base_rip to get relative address: (return_addr - base_rip)
         sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
         sink.instruction(ctx, &Instruction::I64Sub)?;
+        // Shift into the WASM table's index space — see the struct doc.
+        sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
+        sink.instruction(ctx, &Instruction::I64Add)?;
 
         // Keep this as i64: indirect jump plumbing expects architecture state words.
         Ok(())
@@ -96,6 +112,8 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Retu
         sink.instruction(ctx, &Instruction::LocalGet(23))?;
         sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
         sink.instruction(ctx, &Instruction::I64Sub)?;
+        sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
+        sink.instruction(ctx, &Instruction::I64Add)?;
         Ok(())
     }
 }
@@ -339,32 +357,65 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
     }
 
-    fn lookup_plt_import(&self, target: u64) -> Option<(u32, &str)> {
-        let by_addr = self.plt_by_addr.as_ref()?;
-        let imports = self.plt_imports.as_ref()?;
-        let sym = by_addr.get(&target)?;
-        let idx = imports.get(sym)?;
-        Some((*idx, sym.as_str()))
+    fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
+        self.hooks.as_ref()?.lookup(target)
     }
 
-    fn emit_plt_import_call<F>(
-        &self,
+    /// Emit "make the redirected host call, then behave like a `ret`" for a
+    /// hooked guest address — correct regardless of whether it was reached
+    /// via `call` (which already pushed a return address before this runs)
+    /// or a tail `jmp` (whose caller's return address is still on top of
+    /// the guest stack from further up the call chain): either way, the
+    /// guest stack's top holds a valid return address at this point, so
+    /// popping it and jumping there is safe. See
+    /// `docs/guides/thin-runtime-genericity.md` principle 2 and
+    /// `speet_plugin_api::external_target::CallingConvention`.
+    fn emit_hook_call_and_return<F>(
+        &mut self,
         ctx: &mut Context,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         tail_idx: usize,
-        import_idx: u32,
-        symbol: &str,
-    ) -> Result<(), E> {
-        let args = match symbol.strip_prefix('_').unwrap_or(symbol) {
-            "execve" => [7u32, 6, 2], // RDI, RSI, RDX
-            _ => return Ok(()),
-        };
-        for local in args {
+        inst_ip: u64,
+        hook: &speet_plugin_api::external_target::PltHook,
+    ) -> Result<Option<()>, E> {
+        for (i, &local) in hook.convention.arg_locals.iter().enumerate() {
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
+            if hook.convention.wraps_i32(i) {
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+            }
         }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(0))?; // RAX
-        Ok(())
+        rctx.feed(ctx, tail_idx, &Instruction::Call(hook.import_idx))?;
+        if let Some(result_local) = hook.convention.result_local {
+            if hook.convention.result_extend_i32 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+            }
+            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(result_local))?;
+        }
+
+        // Pop the return address off the guest stack (RSP = local 4) and
+        // jump there via yecta's runtime-computed-target dispatch — the
+        // same mechanism `handle_ret`'s non-speculative path uses.
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
+        self.emit_memory_load(ctx, rctx, tail_idx, 64, false)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(23))?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Const(8))?;
+        rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
+        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
+        let return_addr_snippet = ReturnAddressSnippet {
+            base_rip: self.base_rip,
+            base_func_offset: rctx.base_func_offset(),
+        };
+        {
+            use crate::{JumpInfo, JumpKind, TrapAction};
+            let ret_info = JumpInfo::indirect(inst_ip, 23, JumpKind::Return);
+            if rctx.on_jump(&ret_info, ctx)? == TrapAction::Skip {
+                return Ok(Some(()));
+            }
+        }
+        let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, rctx.locals_mark().total_locals, rctx.pool());
+        rctx.ji_with_params(ctx, tail_idx, params)?;
+        Ok(Some(()))
     }
 
     fn init_function<F>(
@@ -1025,6 +1076,18 @@ impl<Context, E> X86Recompiler<Context, E> {
                     next_pos += 1;
                     continue;
                 }
+            }
+
+            // Check the *current* PC against the hook table before decoding
+            // anything else at this slot — a hooked address reached by
+            // fallthrough (rather than a `call`/`jmp` whose target we
+            // resolved ourselves) still needs the same redirect. See
+            // `docs/guides/thin-runtime-genericity.md` principle 2: this is
+            // a real address-space check, not an instruction-shape match.
+            if let Some(hook) = self.lookup_hook(inst_rip).cloned() {
+                self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst_rip, &hook)?;
+                next_pos += inst_len as usize;
+                continue;
             }
 
             let undecidable_option = (match inst.mnemonic() {
@@ -1918,7 +1981,7 @@ impl<Context, E> X86Recompiler<Context, E> {
         Ok(Some(()))
     }
 
-    fn handle_jmp<F>(&self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
+    fn handle_jmp<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let target = match inst.op0_kind() {
             // iced-x86's decoder already resolves this to the absolute
             // target (next_ip + sign-extended displacement) using the ip
@@ -1934,6 +1997,16 @@ impl<Context, E> X86Recompiler<Context, E> {
             if rctx.on_jump(&jmp_info, ctx)? == TrapAction::Skip {
                 return Ok(Some(()));
             }
+        }
+        // A tail-call `jmp` can reach a hooked PLT/external-call address
+        // just as validly as a `call` can — see
+        // `docs/guides/thin-runtime-genericity.md` principle 2. The guest
+        // stack's top still holds the *original* caller's return address
+        // (preserved through the tail-jmp chain, since a bare `jmp` never
+        // pushes its own), so the same call-then-pop-and-jump sequence
+        // applies unchanged.
+        if let Some(hook) = self.lookup_hook(target).cloned() {
+            return self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst.ip(), &hook);
         }
         let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
             rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
@@ -2280,9 +2353,8 @@ impl<Context, E> X86Recompiler<Context, E> {
                     return Ok(Some(()));
                 }
             }
-            if let Some((import_idx, sym)) = self.lookup_plt_import(target) {
-                self.emit_plt_import_call(ctx, rctx, tail_idx, import_idx, sym)?;
-                return Ok(Some(()));
+            if let Some(hook) = self.lookup_hook(target).cloned() {
+                return self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst.ip(), &hook);
             }
             let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
                 rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
@@ -2327,7 +2399,10 @@ impl<Context, E> X86Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(8 + stack_cleanup as i64))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
-            let return_addr_snippet = ReturnAddressSnippet { base_rip: self.base_rip };
+            let return_addr_snippet = ReturnAddressSnippet {
+                base_rip: self.base_rip,
+                base_func_offset: rctx.base_func_offset(),
+            };
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let ret_info = JumpInfo::indirect(inst.ip(), 23, JumpKind::Return);

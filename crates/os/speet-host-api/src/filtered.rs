@@ -98,6 +98,10 @@ impl<H: HostApi> HostApi for FilteredHostApi<H> {
         }
         self.inner.syscall(nr, args)
     }
+
+    fn supports_ambient_linking(&self) -> bool {
+        self.inner.supports_ambient_linking()
+    }
 }
 
 #[cfg(test)]

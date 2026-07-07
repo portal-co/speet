@@ -34,25 +34,38 @@ impl GuestPcRef {
     }
 }
 
-/// Module import index of `env.__speet_log_unreachable` (must match assembly order).
-pub const LOG_UNREACHABLE_IMPORT_IDX: u32 = 3;
-
 /// Patch every translated function before integrated module assembly.
-pub fn instrument_unreachable_logging(fns: &mut [Function], pc_ref: GuestPcRef) {
+///
+/// `log_unreachable_import_idx` must be the *actual* WASM import index of
+/// `env.__speet_log_unreachable` in the module this patch feeds into —
+/// callers derive it as `manifest.index_of("env", "__speet_log_unreachable")`
+/// (see `docs/guides/thin-runtime-genericity.md` principle 1: never
+/// hand-count this). `None` means the active manifest doesn't declare that
+/// import at all (e.g. a non-instrumented assembly path) — in that case
+/// `Unreachable` is left untouched rather than emitting a call to an import
+/// that doesn't exist.
+pub fn instrument_unreachable_logging(
+    fns: &mut [Function],
+    pc_ref: GuestPcRef,
+    log_unreachable_import_idx: Option<u32>,
+) {
+    let Some(import_idx) = log_unreachable_import_idx else {
+        return;
+    };
     for f in fns.iter_mut() {
         let raw = std::mem::replace(f, Function::new([])).into_raw_body();
-        *f = patch_function_body_bytes(&raw, pc_ref)
+        *f = patch_function_body_bytes(&raw, pc_ref, import_idx)
             .unwrap_or_else(|e| panic!("instrument unreachable: {e}"));
     }
 }
 
-fn patch_function_body_bytes(raw: &[u8], pc_ref: GuestPcRef) -> Result<Function, String> {
+fn patch_function_body_bytes(raw: &[u8], pc_ref: GuestPcRef, import_idx: u32) -> Result<Function, String> {
     let reader = wasmparser::BinaryReader::new(raw, 0);
     let body = FunctionBody::new(reader);
-    patch_function_body(body, pc_ref)
+    patch_function_body(body, pc_ref, import_idx)
 }
 
-fn patch_function_body(body: FunctionBody<'_>, pc_ref: GuestPcRef) -> Result<Function, String> {
+fn patch_function_body(body: FunctionBody<'_>, pc_ref: GuestPcRef, import_idx: u32) -> Result<Function, String> {
     let locals_reader = body.get_locals_reader().map_err(|e| e.to_string())?;
     let mut locals = Vec::new();
     let mut lr = locals_reader;
@@ -68,7 +81,7 @@ fn patch_function_body(body: FunctionBody<'_>, pc_ref: GuestPcRef) -> Result<Fun
         match op {
             Operator::Unreachable => {
                 pc_ref.emit_load_pc(&mut out);
-                out.instruction(&Instruction::Call(LOG_UNREACHABLE_IMPORT_IDX));
+                out.instruction(&Instruction::Call(import_idx));
                 out.instruction(&Instruction::Unreachable);
             }
             other => {
@@ -105,7 +118,7 @@ mod tests {
         f.instruction(&Instruction::Unreachable);
         f.instruction(&Instruction::End);
 
-        instrument_unreachable_logging(core::slice::from_mut(&mut f), GuestPcRef::LocalI64(16));
+        instrument_unreachable_logging(core::slice::from_mut(&mut f), GuestPcRef::LocalI64(16), Some(3));
 
         let raw = f.clone().into_raw_body();
         let reader = wasmparser::BinaryReader::new(&raw, 0);
@@ -123,5 +136,17 @@ mod tests {
             Operator::Call { function_index: 3 }
         ));
         assert!(matches!(ops.read().unwrap(), Operator::Unreachable));
+    }
+
+    #[test]
+    fn leaves_unreachable_untouched_when_manifest_has_no_log_import() {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        let before = f.clone().into_raw_body();
+
+        instrument_unreachable_logging(core::slice::from_mut(&mut f), GuestPcRef::LocalI64(16), None);
+
+        assert_eq!(f.into_raw_body(), before);
     }
 }

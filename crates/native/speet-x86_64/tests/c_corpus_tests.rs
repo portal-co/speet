@@ -1,8 +1,8 @@
 //! C compiler-output corpus tests (runtime unreachable-trap detection).
 
 use core::convert::Infallible;
-use speet_corpus_harness::{run_c_program_text, CorpusArch};
-use speet_link_core::ReactorAdapter;
+use speet_corpus_harness::{run_c_program_text, CorpusArch, N_CORPUS_IMPORTS};
+use speet_link_core::{BaseContext, ReactorAdapter};
 use speet_x86_64::X86Recompiler;
 use std::path::Path;
 use wasm_encoder::{Function, ValType};
@@ -41,6 +41,9 @@ fn translate_x86(text: &[u8], base: u64) -> (Vec<Function>, Vec<ValType>) {
     let mut ctx = ();
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
+    // Must match `assemble_corpus_module`'s import count — see the AArch64
+    // corpus test's identical comment for why this is load-bearing.
+    rctx.set_base_func_offset(N_CORPUS_IMPORTS);
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
     recompiler

@@ -40,8 +40,19 @@ fn corpus_rv64_to_x86_64_elf() {
     let dir = std::env::temp_dir().join(format!("speet_rt_xelf_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("guest");
-    rt.link_guest_object(&obj, BinArch::X86_64, BinOs::Linux, &exe)
-        .expect("link");
+    let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+    let halt_addr = speet_recompile::frontend::halt_addr(addr, text.len());
+    rt.link_guest_object(
+        &obj,
+        entry_param_count,
+        speet_riscv::RV64_SP_PARAM_INDEX,
+        halt_addr,
+        Some(speet_riscv::RV64_RA_PARAM_INDEX),
+        BinArch::X86_64,
+        BinOs::Linux,
+        &exe,
+    )
+    .expect("link");
     assert!(exe.exists());
     if cfg!(target_os = "linux") {
         let status = std::process::Command::new(&exe).status().expect("run");
@@ -98,8 +109,19 @@ fn corpus_link_only_x86_64_elf() {
     let dir = std::env::temp_dir().join(format!("speet_rt_link_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("linked");
-    rt.link_guest_object(&obj, BinArch::X86_64, BinOs::Linux, &exe)
-        .expect("link");
+    let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+    let halt_addr = speet_recompile::frontend::halt_addr(addr, text.len());
+    rt.link_guest_object(
+        &obj,
+        entry_param_count,
+        speet_riscv::RV64_SP_PARAM_INDEX,
+        halt_addr,
+        Some(speet_riscv::RV64_RA_PARAM_INDEX),
+        BinArch::X86_64,
+        BinOs::Linux,
+        &exe,
+    )
+    .expect("link");
     assert!(exe.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

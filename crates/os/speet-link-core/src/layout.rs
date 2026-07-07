@@ -62,7 +62,8 @@ impl IndexSpace {
     }
 }
 
-/// Unified pre-declaration covering all six WASM entity kinds.
+/// Unified pre-declaration covering all six WASM entity kinds, plus one
+/// backend-agnostic non-WASM kind (see [`host_capabilities`](Self::host_capabilities)).
 ///
 /// See `docs/entity-index-space.md`.
 #[derive(Default)]
@@ -73,6 +74,19 @@ pub struct EntityIndexSpace {
     pub tables:    IndexSpace,
     pub tags:      IndexSpace,
     pub globals:   IndexSpace,
+    /// Host-capability slots: places a guest can call into the host through.
+    /// Today's only backend realizes every slot as a WASM function import
+    /// (so its slots occupy WASM function indices `0..total()`, immediately
+    /// before `functions`' own indices, matching the WASM binary format's
+    /// "imports first" rule) — but the *registration/numbering* discipline
+    /// here is deliberately backend-agnostic: a future host-JIT (asm→asm,
+    /// no WASM module at all) backend can realize the same slots as
+    /// directly-injected native-call stubs instead. Never hand-count a
+    /// position (`N_IMPORTS`, a `match name { "x" => 4, ... }` table) for
+    /// this — `append()` a slot per capability (typically one per
+    /// `speet_host_api::FuncImport`, in manifest order) and read `base()`
+    /// back. See `docs/guides/thin-runtime-genericity.md` principle 1.
+    pub host_capabilities: IndexSpace,
 }
 
 impl EntityIndexSpace {
@@ -84,6 +98,7 @@ impl EntityIndexSpace {
             tables:    IndexSpace::empty(),
             tags:      IndexSpace::empty(),
             globals:   IndexSpace::empty(),
+            host_capabilities: IndexSpace::empty(),
         }
     }
 }

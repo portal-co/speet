@@ -87,10 +87,12 @@ pub struct X86Recompiler<Context, E> {
     /// Slot for XMM0–XMM15, stored as raw `i64` bit patterns (low 64 bits;
     /// scalar SSE only). FP handlers reinterpret around WASM FP ops.
     xmm_slot: yecta::LocalSlot,
-    /// Guest PLT address → external symbol name (compile-time hook table).
-    plt_by_addr: Option<alloc::collections::BTreeMap<u64, alloc::string::String>>,
-    /// Hooked symbol → WASM import function index.
-    plt_imports: Option<alloc::collections::BTreeMap<alloc::string::String, u32>>,
+    /// Guest-address → symbolic-label hook table (compile-time PLT/
+    /// external-call redirects). Shared type with `speet-aarch64` via
+    /// `speet_plugin_api::external_target` instead of each arch keeping
+    /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
+    /// `docs/guides/thin-runtime-genericity.md` principle 1.
+    hooks: Option<speet_plugin_api::external_target::PltHookTable>,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -130,19 +132,15 @@ impl<Context, E> X86Recompiler<Context, E> {
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
             memory_access: None,
-            plt_by_addr: None,
-            plt_imports: None,
+            hooks: None,
         }
     }
 
-    /// Redirect PLT/external calls to WASM imports (integrated runtime hooks).
-    pub fn set_plt_plan(
-        &mut self,
-        by_addr: alloc::collections::BTreeMap<u64, alloc::string::String>,
-        import_by_symbol: alloc::collections::BTreeMap<alloc::string::String, u32>,
-    ) {
-        self.plt_by_addr = Some(by_addr);
-        self.plt_imports = Some(import_by_symbol);
+    /// Install compile-time PLT/external-call hooks (integrated runtime).
+    /// Checked at every decode slot's PC, not just resolved `call`/`jmp`
+    /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
+    pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
+        self.hooks = Some(hooks);
     }
 
     /// Returns the set of instruction mnemonics that had no translation and
@@ -264,6 +262,18 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// 16 GPRs (i64) + PC (i32) + ZF + SF + CF + OF + PF (5×i32) + 4 temp i64s
     /// + expected_RA (i64) + 16 XMM (i64, locals 26–41) = 42.
     pub const BASE_PARAMS: u32 = 42;
+
+    /// WASM param/local index of RSP (register 4 in the x86-64 numbering the
+    /// `gpr_slot` uses — see the module doc's local-variable layout). Stable
+    /// regardless of trap params, which `setup_traps` always appends *after*
+    /// `BASE_PARAMS`. A C-callable entry (e.g. `speet-rt`'s shim) must seed
+    /// this argument position with a valid, freshly allocated guest stack —
+    /// guest registers are WASM params (see
+    /// `docs/guides/thin-runtime-genericity.md`), so an externally-invoked
+    /// entry function is only correctly callable if the caller supplies real
+    /// initial values for every one of them, not just whatever a bare C
+    /// prototype leaves as garbage.
+    pub const SP_PARAM_INDEX: u32 = 4;
 
     /// Local index of XMM0 (the XMM register file occupies locals 26–41).
     const XMM_BASE_LOCAL: u32 = 26;

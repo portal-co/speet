@@ -64,6 +64,68 @@ fn function_bodies(wasm: &[u8]) -> Vec<wasmparser::FunctionBody<'_>> {
     bodies
 }
 
+/// The WASM function index the module exports as `_start` — the guest's
+/// real entry point (see [`crate::frontend::Translated::entry_func_idx`]),
+/// not necessarily function 0. Falls back to `0` if the module doesn't
+/// export `_start` under that exact name (defensive; every module this
+/// backend actually receives is expected to, per `frontend::finish_module`).
+fn entry_export_func_idx(wasm: &[u8]) -> u32 {
+    for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
+        if let wasmparser::Payload::ExportSection(reader) = payload {
+            for exp in reader.into_iter().flatten() {
+                if exp.name == "_start" && matches!(exp.kind, wasmparser::ExternalKind::Func) {
+                    return exp.index;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Param count of the module's `_start` export's function type — i.e. the
+/// number of arguments a C caller must supply to call `__guest_entry`
+/// correctly (guest registers are WASM params; see
+/// `docs/guides/thin-runtime-genericity.md`). Falls back to `0` if the
+/// module doesn't export `_start`. Callers building the runtime shim
+/// combine this with the arch's `SP_PARAM_INDEX` constant (`speet_aarch64`/
+/// `speet_x86_64`) to seed a valid guest stack at the right argument
+/// position instead of leaving it as caller-side garbage.
+pub fn entry_param_count(wasm: &[u8]) -> u32 {
+    let entry_idx = entry_export_func_idx(wasm);
+    let (sigs, fsigs) = parse_sigs(wasm);
+    fsigs
+        .get(entry_idx as usize)
+        .and_then(|&ti| sigs.get(ti as usize))
+        .map(|t| t.params().len() as u32)
+        .unwrap_or(0)
+}
+
+/// The guest SP register's WASM param index for `arch` — see
+/// `speet_aarch64::AArch64Recompiler::SP_PARAM_INDEX` /
+/// `speet_x86_64::X86Recompiler::SP_PARAM_INDEX`. Callers building a
+/// C-callable entry bridge combine this with [`entry_param_count`] to seed a
+/// freshly allocated guest stack at the right argument position instead of
+/// leaving it as caller-side garbage — see
+/// `docs/guides/thin-runtime-genericity.md`.
+pub fn sp_param_index(arch: BinArch) -> u32 {
+    match arch {
+        BinArch::AArch64 => speet_aarch64::AArch64Recompiler::<(), ()>::SP_PARAM_INDEX,
+        BinArch::X86_64 => speet_x86_64::X86Recompiler::<(), ()>::SP_PARAM_INDEX,
+    }
+}
+
+/// The guest link-register's WASM param index for `arch`, or `None` for an
+/// arch whose `ret` reads the return address from guest memory rather than
+/// a dedicated register (x86-64) — see `speet_rt::entry_bridge_c`'s
+/// `lr_param_index` and `docs/guides/thin-runtime-genericity.md` principle
+/// 4 (the halt-sentinel contract this seeds).
+pub fn lr_param_index(arch: BinArch) -> Option<u32> {
+    match arch {
+        BinArch::AArch64 => Some(speet_aarch64::AArch64Recompiler::<(), ()>::LR_PARAM_INDEX),
+        BinArch::X86_64 => None,
+    }
+}
+
 /// Imported functions as `(module, name)` pairs, in import order. blitz renders
 /// a call to import `i` as the external symbol `{module}__{name}` and offsets
 /// internal function indices past the imports.
@@ -104,6 +166,12 @@ pub fn compile_wasm_to_object(
     let bodies = function_bodies(wasm);
     let imports = function_imports(wasm);
     let import_count = imports.len() as u32;
+    // Internal (post-import) function index of the module's real entry —
+    // see `entry_export_func_idx`. Do NOT assume `_start` is always
+    // function 0: a linked binary's `.text` commonly holds several
+    // functions ahead of the one at the actual entry address (see
+    // `docs/guides/thin-runtime-genericity.md` principle 2).
+    let entry_func_idx = entry_export_func_idx(wasm).saturating_sub(import_count);
     let raw_ops =
         mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs, import_count);
     let ops = dce_pass!(raw_ops);
@@ -130,11 +198,11 @@ pub fn compile_wasm_to_object(
     match arch {
         BinArch::AArch64 => compile_aarch64(
             ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os,
+            &sig_results, arch, os, entry_func_idx,
         ),
         BinArch::X86_64 => compile_x86_64(
             ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os,
+            &sig_results, arch, os, entry_func_idx,
         ),
     }
 }
@@ -303,10 +371,11 @@ fn compile_aarch64<'a>(
     sig_results: &[u32],
     arch: BinArch,
     os: BinOs,
+    entry_func_idx: u32,
 ) -> Result<Vec<u8>, String> {
     use portal_solutions_asm_aarch64::out::bin::{AsmRelocKind, AArch64Writer};
     use portal_solutions_asm_aarch64::out::Writer as _;
-    use portal_solutions_blitz_aarch64::{naive, sysv, AArch64Arch, AArch64Label};
+    use portal_solutions_blitz_aarch64::{sysv, AArch64Arch, AArch64Label};
 
     impl LabelName for AArch64Label {
         fn label_sym(&self) -> LabelSym {
@@ -330,11 +399,16 @@ fn compile_aarch64<'a>(
     let mut out = AArch64Writer::<AArch64Label>::new();
     let mut ctx = ();
     let archc = AArch64Arch::default();
-    let mut state = naive::State::default();
-    state.mem_base = naive::MemBase::WasmMemSymbol;
+    // `sysv::{SysVState, CallAbi, MemBase}`, not `naive::*` — the "naive"
+    // module is slated for deprecation and is a frequent source of ABI
+    // confusion (see `docs/naive-abi-deprecation.md` in `wasm-blitz`); its
+    // `State`/`CallAbi` are what `SysVWriterExt` actually configures to
+    // produce genuinely C-callable AAPCS64 code, despite the module name.
+    let mut state = sysv::SysVState::default();
+    state.mem_base = sysv::MemBase::WasmMemSymbol;
     // Marshal the full guest register file per AAPCS64 (X0-X7 then stack), matching
     // the SysV prologue, so inter-function tail calls thread all params correctly.
-    state.call_abi = naive::CallAbi::AllStack;
+    state.call_abi = sysv::CallAbi::AllStack;
     state.n_imports = n_imports;
     state.call_params = call_params.to_vec();
     state.call_results = call_results.to_vec();
@@ -342,12 +416,20 @@ fn compile_aarch64<'a>(
     state.sig_results = sig_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
-    // Export the entry (func 0) at offset 0.
-    out.set_label(&mut ctx, archc, AArch64Label::External { name: GUEST_ENTRY.into() })
-        .map_err(|e| format!("set_label: {e:?}"))?;
-
+    // Export the guest entry at the *actual* entry function's offset —
+    // never unconditionally function 0 (`_start` names which function that
+    // is; see `entry_export_func_idx`/`docs/guides/thin-runtime-genericity.md`
+    // principle 2). Watch for `StartFn { id, .. }` matching `entry_func_idx`
+    // and place the label right there, before that function's code is
+    // emitted.
     for op in ops {
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
+        if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
+            if *id == entry_func_idx {
+                out.set_label(&mut ctx, archc, AArch64Label::External { name: GUEST_ENTRY.into() })
+                    .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+        }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
             &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
         )
@@ -382,6 +464,7 @@ fn compile_x86_64<'a>(
     sig_results: &[u32],
     arch: BinArch,
     os: BinOs,
+    entry_func_idx: u32,
 ) -> Result<Vec<u8>, String> {
     use portal_solutions_asm_x86_64::out::iced::{AsmRelocKind, IcedWriter};
     use portal_solutions_asm_x86_64::out::Writer as _;
@@ -407,7 +490,7 @@ fn compile_x86_64<'a>(
     let mut ctx = ();
     let archc = X64Arch::default();
     let mut state = sysv::SysVState::default();
-    state.mem_base = portal_solutions_blitz_x86_64::naive::MemBase::WasmMemSymbol;
+    state.mem_base = sysv::MemBase::WasmMemSymbol;
     // Use the all-on-stack inter-function ABI so the per-instruction register-file
     // threading round-trips; import calls still use the C ABI (register args).
     state.call_abi = sysv::CallAbi::AllStack;
@@ -418,11 +501,16 @@ fn compile_x86_64<'a>(
     state.sig_results = sig_results.to_vec();
     let mut reencoder = RoundtripReencoder;
 
-    out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })
-        .map_err(|e| format!("set_label: {e:?}"))?;
-
+    // See the matching comment in `compile_aarch64`: `_start` (not
+    // necessarily function 0) names the real entry.
     for op in ops {
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
+        if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
+            if *id == entry_func_idx {
+                out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })
+                    .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+        }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
             &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
         )

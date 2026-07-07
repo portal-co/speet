@@ -2842,6 +2842,88 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             }
         }
     }
+    /// Seal every function in `reachable` with a `return_call` to
+    /// `wasm_func_idx`, then purge those indices from the lens queue and
+    /// from every live entry's predecessor set. Shared by [`jmp`](Self::jmp)
+    /// (the normal direct-tail-call path) and the cycle branch of
+    /// [`add_pred_checked`](Self::add_pred_checked).
+    fn seal_reachable_with_return_call(
+        &self,
+        ctx: &mut Context,
+        reachable: &BTreeSet<FuncIdx>,
+        wasm_func_idx: u32,
+        params: u32,
+    ) -> Result<(), E> {
+        if reachable.is_empty() {
+            return Ok(());
+        }
+        let mut lock = self.lock_global();
+        let mut plock = self.local_pool.lock();
+        for &FuncIdx(k_idx) in reachable {
+            let f = &mut lock[k_idx as usize];
+            if f.sealed {
+                continue;
+            }
+            _ = take(&mut f.preds);
+            f.transitive_preds = None;
+            f.close_call_region(ctx)?;
+            let stores: Vec<LazyStore> = f.bundles.drain(..).collect();
+            for s in stores {
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
+                f.function.instruction(ctx, &Instruction::I32Eqz)?;
+                f.function
+                    .instruction(ctx, &Instruction::If(BlockType::Empty))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
+                f.function
+                    .instruction(ctx, &Instruction::LocalGet(s.val_local))?;
+                f.function.instruction(ctx, &s.instr)?;
+                f.function.instruction(ctx, &Instruction::End)?;
+                plock.free(s.addr_local, s.addr_type);
+                plock.free(s.val_local, s.val_type);
+                plock.free(s.emitted_local, ValType::I32);
+            }
+            for p in 0..params {
+                f.function.instruction(ctx, &Instruction::LocalGet(p))?;
+            }
+            f.function
+                .instruction(ctx, &Instruction::ReturnCall(wasm_func_idx))?;
+            let ifs = f.if_stmts;
+            for _ in 0..ifs {
+                f.function.instruction(ctx, &Instruction::End)?;
+            }
+            if ifs > 0 {
+                f.function.instruction(ctx, &Instruction::Unreachable)?;
+            }
+            f.function.instruction(ctx, &Instruction::End)?;
+            f.sealed = true;
+            f.opt.reset();
+        }
+        drop(plock);
+        drop(lock);
+        {
+            let mut lens = self.lens.lock();
+            for bucket in lens.iter_mut() {
+                bucket.retain(|fi, _| !reachable.contains(fi));
+            }
+        }
+        {
+            let mut lock = self.lock_global();
+            for (i, entry) in lock.iter_mut().enumerate() {
+                if reachable.contains(&FuncIdx(i as u32)) {
+                    continue;
+                }
+                let before = entry.preds.len();
+                entry.preds.retain(|fi, _| !reachable.contains(fi));
+                if entry.preds.len() != before {
+                    entry.transitive_preds = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Add a predecessor edge with cycle detection.
     /// If a cycle is detected, converts to return calls instead.
     fn add_pred_checked(
@@ -2856,83 +2938,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         // Use the per-entry transitive predecessor cache for the cycle check.
         let cycle = self.transitive_preds_of(pred_idx as usize).contains(&succ);
         if cycle {
-            let mut lock = self.lock_global();
-            let mut plock = self.local_pool.lock();
-            // Clone the set so we can mutate fns while iterating.
-            let pred_transitive: BTreeSet<FuncIdx> =
-                lock[pred_idx as usize].transitive_preds.clone().unwrap();
+            let pred_transitive: BTreeSet<FuncIdx> = self
+                .lock_entry(pred_idx as usize, true)
+                .transitive_preds
+                .clone()
+                .unwrap();
             let FuncIdx(succ_idx) = succ;
             let wasm_func_idx = succ_idx + self.base_func_offset;
-            for k in &pred_transitive {
-                let FuncIdx(k_idx) = *k;
-                let f = &mut lock[k_idx as usize];
-                _ = take(&mut f.preds);
-                f.transitive_preds = None; // invalidate after severing preds
-                // Drain deferred stores: emit the flag-guarded unconditional flush.
-                // We can't borrow `self.local_pool` and `f` simultaneously so we
-                // drain into a local vec first.
-                let stores: Vec<LazyStore> = f.bundles.drain(..).collect();
-                for s in stores {
-                    // Emit only if not already emitted before a load.
-                    f.function
-                        .instruction(ctx, &Instruction::LocalGet(s.emitted_local))?;
-                    f.function.instruction(ctx, &Instruction::I32Eqz)?;
-                    f.function
-                        .instruction(ctx, &Instruction::If(BlockType::Empty))?;
-                    f.function
-                        .instruction(ctx, &Instruction::LocalGet(s.addr_local))?;
-                    f.function
-                        .instruction(ctx, &Instruction::LocalGet(s.val_local))?;
-                    f.function.instruction(ctx, &s.instr)?;
-                    f.function.instruction(ctx, &Instruction::End)?;
-                    // Return locals to the pool.
-                    plock.free(s.addr_local, s.addr_type);
-                    plock.free(s.val_local, s.val_type);
-                    plock.free(s.emitted_local, ValType::I32);
-                }
-                for p in 0..params {
-                    f.function.instruction(ctx, &Instruction::LocalGet(p))?;
-                }
-                f.function
-                    .instruction(ctx, &Instruction::ReturnCall(wasm_func_idx))?;
-                let ifs = f.if_stmts; // each entry closes its own open If frames
-                for _ in 0..ifs {
-                    f.function.instruction(ctx, &Instruction::End)?;
-                }
-                // Every `If`/`Else` in this codebase declares `BlockType::Empty`,
-                // so each if-closing `End` above resumes "reachable" mode
-                // with zero values, regardless of the divergent `ReturnCall`
-                // before them — WASM's unreachable-polymorphism does not
-                // survive past a structured block's own `End`. Re-assert
-                // unreachable immediately before the function's own closing
-                // `End` so it's satisfied even when the function's declared
-                // result type is non-empty (the register-file ABI).
-                f.function.instruction(ctx, &Instruction::Unreachable)?;
-                // Close the function body's implicit outer block.
-                f.function.instruction(ctx, &Instruction::End)?;
-                f.sealed = true;
-            }
-            // Purge the sealed functions from the lens queue.
-            drop(lock);  // release global lock before acquiring lens lock
-            {
-                let mut lens = self.lens.lock();
-                for bucket in lens.iter_mut() {
-                    bucket.retain(|fi, _| !pred_transitive.contains(fi));
-                }
-            }
-            // Remove sealed entries from every live entry's preds set so future
-            // transitive_preds_of traversals cannot walk into sealed ancestors.
-            {
-                let mut lock = self.lock_global();
-                for (i, entry) in lock.iter_mut().enumerate() {
-                    if pred_transitive.contains(&FuncIdx(i as u32)) { continue; }
-                    let before = entry.preds.len();
-                    entry.preds.retain(|fi, _| !pred_transitive.contains(fi));
-                    if entry.preds.len() != before {
-                        entry.transitive_preds = None;
-                    }
-                }
-            }
+            self.seal_reachable_with_return_call(ctx, &pred_transitive, wasm_func_idx, params)?;
         } else {
             self.add_pred(succ, pred, exit);
         }
@@ -3619,12 +3632,14 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         };
         self.seal_to(tail_idx, ctx, &i)
     }
-    /// Emit an unconditional jump to the target function.
-    /// This creates control flow edges from all active functions to the target.
+    /// Emit an unconditional tail call to `target`, sealing every function in
+    /// the current reachable group with `return_call` and purging the stale
+    /// fall-through edge this slot registered in `lens` during `next_with`.
     ///
-    /// # Arguments
-    /// * `target` - The function index to jump to
-    /// * `params` - Number of parameters to pass
+    /// Unlike recording a predecessor edge (which would fan subsequent callee
+    /// instructions back into the caller via `feed_to`), this is the correct
+    /// lowering for guest `b`/`bl`/`jmp`/`call` — the caller dispatches to
+    /// the callee and does not inline it.
     pub fn jmp(
         &self,
         target_idx: usize,
@@ -3632,14 +3647,38 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         target: FuncIdx,
         params: u32,
     ) -> Result<(), E> {
-        // Use the per-entry transitive predecessor cache instead of a BFS.
-        // Every edge created here uses `SOLE_EXIT`: the faithful lowering gives
-        // each function a single (tail) exit.
+        self.flush_bundles(ctx, target_idx)?;
+        self.flush_const_stacks_reachable(ctx, target_idx)?;
         let reachable = self.transitive_preds_of(target_idx).clone();
-        for x in reachable {
-            self.add_pred_checked(ctx, target, x, params, SOLE_EXIT)?;
+        let FuncIdx(succ_idx) = target;
+        let wasm_func_idx = succ_idx + self.base_func_offset;
+        // `next_with` unconditionally pre-registers *every* slot as a
+        // predecessor of "whatever slot gets created `len` steps from now"
+        // (the speculative fall-through edge that makes straight-line runs
+        // of non-branching instructions merge into one WASM function — see
+        // `docs/guides/yecta.md` §1c) *before* the instruction occupying
+        // this slot is even decoded. `jmp` is called precisely when that
+        // guess turns out wrong: this slot's real (and, per `SOLE_EXIT`,
+        // *only*) successor is `target`, not "whatever comes next in
+        // program order" (a guest `bl`/unconditional `b`/`ret`/`br`/`blr`
+        // never actually falls through). Left unpurged, the stale
+        // fall-through edge stays live in `self.lens`, so the *next* slot's
+        // own `next_with` call still adopts `target_idx` as one of its
+        // predecessors — silently merging the never-taken fall-through
+        // path's instructions into this function's body right alongside
+        // (and with no ordering relationship to) the real jump/call, which
+        // is a correctness bug, not a missed optimization: it makes an
+        // unconditional call to a real callee that returns look, to this
+        // function, like straight-line code that runs *instead of*
+        // dispatching to the callee at all.
+        {
+            let mut lens = self.lens.lock();
+            let stale = FuncIdx(target_idx as u32);
+            for bucket in lens.iter_mut() {
+                bucket.remove(&stale);
+            }
         }
-        Ok(())
+        self.seal_reachable_with_return_call(ctx, &reachable, wasm_func_idx, params)
     }
 
     /// Feed an instruction to all active functions.

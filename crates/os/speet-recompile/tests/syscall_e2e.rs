@@ -55,8 +55,19 @@ fn pipeline_reaches_linked_binary() {
     let dir = std::env::temp_dir().join(format!("speet_scl_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("exe");
-    rt.link_guest_object(&obj, BinArch::X86_64, BinOs::MacOs, &exe)
-        .expect("link");
+    let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+    let halt_addr = speet_recompile::frontend::halt_addr(0x1000, EXIT_42.len());
+    rt.link_guest_object(
+        &obj,
+        entry_param_count,
+        speet_riscv::RV64_SP_PARAM_INDEX,
+        halt_addr,
+        Some(speet_riscv::RV64_RA_PARAM_INDEX),
+        BinArch::X86_64,
+        BinOs::MacOs,
+        &exe,
+    )
+    .expect("link");
     assert!(exe.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

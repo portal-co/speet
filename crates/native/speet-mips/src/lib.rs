@@ -78,11 +78,21 @@ enum BranchOp {
     GeZ,
 }
 
-// Shared snippet to compute table index for indirect jumps
-// idx = ((reg_value & ~3) - base_pc) >> 2
+// Shared snippet to compute a WASM table index for indirect jumps:
+//   table_idx = ((reg_value & ~3) - base_pc) >> 2 + base_func_offset
+//
+// `base_func_offset` is required, not optional: the WASM table's `elem`
+// segment populates indices `[n_imports, n_imports + n_fns)`, not
+// `[0, n_fns)` (see `speet-recompile`'s `finish_module`). Omitting it here
+// makes every `JR`/`JALR` target either an unpopulated (imports-reserved)
+// slot or the wrong guest function, off by exactly `base_func_offset` — the
+// "speet emission gap" (see `docs/guides/thin-runtime-genericity.md`
+// principle 1) that AArch64's `A64IndirectTarget` and x86-64's
+// `ReturnAddressSnippet` fix the same way.
 struct TableIndexSnippet {
     rs_local: u32,
     base_pc: u32,
+    base_func_offset: u32,
 }
 
 impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for TableIndexSnippet {
@@ -98,6 +108,8 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Tabl
         sink.instruction(ctx, &WasmInstruction::I32Sub)?;
         sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
         sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
+        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_func_offset as i32))?;
+        sink.instruction(ctx, &WasmInstruction::I32Add)?;
         // The call-indirect table is table64 — its index operand must be i64
         // (see speet-x86_64's `ReturnAddressSnippet`: "indirect jump plumbing
         // expects architecture state words").
@@ -119,6 +131,8 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for TableIndexSn
         sink.instruction(ctx, &WasmInstruction::I32Sub)?;
         sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
         sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
+        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_func_offset as i32))?;
+        sink.instruction(ctx, &WasmInstruction::I32Add)?;
         sink.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
         Ok(())
     }
@@ -1891,6 +1905,7 @@ where
                 let snippet = TableIndexSnippet {
                     rs_local: self.gpr_to_local(rs, rctx.layout()),
                     base_pc: self.base_pc,
+                    base_func_offset: rctx.base_func_offset(),
                 };
                 let params =
                     yecta::JumpCallParams::indirect_jump(&snippet, rctx.locals_mark().total_locals, rctx.pool());
@@ -1926,6 +1941,7 @@ where
                 let snippet = TableIndexSnippet {
                     rs_local: self.gpr_to_local(rs, rctx.layout()),
                     base_pc: self.base_pc,
+                    base_func_offset: rctx.base_func_offset(),
                 };
                 let params =
                     yecta::JumpCallParams::indirect_jump(&snippet, rctx.locals_mark().total_locals, rctx.pool());

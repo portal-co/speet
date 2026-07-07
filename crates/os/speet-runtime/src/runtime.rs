@@ -7,7 +7,11 @@ use binary_io::{BinArch, BinOs};
 use object::Object;
 use speet_host_api::HostApi;
 use speet_recompile::drive::compile_wasm_to_object;
-use speet_recompile::frontend::{assert_same_platform, recompile_rv64_to_wasm, recompile_to_wasm};
+use speet_recompile::frontend::{
+    assert_same_platform, recompile_rv64_to_wasm, recompile_to_wasm, recompile_to_wasm_instrumented_plt,
+    ExternalTargets,
+};
+use speet_recompile::plt::PltCallPlan;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
@@ -81,21 +85,65 @@ impl Runtime {
         let wasm = self.recompile_rv64_text(text, start_addr);
         validate_wasm(&wasm)?;
         let obj = self.compile_to_object(&wasm, arch, os)?;
-        self.link_and_run(&obj, arch, os)
+        // Guest is RV64 regardless of `arch` (the native *output* target) —
+        // its SP/RA positions come from the RV64 frontend, not from `arch`.
+        self.link_and_run(
+            &obj,
+            speet_recompile::drive::entry_param_count(&wasm),
+            speet_riscv::RV64_SP_PARAM_INDEX,
+            speet_recompile::frontend::halt_addr(start_addr, text.len()),
+            Some(speet_riscv::RV64_RA_PARAM_INDEX),
+            arch,
+            os,
+        )
     }
 
     /// Load a host binary from disk, recompile its `.text`, and run.
+    ///
+    /// Prefers the full [`load_binary`] path (which surfaces
+    /// `bin.imports`, and therefore lets PLT/external calls — any
+    /// dynamically-linked libc symbol, e.g. `exit`, whose real target
+    /// address lies outside the recompiled `.text` — actually resolve via
+    /// [`PltCallPlan`]/[`HostApi::resolve_plt_redirect`]) and only falls
+    /// back to the raw `.text`-only [`load_text_from_object`] extraction
+    /// for inputs `load_binary` can't parse as a complete binary (e.g. a
+    /// bare relocatable corpus object with no dynamic-import metadata at
+    /// all). See `docs/guides/thin-runtime-genericity.md` principle 2 —
+    /// skipping the PLT plan here silently drops every guest external
+    /// call, which previously surfaced as a guest crash with no exit
+    /// status rather than a translation error.
     pub fn recompile_binary_and_run(
         &mut self,
         path: &Path,
         arch: BinArch,
         os: BinOs,
     ) -> Result<ExitStatus, String> {
-        if let Ok((text, start)) = load_text_from_object(path) {
-            let guest_arch = guest_arch_from_object_path(path)?;
-            let wasm = match guest_arch {
+        if let Ok(bin) = load_binary(path) {
+            assert_same_platform(&bin)?;
+            let text = bin
+                .sections
+                .iter()
+                .find(|s| {
+                    s.name == ".text"
+                        || s.name == "__TEXT,__text"
+                        || s.name == "__text"
+                        || matches!(s.kind, binary_io::SectionKind::Text)
+                })
+                .ok_or_else(|| "no .text section".to_string())?;
+            let start = text.addr;
+            let targets = ExternalTargets::from_imports(&bin.imports);
+            let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
+            let manifest = self.host.import_manifest();
+            let wasm = match bin.arch {
                 BinArch::X86_64 | BinArch::AArch64 => {
-                    let (w, unsupported) = recompile_to_wasm(&text, start, guest_arch);
+                    let (w, unsupported) = recompile_to_wasm_instrumented_plt(
+                        &text.data,
+                        start,
+                        bin.arch,
+                        Some(&plt_plan),
+                        Some(bin.entry),
+                        &manifest,
+                    );
                     if !unsupported.is_empty() {
                         eprintln!("recompile unsupported: {:?}", unsupported);
                     }
@@ -104,20 +152,18 @@ impl Runtime {
             };
             validate_wasm(&wasm)?;
             let obj = self.compile_to_object(&wasm, arch, os)?;
-            return self.link_and_run(&obj, arch, os);
+            let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
+            let sp_idx = speet_recompile::drive::sp_param_index(bin.arch);
+            let halt_addr = speet_recompile::frontend::halt_addr(start, text.data.len());
+            let lr_idx = speet_recompile::drive::lr_param_index(bin.arch);
+            return self.link_and_run(&obj, entry_param_count, sp_idx, halt_addr, lr_idx, arch, os);
         }
 
-        let bin = load_binary(path)?;
-        assert_same_platform(&bin)?;
-        let text = bin
-            .sections
-            .iter()
-            .find(|s| s.name == ".text" || s.name == "__TEXT,__text")
-            .ok_or_else(|| "no .text section".to_string())?;
-        let start = text.addr;
-        let wasm = match bin.arch {
+        let (text, start) = load_text_from_object(path)?;
+        let guest_arch = guest_arch_from_object_path(path)?;
+        let wasm = match guest_arch {
             BinArch::X86_64 | BinArch::AArch64 => {
-                let (w, unsupported) = recompile_to_wasm(&text.data, start, bin.arch);
+                let (w, unsupported) = recompile_to_wasm(&text, start, guest_arch);
                 if !unsupported.is_empty() {
                     eprintln!("recompile unsupported: {:?}", unsupported);
                 }
@@ -126,7 +172,15 @@ impl Runtime {
         };
         validate_wasm(&wasm)?;
         let obj = self.compile_to_object(&wasm, arch, os)?;
-        self.link_and_run(&obj, arch, os)
+        self.link_and_run(
+            &obj,
+            speet_recompile::drive::entry_param_count(&wasm),
+            speet_recompile::drive::sp_param_index(guest_arch),
+            speet_recompile::frontend::halt_addr(start, text.len()),
+            speet_recompile::drive::lr_param_index(guest_arch),
+            arch,
+            os,
+        )
     }
 
     /// Corpus helper: load `.elf`/`.macho` object, extract `.text`, run RV64 path.
@@ -135,7 +189,24 @@ impl Runtime {
         self.recompile_rv64_and_run(&text, addr, arch, os)
     }
 
-    pub fn link_and_run(&self, guest_obj: &[u8], arch: BinArch, os: BinOs) -> Result<ExitStatus, String> {
+    /// `entry_param_count`/`sp_param_index` describe `__guest_entry`'s real
+    /// WASM signature (guest registers are WASM params — see
+    /// `speet_recompile::drive::{entry_param_count, sp_param_index}` for the
+    /// same-arch case, or the matching frontend's own constant otherwise),
+    /// needed so the entry bridge calls it with a C-ABI-correct argument
+    /// list instead of leaving guest registers (SP in particular) as
+    /// caller-side garbage. See `docs/guides/thin-runtime-genericity.md`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn link_and_run(
+        &self,
+        guest_obj: &[u8],
+        entry_param_count: u32,
+        sp_param_index: u32,
+        halt_addr: u64,
+        lr_param_index: Option<u32>,
+        arch: BinArch,
+        os: BinOs,
+    ) -> Result<ExitStatus, String> {
         let tc = self
             .toolchain
             .as_ref()
@@ -143,7 +214,10 @@ impl Runtime {
         let dir = std::env::temp_dir().join(format!("speet_rt_{}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let exe = dir.join("guest_exe");
-        link_guest(tc, self.host.as_ref(), guest_obj, arch, os, &dir, &exe)?;
+        link_guest(
+            tc, self.host.as_ref(), guest_obj, arch, os, entry_param_count, sp_param_index,
+            halt_addr, lr_param_index, &dir, &exe,
+        )?;
         let status = Command::new(&exe)
             .status()
             .map_err(|e| e.to_string())?;
@@ -152,9 +226,17 @@ impl Runtime {
     }
 
     /// Link only (no spawn) — for tests that assert link success.
+    ///
+    /// See [`Self::link_and_run`] for what `entry_param_count`/
+    /// `sp_param_index`/`halt_addr`/`lr_param_index` mean.
+    #[allow(clippy::too_many_arguments)]
     pub fn link_guest_object(
         &self,
         guest_obj: &[u8],
+        entry_param_count: u32,
+        sp_param_index: u32,
+        halt_addr: u64,
+        lr_param_index: Option<u32>,
         arch: BinArch,
         os: BinOs,
         out_exe: &Path,
@@ -165,7 +247,10 @@ impl Runtime {
             .ok_or_else(|| "LLVM toolchain not available".to_string())?;
         let dir = out_exe.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        link_guest(tc, self.host.as_ref(), guest_obj, arch, os, dir, out_exe)
+        link_guest(
+            tc, self.host.as_ref(), guest_obj, arch, os, entry_param_count, sp_param_index,
+            halt_addr, lr_param_index, dir, out_exe,
+        )
     }
 }
 
