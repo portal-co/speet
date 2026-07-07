@@ -75,25 +75,13 @@ impl PltCallPlan {
 
 /// Per-arch calling convention for a hooked guest symbol's redirected call.
 ///
-/// Only `execve`/`exit` are wired today (matching
-/// `ImportManifest::native_syscall`'s `env.exit` import, `(i32) -> ()`, and
-/// `integrated_native`'s extra `env.__speet_execve`, `(i64,i64,i64) -> i32`).
-/// This is deliberately a small, explicit table rather than a general ABI
-/// decoder — see `docs/future/abi-spec-redirects.md` for the generalized
-/// path (ABI-spec ingestion + generated stubs) that replaces hand-written
-/// entries like these, without changing the
-/// [`PltHookTable`]/[`CallingConvention`] contract those generated stubs
-/// also target. Adding a new manifest `intercepts` entry (principle 1) is
-/// necessary but not sufficient for a new symbol to actually redirect
-/// correctly — a matching arm here is also required until abi-spec codegen
-/// replaces this table.
-///
-/// `arg_locals`/`result_local` are interpreted per-arch by the consuming
-/// recompiler: `speet-x86_64` treats them as literal WASM local indices
-/// (its GPRs are fixed WASM locals 0–15); `speet-aarch64` treats them as
-/// architectural register numbers, resolved to the actual WASM local via
-/// its own dynamic layout at emission time.
+/// Delegates to checked-in ABI-spec stubs when available (`speet-abi-stubs`),
+/// then falls back to hand-maintained entries for symbols not yet generated.
+/// See `docs/future/abi-spec-redirects.md`.
 fn calling_convention_for(arch: BinArch, symbol: &str) -> CallingConvention {
+    if let Some(cc) = speet_abi_stubs::calling_convention(arch, symbol) {
+        return cc;
+    }
     let bare = symbol.strip_prefix('_').unwrap_or(symbol);
     match (arch, bare) {
         (BinArch::X86_64, "execve") => CallingConvention {
@@ -107,18 +95,6 @@ fn calling_convention_for(arch: BinArch, symbol: &str) -> CallingConvention {
             arg_wrap_i32: vec![false, false, false],
             result_local: Some(0), // x0
             result_extend_i32: true,
-        },
-        (BinArch::X86_64, "exit" | "Exit") => CallingConvention {
-            arg_locals: vec![7], // RDI: status
-            arg_wrap_i32: vec![true], // env.exit wants i32, RDI holds i64
-            result_local: None, // env.exit never returns
-            result_extend_i32: false,
-        },
-        (BinArch::AArch64, "exit" | "Exit") => CallingConvention {
-            arg_locals: vec![0], // x0: status
-            arg_wrap_i32: vec![true],
-            result_local: None,
-            result_extend_i32: false,
         },
         _ => CallingConvention::default(),
     }

@@ -65,6 +65,12 @@ pub fn analyze_imports(host: &dyn HostApi, bin: &LoadedBinary) -> (Vec<String>, 
             imp.name.as_str()
         };
         if !allow.contains(lookup) && !allow.contains(bare) && !allow.contains(imp.name.as_str()) {
+            if speet_abi_stubs::has_stub(lookup)
+                || speet_abi_stubs::has_stub(bare)
+                || speet_abi_stubs::has_stub(imp.name.as_str())
+            {
+                continue;
+            }
             fn_ptr_deps.push(imp.name.clone());
         }
     }
@@ -109,6 +115,18 @@ mod tests {
                 plt_addr: Some(0x1010),
             },
         ]);
+        let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
+        assert!(unresolved.is_empty());
+        assert!(fn_ptr.is_empty());
+    }
+
+    #[test]
+    fn write_is_suitable_via_abi_stub() {
+        let host = TunneledHostApi::for_host();
+        let bin = empty_bin(vec![ImportSym {
+            name: "write".into(),
+            plt_addr: Some(0x1000),
+        }]);
         let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
         assert!(unresolved.is_empty());
         assert!(fn_ptr.is_empty());

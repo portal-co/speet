@@ -7,6 +7,7 @@ description = "Thin runtime driver: recompile guest binaries to native and spawn
 [dependencies]
 binary-io = { path = "../../../../binary-io" }
 speet-host-api = { path = "../speet-host-api" }
+speet-abi-stubs = { path = "../speet-abi-stubs" }
 speet-host-syscall = { path = "../speet-host-syscall" }
 speet-recompile = { path = "../speet-recompile" }
 speet-riscv = { path = "../../native/speet-riscv" }

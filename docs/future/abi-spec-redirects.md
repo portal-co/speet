@@ -8,8 +8,15 @@ Let the [thin runtime](../thin-runtime-plan.md) safely support host imports that
 
 ## Two phases
 
-1. **Ingest ABI-spec files** (`speet-abi-spec` crate). Parse ABI description files — starting with Apple's BridgeSupport XML format, since it already models functions, argument types, pointer-vs-value distinctions, and function-pointer parameters — into a structured `AbiSpec { functions: Vec<AbiFunction> }`. Pure data ingestion; feeds `speet_host_api::ImportManifest` construction. No codegen, no behavior change.
-2. **Generate checked-in redirect stubs** (`speet-abi-codegen` tool). Consume an `AbiSpec` and emit **Rust source, checked into the repository**, implementing one stub-emission function per `AbiFunction`, parameterized over the guest's configuration (arch, calling convention). Each generated function emits the actual address-translation / function-translation stub through `asm-arch`'s `WriterCore` emitter — the same emitter wasm-blitz already lowers WASM→native through (see [asm-arch-instruction-sync.md](../guides/asm-arch-instruction-sync.md)) — rather than a separately-compiled C shim string. A function-pointer argument gets a generated trampoline so the *host* can call back into guest code with correctly re-translated argument pointers.
+1. **Ingest ABI-spec files** (`speet-abi-spec` crate). Parse ABI description files — starting with Apple's BridgeSupport XML format, since it already models functions, argument types, pointer-vs-value distinctions, and function-pointer parameters — into a structured `AbiSpec { functions: Vec<AbiFunction> }`. Pure data ingestion; feeds `speet_host_api::ImportManifest` construction. No codegen, no behavior change. **Status: shipped** (`crates/os/speet-abi-spec`).
+2. **Generate checked-in redirect stubs** (`speet-abi-codegen` tool). Consume an `AbiSpec` and emit **Rust source, checked into the repository**, implementing one stub-emission function per `AbiFunction`, parameterized over the guest's configuration (arch, calling convention). Each generated function emits the actual address-translation / function-translation stub through `asm-arch`'s `WriterCore` emitter — the same emitter wasm-blitz already lowers WASM→native through (see [asm-arch-instruction-sync.md](../guides/asm-arch-instruction-sync.md)) — rather than a separately-compiled C shim string. A function-pointer argument gets a generated trampoline so the *host* can call back into guest code with correctly re-translated argument pointers. **Status: initial shipment** — `speet-abi-codegen` + checked-in `speet-abi-stubs` for curated `write`/`exit`; regenerate via:
+
+```bash
+cargo run -p speet-abi-codegen -- \
+  -i test-data/abi-spec/libc-minimal.bridgesupport.xml \
+  -o crates/os/speet-abi-stubs/src/generated \
+  -s write,exit -a x86_64,aarch64
+```
 
 This is consumed at the address-to-label PC-check hook described in [thin-runtime-genericity.md](../guides/thin-runtime-genericity.md): when recompilation reaches a hooked address that needs a real stub rather than a plain host call, the generated emitter for that symbol runs inline.
 

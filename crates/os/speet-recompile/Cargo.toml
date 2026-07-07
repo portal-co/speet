@@ -8,6 +8,7 @@ description = "Full-binary recompiler driver: load host binary -> speet (WASM) -
 binary-io = { path = "../../../../binary-io" }
 tunnel = { path = "../../../../tunnel" }
 speet-host-api = { path = "../speet-host-api" }
+speet-abi-stubs = { path = "../speet-abi-stubs" }
 speet-rt = { path = "../speet-rt" }
 
 # wasm-blitz backends (local path: carries the MemBase + SysV stack-param fixes

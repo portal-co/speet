@@ -9,4 +9,4 @@ mod bridgesupport;
 mod model;
 
 pub use bridgesupport::{parse_bridgesupport, BridgeSupportError};
-pub use model::{AbiArg, AbiFunction, AbiSpec, AbiType, AbiValueKind};
+pub use model::{AbiArg, AbiFunction, AbiSpec, AbiValueKind};

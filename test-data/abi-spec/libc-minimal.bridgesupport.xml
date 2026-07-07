@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<signatures version="1.0">
+  <function name="write">
+    <arg type="i"/>
+    <arg type="^v"/>
+    <arg type="Q"/>
+    <retval type="q"/>
+  </function>
+  <function name="exit">
+    <arg type="i"/>
+    <retval type="v"/>
+  </function>
+  <function name="printf">
+    <arg type="*"/>
+    <arg type="^?"/>
+    <retval type="i"/>
+  </function>
+</signatures>

@@ -1,6 +1,6 @@
 //! Apple BridgeSupport XML ingestion (`BridgeSupport.5`).
 
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Reader;
 
 use crate::model::{AbiArg, AbiFunction, AbiSpec, AbiValueKind};
@@ -35,26 +35,36 @@ pub fn parse_bridgesupport(xml: &str) -> Result<AbiSpec, BridgeSupportError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                let name = local_name(&e);
-                if name == b"signatures" {
+                let tag = tag_name(&e);
+                if tag == "signatures" {
                     in_signatures = true;
-                } else if in_signatures && name == b"function" {
+                } else if in_signatures && tag == "function" {
                     cur_fn = Some(PartialFunction::new(&e)?);
                 } else if let Some(ref mut pf) = cur_fn {
-                    if name == b"arg" {
+                    if tag == "arg" {
                         pf.args.push(parse_arg(&e)?);
-                    } else if name == b"retval" {
+                    } else if tag == "retval" {
+                        pf.retval = Some(parse_arg(&e)?);
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let tag = tag_name(&e);
+                if let Some(ref mut pf) = cur_fn {
+                    if tag == "arg" {
+                        pf.args.push(parse_arg(&e)?);
+                    } else if tag == "retval" {
                         pf.retval = Some(parse_arg(&e)?);
                     }
                 }
             }
             Ok(Event::End(e)) => {
-                let name = local_name(&e);
-                if name == b"function" {
+                let tag = tag_name_end(&e);
+                if tag == "function" {
                     if let Some(pf) = cur_fn.take() {
                         spec.functions.push(pf.finish());
                     }
-                } else if name == b"signatures" {
+                } else if tag == "signatures" {
                     in_signatures = false;
                 }
             }
@@ -73,8 +83,12 @@ pub fn parse_bridgesupport(xml: &str) -> Result<AbiSpec, BridgeSupportError> {
     Ok(spec)
 }
 
-fn local_name(e: &BytesStart<'_>) -> &[u8] {
-    e.name().local_name().as_ref()
+fn tag_name(e: &BytesStart<'_>) -> String {
+    String::from_utf8_lossy(e.name().local_name().as_ref()).into_owned()
+}
+
+fn tag_name_end(e: &BytesEnd<'_>) -> String {
+    String::from_utf8_lossy(e.name().local_name().as_ref()).into_owned()
 }
 
 fn attr(e: &BytesStart<'_>, key: &str) -> Option<String> {

@@ -1,0 +1,18 @@
+[package]
+name = "speet-abi-codegen"
+version = "0.1.0"
+edition = "2021"
+description = "Generate checked-in ABI redirect stub Rust from BridgeSupport specs."
+publish = false
+license-file = "../../../COPYING.md"
+
+[[bin]]
+name = "speet-abi-codegen"
+path = "src/main.rs"
+
+[dependencies]
+speet-abi-spec = { path = "../speet-abi-spec" }
+binary-io = { path = "../../../../binary-io" }
+
+[dev-dependencies]
+tempfile = "3"
