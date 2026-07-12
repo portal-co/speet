@@ -15,6 +15,8 @@ pub use instrument::instrument_functions;
 pub use load::{load_entry_offset, load_text_blob};
 pub mod pipeline;
 
+pub use run::{run_corpus_module, RunState};
+
 pub use manifest::{load_manifest, parse_manifest, Artifact};
 pub use pipeline::{run_c_corpus_file, run_c_corpus_file_with_expected, run_c_program_text};
 

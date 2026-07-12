@@ -23,18 +23,19 @@
 //!       br_table $entry_0 … $entry_N $unknown
 //!     end ;; $entry_0
 //!     … handler arm for syscall 0 …
-//!     br $exit
+//!     return_call $next_pc_func   ;; non-terminating syscalls only
 //!     …
 //!     end ;; $entry_N
 //!     … handler arm for syscall N …
-//!     br $exit
+//!     return_call $next_pc_func   ;; or unreachable if terminating
 //!   end ;; $unknown
 //!   unreachable   ;; (or fallback call if configured)
 //! end ;; $exit
 //!
-//! ;; 3. Forward all params to next-PC function via return_call
-//! local.get $param_0 … local.get $param_{n-1}
-//! return_call $next_pc_func
+//! Non-terminating handler arms tail-call `$next_pc_func` directly. The
+//! continuation is **not** emitted after the closing `end` of `$exit`: wasm-blitz
+//! places post-block code at function entry (before the block body), which would
+//! clobber register locals before the `br_table` runs.
 //! ```
 //!
 //! Each handler arm emits optional saves, marshals WASI parameters from guest
@@ -44,7 +45,7 @@
 //!
 //! # Ambient-state forwarding
 //!
-//! The trailing `return_call` must forward all params of the current chain
+//! Each non-terminating arm's `return_call` must forward all params of the
 //! function, including injected trap params (e.g. `RopDetectTrap` depth
 //! counter).  The caller provides `num_params` (the total param count for the
 //! current chain function) so the dispatcher can emit `local.get 0 …
@@ -451,18 +452,12 @@ impl<'t> WasmSyscallDispatcher<'t> {
                 }
             }
 
-            // 3e. Terminate or branch to $exit.
+            // 3e. Terminate or continue to the next guest PC.
             if entry.terminates {
-                // Non-returning syscall: trap rather than fall through to return_call.
+                // Non-returning syscall: trap rather than fall through.
                 cb.emit(ctx, &Instruction::Unreachable)?;
             } else {
-                // Branch to $exit (depth from current position = n - arm_idx)
-                // We are inside: $exit > $unknown > [arm_{n-1} … arm_{arm_idx+1}]
-                // arm_{arm_idx} was already closed (End above).
-                // Remaining open arm blocks above us: n - arm_idx - 1.
-                // Then $unknown (1 more), then $exit (1 more).
-                let depth_to_exit = (n - arm_idx) as u32;
-                cb.emit(ctx, &Instruction::Br(depth_to_exit))?;
+                self.emit_continue_to_next_pc(ctx, cb)?;
             }
         }
 
@@ -472,15 +467,21 @@ impl<'t> WasmSyscallDispatcher<'t> {
         cb.emit(ctx, &Instruction::Unreachable)?;
 
         // ── Close $exit block ─────────────────────────────────────────────
-        // Close $exit block
         cb.emit(ctx, &Instruction::End)?;
 
-        // ── 4. Forward all params unchanged → return_call $next_pc_func ──
+        Ok(())
+    }
+
+    /// Forward the live register file and tail-call the next guest PC slot.
+    fn emit_continue_to_next_pc<Context, E>(
+        &self,
+        ctx: &mut Context,
+        cb: &mut speet_riscv::CallbackContext<'_, Context, E>,
+    ) -> Result<(), E> {
         for p in 0..self.num_params {
             cb.emit(ctx, &Instruction::LocalGet(p))?;
         }
         cb.emit(ctx, &Instruction::ReturnCall(self.next_pc_func))?;
-
         Ok(())
     }
 }
@@ -563,9 +564,12 @@ mod tests {
         assert!(insts.iter().any(|i| i.contains("Call(100)")));
         assert!(insts.iter().any(|i| i.contains("Call(200)")));
 
-        // Check trailing parameter gets and ReturnCall
+        // Check trailing parameter gets and ReturnCall (one per non-terminating arm)
         assert!(insts.iter().any(|i| i.contains("ReturnCall(300)")));
-        assert_eq!(insts.last().unwrap().as_str(), "ReturnCall(300)");
+        assert_eq!(
+            insts.iter().filter(|i| i.contains("ReturnCall(300)")).count(),
+            2
+        );
     }
 }
 

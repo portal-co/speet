@@ -66,7 +66,10 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 
 ### Phase 1 — Real binary loading + cache
 - [x] `binary_io::load_auto` wrapper in `speet-runtime::load_binary`
-- [x] `ExternalTargets` PLT tunneling scaffold (`from_imports` wired in integrated recompile)
+- [x] `ExternalTargetTable` PLT tunneling (`external_targets_from_imports` + `PltCallPlan` wired in integrated recompile; `b7e50f4`)
+- [x] Corpus `.text` load address contract — ET_REL objects normalize addr `0` → `0x1000` (`speet-runtime::cache`)
+- [x] RV64 WASM cache keys include `start_addr` (same bytes at different bases must not share cache entries)
+- [x] RV64 syscall dispatcher per-arm `return_call` continuation (`speet-syscall`; wasm-blitz block ordering fix)
 - [x] Artifact cache (`ArtifactCache` keyed by input hash + pipeline version; final exe tier)
 - [x] Expand `speet-host-syscall` (x86_64 Linux table)
 

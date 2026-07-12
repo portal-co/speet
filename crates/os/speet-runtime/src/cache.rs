@@ -109,6 +109,24 @@ pub fn load_binary(path: &Path) -> Result<binary_io::LoadedBinary, String> {
     binary_io::load_auto(&bytes).map_err(|e| e.to_string())
 }
 
+/// Default virtual load address for relocatable `.text`-only corpus objects
+/// whose section header lists address 0 (typical ET_REL). Matches the
+/// `0x1000` start PC used throughout syscall/corpus tests and
+/// `speet_recompile::frontend::halt_addr` seeding.
+const DEFAULT_TEXT_LOAD_ADDR: u64 = 0x1000;
+
+/// Resolve the guest virtual address for a `.text` section. Relocatable
+/// corpus blobs (thin-runtime `.elf`/`.macho` objects built by
+/// `test-data/thin-runtime-corpus/compile_corpus.sh`) report address 0
+/// even though the recompiler/link pipeline assumes page-aligned text.
+fn text_section_load_addr(section_addr: u64) -> u64 {
+    if section_addr == 0 {
+        DEFAULT_TEXT_LOAD_ADDR
+    } else {
+        section_addr
+    }
+}
+
 /// Extract `.text` from a corpus ELF/Mach-O object file.
 pub fn load_text_from_object(path: &Path) -> Result<(Vec<u8>, u64), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -118,5 +136,23 @@ pub fn load_text_from_object(path: &Path) -> Result<(Vec<u8>, u64), String> {
         .or_else(|| obj.section_by_name("__TEXT,__text"))
         .ok_or_else(|| format!("no .text in {}", path.display()))?;
     let data = section.data().map_err(|e| e.to_string())?.to_vec();
-    Ok((data, section.address()))
+    Ok((data, text_section_load_addr(section.address())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn thin_runtime_corpus_text_loads_at_page_base() {
+        let guest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test-data/thin-runtime-corpus/rv64-linux/exit_42.elf");
+        if !guest.exists() {
+            return;
+        }
+        let (text, addr) = load_text_from_object(&guest).expect("load corpus");
+        assert_eq!(addr, DEFAULT_TEXT_LOAD_ADDR);
+        assert_eq!(text.len(), 12);
+    }
 }

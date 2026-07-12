@@ -46,7 +46,7 @@ impl Runtime {
 
     /// Recompile RV64 guest `.text` to WASM (syscall path).
     pub fn recompile_rv64_text(&mut self, text: &[u8], start_addr: u64) -> Vec<u8> {
-        let key = ArtifactCache::hash_input(text);
+        let key = format!("{}:{start_addr:x}", ArtifactCache::hash_input(text));
         if let Some(w) = self.cache.get_wasm(&key) {
             return w;
         }
