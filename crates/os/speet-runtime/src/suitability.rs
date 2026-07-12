@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn printf_is_fn_ptr_dep() {
+    fn printf_is_suitable_via_abi_stub() {
         let host = TunneledHostApi::for_host();
         let bin = empty_bin(vec![ImportSym {
             name: "printf".into(),
@@ -141,7 +141,7 @@ mod tests {
         }]);
         let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
         assert!(unresolved.is_empty());
-        assert_eq!(fn_ptr, vec!["printf"]);
+        assert!(fn_ptr.is_empty());
     }
 
     #[test]

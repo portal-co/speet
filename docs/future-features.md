@@ -9,7 +9,7 @@ Umbrella index for capabilities planned across **both** the container megabinary
 | ptrace emulation | [future/ptrace-emulation.md](future/ptrace-emulation.md) | Planned | Container vkernel + thin runtime |
 | execve interception | (thin-runtime-plan Phase 4+) | Planned | Thin runtime |
 | Cross-arch recompilation | (container-plan multi-arch) | Planned | Both |
-| ABI-spec redirect stubs | [future/abi-spec-redirects.md](future/abi-spec-redirects.md) | Phase 1–2 shipped (ingest + curated codegen + `plt_calling_convention` marshalling); native redirect emit wiring at PC-check hooks still open | Thin runtime |
+| ABI-spec redirect stubs | [future/abi-spec-redirects.md](future/abi-spec-redirects.md) | Phase 1–2 + partial fn-ptr v1 (ingest, `printf` stub metadata, per-function host stub catalog, `__speet_invoke`, PLT fn-ptr rewrite via `__speet_stub_for_pc`) | Thin runtime |
 | Redirect shims via virtual GOT | [future/redirect-shim-got.md](future/redirect-shim-got.md) | Planned (deferred; interim PC-check hooks shipped) | Thin runtime |
 
 When a feature ships, update its doc with the implementing crates and flip the status here.

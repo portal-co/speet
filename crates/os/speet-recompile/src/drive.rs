@@ -64,6 +64,22 @@ fn function_bodies(wasm: &[u8]) -> Vec<wasmparser::FunctionBody<'_>> {
     bodies
 }
 
+/// Number of WASM function imports (host capability slots).
+pub fn import_func_count(wasm: &[u8]) -> u32 {
+    function_imports(wasm).len() as u32
+}
+
+/// Number of defined functions in the code section (translated slots + halt).
+pub fn code_func_count(wasm: &[u8]) -> u32 {
+    function_bodies(wasm).len() as u32
+}
+
+/// Local function index exported as `_start` (before `n_imports` offset).
+pub fn entry_local_func_idx(wasm: &[u8]) -> u32 {
+    let n_imports = import_func_count(wasm);
+    entry_export_func_idx(wasm).saturating_sub(n_imports)
+}
+
 /// The WASM function index the module exports as `_start` — the guest's
 /// real entry point (see [`crate::frontend::Translated::entry_func_idx`]),
 /// not necessarily function 0. Falls back to `0` if the module doesn't

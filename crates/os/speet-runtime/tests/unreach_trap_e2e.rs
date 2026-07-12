@@ -61,7 +61,14 @@ fn unreach_trap_logs_guest_pc() {
     let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
     let sp_idx = speet_recompile::drive::sp_param_index(guest_arch);
     let lr_idx = speet_recompile::drive::lr_param_index(guest_arch);
-    let halt_addr = speet_recompile::frontend::halt_addr(start, text.len());
+    let catalog = speet_recompile::guest_func_catalog::GuestFuncCatalog::from_wasm(
+        &wasm,
+        start,
+        guest_arch,
+        text.len(),
+    );
+    let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
+    let halt_local = catalog.halt_entry().local_func_idx;
     link_guest_integrated(
         &tc,
         &host,
@@ -70,8 +77,11 @@ fn unreach_trap_logs_guest_pc() {
         out_os,
         entry_param_count,
         sp_idx,
-        halt_addr,
         lr_idx,
+        &catalog.to_stub_entries(),
+        entry_local,
+        halt_local,
+        None,
         &dir.join("work"),
         &exe,
     )

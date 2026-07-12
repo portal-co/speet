@@ -93,6 +93,20 @@ impl ImportManifest {
             results: vec![I32],
             intercepts: vec!["execve".into(), "_execve".into()],
         });
+        m.func_imports.push(FuncImport {
+            module: "env".into(),
+            name: "__speet_stub_for_pc".into(),
+            params: vec![I64],
+            results: vec![I64],
+            intercepts: vec![],
+        });
+        m.func_imports.push(FuncImport {
+            module: "env".into(),
+            name: "printf".into(),
+            params: vec![I64, I64],
+            results: vec![I32],
+            intercepts: vec!["printf".into()],
+        });
         m
     }
 
@@ -240,6 +254,8 @@ mod tests {
         assert_eq!(m.index_of("env", "write"), Some(2));
         assert_eq!(m.index_of("env", "__speet_log_unreachable"), Some(3));
         assert_eq!(m.index_of("env", "__speet_execve"), Some(4));
+        assert_eq!(m.index_of("env", "__speet_stub_for_pc"), Some(5));
+        assert_eq!(m.index_of("env", "printf"), Some(6));
         assert_eq!(m.index_of("env", "nonexistent"), None);
     }
 
@@ -268,7 +284,7 @@ mod tests {
         assert_eq!(m.resolve_intercept("_exit"), Some(("env", "exit")));
         assert_eq!(m.resolve_intercept("execve"), Some(("env", "__speet_execve")));
         assert_eq!(m.resolve_intercept("_execve"), Some(("env", "__speet_execve")));
-        assert_eq!(m.resolve_intercept("printf"), None);
+        assert_eq!(m.resolve_intercept("printf"), Some(("env", "printf")));
         // Internal-only slots are never guest-symbol-addressable.
         assert_eq!(m.resolve_intercept("__speet_hint"), None);
     }

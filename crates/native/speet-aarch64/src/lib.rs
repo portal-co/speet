@@ -77,6 +77,7 @@ pub struct AArch64Recompiler<Context, E> {
     /// `docs/guides/thin-runtime-genericity.md` principle 1.
     hooks: Option<speet_plugin_api::external_target::PltHookTable>,
     hook_library: speet_plugin_api::external_target::LibraryId,
+    stub_for_pc_import_idx: Option<u32>,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
@@ -122,7 +123,13 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             sp_slot: LocalSlot::default(),
             hooks: None,
             hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
+            stub_for_pc_import_idx: None,
         }
+    }
+
+    /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
+    pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
+        self.stub_for_pc_import_idx = Some(idx);
     }
 
     /// Install compile-time PLT/external-call hooks (integrated runtime).
@@ -135,6 +142,13 @@ impl<Context, E> AArch64Recompiler<Context, E> {
     /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
     pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
         self.hook_library = library;
+    }
+
+    pub(crate) fn arg_needs_fn_ptr_rewrite(&self, label: &str, arg_idx: usize) -> bool {
+        let bare = label.strip_prefix('_').unwrap_or(label);
+        speet_abi_stubs::fn_ptr_arg_indices(label)
+            .or_else(|| speet_abi_stubs::fn_ptr_arg_indices(bare))
+            .is_some_and(|indices| indices.contains(&arg_idx))
     }
 
     pub fn new() -> Self {
@@ -251,7 +265,19 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         };
         for (i, &reg) in hook.convention.arg_locals.iter().enumerate() {
             self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
-            if hook.convention.wraps_i32(i) {
+            if self.arg_needs_fn_ptr_rewrite(&hook.label, i) {
+                if let Some(stub_idx) = self.stub_for_pc_import_idx {
+                    rctx.feed(ctx, tail_idx, &Instruction::Call(stub_idx))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Eqz)?;
+                    rctx.feed(
+                        ctx,
+                        tail_idx,
+                        &Instruction::If(wasm_encoder::BlockType::Empty),
+                    )?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
+                }
+            } else if hook.convention.wraps_i32(i) {
                 rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         }

@@ -71,11 +71,6 @@ pub fn generate(spec: &AbiSpec, config: &CodegenConfig) -> Result<Vec<GeneratedF
         let Some(func) = spec.lookup(sym) else {
             return Err(format!("symbol {sym:?} not found in ABI spec"));
         };
-        if spec.accepts_function_pointers(sym) {
-            return Err(format!(
-                "symbol {sym:?} has function-pointer args — omit from curated allowlist until trampoline codegen exists"
-            ));
-        }
         let mod_name = symbol_module_name(sym);
         mod_items.push_str(&format!("pub mod {mod_name};\n"));
         files.push(GeneratedFile {
@@ -172,12 +167,33 @@ fn emit_registry_rs(config: &CodegenConfig) -> String {
     }
     out.push_str("        _ => None,\n");
     out.push_str("    }\n");
+    out.push_str("}\n\n");
+
+    out.push_str("pub fn fn_ptr_arg_indices(symbol: &str) -> Option<&'static [usize]> {\n");
+    out.push_str("    let bare = symbol.strip_prefix('_').unwrap_or(symbol);\n");
+    out.push_str("    match bare {\n");
+    for sym in &config.symbols {
+        let mod_name = symbol_module_name(sym);
+        writeln!(
+            out,
+            "        {sym:?} => Some(super::{mod_name}::FN_PTR_ARG_INDICES),"
+        )
+        .unwrap();
+    }
+    out.push_str("        _ => None,\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+
+    out.push_str("/// Whether `symbol` has fn-ptr parameters rewritten via the guest stub catalog.\n");
+    out.push_str("pub fn requires_fn_ptr_rewrite(symbol: &str) -> bool {\n");
+    out.push_str("    fn_ptr_arg_indices(symbol).is_some_and(|idx| !idx.is_empty())\n");
     out.push_str("}\n");
     out
 }
 
 fn emit_symbol_module(func: &AbiFunction, config: &CodegenConfig) -> Result<String, String> {
-    let pointer_indices = pointer_arg_indices(func);
+    let pointer_indices = data_pointer_arg_indices(func);
+    let fn_ptr_indices = fn_ptr_arg_indices(func);
     let mut out = String::new();
     writeln!(
         out,
@@ -192,7 +208,12 @@ fn emit_symbol_module(func: &AbiFunction, config: &CodegenConfig) -> Result<Stri
     writeln!(out, "pub const HOST_SYMBOL: &str = {:?};", func.name).unwrap();
     write!(
         out,
-        "pub const POINTER_ARG_INDICES: &[usize] = &{pointer_indices:?};\n\n",
+        "pub const POINTER_ARG_INDICES: &[usize] = &{pointer_indices:?};\n",
+    )
+    .unwrap();
+    write!(
+        out,
+        "pub const FN_PTR_ARG_INDICES: &[usize] = &{fn_ptr_indices:?};\n\n",
     )
     .unwrap();
 
@@ -297,21 +318,38 @@ fn symbol_module_name(sym: &str) -> String {
 }
 
 fn pointer_arg_indices(func: &AbiFunction) -> Vec<usize> {
+    data_pointer_arg_indices(func)
+}
+
+fn data_pointer_arg_indices(func: &AbiFunction) -> Vec<usize> {
     func.args
         .iter()
         .enumerate()
-        .filter(|(_, a)| is_pointer_arg(a))
+        .filter(|(_, a)| is_data_pointer_arg(a))
         .map(|(i, _)| i)
         .collect()
 }
 
+fn fn_ptr_arg_indices(func: &AbiFunction) -> Vec<usize> {
+    func.args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| is_fn_ptr_arg(a))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn is_fn_ptr_arg(arg: &AbiArg) -> bool {
+    arg.function_pointer || arg.kind == AbiValueKind::FunctionPointer
+}
+
+fn is_data_pointer_arg(arg: &AbiArg) -> bool {
+    (arg.pointer || matches!(arg.kind, AbiValueKind::Pointer | AbiValueKind::Object))
+        && !is_fn_ptr_arg(arg)
+}
+
 fn is_pointer_arg(arg: &AbiArg) -> bool {
-    arg.pointer
-        || arg.function_pointer
-        || matches!(
-            arg.kind,
-            AbiValueKind::Pointer | AbiValueKind::FunctionPointer | AbiValueKind::Object
-        )
+    is_data_pointer_arg(arg) || is_fn_ptr_arg(arg)
 }
 
 /// (arg_locals, arg_wrap_i32, result_local, result_extend_i32)
@@ -390,16 +428,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fn_ptr_symbol() {
+    fn generates_printf_with_fn_ptr_indices() {
         let spec = parse_bridgesupport(SAMPLE).unwrap();
-        let err = generate(
+        let files = generate(
             &spec,
             &CodegenConfig {
                 symbols: vec!["printf".into()],
+                source_label: "libc-minimal.bridgesupport.xml".into(),
                 ..Default::default()
             },
         )
-        .unwrap_err();
-        assert!(err.contains("function-pointer"));
+        .unwrap();
+        let printf = files.iter().find(|f| f.path == "printf.rs").unwrap();
+        assert!(printf.contents.contains("FN_PTR_ARG_INDICES: &[usize] = &[1]"));
+        assert!(printf.contents.contains("POINTER_ARG_INDICES: &[usize] = &[0]"));
+        let registry = files.iter().find(|f| f.path == "registry.rs").unwrap();
+        assert!(registry.contents.contains("fn_ptr_arg_indices"));
+        assert!(registry.contents.contains("requires_fn_ptr_rewrite"));
     }
 }

@@ -84,6 +84,21 @@ int {sym}(long path, long argv, long envp) {{
 }}\n\n"
             ));
         }
+        ("env", "__speet_stub_for_pc") => {
+            out.push_str(&format!(
+                "extern uint64_t __speet_stub_for_pc(uint64_t guest_pc);
+uint64_t {sym}(long guest_pc) {{
+    return __speet_stub_for_pc((uint64_t)guest_pc);
+}}\n\n"
+            ));
+        }
+        ("env", "printf") => {
+            out.push_str(&format!(
+                "int {sym}(long fmt, long fn_ptr) {{
+    return (int)printf((const char *)(uintptr_t)fmt, (void *)(uintptr_t)fn_ptr);
+}}\n\n"
+            ));
+        }
         _ => {
             out.push_str(&format!(
                 "/* TODO: stub for {} */\nvoid {sym}(void) {{ abort(); }}\n\n",

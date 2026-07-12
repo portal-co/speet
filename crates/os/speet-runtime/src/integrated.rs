@@ -239,11 +239,26 @@ impl IntegratedNativeRuntime {
         // so `self.out_arch` is also the guest arch here.
         let sp_idx = speet_recompile::drive::sp_param_index(self.out_arch);
         let lr_idx = speet_recompile::drive::lr_param_index(self.out_arch);
-        // Halt-sentinel address (see `docs/guides/thin-runtime-genericity.md`
-        // principle 4): re-derived from the original binary's `.text` span
-        // rather than threaded through the wasm cache, matching
-        // `recompile_wasm`'s own section lookup above.
-        let halt_addr = self.halt_addr_for(path)?;
+        // Halt-sentinel layout is derived inside the guest-function catalog.
+        let bin = load_binary(path)?;
+        let text = bin
+            .sections
+            .iter()
+            .find(|s| {
+                s.name == ".text"
+                    || s.name == "__TEXT,__text"
+                    || s.name == "__text"
+                    || matches!(s.kind, binary_io::SectionKind::Text)
+            })
+            .ok_or_else(|| "no .text section".to_string())?;
+        let catalog = speet_recompile::guest_func_catalog::GuestFuncCatalog::from_wasm(
+            &wasm,
+            text.addr,
+            guest_arch,
+            text.data.len(),
+        );
+        let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
+        let halt_local = catalog.halt_entry().local_func_idx;
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -252,8 +267,11 @@ impl IntegratedNativeRuntime {
             self.out_os,
             entry_param_count,
             sp_idx,
-            halt_addr,
             lr_idx,
+            &catalog.to_stub_entries(),
+            entry_local,
+            halt_local,
+            None,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;

@@ -95,7 +95,7 @@ impl AbiSpec {
             let Some(f) = spec.lookup(sym) else {
                 continue;
             };
-            if spec.accepts_function_pointers(sym) {
+            if spec.accepts_function_pointers(sym) && !speet_abi_stubs::has_stub(sym) {
                 continue;
             }
             if m.func_imports.iter().any(|imp| {

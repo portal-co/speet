@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn extend_manifest_skips_fn_ptr_symbols() {
+    fn extend_manifest_includes_fn_ptr_symbols_with_stub() {
         use speet_host_api::ImportManifest;
 
         let spec = parse_bridgesupport(SAMPLE).unwrap();
@@ -214,6 +214,6 @@ mod tests {
 
         assert!(extended.index_of("env", "write").is_some());
         assert!(extended.index_of("env", "exit").is_some());
-        assert!(extended.index_of("env", "printf").is_none());
+        assert!(extended.index_of("env", "printf").is_some());
     }
 }

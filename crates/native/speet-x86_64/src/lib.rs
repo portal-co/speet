@@ -94,6 +94,7 @@ pub struct X86Recompiler<Context, E> {
     /// `docs/guides/thin-runtime-genericity.md` principle 1.
     hooks: Option<speet_plugin_api::external_target::PltHookTable>,
     hook_library: speet_plugin_api::external_target::LibraryId,
+    stub_for_pc_import_idx: Option<u32>,
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -135,7 +136,13 @@ impl<Context, E> X86Recompiler<Context, E> {
             memory_access: None,
             hooks: None,
             hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
+            stub_for_pc_import_idx: None,
         }
+    }
+
+    /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
+    pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
+        self.stub_for_pc_import_idx = Some(idx);
     }
 
     /// Install compile-time PLT/external-call hooks (integrated runtime).
@@ -148,6 +155,13 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
     pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
         self.hook_library = library;
+    }
+
+    pub(crate) fn arg_needs_fn_ptr_rewrite(&self, label: &str, arg_idx: usize) -> bool {
+        let bare = label.strip_prefix('_').unwrap_or(label);
+        speet_abi_stubs::fn_ptr_arg_indices(label)
+            .or_else(|| speet_abi_stubs::fn_ptr_arg_indices(bare))
+            .is_some_and(|indices| indices.contains(&arg_idx))
     }
 
     /// Returns the set of instruction mnemonics that had no translation and

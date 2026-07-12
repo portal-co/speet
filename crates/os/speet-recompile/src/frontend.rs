@@ -398,6 +398,9 @@ pub fn translate_with_plt(
                 if let Some(plan) = plt_plan {
                     rc.set_plt_hooks(plan.to_hook_table(BinArch::X86_64, manifest));
                 }
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
+                }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);
                 rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
@@ -411,6 +414,9 @@ pub fn translate_with_plt(
                     speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
                 if let Some(plan) = plt_plan {
                     rc.set_plt_hooks(plan.to_hook_table(BinArch::AArch64, manifest));
+                }
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
                 }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);

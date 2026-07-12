@@ -10,10 +10,14 @@
 
 mod shim;
 mod entry_bridge;
+mod guest_stubs;
 
 pub use shim::{generate_memory_tu, generate_shim};
 
-pub use entry_bridge::entry_bridge_c;
+pub use entry_bridge::{entry_bridge_c, entry_bridge_direct_c};
+pub use guest_stubs::{
+    entry_stub_symbol, generate_guest_stubs_c, halt_stub_symbol, GuestStubEntry,
+};
 
 /// The C source of the runtime shim. Compile with the system C compiler and link
 /// with the generated guest object plus the tunneled host dylib (`-lc` on Linux,

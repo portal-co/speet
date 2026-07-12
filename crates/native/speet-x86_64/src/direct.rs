@@ -384,7 +384,19 @@ impl<Context, E> X86Recompiler<Context, E> {
         };
         for (i, &local) in hook.convention.arg_locals.iter().enumerate() {
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
-            if hook.convention.wraps_i32(i) {
+            if self.arg_needs_fn_ptr_rewrite(&hook.label, i) {
+                if let Some(stub_idx) = self.stub_for_pc_import_idx {
+                    rctx.feed(ctx, tail_idx, &Instruction::Call(stub_idx))?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Eqz)?;
+                    rctx.feed(
+                        ctx,
+                        tail_idx,
+                        &Instruction::If(wasm_encoder::BlockType::Empty),
+                    )?;
+                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
+                }
+            } else if hook.convention.wraps_i32(i) {
                 rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
             }
         }

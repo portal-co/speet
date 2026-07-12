@@ -87,5 +87,6 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 ### Integrated thin runtime (2026)
 - [x] Runtime unreachable instrumentation (`__speet_log_unreachable` + WASM post-pass)
 - [x] `IntegratedNativeRuntime` + import-based suitability gate
+- [x] Partial fn-ptr support (per-function stub catalog, `__speet_invoke`, `printf` ABI stub + suitability bypass)
 - [x] `speet-rtd` recompile daemon with disk cache
 - [x] argv-aware shim (`__speet_start`) + `execve` hook TU (`__speet_execve_hook`; link alias deferred)

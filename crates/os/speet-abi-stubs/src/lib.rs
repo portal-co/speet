@@ -8,7 +8,10 @@ use speet_plugin_api::external_target::CallingConvention;
 
 pub mod emit;
 
-pub use generated::registry::{calling_convention, has_stub, pointer_arg_indices, STUB_SYMBOLS};
+pub use generated::registry::{
+    calling_convention, fn_ptr_arg_indices, has_stub, pointer_arg_indices,
+    requires_fn_ptr_rewrite, STUB_SYMBOLS,
+};
 
 /// PLT-hook marshalling: checked-in stub first, then [`ImportManifest`] WASM
 /// param types for the intercept slot (e.g. `execve` → `__speet_execve`).
@@ -74,11 +77,14 @@ mod tests {
     fn write_stub_registered() {
         assert!(has_stub("write"));
         assert!(has_stub("_write"));
-        assert!(!has_stub("printf"));
-        assert_eq!(STUB_SYMBOLS, &["write", "exit"]);
+        assert!(has_stub("printf"));
+        assert_eq!(STUB_SYMBOLS, &["write", "exit", "printf"]);
         let cc = calling_convention(BinArch::X86_64, "write").unwrap();
         assert_eq!(cc.arg_locals, vec![7, 6, 2]);
         assert_eq!(pointer_arg_indices("write"), Some([1].as_slice()));
+        assert_eq!(fn_ptr_arg_indices("printf"), Some([1].as_slice()));
+        assert!(requires_fn_ptr_rewrite("printf"));
+        assert!(!requires_fn_ptr_rewrite("write"));
     }
 
     #[test]

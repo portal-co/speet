@@ -14,6 +14,7 @@
 pub mod backend;
 pub mod drive;
 pub mod frontend;
+pub mod guest_func_catalog;
 pub mod instrument;
 pub mod plt;
 

@@ -9,3 +9,4 @@ license-file = "../../../COPYING.md"
 [dependencies]
 quick-xml = "0.37"
 speet-host-api = { path = "../speet-host-api" }
+speet-abi-stubs = { path = "../speet-abi-stubs" }

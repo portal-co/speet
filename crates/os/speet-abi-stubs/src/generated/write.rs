@@ -7,6 +7,7 @@ use speet_plugin_api::external_target::CallingConvention;
 pub const SYMBOL: &str = "write";
 pub const HOST_SYMBOL: &str = "write";
 pub const POINTER_ARG_INDICES: &[usize] = &[1];
+pub const FN_PTR_ARG_INDICES: &[usize] = &[];
 
 pub fn calling_convention(arch: BinArch) -> Option<CallingConvention> {
     match arch {

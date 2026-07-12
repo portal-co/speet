@@ -4,7 +4,10 @@ use crate::execve_hook;
 use crate::toolchain::{compile_c, link_executable, LlvmToolchain};
 use binary_io::{BinArch, BinOs};
 use speet_host_api::HostApi;
-use speet_rt::{entry_bridge_c, generate_memory_tu, generate_shim};
+use speet_rt::{
+    entry_bridge_c, entry_bridge_direct_c, entry_stub_symbol, generate_guest_stubs_c,
+    generate_memory_tu, generate_shim, halt_stub_symbol, GuestStubEntry,
+};
 use std::path::{Path, PathBuf};
 
 /// Materialize and link guest + runtime objects into an executable.
@@ -23,6 +26,8 @@ use std::path::{Path, PathBuf};
 /// `docs/guides/thin-runtime-genericity.md` principle 4) — a normal-feature
 /// contract, not a test-only convenience: real guest programs may return
 /// out of `main`. See `docs/guides/thin-runtime-genericity.md`.
+/// `halt_addr` is retained for callers that still derive guest layout from
+/// the binary; link uses catalog stub symbols for halt seeding instead.
 #[allow(clippy::too_many_arguments)]
 pub fn link_guest(
     tc: &LlvmToolchain,
@@ -32,18 +37,30 @@ pub fn link_guest(
     os: BinOs,
     entry_param_count: u32,
     sp_param_index: u32,
-    halt_addr: u64,
+    _halt_addr: u64,
     lr_param_index: Option<u32>,
     work_dir: &Path,
     out_exe: &Path,
 ) -> Result<(), String> {
     link_guest_integrated(
-        tc, host, guest_obj, arch, os, entry_param_count, sp_param_index, halt_addr,
-        lr_param_index, work_dir, out_exe,
+        tc,
+        host,
+        guest_obj,
+        arch,
+        os,
+        entry_param_count,
+        sp_param_index,
+        lr_param_index,
+        &[],
+        0,
+        0,
+        Some(_halt_addr),
+        work_dir,
+        out_exe,
     )
 }
 
-/// Integrated link: shim + entry bridge + execve hook.
+/// Integrated link: shim + entry bridge + execve hook + optional per-guest-function stubs.
 #[allow(clippy::too_many_arguments)]
 pub fn link_guest_integrated(
     tc: &LlvmToolchain,
@@ -53,8 +70,11 @@ pub fn link_guest_integrated(
     os: BinOs,
     entry_param_count: u32,
     sp_param_index: u32,
-    halt_addr: u64,
     lr_param_index: Option<u32>,
+    stub_entries: &[GuestStubEntry],
+    entry_local_idx: u32,
+    halt_local_idx: u32,
+    legacy_halt_addr: Option<u64>,
     work_dir: &Path,
     out_exe: &Path,
 ) -> Result<(), String> {
@@ -70,23 +90,45 @@ pub fn link_guest_integrated(
     compile_c(tc, &shim_src, &shim_path, arch, os)?;
 
     let bridge_path = work_dir.join("entry_bridge.o");
-    let bridge_src = entry_bridge_c(entry_param_count, sp_param_index, halt_addr, lr_param_index);
+    let bridge_src = if stub_entries.is_empty() {
+        entry_bridge_direct_c(
+            entry_param_count,
+            sp_param_index,
+            legacy_halt_addr.unwrap_or(0),
+            lr_param_index,
+        )
+    } else {
+        entry_bridge_c(
+            entry_param_count,
+            sp_param_index,
+            lr_param_index,
+            &entry_stub_symbol(entry_local_idx),
+            &halt_stub_symbol(halt_local_idx),
+        )
+    };
     compile_c(tc, &bridge_src, &bridge_path, arch, os)?;
+
+    let mut link_objs: Vec<&Path> = vec![
+        &guest_path,
+        &mem_path,
+        &shim_path,
+        &bridge_path,
+    ];
+    let stubs_path = work_dir.join("guest_stubs.o");
+    if !stub_entries.is_empty() {
+        let stubs_src = generate_guest_stubs_c(stub_entries, entry_param_count);
+        compile_c(tc, &stubs_src, &stubs_path, arch, os)?;
+        link_objs.push(&stubs_path);
+    }
 
     let hook_path = work_dir.join("execve_hook.o");
     compile_c(tc, &execve_hook::generate_execve_hook_c(), &hook_path, arch, os)?;
+    link_objs.push(&hook_path);
 
     let recipe = host.link_recipe();
     let extra = dylib_flags_for_os(os, &recipe.dylib_flags);
 
-    link_executable(
-        tc,
-        &[&guest_path, &mem_path, &shim_path, &bridge_path, &hook_path],
-        out_exe,
-        arch,
-        os,
-        &extra,
-    )
+    link_executable(tc, &link_objs, out_exe, arch, os, &extra)
 }
 
 fn generate_shim_integrated(manifest: &speet_host_api::ImportManifest) -> String {
