@@ -16,6 +16,7 @@ native = [
 
 [dependencies]
 binary-io = { path = "../../../../binary-io" }
+speet-host-api = { path = "../speet-host-api" }
 speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", optional = true, features = ["iced"] }
 portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", optional = true, features = ["bin-backend"] }

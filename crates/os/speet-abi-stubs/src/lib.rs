@@ -3,6 +3,7 @@
 mod generated;
 
 use binary_io::BinArch;
+use speet_host_api::{ImportManifest, WasmValType};
 use speet_plugin_api::external_target::CallingConvention;
 
 pub mod emit;
@@ -23,6 +24,61 @@ pub fn calling_convention(arch: BinArch, symbol: &str) -> Option<CallingConventi
     }
 }
 
+/// PLT-hook marshalling: checked-in stub first, then [`ImportManifest`] WASM
+/// param types for the intercept slot (e.g. `execve` → `__speet_execve`).
+pub fn plt_calling_convention(
+    manifest: &ImportManifest,
+    arch: BinArch,
+    guest_symbol: &str,
+) -> CallingConvention {
+    if let Some(cc) = calling_convention(arch, guest_symbol) {
+        return cc;
+    }
+    hook_calling_convention_from_manifest(manifest, arch, guest_symbol)
+        .unwrap_or_default()
+}
+
+fn hook_calling_convention_from_manifest(
+    manifest: &ImportManifest,
+    arch: BinArch,
+    guest_symbol: &str,
+) -> Option<CallingConvention> {
+    let (_, import_name) = manifest.resolve_intercept(guest_symbol)?;
+    let imp = manifest
+        .func_imports
+        .iter()
+        .find(|i| i.name == import_name)?;
+    Some(import_to_calling_convention(arch, imp))
+}
+
+fn import_to_calling_convention(arch: BinArch, imp: &speet_host_api::FuncImport) -> CallingConvention {
+    let arg_locals = match arch {
+        BinArch::X86_64 => x86_64_arg_locals(imp.params.len()),
+        BinArch::AArch64 => (0..imp.params.len() as u32).collect(),
+    };
+    let arg_wrap_i32 = imp
+        .params
+        .iter()
+        .map(|t| matches!(t, WasmValType::I32))
+        .collect();
+    let (result_local, result_extend_i32) = match imp.results.first() {
+        None => (None, false),
+        Some(WasmValType::I32) => (Some(0), true),
+        Some(_) => (Some(0), false),
+    };
+    CallingConvention {
+        arg_locals,
+        arg_wrap_i32,
+        result_local,
+        result_extend_i32,
+    }
+}
+
+fn x86_64_arg_locals(n: usize) -> Vec<u32> {
+    const ORDER: [u32; 6] = [7, 6, 2, 3, 8, 9]; // RDI, RSI, RDX, RCX, R8, R9
+    ORDER.iter().take(n).copied().collect()
+}
+
 /// Guest pointer argument indices for `symbol`, if stubbed.
 pub fn pointer_arg_indices(symbol: &str) -> Option<&'static [usize]> {
     let bare = symbol.strip_prefix('_').unwrap_or(symbol);
@@ -36,6 +92,7 @@ pub fn pointer_arg_indices(symbol: &str) -> Option<&'static [usize]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use speet_host_api::ImportManifest;
 
     #[test]
     fn write_stub_registered() {
@@ -45,5 +102,15 @@ mod tests {
         let cc = calling_convention(BinArch::X86_64, "write").unwrap();
         assert_eq!(cc.arg_locals, vec![7, 6, 2]);
         assert_eq!(pointer_arg_indices("write"), Some([1].as_slice()));
+    }
+
+    #[test]
+    fn execve_from_integrated_manifest() {
+        let m = ImportManifest::integrated_native();
+        let cc = plt_calling_convention(&m, BinArch::X86_64, "execve");
+        assert_eq!(cc.arg_locals, vec![7, 6, 2]);
+        assert_eq!(cc.arg_wrap_i32, vec![false, false, false]);
+        assert_eq!(cc.result_local, Some(0));
+        assert!(cc.result_extend_i32);
     }
 }

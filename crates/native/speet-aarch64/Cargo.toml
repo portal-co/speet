@@ -16,6 +16,7 @@ speet-memory = { path = "../../helper/speet-memory" }
 speet-link-core = { path = "../../os/speet-link-core" }
 speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 speet-abi-stubs = { path = "../../os/speet-abi-stubs" }
+speet-host-api = { path = "../../os/speet-host-api" }
 binary-io = { path = "../../../../binary-io" }
 
 [dev-dependencies]

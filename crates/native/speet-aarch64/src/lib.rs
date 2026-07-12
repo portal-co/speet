@@ -634,17 +634,6 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 /// Calling convention for a compile-time PLT redirect of `symbol` on AArch64.
 pub fn plt_calling_convention(symbol: &str) -> speet_plugin_api::external_target::CallingConvention {
     use binary_io::BinArch;
-    if let Some(cc) = speet_abi_stubs::calling_convention(BinArch::AArch64, symbol) {
-        return cc;
-    }
-    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
-    match bare {
-        "execve" => speet_plugin_api::external_target::CallingConvention {
-            arg_locals: alloc::vec![0, 1, 2],
-            arg_wrap_i32: alloc::vec![false, false, false],
-            result_local: Some(0),
-            result_extend_i32: true,
-        },
-        _ => speet_plugin_api::external_target::CallingConvention::default(),
-    }
+    use speet_host_api::ImportManifest;
+    speet_abi_stubs::plt_calling_convention(&ImportManifest::integrated_native(), BinArch::AArch64, symbol)
 }

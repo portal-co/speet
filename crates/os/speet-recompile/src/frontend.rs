@@ -396,7 +396,7 @@ pub fn translate_with_plt(
             BinArch::X86_64 => {
                 let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
                 if let Some(plan) = plt_plan {
-                    rc.set_plt_hooks(plan.to_hook_table(BinArch::X86_64));
+                    rc.set_plt_hooks(plan.to_hook_table(BinArch::X86_64, manifest));
                 }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);
@@ -410,7 +410,7 @@ pub fn translate_with_plt(
                 let mut rc =
                     speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
                 if let Some(plan) = plt_plan {
-                    rc.set_plt_hooks(plan.to_hook_table(BinArch::AArch64));
+                    rc.set_plt_hooks(plan.to_hook_table(BinArch::AArch64, manifest));
                 }
                 rc.setup_traps(&mut rctx, &mut ctx);
                 let params = collect_params(&rctx);
