@@ -1,5 +1,6 @@
-
-.DS_Store
 /target
 node_modules
 target
+
+# speet-abi-codegen bulk output (full libc/libSystem baseline; not checked in)
+crates/os/speet-abi-stubs/.generated/

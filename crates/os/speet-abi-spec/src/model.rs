@@ -52,6 +52,14 @@ pub struct AbiSpec {
 }
 
 impl AbiSpec {
+    /// All symbol names in this spec, sorted and deduplicated.
+    pub fn symbol_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.functions.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     pub fn lookup(&self, name: &str) -> Option<&AbiFunction> {
         self.functions.iter().find(|f| f.name == name)
     }

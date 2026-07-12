@@ -4,12 +4,12 @@
 
 ## Purpose
 
-Let the [thin runtime](../thin-runtime-plan.md) safely support host imports that take pointer or function-pointer arguments, without requiring the guest and host to share an address space. Today, [`speet-runtime::suitability`](../../crates/os/speet-runtime/src/suitability.rs)'s `fn_ptr_free_allowlist` rejects any binary importing a symbol not on a small hardcoded allowlist, specifically because a function pointer into guest (WASM-linear) memory is meaningless to a host function expecting a real address. This plan replaces "reject" with "translate" for a deliberately curated set of symbols.
+Let the [thin runtime](../thin-runtime-plan.md) safely support host imports that take pointer or function-pointer arguments, without requiring the guest and host to share an address space. Today, [`speet-runtime::suitability`](../../crates/os/speet-runtime/src/suitability.rs)'s `fn_ptr_free_allowlist` rejects any binary importing a symbol not on a small hardcoded allowlist, specifically because a function pointer into guest (WASM-linear) memory is meaningless to a host function expecting a real address. This plan replaces "reject" with "translate" for symbols that have checked-in stub metadata and runtime wiring.
 
 ## Two phases
 
 1. **Ingest ABI-spec files** (`speet-abi-spec` crate). Parse ABI description files — starting with Apple's BridgeSupport XML format, since it already models functions, argument types, pointer-vs-value distinctions, and function-pointer parameters — into a structured `AbiSpec { functions: Vec<AbiFunction> }`. Pure data ingestion; feeds `speet_host_api::ImportManifest` construction. No codegen, no behavior change. **Status: shipped** (`crates/os/speet-abi-spec`).
-2. **Generate checked-in redirect stubs** (`speet-abi-codegen` tool). Consume an `AbiSpec` and emit **Rust source, checked into the repository**, implementing one stub-emission function per `AbiFunction`, parameterized over the guest's configuration (arch, calling convention). Each generated function emits the actual address-translation / function-translation stub through `asm-arch`'s `WriterCore` emitter — the same emitter wasm-blitz already lowers WASM→native through (see [asm-arch-instruction-sync.md](../guides/asm-arch-instruction-sync.md)) — rather than a separately-compiled C shim string. A function-pointer argument gets a generated trampoline so the *host* can call back into guest code with correctly re-translated argument pointers. **Status: partial fn-ptr v1 shipped** — `speet-abi-codegen` + checked-in `speet-abi-stubs` for curated `write`/`exit`/`printf`; `FN_PTR_ARG_INDICES` + `requires_fn_ptr_rewrite` in `registry.rs`. At link time, [`GuestFuncCatalog`](../../crates/os/speet-recompile/src/guest_func_catalog.rs) drives one host stub per translated guest function (`__speet_guest_fn_N` → `__speet_invoke` → existing `__wasm_table` body); PLT hooks rewrite fn-ptr args through `env.__speet_stub_for_pc` before the redirect import call. **Deferred:** fn-ptr returns, load/store through guest memory, variadic host marshal, targets outside the translated set. Regenerate via:
+2. **Generate redirect stubs** (`speet-abi-codegen` tool). Consume an `AbiSpec` and emit **Rust source** implementing one stub-emission function per `AbiFunction`, parameterized over the guest's configuration (arch, calling convention). Each generated function emits the actual address-translation / function-translation stub through `asm-arch`'s `WriterCore` emitter — the same emitter wasm-blitz already lowers WASM→native through (see [asm-arch-instruction-sync.md](../guides/asm-arch-instruction-sync.md)) — rather than a separately-compiled C shim string. A function-pointer argument gets a generated trampoline so the *host* can call back into guest code with correctly re-translated argument pointers. **Status: partial fn-ptr v1 shipped** — checked-in `write`/`exit`/`printf` under `src/generated/`; full libc/libSystem baseline codegen supported via `--all-symbols` into gitignored `.generated/`. At link time, [`GuestFuncCatalog`](../../crates/os/speet-recompile/src/guest_func_catalog.rs) drives one host stub per translated guest function (`__speet_guest_fn_N` → `__speet_invoke` → existing `__wasm_table` body); PLT hooks rewrite fn-ptr args through `env.__speet_stub_for_pc` before the redirect import call. **Deferred:** fn-ptr returns, load/store through guest memory, variadic host marshal, targets outside the translated set. Regenerate checked-in stubs via:
 
 ```bash
 cargo run -p speet-abi-codegen -- \
@@ -30,7 +30,23 @@ Checking in generated code (rather than shipping the raw ABI-spec files and inte
 
 ## Scope discipline (do not skip — see AGENTS.md §9)
 
-Only generate-and-check-in stubs for genuinely cross-platform behavior, plus a small, deliberately curated set of easily-ported per-OS surfaces (e.g. libSystem and other easily-ported macOS stubs, low-risk Linux stubs). **Do not** check in generated stubs for the entirety of any OS's API surface (e.g. all of macOS/libSystem) — each addition is a deliberate, individually reviewed inclusion, never a bulk import. This bounds the checked-in surface area and keeps stub review tractable as the set grows.
+**Baseline (libc + libSystem):** codegen the **entire** surface from BridgeSupport inputs. Checked-in stubs under `speet-abi-stubs/src/generated/` (`STUB_SYMBOLS` / `-s`) are only the subset the runtime currently wires; everything else is still generated locally into `speet-abi-stubs/.generated/` (gitignored). Growing POSIX coverage is an **implementation** task (suitability, manifest intercepts, redirect emit), not a codegen allowlist decision.
+
+**Outside the baseline:** do **not** check in stubs for other Apple frameworks, GPLed SDK artifacts, or other licensed third-party API surfaces — those stay generated-only/gitignored for **licensing** reasons, not because the codegen pipeline cannot handle them.
+
+```bash
+# Checked-in / wired symbols (committed)
+cargo run -p speet-abi-codegen -- \
+  -i test-data/abi-spec/libc-minimal.bridgesupport.xml \
+  -o crates/os/speet-abi-stubs/src/generated \
+  -s write,exit,printf -a x86_64,aarch64
+
+# Full libc/libSystem baseline (gitignored; run when the BridgeSupport input grows)
+cargo run -p speet-abi-codegen -- \
+  -i PATH/TO/libc.bridgesupport.xml \
+  -o crates/os/speet-abi-stubs/.generated/libc \
+  --all-symbols -a x86_64,aarch64
+```
 
 ## Relationship to other plans
 
