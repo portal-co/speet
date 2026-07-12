@@ -8,21 +8,7 @@ use speet_plugin_api::external_target::CallingConvention;
 
 pub mod emit;
 
-/// Whether a checked-in redirect stub exists for `symbol` (after `_` stripping).
-pub fn has_stub(symbol: &str) -> bool {
-    calling_convention(BinArch::X86_64, symbol).is_some()
-        || calling_convention(BinArch::AArch64, symbol).is_some()
-}
-
-/// Calling convention for a hooked redirect, if a generated stub exists.
-pub fn calling_convention(arch: BinArch, symbol: &str) -> Option<CallingConvention> {
-    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
-    match bare {
-        "write" => generated::write::calling_convention(arch),
-        "exit" => generated::exit::calling_convention(arch),
-        _ => None,
-    }
-}
+pub use generated::registry::{calling_convention, has_stub, pointer_arg_indices, STUB_SYMBOLS};
 
 /// PLT-hook marshalling: checked-in stub first, then [`ImportManifest`] WASM
 /// param types for the intercept slot (e.g. `execve` → `__speet_execve`).
@@ -79,16 +65,6 @@ fn x86_64_arg_locals(n: usize) -> Vec<u32> {
     ORDER.iter().take(n).copied().collect()
 }
 
-/// Guest pointer argument indices for `symbol`, if stubbed.
-pub fn pointer_arg_indices(symbol: &str) -> Option<&'static [usize]> {
-    let bare = symbol.strip_prefix('_').unwrap_or(symbol);
-    match bare {
-        "write" => Some(generated::write::POINTER_ARG_INDICES),
-        "exit" => Some(generated::exit::POINTER_ARG_INDICES),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +75,7 @@ mod tests {
         assert!(has_stub("write"));
         assert!(has_stub("_write"));
         assert!(!has_stub("printf"));
+        assert_eq!(STUB_SYMBOLS, &["write", "exit"]);
         let cc = calling_convention(BinArch::X86_64, "write").unwrap();
         assert_eq!(cc.arg_locals, vec![7, 6, 2]);
         assert_eq!(pointer_arg_indices("write"), Some([1].as_slice()));

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 speet-abi-spec = { path = "../speet-abi-spec" }
+speet-host-api = { path = "../speet-host-api" }
 binary-io = { path = "../../../../binary-io" }
 
 [dev-dependencies]
