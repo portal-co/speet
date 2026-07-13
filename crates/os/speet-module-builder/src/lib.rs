@@ -17,6 +17,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+pub mod build_glue;
+
 use core::convert::Infallible;
 
 use speet_link_core::linker::LinkerPlugin;

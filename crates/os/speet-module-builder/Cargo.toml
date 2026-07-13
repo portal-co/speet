@@ -9,6 +9,8 @@ license-file.workspace = true
 speet-module-target = { path = "../speet-module-target" }
 speet-link-core     = { path = "../speet-link-core" }
 wasm-encoder        = { workspace = true }
+os-target-core      = { path = "../../../../os-emulation/crates/target/os-target-core" }
+os-build           = { path = "../../../../os-emulation/crates/build/os-build" }
 
 [dev-dependencies]
 wasmparser   = { version = "0.240.0", features = ["validate"] }
