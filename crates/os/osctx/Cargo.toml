@@ -2,7 +2,7 @@
 name = "osctx"
 version = "0.1.0"
 edition = "2024"
-description.workspace = true
-license-file.workspace = true
+description = "Compatibility shim that re-exports os-ctx."
 
 [dependencies]
+os-ctx = { path = "../../../../os-emulation/crates/runtime/os-ctx" }

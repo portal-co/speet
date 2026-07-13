@@ -2,11 +2,7 @@
 name = "speet-host-api"
 version = "0.1.0"
 edition = "2021"
-description = "Pluggable host API for the thin runtime: tunneled libc/syscall boundary."
+description = "Compatibility shim that re-exports os-host-api."
 
 [dependencies]
-binary-io = { path = "../../../../binary-io" }
-tunnel = { path = "../../../../tunnel" }
-osctx = { path = "../osctx" }
-
-[dev-dependencies]
+os-host-api = { path = "../../../../os-emulation/crates/runtime/os-host-api" }
