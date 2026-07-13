@@ -221,7 +221,7 @@ mod tests {
     use alloc::string::String;
     use core::convert::Infallible;
     use speet_link_core::EntityIndexSpace;
-    use speet_linux_wasi::{LinuxToWasi, WasiImports};
+    use speet_linux_wasi::{LinuxToWasi, WasiImports, WasiImportsExt};
     use speet_module_builder::ModuleBuilder;
     use speet_plugin_api::snippet::PluginValType;
     use speet_plugin_api::target::{

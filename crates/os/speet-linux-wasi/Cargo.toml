@@ -6,7 +6,7 @@ description.workspace = true
 license-file.workspace = true
 
 [dependencies]
-speet-syscall       = { path = "../speet-syscall" }
+os-linux-wasi        = { path = "../../../../os-emulation/crates/emit/os-linux-wasi" }
 speet-link-core     = { path = "../speet-link-core" }
 speet-module-target = { path = "../speet-module-target" }
 wasm-encoder        = { workspace = true }

@@ -6,8 +6,9 @@ description.workspace = true
 license-file.workspace = true
 
 [dependencies]
-speet-riscv  = { path = "../../native/speet-riscv" }
+speet-riscv    = { path = "../../native/speet-riscv" }
 wasm-encoder = { workspace = true }
+os-syscall-emit = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
 
 [dev-dependencies]
 wax-core = { workspace = true }

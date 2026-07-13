@@ -58,7 +58,7 @@ impl<F, B: Backend> MemoryCodegen<B> for MegabinaryBuilder<F> {
 }
 
 impl<F, B: Backend> SyscallCodegen<B> for MegabinaryBuilder<F> {
-    fn emit_syscall_dispatch(&mut self, backend: &mut B, _table: &SyscallTable<B>) {
+    fn emit_syscall_dispatch(&mut self, backend: &mut B, _table: &SyscallTable) {
         // Placeholder: a real implementation would emit a br_table/dispatch over
         // `_table.entries`. For now we emit a single ecall token so the trait
         // is satisfied and code can compile.
