@@ -2,11 +2,9 @@
 name = "speet-abi-spec"
 version = "0.1.0"
 edition = "2021"
-description = "ABI description ingestion for thin-runtime redirect stubs (BridgeSupport first)."
+description = "Compatibility shim for `os-abi-spec`."
 publish = false
 license-file = "../../../COPYING.md"
 
 [dependencies]
-quick-xml = "0.37"
-speet-host-api = { path = "../speet-host-api" }
-speet-abi-stubs = { path = "../speet-abi-stubs" }
+os-abi-spec = { path = "../../../../os-emulation/crates/abi/os-abi-spec" }

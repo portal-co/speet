@@ -2,18 +2,12 @@
 name = "speet-abi-codegen"
 version = "0.1.0"
 edition = "2021"
-description = "Generate checked-in ABI redirect stub Rust from BridgeSupport specs."
+description = "Compatibility shim for `os-abi-codegen`."
 publish = false
 license-file = "../../../COPYING.md"
 
-[[bin]]
-name = "speet-abi-codegen"
-path = "src/main.rs"
-
 [dependencies]
-speet-abi-spec = { path = "../speet-abi-spec" }
-speet-host-api = { path = "../speet-host-api" }
-binary-io = { path = "../../../../binary-io" }
+os-abi-codegen = { path = "../../../../os-emulation/crates/abi/os-abi-codegen" }
+os-abi-spec = { path = "../../../../os-emulation/crates/abi/os-abi-spec" }
 
-[dev-dependencies]
-tempfile = "3"
+

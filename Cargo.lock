@@ -1067,6 +1067,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "os-abi-codegen"
+version = "0.1.0"
+dependencies = [
+ "binary-io",
+ "os-abi-spec",
+ "os-abi-stubs",
+ "os-host-api",
+]
+
+[[package]]
+name = "os-abi-spec"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+]
+
+[[package]]
+name = "os-abi-stubs"
+version = "0.1.0"
+dependencies = [
+ "binary-io",
+ "os-abi-spec",
+ "os-host-api",
+]
+
+[[package]]
 name = "os-ctx"
 version = "0.1.0"
 
@@ -1592,19 +1618,15 @@ dependencies = [
 name = "speet-abi-codegen"
 version = "0.1.0"
 dependencies = [
- "binary-io",
- "speet-abi-spec",
- "speet-host-api",
- "tempfile",
+ "os-abi-codegen",
+ "os-abi-spec",
 ]
 
 [[package]]
 name = "speet-abi-spec"
 version = "0.1.0"
 dependencies = [
- "quick-xml",
- "speet-abi-stubs",
- "speet-host-api",
+ "os-abi-spec",
 ]
 
 [[package]]
@@ -1612,11 +1634,9 @@ name = "speet-abi-stubs"
 version = "0.1.0"
 dependencies = [
  "binary-io",
- "portal-solutions-asm-aarch64",
- "portal-solutions-asm-x86-64",
- "portal-solutions-blitz-common",
- "speet-host-api",
- "speet-plugin-api",
+ "os-abi-spec",
+ "os-abi-stubs",
+ "os-host-api",
 ]
 
 [[package]]
@@ -1849,6 +1869,7 @@ dependencies = [
 name = "speet-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "os-abi-spec",
  "wasm-encoder 0.240.0",
 ]
 
@@ -3038,6 +3059,62 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-generator"
+version = "0.8.0-pre.10"
+
+[[patch.unused]]
+name = "portal-jsc-simpl-js"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-opt-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "pit-gen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-lang-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-rust-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "wax-tags"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "px-wsdom"
 version = "0.0.6"
 
@@ -3066,23 +3143,63 @@ name = "px-wsdom-macros-decl"
 version = "0.0.6"
 
 [[patch.unused]]
-name = "portal-solutions-asm-jvm"
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "embedded-llm"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "wax-tags"
+name = "embedded-llm-tools"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3146,20 +3263,92 @@ name = "dreamcompiler-minibc-interp"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-gen"
+name = "portal-solutions-asm-jvm"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-lang-generic"
+name = "portal-solutions-asm-riscv64"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-rust-generic"
+name = "portal-solutions-asm-semantics"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64-shim"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-swibb"
 version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "ast-traits"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "cfg-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "register-machine-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "sift-trait"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "siftify"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-canon"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-cc"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-impls"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-pliron-compat"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-reloop"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-reloop2"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-rust"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-trace"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-translation"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "tac-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "type-onion"
+version = "0.2.3"
 
 [[patch.unused]]
 name = "ephemera"
@@ -3242,169 +3431,9 @@ name = "volar-weaver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "ast-traits"
+name = "os-build"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "cfg-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "register-machine-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "sift-trait"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "siftify"
+name = "os-target-core"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "ssa-canon"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-cc"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-impls"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-pliron-compat"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "ssa-reloop"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-reloop2"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-rust"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-trace"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "ssa-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-translation"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "tac-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "type-onion"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
-
-[[patch.unused]]
-name = "embedded-llm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "embedded-llm-tools"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"

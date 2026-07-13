@@ -7,3 +7,4 @@ license-file.workspace = true
 
 [dependencies]
 wasm-encoder = { workspace = true }
+os-abi-spec = { path = "../../../../os-emulation/crates/abi/os-abi-spec" }

@@ -31,38 +31,9 @@ impl LibraryId {
 }
 
 /// Minimal calling-convention description needed to marshal arguments/results
-/// around a redirected call, without hand-matching an instruction shape at
-/// the call site. Each native arch crate supplies symbol conventions via
-/// its own `plt_calling_convention` helper — see `speet-x86_64` /
-/// `speet-aarch64` and `speet_abi_stubs`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CallingConvention {
-    /// Local indices (register slots) holding the callee's arguments, in
-    /// order.
-    pub arg_locals: Vec<u32>,
-    /// Per-argument: whether the register's (64-bit) value must be narrowed
-    /// with `i32.wrap_i64` before the call — set when the target WASM
-    /// import declares an `i32` param but the source register slot is
-    /// natively 64-bit (true of every general-purpose register on both
-    /// aarch64 and x86_64). Empty means no argument needs narrowing (all
-    /// pass through as-is, e.g. an import declaring `i64` params like
-    /// `__speet_execve`). Parallel to `arg_locals`; a missing/absent entry
-    /// for an index is treated as `false`.
-    pub arg_wrap_i32: Vec<bool>,
-    /// Local index the return value should be stored into, if any.
-    pub result_local: Option<u32>,
-    /// Whether the call's WASM result is `i32` and must be widened with
-    /// `i64.extend_i32_u` before storing into `result_local` (a 64-bit
-    /// register slot). Ignored when `result_local` is `None`.
-    pub result_extend_i32: bool,
-}
-
-impl CallingConvention {
-    /// Whether argument index `i` (into `arg_locals`) needs narrowing.
-    pub fn wraps_i32(&self, i: usize) -> bool {
-        self.arg_wrap_i32.get(i).copied().unwrap_or(false)
-    }
-}
+/// around a redirected call. Now owned by `os-abi-spec`; Speet's plugin API
+/// re-exports it so existing consumers keep their import paths.
+pub use os_abi_spec::CallingConvention;
 
 /// One guest-address → symbolic-label hook, keyed by `(library, address)`
 /// rather than a bare `u64` so a plugin can describe multiple
