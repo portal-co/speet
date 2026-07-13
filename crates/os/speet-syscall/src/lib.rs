@@ -98,7 +98,7 @@ impl<'t> WasmSyscallDispatcher<'t> {
         )?;
 
         // Handler arms.
-        for (arm_idx, (_, entry)) in entries.iter().enumerate() {
+        for (_, (_, entry)) in entries.iter().enumerate() {
             cb.emit(ctx, &Instruction::End)?; // close arm block
 
             for save in &entry.saves {
