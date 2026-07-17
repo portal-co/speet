@@ -15,7 +15,7 @@ fn daemon_obtain_linux_elf() {
         return;
     }
     let guest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test-data/thin-runtime-corpus/x86_64-linux/exit_42.elf");
+        .join("../../../test-data/thin-runtime-corpus/x86_64-linux/exit_42.elf");
     if !guest.is_file() {
         eprintln!("SKIP: missing {}", guest.display());
         return;
