@@ -47,10 +47,11 @@ fn daemon_ping_analyze_obtain() {
         &mut sock,
         &encode_request(&Request::Analyze {
             path: guest.display().to_string(),
+            backend: Some("integrated".into()),
         }),
     );
     match decode_response(&analyze).unwrap() {
-        speet_runtime::rtd_protocol::Response::Suitable => {}
+        speet_runtime::rtd_protocol::Response::Suitable { .. } => {}
         other => panic!("expected suitable, got {other:?}"),
     }
 }

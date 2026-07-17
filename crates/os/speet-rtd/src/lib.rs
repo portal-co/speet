@@ -1,15 +1,20 @@
 //! `speet-rtd` daemon library.
+//!
+//! Thin wrapper around the generic `os-daemon`, registering speet's
+//! existing AOT-recompile pipeline (`IntegratedNativeRuntime`) as the
+//! `"integrated"` backend. The daemon itself no longer hardcodes which
+//! transformation strategy produced a runnable artifact — future backends
+//! (e.g. a dylib/so rewriter) register into the same `os_daemon::Daemon`
+//! registry alongside this one.
 
+mod simple_rewrite;
+
+use os_daemon::Daemon as GenericDaemon;
 use speet_host_api::integrated_host_api;
-use speet_runtime::{
-    default_socket_path, IntegratedNativeRuntime, NativeRuntime, ObtainError, SuitabilityReport,
-};
-use speet_runtime::rtd_protocol::{
-    decode_request, encode_response, read_frame, write_frame, Request, Response,
-};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use speet_runtime::IntegratedNativeRuntime;
+use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub fn cache_root() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
@@ -21,97 +26,94 @@ pub fn cache_root() -> PathBuf {
     PathBuf::from("/tmp/speet-rt-artifacts")
 }
 
-pub struct Daemon {
-    rt: Mutex<IntegratedNativeRuntime>,
-}
+pub struct Daemon(GenericDaemon);
 
 impl Daemon {
     pub fn new() -> Self {
         let root = cache_root();
         let _ = std::fs::create_dir_all(&root);
         let rt = IntegratedNativeRuntime::new(Arc::new(integrated_host_api())).with_disk_cache(root);
-        Self {
-            rt: Mutex::new(rt),
-        }
+        let mut inner = GenericDaemon::new();
+        inner.register(Box::new(rt));
+        maybe_register_simple_rewrite(&mut inner);
+        Self(inner)
     }
 
     pub fn handle_frame(&self, frame: &[u8]) -> Vec<u8> {
-        let req = match decode_request(frame) {
-            Ok(r) => r,
-            Err(_) => {
-                return encode_response(&Response::Error {
-                    message: "invalid request".into(),
-                });
-            }
-        };
-        encode_response(&self.dispatch(req))
-    }
-
-    fn dispatch(&self, req: Request) -> Response {
-        match req {
-            Request::Ping => Response::Pong,
-            Request::Analyze { path } => self.handle_analyze(&path),
-            Request::Obtain { path, host_id: _ } => self.handle_obtain(&path),
-        }
-    }
-
-    fn handle_analyze(&self, path: &str) -> Response {
-        let rt = self.rt.lock().unwrap();
-        match rt.analyze(Path::new(path)) {
-            Ok(report) if report.suitable => Response::Suitable,
-            Ok(report) => unsuitable_response(&report),
-            Err(e) => Response::Error { message: e },
-        }
-    }
-
-    fn handle_obtain(&self, path: &str) -> Response {
-        let mut rt = self.rt.lock().unwrap();
-        match rt.obtain_executable(Path::new(path)) {
-            Ok(exe) => Response::Ready {
-                exe_path: exe.display().to_string(),
-                cache_hit: false,
-            },
-            Err(ObtainError::Unsuitable(report)) => unsuitable_response(&report),
-            Err(ObtainError::RecompileFailed(e)) => Response::Error { message: e },
-        }
+        self.0.handle_frame(frame)
     }
 
     pub fn run_on_listener(listener: UnixListener) -> Result<(), String> {
-        let daemon = Daemon::new();
-        for stream in listener.incoming() {
-            let stream = stream.map_err(|e| e.to_string())?;
-            let _ = handle_client(&daemon, stream);
-        }
-        Ok(())
+        Daemon::new().0.run_on_listener(listener)
     }
 }
 
-fn handle_client(daemon: &Daemon, stream: UnixStream) -> Result<(), String> {
-    let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
-    let frame = read_frame(&mut reader)?;
-    let resp = daemon.handle_frame(&frame);
-    let mut sock = stream;
-    write_frame(&mut sock, &resp)?;
-    Ok(())
-}
-
-fn unsuitable_response(report: &SuitabilityReport) -> Response {
-    Response::Unsuitable {
-        unresolved_deps: report.unresolved_deps.clone(),
-        fn_ptr_deps: report.fn_ptr_deps.clone(),
+impl Default for Daemon {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-pub fn bind_socket(path: &Path) -> Result<UnixListener, String> {
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    UnixListener::bind(path).map_err(|e| e.to_string())
-}
+pub use os_daemon::bind_socket;
 
 pub fn default_listen_path() -> PathBuf {
-    default_socket_path()
+    speet_runtime::default_socket_path()
 }
+
+/// Registers the `"simple-rewrite"` backend only if `SIMPLE_REWRITE_SHIM`
+/// (path to the dylib/so to inject) is set — this is opt-in configuration,
+/// so an unconfigured deployment keeps today's exact recompile-only
+/// behavior. On macOS, signing also requires `SANDBOX_CODESIGN_IDENTITY`
+/// (a real identity, or `-` for the local-development ad-hoc fallback);
+/// see `hardened-runtime-library-validation-schema.md`.
+#[cfg(target_os = "macos")]
+fn maybe_register_simple_rewrite(daemon: &mut GenericDaemon) {
+    use simple_rewrite::{SimpleRewriteBackend, SimpleRewriteConfig};
+
+    let Some(shim_path) = std::env::var_os("SIMPLE_REWRITE_SHIM") else {
+        return;
+    };
+    let Ok(identity) = std::env::var("SANDBOX_CODESIGN_IDENTITY") else {
+        eprintln!("simple-rewrite: SIMPLE_REWRITE_SHIM is set but SANDBOX_CODESIGN_IDENTITY is not; skipping");
+        return;
+    };
+    let identity = if identity == "-" {
+        os_codesign_macho::SigningIdentity::AdHoc
+    } else {
+        os_codesign_macho::SigningIdentity::Real(identity)
+    };
+    let config = SimpleRewriteConfig {
+        shim_path: PathBuf::from(shim_path),
+        cache_root: cache_root().join("rewrite"),
+        identity,
+        keychain: std::env::var("SANDBOX_CODESIGN_KEYCHAIN").ok(),
+        allow_get_task_allow: std::env::var("SANDBOX_ALLOW_GET_TASK_ALLOW").as_deref() == Ok("1"),
+    };
+    daemon.register(Box::new(SimpleRewriteBackend::new(config)));
+}
+
+/// Registers the `"simple-rewrite"` backend only if `SIMPLE_REWRITE_SHIM`
+/// (path to the `.so` to inject) is set. Linux/BSD have no code-signing
+/// gate, so no identity configuration is needed.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+fn maybe_register_simple_rewrite(daemon: &mut GenericDaemon) {
+    use simple_rewrite::{SimpleRewriteBackend, SimpleRewriteConfig};
+
+    let Some(shim_path) = std::env::var_os("SIMPLE_REWRITE_SHIM") else {
+        return;
+    };
+    let config = SimpleRewriteConfig {
+        shim_path: PathBuf::from(shim_path),
+        cache_root: cache_root().join("rewrite"),
+    };
+    daemon.register(Box::new(SimpleRewriteBackend::new(config)));
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)))]
+fn maybe_register_simple_rewrite(_daemon: &mut GenericDaemon) {}

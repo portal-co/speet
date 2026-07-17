@@ -37,7 +37,7 @@ fn daemon_obtain_linux_elf() {
         &mut sock,
         &encode_request(&Request::Obtain {
             path: guest.display().to_string(),
-            host_id: "integrated".into(),
+            backend: "integrated".into(),
         }),
     );
     match decode_response(&resp).unwrap() {

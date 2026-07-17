@@ -11,7 +11,16 @@ path = "src/main.rs"
 [dependencies]
 speet-runtime = { path = "../speet-runtime" }
 speet-host-api = { path = "../speet-host-api" }
+os-daemon = { path = "../../../../os-emulation/crates/daemon/os-daemon" }
+os-transform-core = { path = "../../../../os-emulation/crates/daemon/os-transform-core" }
 tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+os-rewrite-macho = { path = "../../../../os-emulation/crates/daemon/os-rewrite-macho" }
+os-codesign-macho = { path = "../../../../os-emulation/crates/daemon/os-codesign-macho" }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+os-rewrite-elf = { path = "../../../../os-emulation/crates/daemon/os-rewrite-elf" }
 
 [dev-dependencies]
 tempfile = "3"

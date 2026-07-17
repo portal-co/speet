@@ -15,6 +15,10 @@ speet-rt = { path = "../speet-rt" }
 tunnel = { path = "../../../../tunnel" }
 object = "0.36"
 wasmparser = "0.240.0"
+os-transform-core = { path = "../../../../os-emulation/crates/daemon/os-transform-core" }
+os-daemon-protocol = { path = "../../../../os-emulation/crates/daemon/os-daemon-protocol" }
+os-daemon-hook = { path = "../../../../os-emulation/crates/daemon/os-daemon-hook" }
+os-daemon = { path = "../../../../os-emulation/crates/daemon/os-daemon" }
 
 [dev-dependencies]
 tempfile = "3"

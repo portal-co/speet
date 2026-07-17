@@ -8,6 +8,7 @@ pub mod rtd_protocol;
 mod runtime;
 mod suitability;
 mod toolchain;
+mod transform_backend;
 
 pub use cache::{load_binary, load_text_from_object, ArtifactCache};
 pub use execve_hook::{default_socket_path, obtain_remote, ping, socket_path, ObtainResponse};
