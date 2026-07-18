@@ -92,13 +92,22 @@ pub fn entry_bridge_direct_c(
         (false, false) => format!("{dummy_args}, {args}"),
     };
 
+    // Reserve `HOST_STR_SCRATCH_BYTES` above the stack for host-import stubs
+    // that need to copy host-owned data (e.g. `getenv`'s result) into a
+    // guest-visible location — see `crate::HOST_STR_SCRATCH_BYTES`'s doc
+    // comment. The stack only ever grows *down* from here, so it can never
+    // collide with that region.
+    let mem_top = format!(
+        "((uint64_t)__wasm_mem_pages * 65536u - {}u)",
+        crate::HOST_STR_SCRATCH_BYTES
+    );
     let (sp_init, seed_stack_ra) = match lr_param_index {
         Some(_) => (
-            "((uint64_t)__wasm_mem_pages * 65536u) & ~(uint64_t)0xF".to_string(),
+            format!("({mem_top}) & ~(uint64_t)0xF"),
             String::new(),
         ),
         None => (
-            "(((uint64_t)__wasm_mem_pages * 65536u) & ~(uint64_t)0xF) - 8".to_string(),
+            format!("(({mem_top}) & ~(uint64_t)0xF) - 8"),
             format!(
                 "    *(uint64_t *)(uintptr_t)(__wasm_mem + __speet_guest_sp) = SPEET_HALT_ADDR;\n",
             ),
@@ -165,14 +174,21 @@ fn entry_bridge_with_catalog(
     // pointer's own address (taking `&halt_stub_sym` here was the bug: it
     // fed a native address into guest-address arithmetic, producing a wild
     // `__wasm_table` index and a segfault on the very first `ret`).
+    // See the analogous comment in `entry_bridge_direct_c` — reserve
+    // `HOST_STR_SCRATCH_BYTES` above the stack for host-import stubs that
+    // copy host-owned data into a guest-visible location.
+    let mem_top = format!(
+        "((uint64_t)__wasm_mem_pages * 65536u - {}u)",
+        crate::HOST_STR_SCRATCH_BYTES
+    );
     let (sp_init, seed_stack_ra, seed_lr) = match lr_param_index {
         Some(lr) => (
-            "((uint64_t)__wasm_mem_pages * 65536u) & ~(uint64_t)0xF".to_string(),
+            format!("({mem_top}) & ~(uint64_t)0xF"),
             String::new(),
             format!("    __speet_set_reg_seed({lr}, {halt_guest_pc}ULL);\n", lr = lr),
         ),
         None => (
-            "(((uint64_t)__wasm_mem_pages * 65536u) & ~(uint64_t)0xF) - 8".to_string(),
+            format!("(({mem_top}) & ~(uint64_t)0xF) - 8"),
             format!("    *(uint64_t *)(uintptr_t)(__wasm_mem + __speet_guest_sp) = {halt_guest_pc}ULL;\n"),
             String::new(),
         ),

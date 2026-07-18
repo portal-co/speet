@@ -6,7 +6,7 @@ use speet_host_api::{FuncImport, ImportManifest};
 /// and calls `__guest_entry`. Compile with `-DSPEET_RT_NO_MAIN` alongside
 /// [`RUNTIME_C`] when using the split runtime + shim layout.
 pub fn generate_shim(manifest: &ImportManifest) -> String {
-    let mut out = String::from(
+    let mut out = format!(
         r#"#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +23,28 @@ extern uint32_t __wasm_mem_pages;
 extern long __guest_entry(void);
 extern void __speet_start(int argc, char **argv);
 
+// Reserved scratch region at the very top of `__wasm_mem` — see
+// `speet_rt::HOST_STR_SCRATCH_BYTES`'s doc comment. Import stubs that need
+// to hand the guest a *translated copy* of host-owned string data (rather
+// than a raw host pointer, which the guest could never safely dereference —
+// see the entry bridge's own module doc for why) copy into here and return
+// the wasm-relative offset. Not a general allocator: the last copy wins,
+// so callers must consume a result before anything else writes here.
+#define SPEET_HOST_STR_SCRATCH_BYTES {HOST_STR_SCRATCH_BYTES}u
+static uint32_t speet_copy_host_str_to_wasm(const char *s) {{
+    if (!s) return 0;
+    uint64_t scratch_off = (uint64_t)__wasm_mem_pages * (uint64_t)WASM_PAGE_SIZE
+        - SPEET_HOST_STR_SCRATCH_BYTES;
+    size_t cap = SPEET_HOST_STR_SCRATCH_BYTES - 1;
+    size_t len = strlen(s);
+    if (len > cap) len = cap;
+    memcpy(__wasm_mem + scratch_off, s, len);
+    __wasm_mem[scratch_off + len] = 0;
+    return (uint32_t)scratch_off;
+}}
+
 "#,
+        HOST_STR_SCRATCH_BYTES = crate::HOST_STR_SCRATCH_BYTES,
     );
 
     for imp in &manifest.func_imports {
@@ -107,6 +128,23 @@ uint64_t {sym}(long guest_pc) {{
             out.push_str(&format!(
                 "long {sym}(int ptr) {{
     return (long)strlen((const char *)(__wasm_mem + (unsigned)ptr));
+}}\n\n"
+            ));
+        }
+        ("env", "getenv") => {
+            // getenv returns a real host `char*` — handing that straight to
+            // guest code would be exactly the raw-host-pointer bug already
+            // fixed once for the guest stack (see the entry bridge's module
+            // doc): the guest's own memory ops always wrap addresses to 32
+            // bits and rebase them off `__wasm_mem`, so a real host pointer
+            // silently corrupts to a wild, ASLR-dependent address. Copy the
+            // value into the reserved scratch region instead and return the
+            // wasm-relative offset (0 for an unset/absent variable, matching
+            // NULL — 0 is never a valid offset into the scratch region).
+            out.push_str(&format!(
+                "long {sym}(int name_ptr) {{
+    const char *name = (const char *)(__wasm_mem + (unsigned)name_ptr);
+    return (long)speet_copy_host_str_to_wasm(getenv(name));
 }}\n\n"
             ));
         }

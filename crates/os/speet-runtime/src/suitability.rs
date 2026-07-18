@@ -4,8 +4,14 @@ use binary_io::LoadedBinary;
 use speet_host_api::HostApi;
 use std::collections::HashSet;
 
-/// Symbols allowed to be linked: tunnel-resolvable and known not to accept
-/// function-pointer parameters.
+/// Symbols allowed to be linked: tunnel-resolvable, and every pointer
+/// argument or return value they have is translated by hand-written glue in
+/// `speet_rt::shim`'s `emit_import_stub` (`__wasm_mem`-relative input
+/// pointers; host-owned return pointers copied into the reserved scratch
+/// region rather than handed to the guest raw — see `getenv`'s stub and
+/// `speet_rt::HOST_STR_SCRATCH_BYTES`'s doc comment for why a raw host
+/// pointer would be unsafe). None of these ever take a function-pointer
+/// argument (the original, narrower reason this list exists).
 fn fn_ptr_free_allowlist() -> HashSet<&'static str> {
     [
         "write",
@@ -29,6 +35,8 @@ fn fn_ptr_free_allowlist() -> HashSet<&'static str> {
         "_putchar",
         "strlen",
         "_strlen",
+        "getenv",
+        "_getenv",
     ]
     .into_iter()
     .collect()

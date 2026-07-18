@@ -31,6 +31,22 @@ pub const GUEST_ENTRY_SYMBOL: &str = "__guest_entry";
 /// The export name for the optional passive-data initializer.
 pub const DATA_INIT_SYMBOL: &str = "__speet_data_init";
 
+/// Bytes reserved at the very top of `__wasm_mem`, above where the guest
+/// stack starts, for host-import stubs that need to hand the guest a
+/// *translated* copy of host-owned data (e.g. `getenv`'s result) rather than
+/// a raw host pointer — returning a raw host pointer would hit the exact
+/// truncation bug the guest-stack/`__wasm_mem` address-space fix (see
+/// `entry_bridge`'s module doc) already fixed once, just for a return value
+/// instead of a seeded register. `entry_bridge`'s `sp_init` computation
+/// subtracts this from `__wasm_mem_pages * 65536` before seeding SP, so the
+/// stack (which only ever grows *down* from its starting point) can never
+/// collide with this region; `shim.rs`'s stubs that copy host data in write
+/// to `[__wasm_mem_pages * 65536 - HOST_STR_SCRATCH_BYTES, __wasm_mem_pages *
+/// 65536)` and return a wasm-relative offset into it. Not a general-purpose
+/// allocator — callers must not assume a copy survives past the next call
+/// into a stub that also uses this region.
+pub const HOST_STR_SCRATCH_BYTES: u32 = 4096;
+
 /// Write the runtime C source to `path`. Returns the bytes written.
 pub fn write_runtime_c(path: &std::path::Path) -> std::io::Result<usize> {
     std::fs::write(path, RUNTIME_C)?;
