@@ -73,6 +73,11 @@ impl IntegratedNativeRuntime {
     pub fn new(host: Arc<dyn HostApi>) -> Self {
         let (mut out_os, mut out_arch) = host_platform();
         if cfg!(target_os = "macos") {
+            // blitz's aarch64 backend SIGBUSes on real arm64 hardware (16-byte
+            // SP-alignment enforcement vs. its 8-byte SP-based operand-stack
+            // pushes; see speet-recompile/STATUS.md "Known limitation: aarch64
+            // native SP alignment"). x86_64 (native or via Rosetta) is the only
+            // runnable macOS output target until that backend is fixed.
             out_arch = BinArch::X86_64;
             out_os = BinOs::MacOs;
         }
@@ -235,10 +240,20 @@ impl IntegratedNativeRuntime {
 
         let host = self.host.clone();
         let entry_param_count = speet_recompile::drive::entry_param_count(&wasm);
-        // Same-platform only (see `assert_same_platform` in `recompile_wasm`),
-        // so `self.out_arch` is also the guest arch here.
-        let sp_idx = speet_recompile::drive::sp_param_index(self.out_arch);
-        let lr_idx = speet_recompile::drive::lr_param_index(self.out_arch);
+        // `sp_param_index`/`lr_param_index` describe the WASM's own
+        // parameter layout, which is a property of whichever frontend
+        // translated the guest (`guest_arch`) — NOT of `self.out_arch`,
+        // which is only the native encoding/link target and can legitimately
+        // differ from `guest_arch` (e.g. an aarch64 guest recompiled to
+        // x86_64 output via the documented Rosetta workaround for
+        // wasm-blitz's aarch64 SP-alignment bug; see `IntegratedNativeRuntime::
+        // new`'s doc comment). Using `self.out_arch` here silently assumed
+        // guest_arch == out_arch always, which held for every same-arch test
+        // this pipeline had been exercised with but breaks for any genuinely
+        // cross-arch guest/output pairing (see `link.rs`'s `link_guest_integrated`
+        // doc comment, which already warns about exactly this mistake).
+        let sp_idx = speet_recompile::drive::sp_param_index(guest_arch);
+        let lr_idx = speet_recompile::drive::lr_param_index(guest_arch);
         // Halt-sentinel layout is derived inside the guest-function catalog.
         let bin = load_binary(path)?;
         let text = bin

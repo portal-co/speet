@@ -10,7 +10,18 @@ pub struct GuestStubEntry {
 }
 
 /// Generate C for guest-function stubs, `__speet_stub_for_pc`, and `__speet_invoke`.
-pub fn generate_guest_stubs_c(entries: &[GuestStubEntry], entry_param_count: u32) -> String {
+///
+/// `abi_pad_args` (see `entry_bridge::entry_bridge_direct_c`'s doc comment
+/// for the full explanation) is the number of unused leading `uint64_t`
+/// dummy arguments `__speet_invoke` must prepend to its call through
+/// `__wasm_table` — 6 for x86-64 output (whose `CallAbi::AllStack` ignores
+/// argument registers entirely), 0 for AArch64 output (whose "AllStack" is
+/// ordinary AAPCS64 marshalling and already matches a plain C call).
+pub fn generate_guest_stubs_c(
+    entries: &[GuestStubEntry],
+    entry_param_count: u32,
+    abi_pad_args: u32,
+) -> String {
     let mut out = String::from(
         r#"#include <stdint.h>
 #include <stddef.h>
@@ -91,25 +102,48 @@ void __speet_set_reg_seed(uint32_t idx, uint64_t val) {
 "#,
     );
 
-    let (params, seeds) = if entry_param_count == 0 {
-        ("void".to_string(), String::new())
-    } else {
-        (
-            (0..entry_param_count)
-                .map(|i| format!("uint64_t p{i}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            (0..entry_param_count)
-                .map(|i| format!("__speet_reg_seed[{i}]"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+    // On backends whose `CallAbi::AllStack` truly marshals *every* param
+    // through the stack, ignoring argument registers entirely (currently
+    // x86-64's wasm-blitz backend only — see this function's doc comment),
+    // a plain `fn(seeds[0], ..., seeds[n-1])` call would have param `i`
+    // actually land in a register the callee never reads, while the stack
+    // slot the callee reads for `i` holds whatever real arg `i+abi_pad_args`
+    // put there (or nothing, once out of range) — every param the callee
+    // sees is silently shifted/garbage. Prepending `abi_pad_args` unused
+    // `uint64_t` args soaks up that many argument registers, forcing the
+    // compiler to spill the real `seeds` starting at stack position 0 —
+    // exactly where AllStack's prologue looks for param 0.
+    let (params, seeds) = (
+        (0..entry_param_count)
+            .map(|i| format!("uint64_t p{i}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        (0..entry_param_count)
+            .map(|i| format!("__speet_reg_seed[{i}]"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let dummy_decl = (0..abi_pad_args)
+        .map(|i| format!("uint64_t __speet_d{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let dummy_args = (0..abi_pad_args).map(|_| "0").collect::<Vec<_>>().join(", ");
+    let full_params = match (dummy_decl.is_empty(), params.is_empty()) {
+        (true, true) => "void".to_string(),
+        (true, false) => params,
+        (false, true) => dummy_decl,
+        (false, false) => format!("{dummy_decl}, {params}"),
+    };
+    let full_args = match (dummy_args.is_empty(), seeds.is_empty()) {
+        (true, _) => seeds,
+        (false, true) => dummy_args,
+        (false, false) => format!("{dummy_args}, {seeds}"),
     };
     out.push_str(&format!(
         r#"uint64_t __speet_invoke(uint32_t wasm_func_idx) {{
-    typedef long (*GuestFn)({params});
+    typedef long (*GuestFn)({full_params});
     GuestFn fn = (GuestFn)(uintptr_t)__wasm_table[wasm_func_idx];
-    return (uint64_t)fn({seeds});
+    return (uint64_t)fn({full_args});
 }}
 
 "#
@@ -148,10 +182,23 @@ mod tests {
                 is_halt: true,
             },
         ];
-        let src = generate_guest_stubs_c(&entries, 2);
+        let src = generate_guest_stubs_c(&entries, 2, 6);
         assert!(src.contains("__speet_stub_for_pc"));
         assert!(src.contains("__speet_guest_fn_0"));
         assert!(src.contains("__speet_guest_fn_1"));
         assert!(src.contains("__speet_set_reg_seed"));
+        assert!(src.contains("__speet_d0"), "x86-64 (abi_pad_args=6) must pad");
+    }
+
+    #[test]
+    fn zero_abi_pad_args_omits_dummy_params() {
+        let entries = vec![GuestStubEntry {
+            guest_pc: 0x1000,
+            wasm_func_idx: 0,
+            local_func_idx: 0,
+            is_halt: false,
+        }];
+        let src = generate_guest_stubs_c(&entries, 2, 0);
+        assert!(!src.contains("__speet_d0"), "aarch64 (abi_pad_args=0) must not pad");
     }
 }

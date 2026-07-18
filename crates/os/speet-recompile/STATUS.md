@@ -41,13 +41,22 @@ C shim (`main` → `__guest_entry`) via `clang`, runs it (Rosetta on Apple silic
 asserts **exit code 42**. This validates blitz codegen + binary-io object writing + the #2
 C-ABI bridge + link/run together.
 
-### Known limitation: aarch64 native SP alignment
-blitz's aarch64 backend uses the hardware SP as the WASM operand stack with 8-byte
-`str/ldr [sp,#±8]!` pushes. Real arm64 (macOS) enforces a 16-byte SP-alignment check on
-SP-based accesses, so recompiled aarch64 code faults (SIGBUS) after the first push — even
-though it passes under Unicorn (which doesn't enforce the check). Fixing it needs either
-16-byte operand-stack slots or a non-SP stack register in the aarch64 backend. Until then
-the runnable path is x86_64 (native on x86 hosts, Rosetta on Apple silicon).
+### Fixed: guest-stack/linear-memory address-space mismatch (was mis-diagnosed as "aarch64 SP alignment")
+This was previously documented as an 8-byte-push SP-alignment fault. Direct `lldb`
+reproduction (register inspection at the fault site) showed that's not the actual defect:
+both wasm-blitz backends already use correctly 16-byte-aligned operand-stack slots and
+frame sizes. The real bug was in `speet-rt`'s entry-bridge C glue: the guest's SP was
+seeded with a **raw absolute host pointer** into a separate `static __speet_guest_stack`
+array, unrelated to `__wasm_mem` (the actual buffer the guest's compiled memory
+loads/stores address, per WASM32's linear-memory model — always `__wasm_mem`-relative
+with the address wrapped to 32 bits). Any SP value exceeding 32 bits — routine on a real
+64-bit host, since ASLR commonly places static data above the 4GB mark — got silently
+truncated by that wrap, producing an ASLR-dependent wild address (ASLR-disabled runs under
+`lldb` always passed; real runs failed ~50-70% of the time). Fixed by moving the guest
+stack inside `__wasm_mem` itself (seeded as a small offset near its top, not a raw
+pointer) in `speet-rt::entry_bridge`. Native aarch64 output is no longer categorically
+broken; `IntegratedNativeRuntime::new`'s macOS x86_64-output override (see below/its own
+doc comment) can in principle be revisited, though it wasn't removed as part of this fix.
 
 ## Frontend pipeline — guest machine code → WASM (verified)
 

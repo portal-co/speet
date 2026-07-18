@@ -6,7 +6,7 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::HostApi;
 use speet_rt::{
     entry_bridge_c, entry_bridge_direct_c, entry_stub_symbol, generate_guest_stubs_c,
-    generate_memory_tu, generate_shim, halt_stub_symbol, GuestStubEntry,
+    generate_memory_tu, generate_shim, GuestStubEntry,
 };
 use std::path::{Path, PathBuf};
 
@@ -89,6 +89,17 @@ pub fn link_guest_integrated(
     let shim_src = generate_shim_integrated(&host.import_manifest());
     compile_c(tc, &shim_src, &shim_path, arch, os)?;
 
+    // Only wasm-blitz's x86-64 backend implements `CallAbi::AllStack` as a
+    // true all-on-stack convention that ignores argument registers; its
+    // AArch64 counterpart implements the same enum variant as ordinary
+    // AAPCS64 marshalling (X0-X7 then stack), which already matches a plain
+    // C call. See `entry_bridge_direct_c`'s and `generate_guest_stubs_c`'s
+    // doc comments.
+    let abi_pad_args: u32 = match arch {
+        BinArch::X86_64 => 6,
+        BinArch::AArch64 => 0,
+    };
+
     let bridge_path = work_dir.join("entry_bridge.o");
     let bridge_src = if stub_entries.is_empty() {
         entry_bridge_direct_c(
@@ -96,14 +107,24 @@ pub fn link_guest_integrated(
             sp_param_index,
             legacy_halt_addr.unwrap_or(0),
             lr_param_index,
+            abi_pad_args,
         )
     } else {
+        // The seeded "return address" must be the halt entry's *guest*
+        // address (see `entry_bridge_c`'s doc comment) — read it straight
+        // from the catalog's own stub entries rather than threading yet
+        // another parameter through, since `stub_entries` already carries it.
+        let halt_guest_pc = stub_entries
+            .iter()
+            .find(|e| e.local_func_idx == halt_local_idx)
+            .map(|e| e.guest_pc)
+            .unwrap_or_else(|| legacy_halt_addr.unwrap_or(0));
         entry_bridge_c(
             entry_param_count,
             sp_param_index,
             lr_param_index,
             &entry_stub_symbol(entry_local_idx),
-            &halt_stub_symbol(halt_local_idx),
+            halt_guest_pc,
         )
     };
     compile_c(tc, &bridge_src, &bridge_path, arch, os)?;
@@ -116,7 +137,7 @@ pub fn link_guest_integrated(
     ];
     let stubs_path = work_dir.join("guest_stubs.o");
     if !stub_entries.is_empty() {
-        let stubs_src = generate_guest_stubs_c(stub_entries, entry_param_count);
+        let stubs_src = generate_guest_stubs_c(stub_entries, entry_param_count, abi_pad_args);
         compile_c(tc, &stubs_src, &stubs_path, arch, os)?;
         link_objs.push(&stubs_path);
     }

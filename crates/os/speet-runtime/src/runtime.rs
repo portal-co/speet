@@ -211,7 +211,20 @@ impl Runtime {
             .toolchain
             .as_ref()
             .ok_or_else(|| "LLVM toolchain not available (set CLANG or install LLVM)".to_string())?;
-        let dir = std::env::temp_dir().join(format!("speet_rt_{}", std::process::id()));
+        // `std::process::id()` alone is shared by every test in this binary — cargo
+        // test runs tests in parallel threads within one process, so two guests
+        // linking/spawning concurrently would fight over the exact same `guest_exe`
+        // path, corrupting or truncating whichever one was mid-write when the other
+        // called `Command::new(&exe).status()` (observed as a signal-killed child,
+        // `ExitStatus::code() == None`, rather than a real guest exit code). Fold in
+        // the thread id and a hash of the guest object so concurrent calls, even
+        // from the same process, never share a directory.
+        let unique = format!(
+            "{:?}-{}",
+            std::thread::current().id(),
+            ArtifactCache::hash_input(guest_obj)
+        );
+        let dir = std::env::temp_dir().join(format!("speet_rt_{}_{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let exe = dir.join("guest_exe");
         link_guest(
@@ -221,7 +234,11 @@ impl Runtime {
         let status = Command::new(&exe)
             .status()
             .map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_dir_all(&dir);
+        if std::env::var("SPEET_RT_KEEP_TMP").is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            eprintln!("kept: {}", dir.display());
+        }
         Ok(status)
     }
 
