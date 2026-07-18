@@ -10,6 +10,7 @@ pub fn generate_shim(manifest: &ImportManifest) -> String {
         r#"#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #define WASM_PAGE_SIZE 65536u
@@ -96,6 +97,16 @@ uint64_t {sym}(long guest_pc) {{
             out.push_str(&format!(
                 "int {sym}(long fmt, long fn_ptr) {{
     return (int)printf((const char *)(uintptr_t)fmt, (void *)(uintptr_t)fn_ptr);
+}}\n\n"
+            ));
+        }
+        ("env", "putchar") => {
+            out.push_str(&format!("int {sym}(int c) {{ return putchar(c); }}\n\n"));
+        }
+        ("env", "strlen") => {
+            out.push_str(&format!(
+                "long {sym}(int ptr) {{
+    return (long)strlen((const char *)(__wasm_mem + (unsigned)ptr));
 }}\n\n"
             ));
         }

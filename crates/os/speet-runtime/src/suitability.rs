@@ -25,6 +25,10 @@ fn fn_ptr_free_allowlist() -> HashSet<&'static str> {
         "_memset",
         "memcpy",
         "_memcpy",
+        "putchar",
+        "_putchar",
+        "strlen",
+        "_strlen",
     ]
     .into_iter()
     .collect()
