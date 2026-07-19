@@ -450,9 +450,18 @@ where
         self.reactor.set_base_func_offset(n);
     }
 
-    // No traps — no-op.
-    fn declare_trap_params(&mut self, _extra: &mut dyn LocalDeclarator) {}
-    fn declare_trap_locals(&mut self, _extra: &mut dyn LocalDeclarator) {}
+    // No built-in trap chain on this adapter, but `extra` (e.g. a
+    // `speet-memory` address mapper) must still get to declare its own
+    // params/locals — mirrors `TrapReactorAdapter`'s forwarding below, minus
+    // the `self.traps...` half neither this adapter nor its callers have.
+    // Callers passing `&mut ()` (no mapper) see no behavior change, since
+    // `()`'s own `declare_params`/`declare_locals` are themselves no-ops.
+    fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) {
+        extra.declare_params(CellIdx(0), &mut self.layout);
+    }
+    fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
+        extra.declare_locals(CellIdx(0), &mut self.layout);
+    }
     fn on_instruction(
         &mut self,
         _info: &InstructionInfo,

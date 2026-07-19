@@ -6,6 +6,8 @@ use disarm64::decoder_full::{
     LDST_IMM9, LDST_POS, LDST_REGOFF, LDST_UNSCALED, LDSTPAIR_INDEXED, LDSTPAIR_OFF,
 };
 use disarm64::decoder_full::Mnemonic;
+use speet_memory::mem::{LoadKind, StoreKind};
+use speet_ordering::EagerMemorySink;
 
 impl<Context, E> AArch64Recompiler<Context, E> {
 
@@ -39,8 +41,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32Load8U(memarg(0)))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                self.emit_mapped_load(ctx, rctx, tail_idx, 1)?;
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
             LDST_POS::LDRH_Rt_ADDR_UIMM12(x) => {
@@ -48,8 +49,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 2))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32Load16U(memarg(1)))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                self.emit_mapped_load(ctx, rctx, tail_idx, 2)?;
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
             LDST_POS::LDRSW_Rt_ADDR_UIMM12(x) => {
@@ -57,7 +57,7 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 4))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2)))?;
+                self.emit_mapped_load(ctx, rctx, tail_idx, 0xB4)?;
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
             }
             LDST_POS::STR_Rt_ADDR_UIMM12(x) => {
@@ -74,18 +74,14 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32Store8(memarg(0)))?;
+                self.emit_mapped_store(ctx, rctx, tail_idx, 1, rd(w))?;
             }
             LDST_POS::STRH_Rt_ADDR_UIMM12(x) => {
                 let w = x.0;
                 self.emit_addr_reg_get(ctx, rctx, tail_idx, rn(w))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(imm12(w) as i64 * 2))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-                self.emit_gpr_get(ctx, rctx, tail_idx, rd(w))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I32Store16(memarg(1)))?;
+                self.emit_mapped_store(ctx, rctx, tail_idx, 2, rd(w))?;
             }
             _ => unsup!(),
         }
@@ -216,44 +212,124 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         data_reg: u32,
     ) -> Result<(), E> {
         if is_load {
+            self.emit_mapped_load(ctx, rctx, tail_idx, load_width)?;
+            self.emit_gpr_set(ctx, rctx, tail_idx, data_reg)?;
+        } else {
+            self.emit_mapped_store(ctx, rctx, tail_idx, load_width, data_reg)?;
+        }
+        Ok(())
+    }
+
+    /// Load-width-generic memory read. Stack before: `[addr]`. Stack after:
+    /// `[value]` (an i64, sign/zero-extended per `load_width`).
+    ///
+    /// Routes through `self.memory_access`'s `AddressMapper` when set (see
+    /// `speet_memory::MemoryAccess::emit_load`'s doc for what it handles:
+    /// address wrap, mapping, alias-check flush, the load itself, and
+    /// post-load extend); falls back to the same direct, unmapped WASM load
+    /// this always emitted when no mapper is configured.
+    fn emit_mapped_load<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        load_width: u8,
+    ) -> Result<(), E> {
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            let kind = match load_width {
+                8 => LoadKind::I64,
+                4 => LoadKind::I32U,
+                2 => LoadKind::I16U,
+                1 => LoadKind::I8U,
+                0xB4 => LoadKind::I32S,
+                0xB2 => LoadKind::I16S,
+                0xB1 => LoadKind::I8S,
+                _ => LoadKind::I64,
+            };
+            let mut fed = FedContext::new(&*rctx, tail_idx);
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_load(ctx, &mut sink, kind)
+        } else {
             match load_width {
-                8    => { rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?; }
-                4    => { rctx.feed(ctx, tail_idx, &Instruction::I64Load32U(memarg(2)))?; }
-                2    => {
+                8 => rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3))),
+                4 => rctx.feed(ctx, tail_idx, &Instruction::I64Load32U(memarg(2))),
+                2 => {
                     rctx.feed(ctx, tail_idx, &Instruction::I32Load16U(memarg(1)))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)
                 }
-                1    => {
+                1 => {
                     rctx.feed(ctx, tail_idx, &Instruction::I32Load8U(memarg(0)))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)
                 }
-                0xB4 => { rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2)))?; } // LDRSW
+                0xB4 => rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2))), // LDRSW
                 0xB2 => { // LDRSH
                     rctx.feed(ctx, tail_idx, &Instruction::I32Load16S(memarg(1)))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)
                 }
                 0xB1 => { // LDRSB
                     rctx.feed(ctx, tail_idx, &Instruction::I32Load8S(memarg(0)))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32S)
                 }
-                _ => { rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?; }
-            }
-            self.emit_gpr_set(ctx, rctx, tail_idx, data_reg)?;
-        } else {
-            // Store: address already on stack; push data
-            self.emit_gpr_get(ctx, rctx, tail_idx, data_reg)?;
-            match load_width {
-                8 => { rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3)))?; }
-                4 => { rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                       rctx.feed(ctx, tail_idx, &Instruction::I32Store(memarg(2)))?; }
-                2 => { rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                       rctx.feed(ctx, tail_idx, &Instruction::I32Store16(memarg(1)))?; }
-                1 => { rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-                       rctx.feed(ctx, tail_idx, &Instruction::I32Store8(memarg(0)))?; }
-                _ => { rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3)))?; }
+                _ => rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3))),
             }
         }
-        Ok(())
+    }
+
+    /// Store-width-generic memory write. Stack before: `[addr]`; `data_reg`'s
+    /// current value is read via `emit_gpr_get` and stored.
+    ///
+    /// Routes through `self.memory_access` when set: map the address first
+    /// (`emit_store_addr`), then push the (possibly-wrapped) value, then emit
+    /// the final store (`emit_store_insn`) — matching `MemoryAccess`'s
+    /// two-step store protocol. Falls back to the direct, unmapped WASM store
+    /// this always emitted when no mapper is configured.
+    fn emit_mapped_store<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        load_width: u8,
+        data_reg: u32,
+    ) -> Result<(), E> {
+        if self.memory_access.is_some() {
+            let ma = self.memory_access.as_deref_mut().unwrap();
+            let mut fed = FedContext::new(&*rctx, tail_idx);
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_store_addr(ctx, &mut sink)?;
+        }
+        self.emit_gpr_get(ctx, rctx, tail_idx, data_reg)?;
+        if let Some(ma) = self.memory_access.as_deref_mut() {
+            // Unlike the unmapped fallback below (which always uses the
+            // 32-bit-value `I32StoreN` opcodes), `emit_store_insn` picks
+            // `I64StoreN` when its own memory64 config is on — matching this
+            // frontend's memory64-enabled module (see `frontend.rs`'s
+            // `set_memory_access` wiring) — and `I64StoreN` takes an i64
+            // value natively (it truncates internally), so no `I32WrapI64`
+            // is needed or wanted here; wrapping would hand it an i32 where
+            // the module expects i64, exactly the "expected i64, found i32"
+            // validation failure this comment is warning against re-adding.
+            let kind = match load_width {
+                8 => StoreKind::I64,
+                4 => StoreKind::I32,
+                2 => StoreKind::I16,
+                1 => StoreKind::I8,
+                _ => StoreKind::I64,
+            };
+            let mut fed = FedContext::new(&*rctx, tail_idx);
+            let mut sink = EagerMemorySink::new(&mut fed);
+            ma.emit_store_insn(ctx, &mut sink, kind)
+        } else {
+            if matches!(load_width, 1 | 2 | 4) {
+                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
+            }
+            match load_width {
+                8 => rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3))),
+                4 => rctx.feed(ctx, tail_idx, &Instruction::I32Store(memarg(2))),
+                2 => rctx.feed(ctx, tail_idx, &Instruction::I32Store16(memarg(1))),
+                1 => rctx.feed(ctx, tail_idx, &Instruction::I32Store8(memarg(0))),
+                _ => rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3))),
+            }
+        }
     }
 
     // ── LDST_REGOFF (register offset) ────────────────────────────────────────
@@ -410,36 +486,27 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             addr_tmp
         };
 
+        let load_width = if is_ldpsw { 0xB4 } else { 8 };
         if is_load {
             // Load Rt from [addr], Rt2 from [addr + elem_sz]
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(base_addr))?;
-            if is_ldpsw {
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2)))?;
-            } else {
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?;
-            }
+            self.emit_mapped_load(ctx, rctx, tail_idx, load_width)?;
             self.emit_gpr_set(ctx, rctx, tail_idx, reg1)?;
 
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(base_addr))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(elem_sz))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-            if is_ldpsw {
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load32S(memarg(2)))?;
-            } else {
-                rctx.feed(ctx, tail_idx, &Instruction::I64Load(memarg(3)))?;
-            }
+            self.emit_mapped_load(ctx, rctx, tail_idx, load_width)?;
             self.emit_gpr_set(ctx, rctx, tail_idx, reg2)?;
         } else {
             // Store Rt to [addr], Rt2 to [addr + elem_sz]
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(base_addr))?;
-            self.emit_gpr_get(ctx, rctx, tail_idx, reg1)?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3)))?;
+            self.emit_mapped_store(ctx, rctx, tail_idx, 8, reg1)?;
 
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(base_addr))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(elem_sz))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-            self.emit_gpr_get(ctx, rctx, tail_idx, reg2)?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Store(memarg(3)))?;
+            self.emit_mapped_store(ctx, rctx, tail_idx, 8, reg2)?;
         }
 
         // Post-index writeback: Rn ← Rn + off

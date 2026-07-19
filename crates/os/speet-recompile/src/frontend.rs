@@ -63,6 +63,8 @@ use core::convert::Infallible;
 use speet_host_api::{ImportManifest, WasmValType};
 use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
+use speet_memory::mapper::DirectMemory;
+use speet_memory::mem::{AddressWidth, IntWidth};
 use wasm_encoder::{
     CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module,
@@ -395,6 +397,18 @@ pub fn translate_with_plt(
         RecompilerChoice::Native(arch) => match arch {
             BinArch::X86_64 => {
                 let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
+                // Identity mapper — behavior-preserving today (see
+                // docs/future/... memory remapping plan); routes addressing
+                // through `speet-memory`'s `MemoryAccess` hook instead of the
+                // frontend's own unmapped-load/store fallback, so a real
+                // translating mapper can later be swapped in here without
+                // touching this call site again.
+                rc.set_memory_access(Box::new(DirectMemory::new(
+                    (),
+                    0,
+                    AddressWidth::W64 { memory64: true },
+                    IntWidth::I64,
+                )));
                 if let Some(plan) = plt_plan {
                     rc.set_plt_hooks(plan.to_hook_table(BinArch::X86_64, manifest));
                 }
@@ -412,6 +426,13 @@ pub fn translate_with_plt(
             BinArch::AArch64 => {
                 let mut rc =
                     speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                // Identity mapper — see the matching X86_64 comment above.
+                rc.set_memory_access(Box::new(DirectMemory::new(
+                    (),
+                    0,
+                    AddressWidth::W64 { memory64: true },
+                    IntWidth::I64,
+                )));
                 if let Some(plan) = plt_plan {
                     rc.set_plt_hooks(plan.to_hook_table(BinArch::AArch64, manifest));
                 }

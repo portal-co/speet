@@ -189,6 +189,17 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         rctx.declare_trap_params(extra);
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
+        // `DirectMemory::declare_locals` allocates the address-mapper's own
+        // scratch local (e.g. for alias-check flushes) — without this call,
+        // `emit_load`/`emit_store_addr` panic the first time they run since
+        // that scratch slot was never assigned. Must run *after* the params
+        // mark is captured above: `declare_locals` is a distinct concern from
+        // `declare_params` (see `ReactorContext::declare_trap_params` vs
+        // `declare_trap_locals`) and appends a genuine per-function *local*,
+        // not a wasm function *param* — calling it before the mark folded
+        // this scratch into the param list, corrupting every function's
+        // exported/expected type signature by one extra i32.
+        rctx.declare_trap_locals(extra);
         mark.total_locals
     }
 
