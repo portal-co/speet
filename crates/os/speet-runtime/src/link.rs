@@ -4,9 +4,10 @@ use crate::execve_hook;
 use crate::toolchain::{compile_c, link_executable, LlvmToolchain};
 use binary_io::{BinArch, BinOs};
 use speet_host_api::HostApi;
+use speet_recompile::frontend::DataSegment;
 use speet_rt::{
-    entry_bridge_c, entry_bridge_direct_c, entry_stub_symbol, generate_guest_stubs_c,
-    generate_memory_tu, generate_shim, GuestStubEntry,
+    entry_bridge_c, entry_bridge_direct_c, entry_stub_symbol, generate_data_segments_c,
+    generate_guest_stubs_c, generate_memory_tu, generate_shim, DataSegmentBytes, GuestStubEntry,
 };
 use std::path::{Path, PathBuf};
 
@@ -55,6 +56,7 @@ pub fn link_guest(
         0,
         0,
         Some(_halt_addr),
+        &[],
         work_dir,
         out_exe,
     )
@@ -75,6 +77,7 @@ pub fn link_guest_integrated(
     entry_local_idx: u32,
     halt_local_idx: u32,
     legacy_halt_addr: Option<u64>,
+    data_segments: &[DataSegment],
     work_dir: &Path,
     out_exe: &Path,
 ) -> Result<(), String> {
@@ -141,6 +144,20 @@ pub fn link_guest_integrated(
         compile_c(tc, &stubs_src, &stubs_path, arch, os)?;
         link_objs.push(&stubs_path);
     }
+
+    // Always linked: defines `__wasm_data_seg_N`/`__wasm_memory_init_copy`
+    // when there are segments, or a no-op `__speet_data_init` stub when
+    // there aren't — `entry_bridge`'s `__speet_start` always calls
+    // `__speet_data_init` unconditionally, so exactly one definition (this
+    // one, or `guest.o`'s real one when segments are present) must exist.
+    let data_segs_path = work_dir.join("data_segments.o");
+    let segs: Vec<DataSegmentBytes> = data_segments
+        .iter()
+        .map(|s| DataSegmentBytes { bytes: &s.bytes })
+        .collect();
+    let data_segs_src = generate_data_segments_c(&segs);
+    compile_c(tc, &data_segs_src, &data_segs_path, arch, os)?;
+    link_objs.push(&data_segs_path);
 
     let hook_path = work_dir.join("execve_hook.o");
     compile_c(tc, &execve_hook::generate_execve_hook_c(), &hook_path, arch, os)?;

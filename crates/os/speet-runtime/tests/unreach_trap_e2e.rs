@@ -82,6 +82,7 @@ fn unreach_trap_logs_guest_pc() {
         entry_local,
         halt_local,
         None,
+        &[],
         &dir.join("work"),
         &exe,
     )

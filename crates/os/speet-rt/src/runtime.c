@@ -70,11 +70,16 @@ uint32_t __wasm_memory_grow(uint32_t delta, uint8_t **mem, uint32_t *pages) {
 }
 
 /*
- * Optional passive-data initializer, emitted by speet when the guest has data
- * sections. Exported by the backend as `__speet_data_init` when present. Declared
- * weak so binaries without data sections still link.
+ * Passive-data initializer: the backend's compiled guest object exports a
+ * real one when the guest has data segments, otherwise whoever links this
+ * TU must supply a no-op definition (see `speet_rt::generate_data_segments_c`,
+ * which does exactly that for the integrated shim path). A weak/`if`-guarded
+ * declaration was tried first but doesn't work here: Apple's `ld64` only
+ * treats `weak_import` as optional for symbols coming from a *dylib* at load
+ * time, and still hard-errors "symbol not found" for an unresolved weak
+ * reference against a plain relocatable object in the same static link.
  */
-extern void __speet_data_init(void) __attribute__((weak));
+extern void __speet_data_init(void);
 
 /*
  * Recompiled guest entry. The backend emits an export dispatcher named
@@ -102,9 +107,7 @@ int main(int argc, char **argv) {
         __wasm_mem[i] = 0;
     }
 
-    if (__speet_data_init) {
-        __speet_data_init();
-    }
+    __speet_data_init();
 
     __guest_entry();
     return 0;

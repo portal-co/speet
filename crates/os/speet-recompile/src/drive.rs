@@ -98,6 +98,25 @@ fn entry_export_func_idx(wasm: &[u8]) -> u32 {
     0
 }
 
+/// The WASM function index the module exports under
+/// [`crate::frontend::DATA_INIT_EXPORT_NAME`], if any — `finish_module` only
+/// emits that export when the guest has data segments, so this is `None` for
+/// every guest without any.
+fn data_init_export_func_idx(wasm: &[u8]) -> Option<u32> {
+    for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
+        if let wasmparser::Payload::ExportSection(reader) = payload {
+            for exp in reader.into_iter().flatten() {
+                if exp.name == crate::frontend::DATA_INIT_EXPORT_NAME
+                    && matches!(exp.kind, wasmparser::ExternalKind::Func)
+                {
+                    return Some(exp.index);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Param count of the module's `_start` export's function type — i.e. the
 /// number of arguments a C caller must supply to call `__guest_entry`
 /// correctly (guest registers are WASM params; see
@@ -188,6 +207,10 @@ pub fn compile_wasm_to_object(
     // functions ahead of the one at the actual entry address (see
     // `docs/guides/thin-runtime-genericity.md` principle 2).
     let entry_func_idx = entry_export_func_idx(wasm).saturating_sub(import_count);
+    // Same idea for the optional data-init function (see
+    // `data_init_export_func_idx`): `None` when the guest has no data
+    // segments, so `finish_module` never emitted the export.
+    let data_init_func_idx = data_init_export_func_idx(wasm).map(|i| i.saturating_sub(import_count));
     let raw_ops =
         mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs, import_count);
     let ops = dce_pass!(raw_ops);
@@ -214,11 +237,11 @@ pub fn compile_wasm_to_object(
     match arch {
         BinArch::AArch64 => compile_aarch64(
             ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os, entry_func_idx,
+            &sig_results, arch, os, entry_func_idx, data_init_func_idx,
         ),
         BinArch::X86_64 => compile_x86_64(
             ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os, entry_func_idx,
+            &sig_results, arch, os, entry_func_idx, data_init_func_idx,
         ),
     }
 }
@@ -388,6 +411,7 @@ fn compile_aarch64<'a>(
     arch: BinArch,
     os: BinOs,
     entry_func_idx: u32,
+    data_init_func_idx: Option<u32>,
 ) -> Result<Vec<u8>, String> {
     use portal_solutions_asm_aarch64::out::bin::{AsmRelocKind, AArch64Writer};
     use portal_solutions_asm_aarch64::out::Writer as _;
@@ -445,6 +469,14 @@ fn compile_aarch64<'a>(
                 out.set_label(&mut ctx, archc, AArch64Label::External { name: GUEST_ENTRY.into() })
                     .map_err(|e| format!("set_label: {e:?}"))?;
             }
+            if data_init_func_idx == Some(*id) {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    AArch64Label::External { name: crate::frontend::DATA_INIT_EXPORT_NAME.into() },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
         }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
             &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
@@ -481,6 +513,7 @@ fn compile_x86_64<'a>(
     arch: BinArch,
     os: BinOs,
     entry_func_idx: u32,
+    data_init_func_idx: Option<u32>,
 ) -> Result<Vec<u8>, String> {
     use portal_solutions_asm_x86_64::out::iced::{AsmRelocKind, IcedWriter};
     use portal_solutions_asm_x86_64::out::Writer as _;
@@ -525,6 +558,14 @@ fn compile_x86_64<'a>(
             if *id == entry_func_idx {
                 out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })
                     .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+            if data_init_func_idx == Some(*id) {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    X64Label::External { name: crate::frontend::DATA_INIT_EXPORT_NAME.into() },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
             }
         }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(

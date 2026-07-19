@@ -66,9 +66,9 @@ use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
 use speet_memory::mapper::DirectMemory;
 use speet_memory::mem::{AddressWidth, IntWidth};
 use wasm_encoder::{
-    CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind, ExportSection,
-    Function, FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module,
-    RefType, TableSection, TableType, TypeSection, ValType,
+    CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection, Elements, EntityType,
+    ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
+    MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
@@ -119,6 +119,7 @@ pub fn assemble_translated_module(
         memory64,
         entry_func_idx,
         n_params,
+        &[],
     )
 }
 
@@ -208,7 +209,7 @@ pub fn build_halt_stub(n_params: u32) -> Function {
 /// is a parameter count away from `entry_func_idx`'s numbering (both are
 /// 0-based, *before* `n_imports`), see [`Translated::entry_func_idx`].
 fn finish_module(
-    types: TypeSection,
+    mut types: TypeSection,
     imports: ImportSection,
     space: &EntityIndexSpace,
     func_slot: IndexSlot,
@@ -216,16 +217,29 @@ fn finish_module(
     memory64: bool,
     entry_func_idx: u32,
     n_register_params: u32,
+    data_segments: &[DataSegment],
 ) -> Vec<u8> {
     let n_imports = space.host_capabilities.total();
     let total = space.functions.count(func_slot);
     let halt_stub = build_halt_stub(n_register_params);
+
+    // The data-init function (if any) gets its own `() -> ()` type, appended
+    // after every import's type — `types.len()` before the append is exactly
+    // that new type's index regardless of how many import types precede it.
+    let data_init_type_idx = (!data_segments.is_empty()).then(|| {
+        let idx = types.len();
+        types.ty().function([], []);
+        idx
+    });
 
     let mut funcs = FunctionSection::new();
     for _ in fns {
         funcs.function(0);
     }
     funcs.function(0); // halt stub: also type 0, (registers) -> (registers)
+    if let Some(ty) = data_init_type_idx {
+        funcs.function(ty);
+    }
 
     let table_size = n_imports + total + 1;
     let mut tables = TableSection::new();
@@ -249,6 +263,14 @@ fn finish_module(
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("_start", ExportKind::Func, n_imports + entry_func_idx);
+    // The data-init function sits right after the halt stub in both the
+    // function and code sections (neither is part of the guest-function
+    // dispatch table, so this doesn't disturb the elem/table indices below)
+    // — exported by name since the C entry shim calls it directly, not
+    // through the table.
+    if data_init_type_idx.is_some() {
+        exports.export(DATA_INIT_EXPORT_NAME, ExportKind::Func, n_imports + total + 1);
+    }
 
     let indices: Vec<u32> = (n_imports..n_imports + total + 1).collect();
     let mut elems = ElementSection::new();
@@ -263,6 +285,10 @@ fn finish_module(
         code.function(f);
     }
     code.function(&halt_stub);
+    let data_init_fn = data_init_type_idx.map(|_| build_data_init_fn(data_segments));
+    if let Some(f) = &data_init_fn {
+        code.function(f);
+    }
 
     let mut module = Module::new();
     module.section(&types);
@@ -272,7 +298,23 @@ fn finish_module(
     module.section(&mems);
     module.section(&exports);
     module.section(&elems);
+    // Bulk-memory-operations spec: a module using `memory.init`/`data.drop`
+    // must carry a `DataCount` section (between elements and code) so
+    // decoders can validate those instructions' data-index operands without
+    // a forward reference to the later `Data` section.
+    if !data_segments.is_empty() {
+        module.section(&DataCountSection {
+            count: data_segments.len() as u32,
+        });
+    }
     module.section(&code);
+    if !data_segments.is_empty() {
+        let mut data = DataSection::new();
+        for seg in data_segments {
+            data.passive(seg.bytes.iter().copied());
+        }
+        module.section(&data);
+    }
     module.finish()
 }
 
@@ -288,6 +330,47 @@ fn finish_module(
 /// `docs/guides/thin-runtime-genericity.md` principle 4.
 pub fn halt_addr(start_addr: u64, text_len: usize) -> u64 {
     start_addr + text_len as u64
+}
+
+/// One guest data section (`.rodata`/`.data`) to populate `__wasm_mem` with
+/// at load time, via the generated data-init function (see
+/// [`DATA_INIT_EXPORT_NAME`], [`build_data_init_fn`]). `addr` is the
+/// section's own guest virtual address; `bytes` its literal content. Never
+/// pass `.bss` here — `__wasm_mem` already starts zeroed, so a zero-fill
+/// segment would be redundant work, not a correctness fix.
+#[derive(Clone, Debug)]
+pub struct DataSegment {
+    pub addr: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Export name of the generated data-init function (see
+/// [`build_data_init_fn`]) — the C entry shim (`speet_rt::entry_bridge`)
+/// calls this once, before seeding registers/invoking the guest entry,
+/// whenever the guest has any non-empty [`DataSegment`]s.
+pub const DATA_INIT_EXPORT_NAME: &str = "__speet_data_init";
+
+/// Build the data-init function: for each segment, `memory.init` copies its
+/// bytes to its own guest address, then `data.drop` releases the (already
+/// fully consumed, by construction — see `Instruction::DataDrop`'s doc
+/// comment in `wasm-blitz`) segment. `dest` is pushed as `i64.const` since
+/// this module's memory is always memory64 (see `finish_module`'s
+/// `memory64` parameter) — `src_offset`/`len` stay `i32` regardless, per the
+/// WASM bulk-memory-operations spec (they index into the segment itself,
+/// not the address space).
+pub fn build_data_init_fn(segments: &[DataSegment]) -> Function {
+    let mut f = Function::new([]);
+    for (i, seg) in segments.iter().enumerate() {
+        let data_index = i as u32;
+        f.instruction(&Instruction::I64Const(seg.addr as i64));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Const(seg.bytes.len() as i32));
+        f.instruction(&Instruction::MemoryInit { mem: 0, data_index });
+        f.instruction(&Instruction::DataDrop(data_index));
+    }
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
+    f
 }
 
 /// Build a fresh [`ReactorAdapter`] (mirrors the speet-e2e harness `make_rctx`,
@@ -485,6 +568,18 @@ pub fn translate_with_plt(
 /// and to resolve indices in [`crate::plt::PltCallPlan`] — see
 /// `docs/guides/thin-runtime-genericity.md` principle 1.
 pub fn assemble_module_instrumented(t: &Translated, arch: BinArch, manifest: &ImportManifest) -> Vec<u8> {
+    assemble_module_instrumented_with_data(t, arch, manifest, &[])
+}
+
+/// Like [`assemble_module_instrumented`], but also emits `data_segments` as
+/// passive WASM data segments plus a generated init function the C entry
+/// shim calls once at startup — see [`DataSegment`]/[`DATA_INIT_EXPORT_NAME`].
+pub fn assemble_module_instrumented_with_data(
+    t: &Translated,
+    arch: BinArch,
+    manifest: &ImportManifest,
+    data_segments: &[DataSegment],
+) -> Vec<u8> {
     use crate::instrument::{instrument_unreachable_logging, GuestPcRef};
 
     let mut fns = t.fns.clone();
@@ -494,7 +589,7 @@ pub fn assemble_module_instrumented(t: &Translated, arch: BinArch, manifest: &Im
     let total = fns.len() as u32;
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &fns, true, t.entry_func_idx, n_params)
+    finish_module(types, imports, &space, func_slot, &fns, true, t.entry_func_idx, n_params, data_segments)
 }
 
 /// Recompile with integrated unreachable instrumentation and optional PLT hooks.
@@ -521,9 +616,26 @@ pub fn recompile_to_wasm_instrumented_plt(
     entry_addr: Option<u64>,
     manifest: &ImportManifest,
 ) -> (Vec<u8>, Vec<String>) {
+    recompile_to_wasm_instrumented_plt_with_data(text, start_addr, arch, plt_plan, entry_addr, manifest, &[])
+}
+
+/// Like [`recompile_to_wasm_instrumented_plt`], but also emits
+/// `data_segments` as passive WASM data segments plus a generated init
+/// function the C entry shim calls once at startup — see
+/// [`DataSegment`]/[`DATA_INIT_EXPORT_NAME`].
+#[allow(clippy::too_many_arguments)]
+pub fn recompile_to_wasm_instrumented_plt_with_data(
+    text: &[u8],
+    start_addr: u64,
+    arch: BinArch,
+    plt_plan: Option<&PltCallPlan>,
+    entry_addr: Option<u64>,
+    manifest: &ImportManifest,
+    data_segments: &[DataSegment],
+) -> (Vec<u8>, Vec<String>) {
     let t = translate_with_plt(text, start_addr, RecompilerChoice::Native(arch), plt_plan, entry_addr, manifest);
     let unsupported = t.unsupported.clone();
-    (assemble_module_instrumented(&t, arch, manifest), unsupported)
+    (assemble_module_instrumented_with_data(&t, arch, manifest, data_segments), unsupported)
 }
 
 /// Assemble a single translated binary into a complete WASM module (no exception
@@ -545,7 +657,7 @@ pub fn assemble_module(t: &Translated, manifest: &ImportManifest) -> Vec<u8> {
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &t.fns, true, t.entry_func_idx, n_params)
+    finish_module(types, imports, &space, func_slot, &t.fns, true, t.entry_func_idx, n_params, &[])
 }
 
 /// Recompile a `.text` blob of guest machine code to a complete WASM module.
@@ -612,7 +724,7 @@ pub fn assemble_syscall_module(t: &Translated, manifest: &ImportManifest) -> Vec
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &t.fns, false, t.entry_func_idx, n_params)
+    finish_module(types, imports, &space, func_slot, &t.fns, false, t.entry_func_idx, n_params, &[])
 }
 
 /// Recompile an RV64 Linux `.text` blob (with `ecall` → host syscalls) to WASM.

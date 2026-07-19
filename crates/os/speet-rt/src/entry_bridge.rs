@@ -142,12 +142,25 @@ void __speet_set_argv(int argc, char **argv) {{
 extern uint8_t *__wasm_mem;
 extern uint32_t __wasm_mem_pages;
 
+// Passive-data initializer: `guest.o` exports a real one (compiled from the
+// guest's `DataSection`) when the guest has data segments, otherwise the
+// linked `data_segments.o` provides a no-op definition (see
+// `speet_rt::generate_data_segments_c`) — so exactly one definition always
+// exists and this call needs no weak-symbol handling. A weak/`if`-guarded
+// call was tried first but doesn't work for a symbol that must come from
+// another *object file* in the same static link (as opposed to a dylib):
+// Apple's `ld64` requires `weak_import` specifically for optional dylib
+// symbols, and still hard-errors "symbol not found" for an unresolved weak
+// reference against a plain relocatable object.
+extern void __speet_data_init(void);
+
 extern long __guest_entry({full_params_decl});
 
 void __speet_start(int argc, char **argv) {{
     __speet_set_argv(argc, argv);
     uint64_t __speet_guest_sp = {sp_init};
-{seed_stack_ra}    long ret = __guest_entry({full_args});
+{seed_stack_ra}    __speet_data_init();
+    long ret = __guest_entry({full_args});
     _exit((int)ret);
 }}
 "#
@@ -221,12 +234,25 @@ void __speet_set_reg_seed(uint32_t idx, uint64_t val);
 extern uint8_t *__wasm_mem;
 extern uint32_t __wasm_mem_pages;
 
+// Passive-data initializer: `guest.o` exports a real one (compiled from the
+// guest's `DataSection`) when the guest has data segments, otherwise the
+// linked `data_segments.o` provides a no-op definition (see
+// `speet_rt::generate_data_segments_c`) — so exactly one definition always
+// exists and this call needs no weak-symbol handling. A weak/`if`-guarded
+// call was tried first but doesn't work for a symbol that must come from
+// another *object file* in the same static link (as opposed to a dylib):
+// Apple's `ld64` requires `weak_import` specifically for optional dylib
+// symbols, and still hard-errors "symbol not found" for an unresolved weak
+// reference against a plain relocatable object.
+extern void __speet_data_init(void);
+
 extern uint64_t {entry_stub_sym}(void);
 
 void __speet_start(int argc, char **argv) {{
     __speet_set_argv(argc, argv);
     uint64_t __speet_guest_sp = {sp_init};
 {seed_stack_ra}{seed_lr}{zero_seeds}    __speet_set_reg_seed({sp_idx}, __speet_guest_sp);
+    __speet_data_init();
     long ret = (long){entry_stub_sym}();
     _exit((int)ret);
 }}
@@ -271,6 +297,25 @@ mod tests {
         let aarch64 = entry_bridge_direct_c(9, 4, 0x100000370, Some(8), 0);
         assert!(!aarch64.contains("__speet_d0"), "aarch64 (abi_pad_args=0) must not pad");
         assert!(aarch64.contains("extern long __guest_entry(uint64_t p0"));
+    }
+
+    #[test]
+    fn both_bridges_call_data_init_before_guest_entry() {
+        let catalog = entry_bridge_c(72, 71, Some(30), "__speet_guest_fn_1", 0x100000370);
+        assert!(catalog.contains("extern void __speet_data_init(void);"));
+        assert!(catalog.contains("__speet_data_init();"));
+        let data_init_pos = catalog.find("__speet_data_init();").unwrap();
+        let entry_call_pos = catalog.find("(long)__speet_guest_fn_1()").unwrap();
+        assert!(data_init_pos < entry_call_pos);
+
+        let direct = entry_bridge_direct_c(9, 4, 0x100000370, Some(8), 0);
+        assert!(direct.contains("extern void __speet_data_init(void);"));
+        assert!(direct.contains("__speet_data_init();"));
+        let data_init_pos = direct.find("__speet_data_init();").unwrap();
+        // The `extern long __guest_entry(...)` declaration appears before the
+        // call site inside `__speet_start` — take the *last* occurrence.
+        let entry_call_pos = direct.rfind("__guest_entry(").unwrap();
+        assert!(data_init_pos < entry_call_pos);
     }
 
     #[test]

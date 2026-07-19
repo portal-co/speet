@@ -9,8 +9,8 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt,
-    external_targets_from_imports,
+    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt_with_data,
+    external_targets_from_imports, DataSegment,
 };
 use speet_recompile::plt::PltCallPlan;
 use std::ffi::OsStr;
@@ -160,15 +160,17 @@ impl IntegratedNativeRuntime {
         let targets = external_targets_from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
+        let data_segments = data_segments_from_binary(&bin);
 
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt(
+            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_data(
                 &text.data,
                 start,
                 guest_arch,
                 Some(&plt_plan),
                 Some(bin.entry),
                 &manifest,
+                &data_segments,
             ),
         };
         self.cache.put_wasm(&input_hash, wasm.clone());
@@ -274,6 +276,7 @@ impl IntegratedNativeRuntime {
         );
         let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
         let halt_local = catalog.halt_entry().local_func_idx;
+        let data_segments = data_segments_from_binary(&bin);
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -287,6 +290,7 @@ impl IntegratedNativeRuntime {
             entry_local,
             halt_local,
             None,
+            &data_segments,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;
@@ -328,6 +332,27 @@ impl NativeRuntime for IntegratedNativeRuntime {
         }
         cmd.status().map_err(|e| e.to_string())
     }
+}
+
+/// Extract initialized data (`.data`/`.rodata`) sections as WASM passive data
+/// segments. `.bss` is skipped: `__wasm_mem` already starts zeroed, so it
+/// needs no `memory.init` copy. Section addresses are the guest's own virtual
+/// addresses, matching the identity address mapper wired into every
+/// architecture frontend (see `speet_recompile::frontend::translate_with_plt`).
+fn data_segments_from_binary(bin: &binary_io::LoadedBinary) -> Vec<DataSegment> {
+    bin.sections
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.kind,
+                binary_io::SectionKind::Data | binary_io::SectionKind::RoData
+            ) && !s.data.is_empty()
+        })
+        .map(|s| DataSegment {
+            addr: s.addr,
+            bytes: s.data.clone(),
+        })
+        .collect()
 }
 
 fn arch_label(a: BinArch) -> &'static str {
