@@ -68,6 +68,13 @@ The dichotomy between native and WASM frontends is now value-level (reactor cons
 
 `speet-schedule` is the coordination layer above `FuncSchedule`. Phase 1 registers all binaries and freezes the `EntityIndexSpace`. Phase 2 dispatches emit closures in order with correct `base_func_offset` values. The panic-on-count-mismatch invariant from `FuncSchedule::execute` (§1 above) applies here too.
 
+`FuncSchedule::execute_selected` is the demand-driven counterpart for callers that
+need only a subset of registered binary units. It preserves Phase 1's complete,
+frozen index layout, but does not invoke unselected emit closures. Keep expensive
+source parsing and lowering inside an emit closure so an unselected unit stays
+unmaterialized. It is deliberately coarse: selecting a binary can still emit all of
+that binary's functions until its frontend supplies a finer per-function sketch.
+
 **Do not** bypass Phase 1 by computing `base_func_offset` inside a Phase 2 closure — the entire point is that all offsets are known before any emission begins.
 
 ---

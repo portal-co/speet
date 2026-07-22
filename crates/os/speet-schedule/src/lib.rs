@@ -140,8 +140,48 @@ impl<'a, Context, E, F> FuncSchedule<'a, Context, E, F> {
         P: LinkerPlugin<F>,
         F: InstructionSink<Context, E>,
     {
+        self.execute_where(ctx, plugin, user_ctx, |_| true)
+    }
+
+    /// Execute only explicitly demanded registered units.
+    ///
+    /// Registration still happens for every binary before this method is
+    /// called, so all cross-binary entity indices remain final. An unselected
+    /// emit closure is dropped without invocation: it must therefore keep
+    /// source parsing/lowering inside the closure rather than during `push`.
+    /// This is the compatibility-safe demand boundary for intentionally coarse
+    /// binary units; a selected unit may still emit many guest functions.
+    #[track_caller]
+    pub fn execute_selected<C, P>(
+        self,
+        selected: &[IndexSlot],
+        ctx: &mut C,
+        plugin: &mut P,
+        user_ctx: &mut Context,
+    ) where
+        C: ReactorContext<Context, E, FnType = F>,
+        P: LinkerPlugin<F>,
+        F: InstructionSink<Context, E>,
+    {
+        self.execute_where(ctx, plugin, user_ctx, |slot| selected.contains(&slot))
+    }
+
+    fn execute_where<C, P>(
+        self,
+        ctx: &mut C,
+        plugin: &mut P,
+        user_ctx: &mut Context,
+        mut selected: impl FnMut(IndexSlot) -> bool,
+    ) where
+        C: ReactorContext<Context, E, FnType = F>,
+        P: LinkerPlugin<F>,
+        F: InstructionSink<Context, E>,
+    {
         let Self { entity_space, items } = self;
         for item in items {
+            if !selected(item.fn_slot) {
+                continue;
+            }
             ctx.set_base_func_offset(entity_space.functions.base(item.fn_slot));
             let unit = (item.emit)(ctx, user_ctx);
             assert_eq!(
