@@ -75,6 +75,7 @@ wasm-encoder = { version = "0.240.0", default-features = false, features = [
 ] }
 
 wax-core = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", branch = "main" }
+wax-meta = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", branch = "main" }
 
 portal-solutions-asm-semantics = { version = "0.1.0", git = "https://github.com/portal-co/asm-arch.git" }
 asim-core = { version = "0.1.0", git = "https://github.com/portal-co/asim.git", branch = "main" }

@@ -25,10 +25,23 @@ use speet_link_core::linker::LinkerPlugin;
 use speet_link_core::unit::{BinaryUnit, FuncType};
 use speet_module_target::{FuncImport, ModuleTarget};
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, ElementSection, Elements, ExportKind, ExportSection,
+    CodeSection, ConstExpr, CustomSection, DataSection, ElementSection, Elements, ExportKind, ExportSection,
     FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType, Module,
     RefType, TableSection, TableType, TagSection, TagType, TypeSection,
 };
+
+/// Append a canonical v0.1 semantic metadata manifest to an already assembled module.
+///
+/// The manifest is deliberately unsigned: callers that require authentication add a
+/// `wasmsign3` target/signature after this section.  This keeps Speet's ordinary
+/// module assembly useful to `RespectUnstable` consumers immediately.
+pub fn append_wsmm_manifest(module: &mut Module, manifest: &wax_meta::Manifest) -> Result<(), wax_meta::Error> {
+    module.section(&CustomSection {
+        name: Cow::Borrowed(wax_meta::SECTION_NAME),
+        data: Cow::Owned(manifest.encode()?),
+    });
+    Ok(())
+}
 
 // ── ElementsOwned ─────────────────────────────────────────────────────────────
 
