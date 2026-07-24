@@ -8,3 +8,12 @@ license-file.workspace = true
 [dependencies]
 speet-traps = { path = "../speet-traps" }
 yecta = { path = "../yecta" }
+portal-lazy-transform = { path = "../../../../portal-lazy-transform", optional = true }
+
+[features]
+# Opt-in: compute_reachable's BFS runs on portal_lazy_transform::assemble_bfs
+# instead of this crate's own worklist. Off by default. ReachableSet is an
+# unordered BTreeSet, so this is a pure implementation swap -- the discovered
+# *set* is identical either way (see tests comparing both against each
+# other for representative CFGs).
+lazy-reach-plan = ["dep:portal-lazy-transform"]

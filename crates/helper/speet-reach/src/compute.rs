@@ -65,6 +65,29 @@ pub fn compute_reachable(
     base_addr: u64,
     decoder: &dyn CfgDecoder,
 ) -> ReachableSet {
+    #[cfg(feature = "lazy-reach-plan")]
+    {
+        crate::planned::compute_reachable_via_plan(spec, bytes, base_addr, decoder)
+    }
+    #[cfg(not(feature = "lazy-reach-plan"))]
+    {
+        compute_reachable_eager_worklist(spec, bytes, base_addr, decoder)
+    }
+}
+
+/// Today's direct BFS over a plain `VecDeque` worklist. Kept as the default
+/// implementation so `lazy-reach-plan` is a strict opt-in; see
+/// `planned::compute_reachable_via_plan` for the
+/// `portal-lazy-transform`-based alternative. `ReachableSet` is an unordered
+/// `BTreeSet`, so the two implementations are pure alternatives -- they
+/// compute the identical *set*, never a caller-visible order.
+#[cfg_attr(feature = "lazy-reach-plan", allow(dead_code))]
+pub(crate) fn compute_reachable_eager_worklist(
+    spec: &ReachabilitySpec,
+    bytes: &[u8],
+    base_addr: u64,
+    decoder: &dyn CfgDecoder,
+) -> ReachableSet {
     let end_addr = base_addr.saturating_add(bytes.len() as u64);
     let in_range = |pc: u64| pc >= base_addr && pc < end_addr;
 

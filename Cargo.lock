@@ -1204,6 +1204,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "portal-lazy-transform"
+version = "0.1.0"
+
+[[package]]
 name = "portal-pc-asm-common"
 version = "0.1.1"
 dependencies = [
@@ -2017,6 +2021,7 @@ dependencies = [
 name = "speet-reach"
 version = "0.1.0"
 dependencies = [
+ "portal-lazy-transform",
  "speet-traps",
  "yecta",
 ]
@@ -3160,6 +3165,82 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "px-wsdom"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-axum"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-core"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-dom"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-javascript"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-macros"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "px-wsdom-macros-decl"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "portal-solutions-swibb"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "embedded-llm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "embedded-llm-tools"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-jvm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-semantics"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64-shim"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "wax-tags"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-gen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-lang-generic"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-rust-generic"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "dreamcomp-ir-plugin-host"
 version = "0.1.0"
 
@@ -3220,64 +3301,8 @@ name = "dreamcompiler-minibc-interp"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "embedded-llm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "embedded-llm-tools"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "pit-core"
 version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "wax-tags"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-jvm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "px-wsdom"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-axum"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-core"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-dom"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-javascript"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-macros"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "px-wsdom-macros-decl"
-version = "0.0.6"
 
 [[patch.unused]]
 name = "ast-traits"
@@ -3348,70 +3373,6 @@ name = "type-onion"
 version = "0.2.3"
 
 [[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "pit-gen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-lang-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-rust-generic"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-async"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-page-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-native"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-wax"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "portal-pc-waffle"
 version = "0.6.0-alpha.1"
 
@@ -3458,6 +3419,42 @@ version = "0.6.0-alpha.1"
 [[patch.unused]]
 name = "portal-pc-waffle-passes-shared"
 version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-generator"
+version = "0.8.0-pre.10"
+
+[[patch.unused]]
+name = "portal-jsc-simpl-js"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-opt-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
 
 [[patch.unused]]
 name = "ephemera"
@@ -3540,9 +3537,17 @@ name = "volar-weaver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
+name = "os-async"
+version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
+name = "os-page-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-native"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-wax"
+version = "0.1.0"

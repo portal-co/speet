@@ -51,11 +51,15 @@ extern crate alloc;
 mod compute;
 mod edges;
 mod filter;
+#[cfg(feature = "lazy-reach-plan")]
+mod planned;
 mod pc_slot_map;
 mod spec;
 
 pub use compute::{ReachableSet, compute_reachable};
 pub use edges::{CfgDecoder, CfgEdges};
 pub use filter::ReachabilityFilter;
+#[cfg(feature = "lazy-reach-plan")]
+pub use planned::{compute_reachable_via_plan, compute_reachable_via_plan_with_limits};
 pub use pc_slot_map::PcSlotMap;
 pub use spec::ReachabilitySpec;
