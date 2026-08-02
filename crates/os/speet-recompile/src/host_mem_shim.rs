@@ -201,6 +201,19 @@ impl Reencode for HostMemShimReencoder {
         Ok(())
     }
 
+    fn parse_custom_section(
+        &mut self,
+        module: &mut Module,
+        section: wasmparser::CustomSectionReader<'_>,
+    ) -> Result<(), Error<String>> {
+        // rustc's `name` custom section references import indices that disappear
+        // once host-mem imports are stripped — drop it rather than remap.
+        if matches!(section.as_known(), wasmparser::KnownCustom::Name(_)) {
+            return Ok(());
+        }
+        utils::parse_custom_section(self, module, section)
+    }
+
     fn instruction<'a>(
         &mut self,
         op: Operator<'a>,

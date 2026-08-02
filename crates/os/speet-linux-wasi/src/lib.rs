@@ -2,16 +2,19 @@
 //! adds `@speet`-specific index-space hooks (`register` / `declare`) that live
 //! on this side of the dependency boundary.
 //!
-//! Phase 2 migration: encapsulate ecall handlers as linked module functions
-//! (not inline `br_table` at guest sites) and route scratch copies through
-//! `__speet_host_mem_*` imports pre-shimming — see `docs/guides/dual-backends.md`.
+//! Linux→WASI handler bodies live in [`speet-linux-wasi-guest`] (Rust → WASM),
+//! are host-mem lowered at build time, and exposed as [`CANONICAL_GUEST_WASM`].
 
 #![no_std]
 extern crate alloc;
 
-mod handler_module;
+mod guest_module;
 
-pub use handler_module::{emit_handler_function, HandlerModulePlan, HostMemImportIndices};
+pub use guest_module::{
+    guest_export_names, handler_export_name, validate_canonical_guest, HandlerModulePlan,
+    CANONICAL_GUEST_WASM, EXPORT_HANDLER_CLOSE, EXPORT_HANDLER_EXIT, EXPORT_HANDLER_READ,
+    EXPORT_HANDLER_WRITE, EXPORT_SYSCALL_DISPATCH,
+};
 pub use os_linux_wasi::{IOVEC_SCRATCH_OFFSET, LinuxToWasi, WasiImports};
 
 use speet_link_core::EntityIndexSpace;

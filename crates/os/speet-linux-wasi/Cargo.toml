@@ -10,5 +10,8 @@ os-linux-wasi        = { path = "../../../../os-emulation/crates/emit/os-linux-w
 os-syscall-emit      = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
 speet-link-core     = { path = "../speet-link-core" }
 speet-module-target = { path = "../speet-module-target" }
+wasmparser          = { workspace = true, features = ["validate"] }
 wasm-encoder        = { workspace = true }
-wasmparser          = { workspace = true }
+
+[build-dependencies]
+speet-recompile = { path = "../speet-recompile" }
