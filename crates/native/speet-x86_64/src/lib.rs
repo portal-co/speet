@@ -87,13 +87,6 @@ pub struct X86Recompiler<Context, E> {
     /// Slot for XMM0–XMM15, stored as raw `i64` bit patterns (low 64 bits;
     /// scalar SSE only). FP handlers reinterpret around WASM FP ops.
     xmm_slot: yecta::LocalSlot,
-    /// Guest-address → symbolic-label hook table (compile-time PLT/
-    /// external-call redirects). Shared type with `speet-aarch64` via
-    /// `speet_plugin_api::external_target` instead of each arch keeping
-    /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
-    /// `docs/guides/thin-runtime-genericity.md` principle 1.
-    hooks: Option<speet_plugin_api::external_target::PltHookTable>,
-    hook_library: speet_plugin_api::external_target::LibraryId,
     stub_for_pc_import_idx: Option<u32>,
 }
 
@@ -134,8 +127,6 @@ impl<Context, E> X86Recompiler<Context, E> {
             slot_assigner: None,
             unsupported_insns: alloc::collections::BTreeSet::new(),
             memory_access: None,
-            hooks: None,
-            hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
             stub_for_pc_import_idx: None,
         }
     }
@@ -143,18 +134,6 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
     pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
         self.stub_for_pc_import_idx = Some(idx);
-    }
-
-    /// Install compile-time PLT/external-call hooks (integrated runtime).
-    /// Checked at every decode slot's PC, not just resolved `call`/`jmp`
-    /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
-    pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
-        self.hooks = Some(hooks);
-    }
-
-    /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
-    pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
-        self.hook_library = library;
     }
 
     pub(crate) fn arg_needs_fn_ptr_rewrite(&self, label: &str, arg_idx: usize) -> bool {
@@ -230,6 +209,16 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// called during `setup_traps` / `init_function`.
     pub fn set_memory_access(&mut self, ma: alloc::boxed::Box<dyn MemoryAccess<Context, E>>) {
         self.memory_access = Some(ma);
+    }
+
+    /// Bind layout-param slots into the installed memory mapper (HostOffset path).
+    pub fn bind_memory_layout<F>(&mut self, rctx: &dyn ReactorContext<Context, E, FnType = F>) {
+        if let (Some(ma), Some(params)) = (
+            self.memory_access.as_deref_mut(),
+            rctx.runtime_layout_params(),
+        ) {
+            ma.bind_layout_slots(rctx.layout(), &params.slots);
+        }
     }
 
     /// Remove any previously installed memory access implementation.

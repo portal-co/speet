@@ -47,7 +47,7 @@ use speet_traps::{
     LocalDeclarator,
 };
 use wasm_encoder::{Ieee64, Instruction, ValType};
-use yecta::{FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark};
+use yecta::{FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark, SlotAssigner};
 
 pub mod direct;
 use direct::A64IndirectTarget;
@@ -70,14 +70,9 @@ pub struct AArch64Recompiler<Context, E> {
     /// Stack pointer (1 × i64).  AArch64 encodes SP as register 31 in load/store and
     /// `ADD`/`SUB` immediate forms; x31 remains XZR everywhere else.
     pub(crate) sp_slot: LocalSlot,
-    /// Guest-address → symbolic-label hook table (compile-time PLT/
-    /// external-call redirects). Shared type with `speet-x86_64` via
-    /// `speet_plugin_api::external_target` instead of each arch keeping
-    /// its own `plt_by_addr`/`plt_imports` `BTreeMap` pair — see
-    /// `docs/guides/thin-runtime-genericity.md` principle 1.
-    hooks: Option<speet_plugin_api::external_target::PltHookTable>,
-    hook_library: speet_plugin_api::external_target::LibraryId,
     stub_for_pc_import_idx: Option<u32>,
+    /// Optional slot assigner: controls which guest PCs get WASM function slots.
+    slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
 }
 
 impl<Context, E> AArch64Recompiler<Context, E> {
@@ -121,27 +116,14 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             tmp_slot: LocalSlot::default(),
             fp_slot: LocalSlot::default(),
             sp_slot: LocalSlot::default(),
-            hooks: None,
-            hook_library: speet_plugin_api::external_target::LibraryId::MAIN_IMAGE,
             stub_for_pc_import_idx: None,
+            slot_assigner: None,
         }
     }
 
     /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
     pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
         self.stub_for_pc_import_idx = Some(idx);
-    }
-
-    /// Install compile-time PLT/external-call hooks (integrated runtime).
-    /// Checked at every decode slot's PC, not just resolved `bl`/`b`
-    /// targets — see `docs/guides/thin-runtime-genericity.md` principle 2.
-    pub fn set_plt_hooks(&mut self, hooks: speet_plugin_api::external_target::PltHookTable) {
-        self.hooks = Some(hooks);
-    }
-
-    /// Which [`LibraryId`] [`lookup_hook`] uses (default: main image).
-    pub fn set_hook_library(&mut self, library: speet_plugin_api::external_target::LibraryId) {
-        self.hook_library = library;
     }
 
     pub(crate) fn arg_needs_fn_ptr_rewrite(&self, label: &str, arg_idx: usize) -> bool {
@@ -163,8 +145,36 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         self.unsupported_insns.clear();
     }
 
+    /// Install a slot assigner to control which guest PCs receive WASM function slots.
+    ///
+    /// When set, `pc_to_func_idx` uses `SlotAssigner::slot_for_pc` instead of the
+    /// legacy `(pc - base_pc) / 4` formula.
+    pub fn set_slot_assigner(&mut self, gate: impl SlotAssigner + Send + Sync + 'static) {
+        self.slot_assigner = Some(alloc::boxed::Box::new(gate));
+    }
+
+    /// Return the total WASM function slots declared by the installed slot assigner.
+    ///
+    /// Panics if no slot assigner has been installed via `set_slot_assigner`.
+    pub fn count_fns(&self) -> u32 {
+        self.slot_assigner
+            .as_ref()
+            .expect("set_slot_assigner must be called before count_fns")
+            .total_slots()
+    }
+
     pub fn set_memory_access(&mut self, ma: alloc::boxed::Box<dyn MemoryAccess<Context, E>>) {
         self.memory_access = Some(ma);
+    }
+
+    /// Bind layout-param slots into the installed memory mapper (HostOffset path).
+    pub fn bind_memory_layout<F>(&mut self, rctx: &dyn ReactorContext<Context, E, FnType = F>) {
+        if let (Some(ma), Some(params)) = (
+            self.memory_access.as_deref_mut(),
+            rctx.runtime_layout_params(),
+        ) {
+            ma.bind_layout_slots(rctx.layout(), &params.slots);
+        }
     }
 
     /// Register trap parameters and compute the total WASM local count.
@@ -247,75 +257,12 @@ impl<Context, E> AArch64Recompiler<Context, E> {
 
     /// Convert a guest PC to a WASM function index relative to base_pc.
     pub(crate) fn pc_to_func_idx(&self, pc: u64) -> Option<FuncIdx> {
-        let offset = pc.checked_sub(self.base_pc)?;
-        Some(FuncIdx((offset / 4) as u32))
-    }
-
-    pub(crate) fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
-        self.hooks.as_ref()?.lookup(self.hook_library, target)
-    }
-
-    /// Emit "make the redirected host call, then behave like a `ret`" for a
-    /// hooked guest address — correct regardless of whether it was reached
-    /// via `bl` (which just set `x30 = pc+4`) or a tail `b` (whose caller's
-    /// `x30` is preserved unchanged through the chain): either way, `x30`
-    /// holds a valid return address at this point, so jumping to it is
-    /// safe. See `docs/guides/thin-runtime-genericity.md` principle 2 and
-    /// `speet_plugin_api::external_target::CallingConvention`.
-    pub(crate) fn emit_hook_call_and_return<F>(
-        &mut self,
-        ctx: &mut Context,
-        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
-        tail_idx: usize,
-        pc: u64,
-        hook: &speet_plugin_api::external_target::PltHook,
-    ) -> Result<(), E> {
-        use speet_plugin_api::external_target::PltHookTarget;
-        let PltHookTarget::WasmImport { import_idx } = hook.target else {
-            return Ok(());
-        };
-        for (i, &reg) in hook.convention.arg_locals.iter().enumerate() {
-            self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
-            if self.arg_needs_fn_ptr_rewrite(&hook.label, i) {
-                if let Some(stub_idx) = self.stub_for_pc_import_idx {
-                    rctx.feed(ctx, tail_idx, &Instruction::Call(stub_idx))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64Eqz)?;
-                    rctx.feed(
-                        ctx,
-                        tail_idx,
-                        &Instruction::If(wasm_encoder::BlockType::Empty),
-                    )?;
-                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
-                }
-            } else if hook.convention.wraps_i32(i) {
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-            }
+        if let Some(gate) = &self.slot_assigner {
+            gate.slot_for_pc(pc).map(FuncIdx)
+        } else {
+            let offset = pc.checked_sub(self.base_pc)?;
+            Some(FuncIdx((offset / 4) as u32))
         }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
-        if let Some(result_reg) = hook.convention.result_local {
-            if hook.convention.result_extend_i32 {
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
-            }
-            self.emit_gpr_set(ctx, rctx, tail_idx, result_reg)?;
-        }
-
-        let total = rctx.locals_mark().total_locals;
-        let lr_local = rctx.layout().local(self.gpr_slot, 30);
-        {
-            let info = JumpInfo::indirect(pc, lr_local, JumpKind::Return);
-            if rctx.on_jump(&info, ctx)? == TrapAction::Skip {
-                return Ok(());
-            }
-        }
-        let target_snippet = A64IndirectTarget::from_constant_base(
-            lr_local,
-            self.base_pc,
-            rctx.base_func_offset(),
-        );
-        let params = JumpCallParams::indirect_jump(&target_snippet, total, rctx.pool());
-        rctx.ji_with_params(ctx, tail_idx, params)?;
-        Ok(())
     }
 
     // ── GPR emit helpers ──────────────────────────────────────────────────────

@@ -203,6 +203,8 @@ pub use AddressMapper as MapperCallback;
 /// `declare_locals` allocates any scratch locals needed (e.g. the physical
 /// address local for alias-check alias checks in `DirectMemory`).
 pub trait MemoryAccess<Context, E>: LocalDeclarator {
+    /// Bind layout-param slots after `declare_trap_params` (no-op for identity mappers).
+    fn bind_layout_slots(&mut self, _layout: &LocalLayout, _slots: &speet_link_core::ParamSlotMap) {}
     // ── Load ──────────────────────────────────────────────────────────────
 
     /// Emit a complete load sequence.

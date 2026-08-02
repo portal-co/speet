@@ -35,12 +35,14 @@
 #![no_std]
 extern crate alloc;
 
+pub mod factory;
 pub mod layout;
 pub mod mapper;
 pub mod mem;
 pub mod paging;
 pub mod r#virtual;
 
+pub use factory::{memory_access_for_model, GUEST_MEMORY_INDEX, LayoutMemoryAccess};
 pub use layout::{LocalLayout, LocalSlot};
 pub use mapper::{AddressMapper, CallbackContext, ChunkedMapper, DirectMemory, HostOffsetMapper, MapperCallback, MemoryAccess, StackedMapper};
 pub use yecta::LocalDeclarator;

@@ -943,6 +943,14 @@ pub struct WasmTranslateConfig {
 
 impl WasmTranslateConfig {
     pub fn plain() -> Self { Self { mapper: Option::None, cond_trap: Option::None } }
+
+    /// Use the shared layout memory factory ([`speet_memory::memory_access_for_model`]).
+    pub fn with_memory_model(model: speet_link_core::image_layout::MemoryModel) -> Self {
+        Self {
+            mapper: Some(speet_memory::memory_access_for_model(model)),
+            cond_trap: None,
+        }
+    }
 }
 
 /// Translate a WASM module through `WasmFrontend` and assemble a runnable

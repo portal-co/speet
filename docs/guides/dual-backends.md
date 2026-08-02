@@ -35,12 +35,25 @@ let offsets = IndexOffsets::wasm_os_external_hosting(&schedule, external_slot);
 WasmFrontend::new(..., offsets, ...);
 ```
 
-## Parity checklist
+## Parity checklist (three lanes)
+
+Shared input: **merged-with-mock** canonical multi-memory module (post-shimming pass).
+
+| Lane | Runner | Validates |
+|------|--------|-----------|
+| **A** | wasmi/wasmtime | Reference sandbox execution |
+| **B-wasm** | wasm-blitz as WASM compiler (not wasmi) | Same module as A; compiler path |
+| **B-native** | wasm-blitz native + blitz extensions | Import bridge + `__wasm_mem_N` |
 
 When changing emission or link:
 
 - [ ] Does the megabinary validate under wasmparser?
+- [ ] Does the shimming pass produce canonical multi-memory when host-mem imports are present?
 - [ ] Does wasm-blitz compile the same module (`speet-recompile` drive)?
 - [ ] Are redirect shims in the elem segment before halt?
 - [ ] Does `PltCallPlan` use manifest indices only?
 - [ ] Are layout params declared via `RuntimeLayoutParams` (`LocalSlot` handles)?
+- [ ] Does lane B-wasm match lane A semantics on merged-with-mock?
+- [ ] Does lane B-native match lane A with blitz extension overlay?
+
+Note: A-OS (`WasmFrontend` + `FuncSchedule`) is **not** a parity lane — covered by A + B-wasm + unit tests.

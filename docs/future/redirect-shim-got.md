@@ -1,6 +1,6 @@
 # Redirect Shims via Virtual GOT / Lazy Pointers
 
-**Status: Planned (deferred)** — see [future-features.md](../future-features.md).
+**Status: Phase 2 in progress** — virtual GOT active; PC-check hooks retired on x86_64/aarch64.
 
 ## Purpose
 
@@ -24,10 +24,11 @@ Replace the interim **PC-check inline hook** path (see [thin-runtime-genericity.
 - Requires a stable **runtime PC/IP base** contract between load, GOT init, and indirect-call target computation (`base_func_offset` + slot formula).
 - The interim PC-check path (WASM import call + synthetic return at hooked PCs) is sufficient for integrated thin-runtime v1 (`write`/`exit`/`execve` hooks) and remains valuable for debugging coverage until this lands.
 
-## Interim (current)
+## Interim (retired in Phase 2)
 
-- [`PltHookTable`](../plugin/speet-plugin-api) + per-slot PC check in `speet-x86_64` / `speet-aarch64`.
-- [`PltCallPlan`](../crates/os/speet-recompile/src/plt.rs) resolves `PltRedirect::WasmImport` hooks; `PltRedirect::Ambient` stays link-time only (no WASM PC-check emission).
+- ~~[`PltHookTable`](../plugin/speet-plugin-api) + per-slot PC check in `speet-x86_64` / `speet-aarch64`.~~
+- Redirect dispatch is via patched GOT cells + [`PcSlotMap::with_redirect_shims`](../crates/helper/speet-reach/src/pc_slot_map.rs) + redirect shim WASM functions.
+- [`PltCallPlan`](../crates/os/speet-recompile/src/plt.rs) resolves `PltRedirect::WasmImport` and `PltRedirect::NativeShim` hooks.
 - Keys generalized to `(LibraryId, u64)`; default `LibraryId::MAIN_IMAGE` for same-platform ELF/Mach-O.
 
 ## Phase 1 foundation (landed)
@@ -40,7 +41,14 @@ The first-component plan adds shared infrastructure this doc's Phase 2 will cons
 - `PltRedirect::NativeShim` resolves through manifest/`os_shim_*`; redirect shim bodies emitted for both WASM-import and native-shim addresses.
 - Dual-backend contract documented in [`dual-backends.md`](../guides/dual-backends.md) and AGENTS.md §10.
 
-PC-check hooks remain active until Phase 2 wires virtual GOT cells end-to-end.
+PC-check hooks were removed in Phase 2; indirect PLT/GOT calls land on redirect shims via patched data + extended slot map.
+
+## Phase 2 (in progress)
+
+- Full [`GuestImageLayout`](../crates/os/speet-link-core/src/image_layout.rs) threaded through integrated recompile (relocs + `memory_model`).
+- [`memory_access_for_model`](../crates/helper/speet-memory/src/factory.rs) shared factory for native emitters.
+- Pre-pass [`__speet_host_mem_*`](../crates/runtime/os-host-api/src/manifest.rs) imports + [`host_mem_shim`](../crates/os/speet-recompile/src/host_mem_shim.rs) lowering pass (canonical multi-memory).
+- Three-lane parity harness foundation: [`megabinary_parity.rs`](../crates/os/speet-recompile/tests/megabinary_parity.rs).
 
 ## Cross-links
 

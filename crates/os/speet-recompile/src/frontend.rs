@@ -63,8 +63,9 @@ use core::convert::Infallible;
 use speet_host_api::{ImportManifest, WasmValType};
 use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, RuntimeLayoutParams, TextBaseSource};
-use speet_memory::mapper::DirectMemory;
-use speet_memory::mem::{AddressWidth, IntWidth};
+use speet_link_core::image_layout::MemoryModel;
+use speet_memory::memory_access_for_model;
+use speet_reach::{CfgDecoder, CfgEdges, PcSlotMap};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection, Elements, EntityType,
     ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
@@ -515,7 +516,7 @@ pub enum RecompilerChoice {
 /// here silently makes every internal `call`/`return_call` target the wrong
 /// function. See `docs/guides/thin-runtime-genericity.md` principle 1.
 pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice, manifest: &ImportManifest) -> Translated {
-    translate_with_plt(text, start_addr, choice, None, None, manifest)
+    translate_with_plt(text, start_addr, choice, None, None, manifest, MemoryModel::OwnedLinear)
 }
 
 /// Guest-address-offset → relative function-slot-index granularity (bytes
@@ -532,6 +533,59 @@ fn slot_granularity(arch: BinArch) -> u64 {
     }
 }
 
+fn redirect_shim_count(plt_plan: Option<&PltCallPlan>) -> u32 {
+    let Some(plan) = plt_plan else {
+        return 0;
+    };
+    let mut keys: std::collections::BTreeSet<_> =
+        plan.wasm_import_by_addr.keys().copied().collect();
+    keys.extend(plan.native_shim_by_addr.keys().copied());
+    keys.len() as u32
+}
+
+struct Fixed4CfgDecoder;
+
+impl CfgDecoder for Fixed4CfgDecoder {
+    fn decode_edges(&self, _pc: u64, bytes: &[u8]) -> Option<CfgEdges> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        Some(CfgEdges {
+            static_successors: vec![],
+            fallthrough: true,
+            insn_len: 4,
+            has_indirect: false,
+        })
+    }
+}
+
+fn bind_memory_after_traps<E>(
+    rc: &mut speet_x86_64::X86Recompiler<(), E>,
+    rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>,
+) {
+    rc.bind_memory_layout(rctx);
+}
+
+fn bind_memory_after_traps_aarch64<E>(
+    rc: &mut speet_aarch64::AArch64Recompiler<(), E>,
+    rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>,
+) {
+    rc.bind_memory_layout(rctx);
+}
+
+fn build_pc_slot_map(arch: BinArch, text: &[u8], start_addr: u64, n_shims: u32) -> PcSlotMap {
+    let halt = halt_addr(start_addr, text.len());
+    let gran = slot_granularity(arch);
+    match arch {
+        BinArch::X86_64 => {
+            let dec = speet_x86_64::cfg::X86CfgDecoder;
+            PcSlotMap::all_slots(text, start_addr, &dec).with_redirect_shims(halt, n_shims, gran)
+        }
+        BinArch::AArch64 => PcSlotMap::all_slots(text, start_addr, &Fixed4CfgDecoder)
+            .with_redirect_shims(halt, n_shims, gran),
+    }
+}
+
 /// Like [`translate`], but redirects PLT/external calls per `plt_plan` and,
 /// when `entry_addr` is given, exports the function at that guest address
 /// (rather than `fns[0]`) as `_start` — see [`Translated::entry_func_idx`].
@@ -542,6 +596,7 @@ pub fn translate_with_plt(
     plt_plan: Option<&PltCallPlan>,
     entry_addr: Option<u64>,
     manifest: &ImportManifest,
+    memory_model: MemoryModel,
 ) -> Translated {
     let n_imports = manifest.func_imports.len() as u32;
     let entry_func_idx = match (&choice, entry_addr) {
@@ -559,29 +614,24 @@ pub fn translate_with_plt(
     );
     let mut ctx = ();
 
+    let n_shims = redirect_shim_count(plt_plan);
+
     let (params, unsupported) = match choice {
         RecompilerChoice::Native(arch) => match arch {
             BinArch::X86_64 => {
                 let mut rc = speet_x86_64::X86Recompiler::new_with_base_rip(start_addr);
-                // Identity mapper — behavior-preserving today (see
-                // docs/future/... memory remapping plan); routes addressing
-                // through `speet-memory`'s `MemoryAccess` hook instead of the
-                // frontend's own unmapped-load/store fallback, so a real
-                // translating mapper can later be swapped in here without
-                // touching this call site again.
-                rc.set_memory_access(Box::new(DirectMemory::new(
-                    (),
-                    0,
-                    AddressWidth::W64 { memory64: true },
-                    IntWidth::I64,
-                )));
-                if let Some(plan) = plt_plan {
-                    rc.set_plt_hooks(plan.to_hook_table(BinArch::X86_64, manifest));
-                }
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::X86_64,
+                    text,
+                    start_addr,
+                    n_shims,
+                ));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);
                 }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
                 rc.setup_traps(&mut rctx, &mut ctx);
+                bind_memory_after_traps(&mut rc, &rctx);
                 let params = collect_params(&rctx);
                 rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
                     Function::new(a.collect::<Vec<_>>())
@@ -592,20 +642,18 @@ pub fn translate_with_plt(
             BinArch::AArch64 => {
                 let mut rc =
                     speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
-                // Identity mapper — see the matching X86_64 comment above.
-                rc.set_memory_access(Box::new(DirectMemory::new(
-                    (),
-                    0,
-                    AddressWidth::W64 { memory64: true },
-                    IntWidth::I64,
-                )));
-                if let Some(plan) = plt_plan {
-                    rc.set_plt_hooks(plan.to_hook_table(BinArch::AArch64, manifest));
-                }
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::AArch64,
+                    text,
+                    start_addr,
+                    n_shims,
+                ));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);
                 }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
                 rc.setup_traps(&mut rctx, &mut ctx);
+                bind_memory_after_traps_aarch64(&mut rc, &rctx);
                 let params = collect_params(&rctx);
                 rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
                     Function::new(a.collect::<Vec<_>>())
@@ -735,19 +783,13 @@ pub fn recompile_to_wasm_instrumented_plt_with_data(
     manifest: &ImportManifest,
     data_segments: &[DataSegment],
 ) -> (Vec<u8>, Vec<String>) {
-    let t = translate_with_plt(text, start_addr, RecompilerChoice::Native(arch), plt_plan, entry_addr, manifest);
-    let unsupported = t.unsupported.clone();
-    let n_params = t.params.len() as u32;
-    let (_, shim_by_sym) = plt_plan
-        .map(|p| build_redirect_shims_from_plan(p, arch, manifest, n_params))
-        .unwrap_or_default();
     let layout = speet_link_core::GuestImageLayout {
         text_base: start_addr,
         text_len: text.len(),
         slot_granularity: slot_granularity(arch),
         data_sections: data_segments
             .iter()
-            .map(|s| speet_link_core::DataSectionSpec {
+            .map(|s| speet_link_core::image_layout::DataSectionSpec {
                 name: String::new(),
                 addr: s.addr,
                 bytes: s.bytes.clone(),
@@ -755,9 +797,39 @@ pub fn recompile_to_wasm_instrumented_plt_with_data(
             .collect(),
         relocs: vec![],
         libraries: vec![],
-        memory_model: speet_link_core::MemoryModel::OwnedLinear,
+        memory_model: speet_link_core::image_layout::MemoryModel::OwnedLinear,
     };
-    let linked_data = crate::data_link::link_data_segments(&layout, plt_plan, &shim_by_sym);
+    recompile_to_wasm_instrumented_plt_with_layout(
+        text, &layout, arch, plt_plan, entry_addr, manifest,
+    )
+}
+
+/// Like [`recompile_to_wasm_instrumented_plt_with_data`], but accepts a full
+/// [`GuestImageLayout`] (relocs, memory model, libraries) from the loaded binary.
+pub fn recompile_to_wasm_instrumented_plt_with_layout(
+    text: &[u8],
+    layout: &speet_link_core::GuestImageLayout,
+    arch: BinArch,
+    plt_plan: Option<&PltCallPlan>,
+    entry_addr: Option<u64>,
+    manifest: &ImportManifest,
+) -> (Vec<u8>, Vec<String>) {
+    let start_addr = layout.text_base;
+    let t = translate_with_plt(
+        text,
+        start_addr,
+        RecompilerChoice::Native(arch),
+        plt_plan,
+        entry_addr,
+        manifest,
+        layout.memory_model,
+    );
+    let unsupported = t.unsupported.clone();
+    let n_params = t.params.len() as u32;
+    let (_, shim_by_sym) = plt_plan
+        .map(|p| build_redirect_shims_from_plan(p, arch, manifest, n_params))
+        .unwrap_or_default();
+    let linked_data = crate::data_link::link_data_segments(layout, plt_plan, &shim_by_sym);
     (
         assemble_module_instrumented_with_data(&t, arch, manifest, &linked_data, plt_plan),
         unsupported,
@@ -915,7 +987,9 @@ mod tests {
         let manifest = ImportManifest::native_syscall();
         let t = translate(&[0u8; 1], 0x1000, RecompilerChoice::Plugin(plugin), &manifest);
         assert_eq!(t.fns.len(), 1);
-        assert_eq!(t.params, vec![ValType::I64]);
+        // ToyArch emits one i64 param; layout params (text_base, host_mem_base) append after traps setup.
+        assert!(t.params.len() >= 1);
+        assert_eq!(t.params[0], ValType::I64);
         assert!(t.unsupported.is_empty());
 
         let mut expected = Function::new([]);

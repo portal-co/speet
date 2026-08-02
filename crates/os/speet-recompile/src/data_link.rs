@@ -35,21 +35,7 @@ pub fn link_data_segments(
 
     // Patch PLT GOT slots with shim guest PCs when allocated.
     if let Some(plan) = plt_plan {
-        for (&(library, addr), &import_idx) in &plan.wasm_import_by_addr {
-            let _ = import_idx;
-            if library != LibraryId::MAIN_IMAGE {
-                continue;
-            }
-            let label = plan
-                .targets
-                .lookup(library, addr)
-                .unwrap_or("")
-                .to_string();
-            if let Some(&shim_i) = shim_index_by_symbol.get(&label) {
-                let shim_pc = layout.shim_guest_pc(shim_i);
-                patch_got_at_addr(layout, &mut sections, addr, shim_pc);
-            }
-        }
+        patch_got_from_plan(layout, &mut sections, plan, shim_index_by_symbol);
     }
 
     layout
@@ -94,6 +80,29 @@ fn resolve_reloc_value(
     }
 
     None
+}
+
+/// Patch GOT cells for both WASM-import and native-shim redirect addresses.
+fn patch_got_from_plan(
+    layout: &GuestImageLayout,
+    sections: &mut [Vec<u8>],
+    plan: &PltCallPlan,
+    shim_index_by_symbol: &BTreeMap<String, u32>,
+) {
+    let mut addrs: BTreeMap<(LibraryId, u64), ()> = BTreeMap::new();
+    for key in plan.wasm_import_by_addr.keys() {
+        addrs.insert(*key, ());
+    }
+    for key in plan.native_shim_by_addr.keys() {
+        addrs.insert(*key, ());
+    }
+    for &(library, addr) in addrs.keys() {
+        let label = plan.targets.lookup(library, addr).unwrap_or("").to_string();
+        if let Some(&shim_i) = shim_index_by_symbol.get(&label) {
+            let shim_pc = layout.shim_guest_pc(shim_i);
+            patch_got_at_addr(layout, sections, addr, shim_pc);
+        }
+    }
 }
 
 fn patch_got_at_addr(

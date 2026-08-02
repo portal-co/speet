@@ -1,6 +1,10 @@
 //! Compatibility shim that re-exports the generic `os-linux-wasi` crate and
 //! adds `@speet`-specific index-space hooks (`register` / `declare`) that live
 //! on this side of the dependency boundary.
+//!
+//! Phase 2 migration: encapsulate ecall handlers as linked module functions
+//! (not inline `br_table` at guest sites) and route scratch copies through
+//! `__speet_host_mem_*` imports pre-shimming — see `docs/guides/dual-backends.md`.
 
 #![no_std]
 extern crate alloc;

@@ -71,6 +71,21 @@ pub struct GuestMemoryConfig<Context, E> {
     pub memory_access: Option<Box<dyn MemoryAccess<Context, E>>>,
 }
 
+/// Build a [`GuestMemoryConfig`] from [`MemoryModel`] (shared with native emitters).
+pub fn guest_memory_config_for_model<Context, E>(
+    model: speet_link_core::image_layout::MemoryModel,
+    addr_width: AddressWidth,
+) -> GuestMemoryConfig<Context, E>
+where
+    Context: 'static,
+    E: 'static,
+{
+    GuestMemoryConfig {
+        addr_width,
+        memory_access: Some(speet_memory::memory_access_for_model(model)),
+    }
+}
+
 // ── IndexOffsets ──────────────────────────────────────────────────────────────
 
 /// Additive offsets applied when re-emitting call, global, and table instructions.

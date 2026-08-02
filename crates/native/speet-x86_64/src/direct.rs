@@ -357,81 +357,6 @@ impl<Context, E> X86Recompiler<Context, E> {
         }
     }
 
-    fn lookup_hook(&self, target: u64) -> Option<&speet_plugin_api::external_target::PltHook> {
-        self.hooks.as_ref()?.lookup(self.hook_library, target)
-    }
-
-    /// Emit "make the redirected host call, then behave like a `ret`" for a
-    /// hooked guest address — correct regardless of whether it was reached
-    /// via `call` (which already pushed a return address before this runs)
-    /// or a tail `jmp` (whose caller's return address is still on top of
-    /// the guest stack from further up the call chain): either way, the
-    /// guest stack's top holds a valid return address at this point, so
-    /// popping it and jumping there is safe. See
-    /// `docs/guides/thin-runtime-genericity.md` principle 2 and
-    /// `speet_plugin_api::external_target::CallingConvention`.
-    fn emit_hook_call_and_return<F>(
-        &mut self,
-        ctx: &mut Context,
-        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
-        tail_idx: usize,
-        inst_ip: u64,
-        hook: &speet_plugin_api::external_target::PltHook,
-    ) -> Result<Option<()>, E> {
-        use speet_plugin_api::external_target::PltHookTarget;
-        let PltHookTarget::WasmImport { import_idx } = hook.target else {
-            return Ok(Some(()));
-        };
-        for (i, &local) in hook.convention.arg_locals.iter().enumerate() {
-            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(local))?;
-            if self.arg_needs_fn_ptr_rewrite(&hook.label, i) {
-                if let Some(stub_idx) = self.stub_for_pc_import_idx {
-                    rctx.feed(ctx, tail_idx, &Instruction::Call(stub_idx))?;
-                    rctx.feed(ctx, tail_idx, &Instruction::I64Eqz)?;
-                    rctx.feed(
-                        ctx,
-                        tail_idx,
-                        &Instruction::If(wasm_encoder::BlockType::Empty),
-                    )?;
-                    rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
-                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
-                }
-            } else if hook.convention.wraps_i32(i) {
-                rctx.feed(ctx, tail_idx, &Instruction::I32WrapI64)?;
-            }
-        }
-        rctx.feed(ctx, tail_idx, &Instruction::Call(import_idx))?;
-        if let Some(result_local) = hook.convention.result_local {
-            if hook.convention.result_extend_i32 {
-                rctx.feed(ctx, tail_idx, &Instruction::I64ExtendI32U)?;
-            }
-            rctx.feed(ctx, tail_idx, &Instruction::LocalSet(result_local))?;
-        }
-
-        // Pop the return address off the guest stack (RSP = local 4) and
-        // jump there via yecta's runtime-computed-target dispatch — the
-        // same mechanism `handle_ret`'s non-speculative path uses.
-        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
-        self.emit_memory_load(ctx, rctx, tail_idx, 64, false)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(23))?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
-        rctx.feed(ctx, tail_idx, &Instruction::I64Const(8))?;
-        rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
-        rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
-        let return_addr_snippet =
-            ReturnAddressSnippet::from_constant_base(self.base_rip, rctx.base_func_offset());
-        {
-            use crate::{JumpInfo, JumpKind, TrapAction};
-            let ret_info = JumpInfo::indirect(inst_ip, 23, JumpKind::Return);
-            if rctx.on_jump(&ret_info, ctx)? == TrapAction::Skip {
-                return Ok(Some(()));
-            }
-        }
-        let params = yecta::JumpCallParams::indirect_jump(&return_addr_snippet, rctx.locals_mark().total_locals, rctx.pool());
-        rctx.ji_with_params(ctx, tail_idx, params)?;
-        Ok(Some(()))
-    }
-
     fn init_function<F>(
         &mut self,
         ctx: &mut Context,
@@ -1090,18 +1015,6 @@ impl<Context, E> X86Recompiler<Context, E> {
                     next_pos += 1;
                     continue;
                 }
-            }
-
-            // Check the *current* PC against the hook table before decoding
-            // anything else at this slot — a hooked address reached by
-            // fallthrough (rather than a `call`/`jmp` whose target we
-            // resolved ourselves) still needs the same redirect. See
-            // `docs/guides/thin-runtime-genericity.md` principle 2: this is
-            // a real address-space check, not an instruction-shape match.
-            if let Some(hook) = self.lookup_hook(inst_rip).cloned() {
-                self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst_rip, &hook)?;
-                next_pos += inst_len as usize;
-                continue;
             }
 
             let undecidable_option = (match inst.mnemonic() {
@@ -2012,16 +1925,6 @@ impl<Context, E> X86Recompiler<Context, E> {
                 return Ok(Some(()));
             }
         }
-        // A tail-call `jmp` can reach a hooked PLT/external-call address
-        // just as validly as a `call` can — see
-        // `docs/guides/thin-runtime-genericity.md` principle 2. The guest
-        // stack's top still holds the *original* caller's return address
-        // (preserved through the tail-jmp chain, since a bare `jmp` never
-        // pushes its own), so the same call-then-pop-and-jump sequence
-        // applies unchanged.
-        if let Some(hook) = self.lookup_hook(target).cloned() {
-            return self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst.ip(), &hook);
-        }
         let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
             rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
             return Ok(Some(()));
@@ -2366,9 +2269,6 @@ impl<Context, E> X86Recompiler<Context, E> {
                 if rctx.on_jump(&call_info, ctx)? == TrapAction::Skip {
                     return Ok(Some(()));
                 }
-            }
-            if let Some(hook) = self.lookup_hook(target).cloned() {
-                return self.emit_hook_call_and_return(ctx, rctx, tail_idx, inst.ip(), &hook);
             }
             let Some(target_func_idx) = self.rip_to_func_idx(rctx, target) else {
                 rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;

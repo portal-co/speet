@@ -17,6 +17,7 @@ pub mod drive;
 pub mod frontend;
 pub mod guest_func_catalog;
 pub mod instrument;
+pub mod host_mem_shim;
 pub mod plt;
 
 /// Re-exports of the abstracted components this driver is built on.

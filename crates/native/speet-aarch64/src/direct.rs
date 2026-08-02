@@ -95,17 +95,6 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 }
             }
 
-            // Check the *current* PC against the hook table before decoding
-            // anything else at this slot — a hooked address reached by
-            // fallthrough (rather than a `bl`/`b` whose target we resolved
-            // ourselves) still needs the same redirect. See
-            // `docs/guides/thin-runtime-genericity.md` principle 2.
-            if let Some(hook) = self.lookup_hook(pc).cloned() {
-                self.emit_hook_call_and_return(ctx, rctx, tail_idx, pc, &hook).map_err(|_| ())?;
-                offset += 4;
-                continue;
-            }
-
             match opcode {
                 None => {
                     rctx.feed(ctx, tail_idx, &Instruction::Unreachable).map_err(|_| ())?;
@@ -199,16 +188,6 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                     let kind = if is_bl { JumpKind::Call } else { JumpKind::DirectJump };
                     let info = JumpInfo::direct(pc, target, kind);
                     if rctx.on_jump(&info, ctx)? == TrapAction::Skip { return Ok(()); }
-                }
-                // A tail-call `B` can reach a hooked PLT/external-call
-                // address just as validly as `BL` — see
-                // `docs/guides/thin-runtime-genericity.md` principle 2. `x30`
-                // still holds the *original* caller's return address either
-                // way (a bare `B` never touches it), so the same
-                // call-then-jump-to-lr sequence applies unchanged.
-                if let Some(hook) = self.lookup_hook(target).cloned() {
-                    self.emit_hook_call_and_return(ctx, rctx, tail_idx, pc, &hook)?;
-                    return Ok(());
                 }
                 match self.pc_to_func_idx(target) {
                     Some(f_idx) => rctx.jmp(ctx, tail_idx, f_idx, total)?,

@@ -9,7 +9,7 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt_with_data,
+    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt_with_layout,
     external_targets_from_imports, DataSegment,
 };
 use speet_link_core::GuestImageLayout;
@@ -162,17 +162,15 @@ impl IntegratedNativeRuntime {
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
         let layout = GuestImageLayout::from_loaded_binary(&bin);
-        let data_segments = data_segments_from_layout(&layout);
 
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_data(
+            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_layout(
                 &text.data,
-                start,
+                &layout,
                 guest_arch,
                 Some(&plt_plan),
                 Some(bin.entry),
                 &manifest,
-                &data_segments,
             ),
         };
         self.cache.put_wasm(&input_hash, wasm.clone());
