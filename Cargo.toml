@@ -36,6 +36,7 @@ members = [
     "crates/os/speet-abi-spec",
     "crates/os/speet-abi-codegen",
     "crates/os/speet-abi-stubs",
+    "crates/os/speet-host-mem-shim",
     "crates/os/speet-recompile",
     "crates/os/speet-runtime",
     "crates/os/speet-rtd",

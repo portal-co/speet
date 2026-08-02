@@ -8,10 +8,15 @@ license-file.workspace = true
 [dependencies]
 os-linux-wasi        = { path = "../../../../os-emulation/crates/emit/os-linux-wasi" }
 os-syscall-emit      = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
-speet-link-core     = { path = "../speet-link-core" }
-speet-module-target = { path = "../speet-module-target" }
-wasmparser          = { workspace = true, features = ["validate"] }
-wasm-encoder        = { workspace = true }
+speet-host-api       = { path = "../speet-host-api" }
+speet-link-core      = { path = "../speet-link-core" }
+speet-module-target  = { path = "../speet-module-target" }
+speet-reach          = { path = "../../helper/speet-reach" }
+speet-riscv          = { path = "../../native/speet-riscv" }
+rv-asm               = { workspace = true }
+wasmparser           = { workspace = true, features = ["validate"] }
+wasm-encoder         = { workspace = true, features = ["wasmparser"] }
+yecta                = { path = "../../helper/yecta" }
 
 [build-dependencies]
-speet-recompile = { path = "../speet-recompile" }
+speet-host-mem-shim = { path = "../speet-host-mem-shim" }

@@ -20,6 +20,7 @@ use crate::{CfgDecoder, ReachableSet};
 /// |--------|----------|----------|
 /// | [`all_slots`](PcSlotMap::all_slots) | None | Fixing the latent formula bug; no reachability filter |
 /// | [`from_reachable`](PcSlotMap::from_reachable) | Unreachable PCs | True slot omission |
+#[derive(Clone)]
 pub struct PcSlotMap {
     /// Sorted list of included PCs.  The index is the local slot index.
     sorted_pcs: Vec<u64>,

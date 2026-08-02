@@ -60,7 +60,7 @@ fn try_build_and_lower(workspace_root: &Path, out: &Path) -> bool {
     };
 
     let canonical =
-        speet_recompile::host_mem_shim::lower_host_mem_imports(&wasm).expect("lower guest wasm");
+        speet_host_mem_shim::lower_host_mem_imports(&wasm).expect("lower guest wasm");
     std::fs::write(out, &canonical).expect("write canonical guest wasm");
     true
 }

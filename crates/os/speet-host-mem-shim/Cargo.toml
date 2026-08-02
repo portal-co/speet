@@ -1,0 +1,11 @@
+[package]
+name = "speet-host-mem-shim"
+version = "0.1.0"
+edition = "2021"
+description = "Lower __speet_host_mem imports to multi-memory WASM ops"
+license-file.workspace = true
+publish = false
+
+[dependencies]
+wasm-encoder = { workspace = true, features = ["wasmparser"] }
+wasmparser = { workspace = true, features = ["validate"] }

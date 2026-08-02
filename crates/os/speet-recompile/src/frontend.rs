@@ -935,6 +935,11 @@ pub fn recompile_rv64_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
     assemble_syscall_module(&t, &ImportManifest::rv64_syscall())
 }
 
+/// Recompile an RV64 Linux `.text` blob with Linux→WASI preview1 lowering.
+pub fn recompile_rv64_wasi_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
+    speet_linux_wasi::recompile_rv64_wasi_to_wasm(text, start_addr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

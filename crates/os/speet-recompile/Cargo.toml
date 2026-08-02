@@ -8,6 +8,7 @@ description = "Full-binary recompiler driver: load host binary -> speet (WASM) -
 binary-io = { path = "../../../../binary-io" }
 tunnel = { path = "../../../../tunnel" }
 speet-host-api = { path = "../speet-host-api" }
+speet-host-mem-shim = { path = "../speet-host-mem-shim" }
 speet-abi-stubs = { path = "../speet-abi-stubs" }
 speet-rt = { path = "../speet-rt" }
 
@@ -26,6 +27,7 @@ speet-aarch64 = { path = "../../native/speet-aarch64" }
 speet-riscv = { path = "../../native/speet-riscv", features = ["logging"] }
 speet-syscall = { path = "../speet-syscall" }
 speet-host-syscall = { path = "../speet-host-syscall" }
+speet-linux-wasi = { path = "../speet-linux-wasi" }
 speet-link-core = { path = "../speet-link-core" }
 speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 speet-plugin-adapter = { path = "../../plugin/speet-plugin-adapter" }
