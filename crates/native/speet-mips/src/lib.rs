@@ -91,8 +91,20 @@ enum BranchOp {
 // `ReturnAddressSnippet` fix the same way.
 struct TableIndexSnippet {
     rs_local: u32,
-    base_pc: u32,
+    text_base: speet_link_core::TextBaseSnippet,
     base_func_offset: u32,
+}
+
+impl TableIndexSnippet {
+    fn from_constant_base(rs_local: u32, base_pc: u32, base_func_offset: u32) -> Self {
+        Self {
+            rs_local,
+            text_base: speet_link_core::TextBaseSnippet::new(
+                speet_link_core::TextBaseSource::Constant(base_pc as u64),
+            ),
+            base_func_offset,
+        }
+    }
 }
 
 impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for TableIndexSnippet {
@@ -104,16 +116,13 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Tabl
         sink.instruction(ctx, &WasmInstruction::LocalGet(self.rs_local))?;
         sink.instruction(ctx, &WasmInstruction::I32Const(0xFFFFFFFC_u32 as i32))?;
         sink.instruction(ctx, &WasmInstruction::I32And)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_pc as i32))?;
-        sink.instruction(ctx, &WasmInstruction::I32Sub)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
-        sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_func_offset as i32))?;
-        sink.instruction(ctx, &WasmInstruction::I32Add)?;
-        // The call-indirect table is table64 — its index operand must be i64
-        // (see speet-x86_64's `ReturnAddressSnippet`: "indirect jump plumbing
-        // expects architecture state words").
         sink.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
+        wax_core::build::InstructionSource::emit_instruction(&self.text_base, ctx, sink)?;
+        sink.instruction(ctx, &WasmInstruction::I64Sub)?;
+        sink.instruction(ctx, &WasmInstruction::I64Const(2))?;
+        sink.instruction(ctx, &WasmInstruction::I64ShrU)?;
+        sink.instruction(ctx, &WasmInstruction::I64Const(self.base_func_offset as i64))?;
+        sink.instruction(ctx, &WasmInstruction::I64Add)?;
         Ok(())
     }
 }
@@ -127,13 +136,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for TableIndexSn
         sink.instruction(ctx, &WasmInstruction::LocalGet(self.rs_local))?;
         sink.instruction(ctx, &WasmInstruction::I32Const(0xFFFFFFFC_u32 as i32))?;
         sink.instruction(ctx, &WasmInstruction::I32And)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_pc as i32))?;
-        sink.instruction(ctx, &WasmInstruction::I32Sub)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(2))?;
-        sink.instruction(ctx, &WasmInstruction::I32ShrU)?;
-        sink.instruction(ctx, &WasmInstruction::I32Const(self.base_func_offset as i32))?;
-        sink.instruction(ctx, &WasmInstruction::I32Add)?;
         sink.instruction(ctx, &WasmInstruction::I64ExtendI32U)?;
+        wax_core::build::InstructionSource::emit_instruction(&self.text_base, ctx, sink)?;
+        sink.instruction(ctx, &WasmInstruction::I64Sub)?;
+        sink.instruction(ctx, &WasmInstruction::I64Const(2))?;
+        sink.instruction(ctx, &WasmInstruction::I64ShrU)?;
+        sink.instruction(ctx, &WasmInstruction::I64Const(self.base_func_offset as i64))?;
+        sink.instruction(ctx, &WasmInstruction::I64Add)?;
         Ok(())
     }
 }
@@ -1902,11 +1911,11 @@ where
                     return Ok(());
                 }
 
-                let snippet = TableIndexSnippet {
-                    rs_local: self.gpr_to_local(rs, rctx.layout()),
-                    base_pc: self.base_pc,
-                    base_func_offset: rctx.base_func_offset(),
-                };
+                let snippet = TableIndexSnippet::from_constant_base(
+                    self.gpr_to_local(rs, rctx.layout()),
+                    self.base_pc,
+                    rctx.base_func_offset(),
+                );
                 let params =
                     yecta::JumpCallParams::indirect_jump(&snippet, rctx.locals_mark().total_locals, rctx.pool());
                 rctx.ji_with_params(ctx, tail_idx, params)?
@@ -1938,11 +1947,11 @@ where
                     return Ok(());
                 }
 
-                let snippet = TableIndexSnippet {
-                    rs_local: self.gpr_to_local(rs, rctx.layout()),
-                    base_pc: self.base_pc,
-                    base_func_offset: rctx.base_func_offset(),
-                };
+                let snippet = TableIndexSnippet::from_constant_base(
+                    self.gpr_to_local(rs, rctx.layout()),
+                    self.base_pc,
+                    rctx.base_func_offset(),
+                );
                 let params =
                     yecta::JumpCallParams::indirect_jump(&snippet, rctx.locals_mark().total_locals, rctx.pool());
                 rctx.ji_with_params(ctx, tail_idx, params)?;

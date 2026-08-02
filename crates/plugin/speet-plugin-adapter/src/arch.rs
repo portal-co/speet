@@ -402,6 +402,8 @@ mod tests {
                 slot_count: 0,
                 total_locals: 0,
             },
+            injected_start: Mark { slot_count: 0, total_locals: 0 },
+            layout_params: speet_link_core::RuntimeLayoutParams::new(),
             pool,
             escape_tag: None,
         }

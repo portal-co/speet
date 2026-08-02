@@ -265,6 +265,8 @@ pub fn make_rctx<'r>(
         reactor,
         layout:      yecta::LocalLayout::empty(),
         locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        layout_params: speet_link_core::RuntimeLayoutParams::new(),
         pool:        yecta::Pool { handler: &T, ty: type_idx },
         escape_tag,
     };

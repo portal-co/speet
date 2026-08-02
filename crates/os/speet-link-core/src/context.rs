@@ -426,6 +426,28 @@ where
     pub escape_tag: Option<EscapeTag>,
 }
 
+impl<'a, Context, E, F, P> ReactorAdapter<'a, Context, E, F, P>
+where
+    F: InstructionSink<Context, E>,
+    P: LocalPoolBackend,
+{
+    /// Create a test/simple adapter with empty layout params.
+    pub fn new(
+        reactor: &'a mut Reactor<Context, E, F, P>,
+        pool: Pool<'a, Context, E>,
+    ) -> Self {
+        Self {
+            reactor,
+            layout: LocalLayout::empty(),
+            locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            injected_start: Mark { slot_count: 0, total_locals: 0 },
+            layout_params: RuntimeLayoutParams::new(),
+            pool,
+            escape_tag: None,
+        }
+    }
+}
+
 impl<'a, Context, E, F, P> InstructionSink<Context, E> for ReactorAdapter<'a, Context, E, F, P>
 where
     F: InstructionSink<Context, E>,

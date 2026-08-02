@@ -12,6 +12,8 @@ fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, Loca
         reactor,
         layout: yecta::LocalLayout::empty(),
         locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        layout_params: speet_link_core::RuntimeLayoutParams::new(),
         pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
         escape_tag: None,
     }

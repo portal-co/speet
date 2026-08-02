@@ -1399,7 +1399,7 @@ mod tests {
         let mark = Mark { slot_count: 0, total_locals: 0 };
         static T: TableIdx = TableIdx(0);
         let pool = yecta::Pool { handler: &T, ty: TypeIdx(0) };
-        ReactorAdapter { reactor, layout, locals_mark: mark, pool, escape_tag: None }
+        ReactorAdapter { reactor, layout, locals_mark: mark, injected_start: Mark { slot_count: 0, total_locals: 0 }, layout_params: speet_link_core::RuntimeLayoutParams::new(), pool, escape_tag: None }
     }
 
     macro_rules! translate_ok {

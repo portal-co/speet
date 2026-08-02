@@ -1208,17 +1208,28 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         base_local: u32,
                         offset: i32,
                         enable_rv64: bool,
-                        base_pc: u64,
-                        // The call-indirect table holds every function from every
-                        // linked binary unit at a single, shared global index — so
-                        // the local (within-this-unit) function index computed from
-                        // the PC must be shifted into that global space the same way
-                        // a `Target::Static` call already is (`func_idx +
-                        // base_func_offset`, see yecta's `emit_call_body`). Omitting
-                        // this caused `call_indirect` to land on a *different* unit's
-                        // function (wrong register-file type) when linking multiple
-                        // binaries together.
+                        text_base: speet_link_core::TextBaseSnippet,
                         base_func_offset: u32,
+                    }
+
+                    impl JalrTargetSnippet {
+                        fn from_constant_base(
+                            base_local: u32,
+                            offset: i32,
+                            enable_rv64: bool,
+                            base_pc: u64,
+                            base_func_offset: u32,
+                        ) -> Self {
+                            Self {
+                                base_local,
+                                offset,
+                                enable_rv64,
+                                text_base: speet_link_core::TextBaseSnippet::new(
+                                    speet_link_core::TextBaseSource::Constant(base_pc),
+                                ),
+                                base_func_offset,
+                            }
+                        }
                     }
 
                     impl<Context, E> wax_core::build::InstructionSource<Context, E> for JalrTargetSnippet {
@@ -1227,8 +1238,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                             ctx: &mut Context,
                             sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
                         ) -> Result<(), E> {
-                            // Compute: ((base + offset) & ~1 - base_pc) / 2 + base_func_offset
-                            // This gives us the function index from the PC
+                            // Compute: ((base + offset) & ~1 - text_base) >> 1 + base_func_offset
                             sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
                             if self.enable_rv64 {
                                 sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
@@ -1238,11 +1248,16 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                     &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64),
                                 )?;
                                 sink.instruction(ctx, &Instruction::I64And)?;
-                                sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
+                                wax_core::build::InstructionSource::emit_instruction(
+                                    &self.text_base,
+                                    ctx,
+                                    sink,
+                                )?;
                                 sink.instruction(ctx, &Instruction::I64Sub)?;
                                 sink.instruction(ctx, &Instruction::I64Const(1))?;
                                 sink.instruction(ctx, &Instruction::I64ShrU)?;
-                                sink.instruction(ctx, &Instruction::I32WrapI64)?;
+                                sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Add)?;
                             } else {
                                 sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
                                 sink.instruction(ctx, &Instruction::I32Add)?;
@@ -1251,13 +1266,18 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                     &Instruction::I32Const(0xFFFFFFFE_u32 as i32),
                                 )?;
                                 sink.instruction(ctx, &Instruction::I32And)?;
-                                sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
-                                sink.instruction(ctx, &Instruction::I32Sub)?;
-                                sink.instruction(ctx, &Instruction::I32Const(1))?;
-                                sink.instruction(ctx, &Instruction::I32ShrU)?;
+                                sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                                wax_core::build::InstructionSource::emit_instruction(
+                                    &self.text_base,
+                                    ctx,
+                                    sink,
+                                )?;
+                                sink.instruction(ctx, &Instruction::I64Sub)?;
+                                sink.instruction(ctx, &Instruction::I64Const(1))?;
+                                sink.instruction(ctx, &Instruction::I64ShrU)?;
+                                sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
+                                sink.instruction(ctx, &Instruction::I64Add)?;
                             }
-                            sink.instruction(ctx, &Instruction::I32Const(self.base_func_offset as i32))?;
-                            sink.instruction(ctx, &Instruction::I32Add)?;
                             Ok(())
                         }
                     }
@@ -1270,48 +1290,17 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                      dyn wax_core::build::InstructionOperatorSink<Context, E> + '_
                                  ),
                         ) -> Result<(), E> {
-                            // Compute: ((base + offset) & ~1 - base_pc) / 2 + base_func_offset
-                            // This gives us the function index from the PC
-                            sink.instruction(ctx, &Instruction::LocalGet(self.base_local))?;
-                            if self.enable_rv64 {
-                                sink.instruction(ctx, &Instruction::I64Const(self.offset as i64))?;
-                                sink.instruction(ctx, &Instruction::I64Add)?;
-                                sink.instruction(
-                                    ctx,
-                                    &Instruction::I64Const(0xFFFFFFFFFFFFFFFE_u64 as i64),
-                                )?;
-                                sink.instruction(ctx, &Instruction::I64And)?;
-                                sink.instruction(ctx, &Instruction::I64Const(self.base_pc as i64))?;
-                                sink.instruction(ctx, &Instruction::I64Sub)?;
-                                sink.instruction(ctx, &Instruction::I64Const(1))?;
-                                sink.instruction(ctx, &Instruction::I64ShrU)?;
-                                sink.instruction(ctx, &Instruction::I32WrapI64)?;
-                            } else {
-                                sink.instruction(ctx, &Instruction::I32Const(self.offset))?;
-                                sink.instruction(ctx, &Instruction::I32Add)?;
-                                sink.instruction(
-                                    ctx,
-                                    &Instruction::I32Const(0xFFFFFFFE_u32 as i32),
-                                )?;
-                                sink.instruction(ctx, &Instruction::I32And)?;
-                                sink.instruction(ctx, &Instruction::I32Const(self.base_pc as i32))?;
-                                sink.instruction(ctx, &Instruction::I32Sub)?;
-                                sink.instruction(ctx, &Instruction::I32Const(1))?;
-                                sink.instruction(ctx, &Instruction::I32ShrU)?;
-                            }
-                            sink.instruction(ctx, &Instruction::I32Const(self.base_func_offset as i32))?;
-                            sink.instruction(ctx, &Instruction::I32Add)?;
-                            Ok(())
+                            wax_core::build::InstructionSource::emit_instruction(self, ctx, sink)
                         }
                     }
 
-                    let target_snippet = JalrTargetSnippet {
-                        base_local: rctx.layout().local(self.int_reg_slot, base.0 as u32),
-                        offset: offset.as_i32(),
-                        enable_rv64: self.enable_rv64,
-                        base_pc: self.base_pc,
-                        base_func_offset: rctx.base_func_offset(),
-                    };
+                    let target_snippet = JalrTargetSnippet::from_constant_base(
+                        rctx.layout().local(self.int_reg_slot, base.0 as u32),
+                        offset.as_i32(),
+                        self.enable_rv64,
+                        self.base_pc,
+                        rctx.base_func_offset(),
+                    );
 
                     // Use fixups to set expected_ra only for this call
                     let mut fixups = alloc::collections::BTreeMap::new();
@@ -1406,32 +1395,33 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         struct RetTargetSnippet {
                             scratch_local: u32,
                             scratch_is_i64: bool,
-                            base_pc: u64,
+                            text_base: speet_link_core::TextBaseSnippet,
                             base_func_offset: u32,
                         }
-                        fn emit_ret_target<Context, E, S>(
+                        fn emit_ret_target<Context, E>(
                             ctx: &mut Context,
-                            sink: &mut S,
+                            sink: &mut dyn wax_core::build::InstructionSink<Context, E>,
                             scratch_local: u32,
                             scratch_is_i64: bool,
-                            base_pc: u64,
+                            text_base: &speet_link_core::TextBaseSnippet,
                             base_func_offset: u32,
-                        ) -> Result<(), E>
-                        where
-                            S: wax_core::build::InstructionSink<Context, E> + ?Sized,
-                        {
-                            // table_idx = ((scratch - base_pc) >> 1) + base_func_offset,
-                            // kept as i64 — the indirect call table is table64
-                            // (see `assemble_corpus_module`/`finish_module`),
-                            // so `return_call_indirect` requires an i64 index.
-                            // Mirrors AArch64's `A64IndirectTarget` exactly
-                            // (granularity 2 here for RVC 2-byte alignment vs
-                            // AArch64's 4).
-                            sink.instruction(ctx, &Instruction::LocalGet(scratch_local))?;
-                            if !scratch_is_i64 {
-                                sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                        ) -> Result<(), E> {
+                            if scratch_is_i64 {
+                                let indirect = speet_link_core::IndirectTableIdxSnippet {
+                                    gpr_local: scratch_local,
+                                    text_base,
+                                    slot_shift: 1,
+                                    base_func_offset,
+                                };
+                                return wax_core::build::InstructionSource::emit_instruction(
+                                    &indirect,
+                                    ctx,
+                                    sink,
+                                );
                             }
-                            sink.instruction(ctx, &Instruction::I64Const(base_pc as i64))?;
+                            sink.instruction(ctx, &Instruction::LocalGet(scratch_local))?;
+                            sink.instruction(ctx, &Instruction::I64ExtendI32U)?;
+                            wax_core::build::InstructionSource::emit_instruction(text_base, ctx, sink)?;
                             sink.instruction(ctx, &Instruction::I64Sub)?;
                             sink.instruction(ctx, &Instruction::I64Const(1))?;
                             sink.instruction(ctx, &Instruction::I64ShrU)?;
@@ -1445,7 +1435,14 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                 ctx: &mut Context,
                                 sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
                             ) -> Result<(), E> {
-                                emit_ret_target(ctx, sink, self.scratch_local, self.scratch_is_i64, self.base_pc, self.base_func_offset)
+                                emit_ret_target(
+                                    ctx,
+                                    sink,
+                                    self.scratch_local,
+                                    self.scratch_is_i64,
+                                    &self.text_base,
+                                    self.base_func_offset,
+                                )
                             }
                         }
                         impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for RetTargetSnippet {
@@ -1454,13 +1451,15 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                                 ctx: &mut Context,
                                 sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
                             ) -> Result<(), E> {
-                                emit_ret_target(ctx, sink, self.scratch_local, self.scratch_is_i64, self.base_pc, self.base_func_offset)
+                                wax_core::build::InstructionSource::emit_instruction(self, ctx, sink)
                             }
                         }
                         let target_snippet = RetTargetSnippet {
                             scratch_local: scratch,
                             scratch_is_i64: self.use_memory64 || self.enable_rv64,
-                            base_pc: self.base_pc,
+                            text_base: speet_link_core::TextBaseSnippet::new(
+                                speet_link_core::TextBaseSource::Constant(self.base_pc),
+                            ),
                             base_func_offset: rctx.base_func_offset(),
                         };
                         let params = yecta::JumpCallParams::indirect_jump(
