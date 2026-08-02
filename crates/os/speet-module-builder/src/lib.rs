@@ -480,6 +480,9 @@ pub fn assemble(output: MegabinaryOutput<wasm_encoder::Function>) -> Module {
 
     // ExportSection
     let mut export_sec = ExportSection::new();
+    if !memories.is_empty() {
+        export_sec.export("memory", ExportKind::Memory, 0);
+    }
     for (name, idx) in &exports {
         export_sec.export(name, ExportKind::Func, *idx);
     }

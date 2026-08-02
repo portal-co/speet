@@ -1,18 +1,68 @@
-//! Extract and import-remap handler bodies from [`super::CANONICAL_GUEST_WASM`].
+//! Extract guest defined functions and import-remap call targets for megabinary linking.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use speet_link_core::unit::FuncType;
 use wasm_encoder::{Function, Instruction};
 use wasmparser::{FunctionBody, Operator, Parser, Payload, TypeRef};
 
+use super::guest_module;
 use super::WasiImports;
 use super::{
     EXPORT_HANDLER_CLOSE, EXPORT_HANDLER_EXIT, EXPORT_HANDLER_READ, EXPORT_HANDLER_WRITE,
     EXPORT_SYSCALL_DISPATCH,
 };
+
+/// All defined functions from the guest module, ready for a megabinary slot.
+pub struct GuestDefinedModule {
+    pub functions: Vec<Function>,
+    pub func_types: Vec<FuncType>,
+    pub entry_points: Vec<(String, u32)>,
+}
+
+/// Copy every defined function from `wasm`, remapping `call` targets for megabinary indices.
+pub fn extract_guest_defined_module(
+    wasm: &[u8],
+    wasi: &WasiImports,
+    defined_base: u32,
+) -> Result<GuestDefinedModule, String> {
+    let module = parse_guest_module(wasm)?;
+    let import_remap = guest_import_remap(&module, wasi)?;
+    let defined_remap = guest_defined_remap(&module, defined_base);
+
+    let mut functions = Vec::with_capacity(module.func_type_indices.len());
+    let mut func_types = Vec::with_capacity(module.func_type_indices.len());
+    let mut code_idx = 0u32;
+    for payload in Parser::new(0).parse_all(wasm) {
+        if let Payload::CodeSectionEntry(body) = payload.map_err(|e| format!("{e:?}"))? {
+            let ty_idx = module.func_type_indices[code_idx as usize];
+            func_types.push(guest_module::guest_func_type_at(wasm, ty_idx));
+            functions.push(rewrite_body(body, &import_remap, &defined_remap)?);
+            code_idx += 1;
+        }
+    }
+
+    let mut entry_points = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        if let Payload::ExportSection(reader) = payload.map_err(|e| format!("{e:?}"))? {
+            for export in reader {
+                let export = export.map_err(|e| format!("{e:?}"))?;
+                if export.kind == wasmparser::ExternalKind::Func {
+                    entry_points.push((export.name.to_string(), export.index));
+                }
+            }
+        }
+    }
+
+    Ok(GuestDefinedModule {
+        functions,
+        func_types,
+        entry_points,
+    })
+}
 
 /// One guest handler function ready to append after translated RV64 code.
 pub struct GuestHandlerFunctions {
@@ -103,37 +153,19 @@ fn guest_import_remap(
     _module: &ParsedGuestModule,
     wasi: &WasiImports,
 ) -> Result<BTreeMap<u32, u32>, String> {
-    let guest = super::CANONICAL_GUEST_WASM;
-    let mut guest_imports: BTreeMap<(String, String), u32> = BTreeMap::new();
-    let mut import_func_idx = 0u32;
-    for payload in Parser::new(0).parse_all(guest) {
-        if let Payload::ImportSection(reader) = payload.map_err(|e| format!("{e:?}"))? {
-            for imp in reader {
-                let imp = imp.map_err(|e| format!("{e:?}"))?;
-                if let TypeRef::Func(_) = imp.ty {
-                    guest_imports.insert(
-                        (imp.module.to_string(), imp.name.to_string()),
-                        import_func_idx,
-                    );
-                    import_func_idx += 1;
-                }
-            }
-        }
-    }
-
-    let megabinary = [
-        ("wasi_snapshot_preview1", "fd_write", wasi.fd_write),
-        ("wasi_snapshot_preview1", "fd_read", wasi.fd_read),
-        ("wasi_snapshot_preview1", "fd_close", wasi.fd_close),
-        ("wasi_snapshot_preview1", "proc_exit", wasi.proc_exit),
-    ];
-
     let mut remap = BTreeMap::new();
-    for (module_name, name, meg_idx) in megabinary {
-        let guest_idx = guest_imports
-            .get(&(module_name.into(), name.into()))
-            .ok_or_else(|| format!("guest module missing import {module_name}::{name}"))?;
-        remap.insert(*guest_idx, meg_idx);
+    for (guest_idx, imp) in super::guest_module::guest_func_imports(super::CANONICAL_GUEST_WASM)
+        .into_iter()
+        .enumerate()
+    {
+        let meg_idx = match imp.name.as_str() {
+            "fd_write" => wasi.fd_write,
+            "fd_read" => wasi.fd_read,
+            "fd_close" => wasi.fd_close,
+            "proc_exit" => wasi.proc_exit,
+            other => return Err(format!("unexpected guest import {other}")),
+        };
+        remap.insert(guest_idx as u32, meg_idx);
     }
     Ok(remap)
 }

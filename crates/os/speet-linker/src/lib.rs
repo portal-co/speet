@@ -38,9 +38,9 @@ use yecta::{
 
 pub use speet_link_core::{
     BaseContext, BinaryUnit, DataSegment, EntityIndexSpace, FuncLayout, FuncSlot, FuncType,
-    IndexSlot, IndexSpace, MemWidth, OobConfig, ParamSource, ParamSlotMap, Place, ReactorAdapter,
-    ReactorContext, Recompile, RuntimeLayoutParams, SavePair, ShimSpec, TextBaseSource,
-    TrapReactorAdapter, emit_shim,
+    IndexSlot, IndexSpace, LinkerPlugin, MemWidth, OobConfig, ParamSource, ParamSlotMap, Place,
+    ReactorAdapter, ReactorContext, Recompile, RuntimeLayoutParams, SavePair, ShimSpec,
+    TextBaseSource, TrapReactorAdapter, emit_shim,
 };
 
 // ── LinkerInner ───────────────────────────────────────────────────────────────

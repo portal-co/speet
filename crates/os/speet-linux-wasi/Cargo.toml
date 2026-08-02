@@ -10,9 +10,14 @@ os-linux-wasi        = { path = "../../../../os-emulation/crates/emit/os-linux-w
 os-syscall-emit      = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
 speet-host-api       = { path = "../speet-host-api" }
 speet-link-core      = { path = "../speet-link-core" }
+speet-linker         = { path = "../speet-linker" }
+speet-module-builder = { path = "../speet-module-builder" }
 speet-module-target  = { path = "../speet-module-target" }
+speet-memory           = { path = "../../helper/speet-memory" }
 speet-reach          = { path = "../../helper/speet-reach" }
 speet-riscv          = { path = "../../native/speet-riscv" }
+speet-schedule       = { path = "../speet-schedule" }
+speet-wasm           = { path = "../../managed/speet-wasm" }
 rv-asm               = { workspace = true }
 wasmparser           = { workspace = true, features = ["validate"] }
 wasm-encoder         = { workspace = true, features = ["wasmparser"] }

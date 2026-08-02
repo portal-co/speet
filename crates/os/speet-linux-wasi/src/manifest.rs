@@ -4,7 +4,8 @@ use alloc::vec;
 
 use speet_host_api::{FuncImport, ImportManifest, WasmValType::I32};
 
-/// WASI preview1 imports in [`super::WasiImportsExt`] order (fd_write, fd_read, fd_close, proc_exit).
+/// [`ImportManifest`] for host-side WASI preview1 wiring (lookup by name).
+/// Megabinary import **order and signatures** come from [`guest_module::guest_func_imports`].
 pub fn wasi_preview1_manifest() -> ImportManifest {
     ImportManifest {
         func_imports: vec![

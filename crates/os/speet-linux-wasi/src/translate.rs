@@ -12,7 +12,6 @@ use yecta::{LocalPool, Reactor, SlotAssigner, TableIdx, TypeIdx};
 
 use crate::ecall::LinuxWasiEcall;
 use crate::manifest::wasi_preview1_manifest;
-use crate::merge::extract_guest_handlers;
 use crate::WasiImports;
 
 static REACTOR_TABLE: TableIdx = TableIdx(0);
@@ -95,13 +94,14 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
         },
     );
     let n_translated = slots.total_slots();
-    let handler_base = n_imports + n_translated;
-    let guest_handlers =
-        extract_guest_handlers(&wasi, handler_base).expect("canonical guest handlers");
-    let syscall_dispatch_idx = handler_base + guest_handlers.syscall_dispatch_offset;
-
-    let n_handlers = guest_handlers.functions.len() as u32;
-    let halt_stub_idx = handler_base + n_handlers;
+    let n_guest = crate::guest_module::guest_defined_fn_count(crate::CANONICAL_GUEST_WASM);
+    let rv64_base = n_imports + n_guest;
+    let syscall_dispatch_idx = crate::link::func_export_index(
+        crate::CANONICAL_GUEST_WASM,
+        crate::EXPORT_SYSCALL_DISPATCH,
+    )
+    .expect("syscall_dispatch export");
+    let halt_stub_idx = rv64_base + n_translated;
 
     let mut recompiler =
         speet_riscv::RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
@@ -110,7 +110,7 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
     recompiler.set_slot_assigner(slots.clone());
 
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, n_imports, start_addr);
+    let mut rctx = make_rctx(&mut reactor, rv64_base, start_addr);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
@@ -118,7 +118,7 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
     let mut ecall_cb = LinuxWasiEcall {
         syscall_dispatch_idx,
         slots,
-        base_func_offset: n_imports,
+        base_func_offset: rv64_base,
         halt_stub_idx,
         num_params: params.len() as u32,
     };
