@@ -1,8 +1,10 @@
 //! Link [`CANONICAL_GUEST_WASM`] as the first megabinary slot via [`WasmFrontend`].
 //!
-//! Megabinary imports come from [`guest_module::guest_func_imports`]. The guest slot uses
-//! [`WasmFrontend::set_preserve_guest_module`] for the pre-lowered multi-memory module.
+//! Megabinary imports come from [`guest_module::guest_func_imports`]. The guest
+//! module is multi-memory: memory 0 is private/unmapped, memory 1 is shared with
+//! the host (identity-mapped via [`DirectMemory`]).
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -12,7 +14,7 @@ use speet_link_core::{
     unit::FuncType, BinaryUnit, ReactorContext, Recompile,
 };
 use speet_linker::Linker;
-use speet_memory::AddressWidth;
+use speet_memory::{AddressWidth, DirectMemory, IntWidth};
 use speet_module_builder::{assemble, ElementsOwned, MegabinaryBuilder};
 use speet_reach::PcSlotMap;
 use speet_riscv::cfg::RiscVCfgDecoder;
@@ -183,13 +185,20 @@ fn declare_guest_memories(builder: &mut MegabinaryBuilder<Function>) {
 
 fn guest_memory_configs() -> Vec<GuestMemoryConfig<(), LinkErr>> {
     vec![
+        // Private guest linear memory — keep index 0, no address rewrite.
         GuestMemoryConfig {
             addr_width: AddressWidth::W32,
             memory_access: None,
         },
+        // Host-shared memory — already lowered to memory 1; identity map.
         GuestMemoryConfig {
             addr_width: AddressWidth::W32,
-            memory_access: None,
+            memory_access: Some(Box::new(DirectMemory::new(
+                (),
+                HOST_MEMORY_INDEX,
+                AddressWidth::W32,
+                IntWidth::I32,
+            ))),
         },
     ]
 }
@@ -233,7 +242,6 @@ fn emit_guest_unit(
         HOST_MEMORY_INDEX,
         IndexOffsets::default(),
     );
-    frontend.set_preserve_guest_module(true);
     frontend
         .translate_module(ctx, rctx, CANONICAL_GUEST_WASM)
         .expect("guest translate_module");

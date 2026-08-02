@@ -78,6 +78,11 @@ pub trait AddressMapper<Context, E>: LocalDeclarator {
     fn chunk_size(&self) -> Option<u64> {
         None
     }
+
+    /// `false` for identity mappers that leave the address unchanged.
+    fn transforms_address(&self) -> bool {
+        true
+    }
 }
 
 /// Identity mapper: leaves the address unchanged.
@@ -89,6 +94,11 @@ impl<Context, E> AddressMapper<Context, E> for () {
         _sink: &mut dyn MemorySink<Context, E>,
     ) -> Result<(), E> {
         Ok(())
+    }
+
+    #[inline]
+    fn transforms_address(&self) -> bool {
+        false
     }
 }
 
@@ -126,6 +136,11 @@ impl<Context, E, M: AddressMapper<Context, E>> AddressMapper<Context, E> for Chu
     #[inline]
     fn chunk_size(&self) -> Option<u64> {
         Some(self.page_size)
+    }
+
+    #[inline]
+    fn transforms_address(&self) -> bool {
+        self.inner.transforms_address()
     }
 }
 
@@ -181,6 +196,11 @@ where
             (None, x) | (x, None) => x,
             (Some(a), Some(b)) => Some(a.min(b)),
         }
+    }
+
+    #[inline]
+    fn transforms_address(&self) -> bool {
+        self.outer.transforms_address() || self.inner.transforms_address()
     }
 }
 
@@ -296,6 +316,19 @@ pub trait MemoryAccess<Context, E>: LocalDeclarator {
     fn needs_wrap_for_narrow_store(&self, _kind: StoreKind) -> bool {
         false
     }
+
+    /// Host/linear-memory index this access emits into, when known.
+    fn data_memory_index(&self) -> Option<u32> {
+        None
+    }
+
+    /// `true` when [`emit_store_addr`] applies a non-identity address transform.
+    ///
+    /// Used by multi-memory `memory.copy` / `memory.fill` lowering to choose
+    /// between a pass-through op and a chunked translate loop.
+    fn transforms_address(&self) -> bool {
+        true
+    }
 }
 
 // ── DirectMemory ───────────────────────────────────────────────────────────────
@@ -384,6 +417,14 @@ impl<M: LocalDeclarator> LocalDeclarator for DirectMemory<M> {
 }
 
 impl<Context, E, M: AddressMapper<Context, E>> MemoryAccess<Context, E> for DirectMemory<M> {
+    fn data_memory_index(&self) -> Option<u32> {
+        Some(self.data_memory_index)
+    }
+
+    fn transforms_address(&self) -> bool {
+        self.mapper.transforms_address()
+    }
+
     fn emit_load(
         &mut self,
         ctx: &mut Context,

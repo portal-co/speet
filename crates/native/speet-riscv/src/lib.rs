@@ -647,6 +647,10 @@ where
         } else {
             ValType::I32
         };
+        // Always start from an empty layout.  Prior emit closures on the same
+        // Linker (e.g. WasmFrontend) may have left guest scratch locals that
+        // would otherwise shift every arch param index.
+        *rctx.layout_mut() = yecta::LocalLayout::empty();
         {
             let layout = rctx.layout_mut();
             self.int_reg_slot     = layout.append(32, int_type); // x0-x31 (params 0-31)

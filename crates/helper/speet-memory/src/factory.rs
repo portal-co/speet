@@ -42,6 +42,20 @@ impl<Context, E> MemoryAccess<Context, E> for LayoutMemoryAccess<Context, E> {
         }
     }
 
+    fn data_memory_index(&self) -> Option<u32> {
+        match self {
+            Self::Linear(m, _) => Some(m.data_memory_index),
+            Self::HostOffset(m, _) => Some(m.data_memory_index),
+        }
+    }
+
+    fn transforms_address(&self) -> bool {
+        match self {
+            Self::Linear(_, _) => false,
+            Self::HostOffset(_, _) => true,
+        }
+    }
+
     fn emit_load(
         &mut self,
         ctx: &mut Context,

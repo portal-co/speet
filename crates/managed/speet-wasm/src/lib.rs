@@ -61,13 +61,17 @@ use wax_core::build::InstructionSink;
 ///
 /// Supply one entry per guest memory (indexed by guest memory index).
 /// Entries beyond the number of parsed memories fall back to identity
-/// (no mapper, 32-bit addresses).
+/// (no mapper, guest memory index preserved, 32-bit addresses).
 pub struct GuestMemoryConfig<Context, E> {
     /// Width of guest addresses for this memory.
     pub addr_width: AddressWidth,
     /// Memory access implementation that owns address translation, memory
     /// index, and load/store emission for this memory.
-    /// When `None`, identity mapping and host memory index 0 are used.
+    ///
+    /// When `None`, the guest memory index is preserved and addresses are not
+    /// rewritten (private / already-lowered memories). When `Some`, loads and
+    /// stores target [`MemoryAccess::data_memory_index`] (falling back to the
+    /// frontend's `host_memory`) and may apply address translation.
     pub memory_access: Option<Box<dyn MemoryAccess<Context, E>>>,
 }
 
@@ -195,11 +199,6 @@ pub struct WasmFrontend<Context, E, F = Function> {
     /// `i32` is on the WASM stack but before every `if` and `br_if` instruction
     /// is emitted.  The trap may emit instructions to transform the condition.
     cond_trap: Option<Box<dyn ConditionTrap<Context, E>>>,
-    /// Re-emit guest modules that are already target-shaped (multi-memory, no
-    /// address-space mapper).  Preserves memory indices and skips store-scratch
-    /// locals.  Also auto-enabled when every [`GuestMemoryConfig::memory_access`]
-    /// is `None` and the module declares more than one memory.
-    preserve_guest_module: bool,
 }
 
 impl<Context, E, F> WasmFrontend<Context, E, F> {
@@ -228,25 +227,7 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             injected_params: Vec::new(),
             fn_type_signatures: BTreeMap::new(),
             cond_trap: None,
-            preserve_guest_module: false,
         }
-    }
-
-    /// Enable [`Self::preserves_guest_module`] mode for already-lowered guest WASM
-    /// (e.g. multi-memory modules with host-mem imports lowered to `memory` ops).
-    pub fn set_preserve_guest_module(&mut self, preserve: bool) {
-        self.preserve_guest_module = preserve;
-    }
-
-    /// True when guest bodies should be re-emitted with memory indices and locals
-    /// preserved (no address-space mapper on any memory).
-    pub fn preserves_guest_module(&self) -> bool {
-        self.preserve_guest_module
-            || (self.memory_infos.len() > 1
-                && self
-                    .per_memory
-                    .iter()
-                    .all(|c| c.memory_access.is_none()))
     }
 
     /// Install a condition trap.
@@ -345,17 +326,27 @@ impl<Context, E, F> WasmFrontend<Context, E, F> {
             .unwrap_or(AddressWidth::W32)
     }
 
-    /// When no memory mapper is installed, preserve guest memory indices.
+    /// Resolve the host/linear memory index for a guest memory operation.
+    ///
+    /// Unmapped memories (`memory_access: None`) keep their guest index.
+    /// Mapped memories use [`MemoryAccess::data_memory_index`], falling back
+    /// to [`Self::host_memory`].
     fn memory_index_for(&self, guest_mem: u32) -> u32 {
-        if self
-            .per_memory
-            .iter()
-            .all(|c| c.memory_access.is_none())
-        {
-            guest_mem
-        } else {
-            self.host_memory
+        match self.per_memory.get(guest_mem as usize) {
+            Some(cfg) => match cfg.memory_access.as_ref() {
+                Some(ma) => ma.data_memory_index().unwrap_or(self.host_memory),
+                None => guest_mem,
+            },
+            None => guest_mem,
         }
+    }
+
+    fn memory_transforms_address(&self, guest_mem: u32) -> bool {
+        self.per_memory
+            .get(guest_mem as usize)
+            .and_then(|cfg| cfg.memory_access.as_ref())
+            .map(|ma| ma.transforms_address())
+            .unwrap_or(false)
     }
 }
 
@@ -564,11 +555,13 @@ where
             None => {
                 *base_ctx.layout_mut() = LocalLayout::empty();
                 // For the data-init function every param is injected (no arch params).
+                // Match the emitted FuncType exactly — do not call
+                // `declare_trap_params`, which would append Linker layout
+                // params (`text_base`/`host_mem_base`) that are not in this type.
                 let injected_start = base_ctx.layout().mark();
-                if n_injected > 0 {
-                    base_ctx.layout_mut().append(n_injected, ValType::I32);
+                for ty in &self.injected_params {
+                    base_ctx.layout_mut().append(1, *ty);
                 }
-                base_ctx.declare_trap_params(&mut ());
                 let mark = base_ctx.layout().mark();
                 base_ctx.set_locals_mark(mark);
                 let params_snap = base_ctx.layout().clone();
@@ -598,25 +591,24 @@ where
         let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
         let mut out = (self.fn_creator)(out_locals);
 
-        let host_memory = self.host_memory;
-
         // We need to borrow `self.data_init_ops` but also call `self.per_memory`.
         // Collect the ops into a local vec to avoid the borrow conflict.
-        let ops: Vec<(u64, u32, u32, usize)> = self
+        let ops: Vec<(u64, u32, usize)> = self
             .data_init_ops
             .iter()
             .map(|op| match op {
                 DataInitOp::InitChunk {
                     guest_va,
                     seg_idx,
-                    byte_len,
+                    byte_len: _,
                     memory_idx,
-                } => (*guest_va, *seg_idx, *byte_len, *memory_idx),
+                } => (*guest_va, *seg_idx, *memory_idx),
             })
             .collect();
 
-        for (guest_va, seg_idx, byte_len, memory_idx) in ops {
+        for (guest_va, seg_idx, memory_idx) in ops {
             let use_i64 = self.addr_width_for_memory(memory_idx).is_64();
+            let dest_mem = self.memory_index_for(memory_idx as u32);
 
             // Push guest VA.
             if use_i64 {
@@ -634,12 +626,12 @@ where
                 ma.emit_store_addr(ctx, &mut EagerMemorySink::new(&mut out))?;
             }
 
-            // memory.init seg_idx host_memory
+            // memory.init seg_idx <dest memory for this guest memory>
             out.instruction(
                 ctx,
                 &Instruction::MemoryInit {
                     data_index: seg_idx,
-                    mem: host_memory,
+                    mem: dest_mem,
                 },
             )?;
             // data.drop seg_idx
@@ -670,17 +662,16 @@ where
     ) -> Result<(), E> {
         // -- Extend function type with injected params ---------------------
         let orig_param_types: Vec<ValType> = func_type.params_val_types().collect();
+        let orig_result_types: Vec<ValType> = func_type.results_val_types().collect();
         let orig_param_count = orig_param_types.len() as u32;
         let n_injected = self.injected_params.len() as u32;
         // Injected params live at local indices orig_param_count..orig_param_count+n_injected.
         let injected_base = orig_param_count;
 
         let func_type = if n_injected > 0 {
-            let orig_params: Vec<ValType> = func_type.params_val_types().collect();
-            let orig_results: Vec<ValType> = func_type.results_val_types().collect();
-            let mut new_params = orig_params;
+            let mut new_params = orig_param_types.clone();
             new_params.extend_from_slice(&self.injected_params);
-            let mut new_results = orig_results;
+            let mut new_results = orig_result_types.clone();
             new_results.extend_from_slice(&self.injected_params);
             FuncType::from_val_types(&new_params, &new_results)
         } else {
@@ -697,75 +688,27 @@ where
             guest_locals.push((count, val_type_from_wasmparser(wasm_ty)));
         }
 
-        // -- Pre-allocate cell keyed on (extended func_type, guest_locals) -
-        let preserve = self.preserves_guest_module();
+        // -- Pre-allocate cell keyed on (guest type, guest_locals) ---------
+        let cell =
+            base_ctx.alloc_cell_for_guest(&orig_param_types, &orig_result_types, &guest_locals);
 
-        let (
-            params_mark,
-            base_scratch_idx,
-            addr_width,
-            loop_dst_local,
-            loop_src_local,
-            loop_len_local,
-            call_indirect_scratch,
-            out_locals,
-        ) = if preserve {
-            *base_ctx.layout_mut() = LocalLayout::empty();
-            for ty in &orig_param_types {
-                base_ctx.layout_mut().append(1, *ty);
-            }
-            if n_injected > 0 {
-                base_ctx.layout_mut().append(n_injected, ValType::I32);
-            }
-            let params_mark = base_ctx.layout().mark();
-            base_ctx.set_locals_mark(params_mark);
-            for &(count, ty) in &guest_locals {
-                base_ctx.layout_mut().append(count, ty);
-            }
-            let call_indirect_scratch = if n_injected > 0 {
-                let slot = base_ctx.layout_mut().append(1, ValType::I32);
-                base_ctx.layout().base(slot)
-            } else {
-                0
-            };
-            let out_locals: Vec<(u32, ValType)> =
-                base_ctx.layout().iter_since(&params_mark).collect();
-            (
-                params_mark,
-                0,
-                AddressWidth::W32,
-                0,
-                0,
-                0,
-                call_indirect_scratch,
-                out_locals,
-            )
-        } else {
-        let guest_params: Vec<ValType> = func_type.params_val_types().collect();
-        let guest_results: Vec<ValType> = func_type.results_val_types().collect();
-        let cell = base_ctx.alloc_cell_for_guest(&guest_params, &guest_results, &guest_locals);
         // -- Params layout snapshot (cached per function type) -------------
         // Params are implicit in WASM (not in Function::new locals list).
-        // We cache a FuncSignature per unique extended function type so that
-        // trap params are only declared once per type.
-        //
-        // injected_start is placed after the original (arch) guest params and
-        // before any injected/trap params, matching the FuncSignature invariant.
+        // Layout must match the emitted FuncType exactly.  Do **not** call
+        // `declare_trap_params` here: Linker always appends `text_base` /
+        // `host_mem_base`, which are not part of the guest function type and
+        // would skew every absolute local index used for scratch / mappers.
         let params_snap: LocalLayout = match self.fn_type_signatures.get(&func_type) {
             Some(s) => s.params.clone(),
             None => {
                 *base_ctx.layout_mut() = LocalLayout::empty();
-                // Arch (original guest) params come first.
                 for ty in &orig_param_types {
                     base_ctx.layout_mut().append(1, *ty);
                 }
-                // Mark before injected/trap params.
                 let injected_start = base_ctx.layout().mark();
-                // Injected params (threaded through every call site).
-                if n_injected > 0 {
-                    base_ctx.layout_mut().append(n_injected, ValType::I32);
+                for ty in &self.injected_params {
+                    base_ctx.layout_mut().append(1, *ty);
                 }
-                base_ctx.declare_trap_params(&mut ());
                 let mark = base_ctx.layout().mark();
                 base_ctx.set_locals_mark(mark);
                 let params_snap = base_ctx.layout().clone();
@@ -779,79 +722,45 @@ where
         *base_ctx.layout_mut() = params_snap;
         base_ctx.set_locals_mark(params_mark);
 
-        // Append guest declared locals to the layout.
         for &(count, ty) in &guest_locals {
             base_ctx.layout_mut().append(count, ty);
         }
 
-        // 4 type-specific scratch locals for store value saving:
-        //   slot_i32 -> i32 scratch  (offset +0 from base)
-        //   slot_i64 -> i64 scratch  (offset +0 from base)
-        //   slot_f32 -> f32 scratch  (offset +0 from base)
-        //   slot_f64 -> f64 scratch  (offset +0 from base)
+        // 4 type-specific scratch locals for store value saving.
         let slot_i32 = base_ctx.layout_mut().append(1, ValType::I32);
         let slot_i64 = base_ctx.layout_mut().append(1, ValType::I64);
         let slot_f32 = base_ctx.layout_mut().append(1, ValType::F32);
         let slot_f64 = base_ctx.layout_mut().append(1, ValType::F64);
-        // base_scratch_idx is the absolute index of slot_i32 (the first scratch).
-        // emit_store uses base_scratch_idx + {0,1,2,3} for the four scratch types.
         let base_scratch_idx = base_ctx.layout().base(slot_i32);
-        // Verify the four scratch slots are contiguous (they always are since
-        // each is exactly 1 local, but make it explicit via debug assert).
         debug_assert_eq!(base_ctx.layout().base(slot_i64), base_scratch_idx + 1);
         debug_assert_eq!(base_ctx.layout().base(slot_f32), base_scratch_idx + 2);
         debug_assert_eq!(base_ctx.layout().base(slot_f64), base_scratch_idx + 3);
 
-        // Use the primary memory's (index 0) mapper and addr_width for this function.
-        let addr_width = self.addr_width_for_memory(0);
-
-        // Mapper and loop scratch locals (only when a memory_access is configured).
-        // loop_slot is appended first; memory_access declares its own locals via declare_locals.
-        let mut p = self.per_memory.iter_mut();
+        // Mapper locals + loop scratch when any memory_access is configured.
         let mut loop_slot = None;
-        let loop_slot = loop {
-            let Some(p) = p.next() else {
-                break loop_slot; // unused
-            };
+        for p in self.per_memory.iter_mut() {
             if let Some(m) = p.memory_access.as_deref_mut() {
                 m.declare_locals(cell, base_ctx.layout_mut());
-
-                if let None = loop_slot {
+                if loop_slot.is_none() {
                     loop_slot = Some(base_ctx.layout_mut().append(3, ValType::I32));
-                };
+                }
             }
-        };
+        }
         let loop_base = loop_slot
             .map(|loop_slot| base_ctx.layout().base(loop_slot))
             .unwrap_or(0);
         let (loop_dst_local, loop_src_local, loop_len_local) =
             (loop_base, loop_base + 1, loop_base + 2);
 
-        // Let traps declare their per-function locals, forwarding the
-        // pre-allocated cell so traps receive a meaningful CellIdx.
         base_ctx.declare_trap_locals_with_cell(cell, &mut ());
-        // Extra scratch for call_indirect: saves the table index while we push
-        // injected params onto the stack.  Only allocated when n_injected > 0.
         let call_indirect_scratch = if n_injected > 0 {
             let slot: LocalSlot = base_ctx.layout_mut().append(1, ValType::I32);
             base_ctx.layout().base(slot)
         } else {
-            0 // unused
+            0
         };
 
         let out_locals: Vec<(u32, ValType)> = base_ctx.layout().iter_since(&params_mark).collect();
-            (
-                params_mark,
-                base_scratch_idx,
-                addr_width,
-                loop_dst_local,
-                loop_src_local,
-                loop_len_local,
-                call_indirect_scratch,
-                out_locals,
-            )
-        };
-
         let mut out = (self.fn_creator)(out_locals);
 
         let ops_reader = body.get_operators_reader()?;
@@ -859,9 +768,6 @@ where
         for op_result in ops_reader {
             let op = op_result?;
 
-            // Track block depth so we can identify the function-level `End`.
-            // Also intercept `Return` and function-level `End` to push injected
-            // params as extra return values.
             match &op {
                 Operator::Block { .. }
                 | Operator::Loop { .. }
@@ -872,7 +778,6 @@ where
                 }
                 Operator::End => {
                     if depth == 0 {
-                        // Function-level end: push injected locals as extra returns.
                         for i in 0..n_injected {
                             out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
                         }
@@ -891,23 +796,11 @@ where
                 }
                 _ => {}
             }
-            if preserve {
-                self.translate_op_preserve(
-                    ctx,
-                    &op,
-                    &mut out,
-                    orig_param_count,
-                    n_injected,
-                    injected_base,
-                    call_indirect_scratch,
-                )?;
-            } else {
             self.translate_op(
                 ctx,
                 &op,
                 &mut out,
                 base_scratch_idx,
-                addr_width,
                 loop_dst_local,
                 loop_src_local,
                 loop_len_local,
@@ -916,136 +809,9 @@ where
                 injected_base,
                 call_indirect_scratch,
             )?;
-            }
         }
 
         self.compiled.push((out, func_type));
-        Ok(())
-    }
-
-    /// Pass-through re-emission for [`Self::preserves_guest_module`] modules:
-    /// only call/global index offsets and injected-param threading are applied.
-    fn translate_op_preserve(
-        &mut self,
-        ctx: &mut Context,
-        op: &Operator<'_>,
-        out: &mut F,
-        orig_param_count: u32,
-        n_injected: u32,
-        injected_base: u32,
-        call_indirect_scratch: u32,
-    ) -> Result<(), E> {
-        let offsets = self.offsets;
-        match op {
-            Operator::LocalGet { local_index } => {
-                let idx = if *local_index < orig_param_count {
-                    *local_index
-                } else {
-                    local_index + n_injected
-                };
-                out.instruction(ctx, &Instruction::LocalGet(idx))?;
-            }
-            Operator::LocalSet { local_index } => {
-                let idx = if *local_index < orig_param_count {
-                    *local_index
-                } else {
-                    local_index + n_injected
-                };
-                out.instruction(ctx, &Instruction::LocalSet(idx))?;
-            }
-            Operator::LocalTee { local_index } => {
-                let idx = if *local_index < orig_param_count {
-                    *local_index
-                } else {
-                    local_index + n_injected
-                };
-                out.instruction(ctx, &Instruction::LocalTee(idx))?;
-            }
-            Operator::GlobalGet { global_index } => {
-                let host_idx = (*global_index as i64 + offsets.global) as u32;
-                out.instruction(ctx, &Instruction::GlobalGet(host_idx))?;
-            }
-            Operator::GlobalSet { global_index } => {
-                let host_idx = (*global_index as i64 + offsets.global) as u32;
-                out.instruction(ctx, &Instruction::GlobalSet(host_idx))?;
-            }
-            Operator::Call { function_index } => {
-                for i in 0..n_injected {
-                    out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
-                }
-                out.instruction(ctx, &Instruction::Call(function_index + offsets.func))?;
-                for i in (0..n_injected).rev() {
-                    out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
-                }
-            }
-            Operator::CallIndirect {
-                type_index,
-                table_index,
-            } => {
-                if n_injected > 0 {
-                    out.instruction(ctx, &Instruction::LocalSet(call_indirect_scratch))?;
-                    for i in 0..n_injected {
-                        out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
-                    }
-                    out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
-                }
-                out.instruction(
-                    ctx,
-                    &Instruction::CallIndirect {
-                        type_index: *type_index,
-                        table_index: table_index + offsets.table,
-                    },
-                )?;
-                for i in (0..n_injected).rev() {
-                    out.instruction(ctx, &Instruction::LocalSet(injected_base + i))?;
-                }
-            }
-            Operator::ReturnCall { function_index } => {
-                for i in 0..n_injected {
-                    out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
-                }
-                out.instruction(ctx, &Instruction::ReturnCall(function_index + offsets.func))?;
-            }
-            Operator::ReturnCallIndirect {
-                type_index,
-                table_index,
-            } => {
-                if n_injected > 0 {
-                    out.instruction(ctx, &Instruction::LocalSet(call_indirect_scratch))?;
-                    for i in 0..n_injected {
-                        out.instruction(ctx, &Instruction::LocalGet(injected_base + i))?;
-                    }
-                    out.instruction(ctx, &Instruction::LocalGet(call_indirect_scratch))?;
-                }
-                out.instruction(
-                    ctx,
-                    &Instruction::ReturnCallIndirect {
-                        type_index: *type_index,
-                        table_index: table_index + offsets.table,
-                    },
-                )?;
-            }
-            Operator::If { blockty } => {
-                if let Some(ref trap) = self.cond_trap {
-                    let info = ConditionInfo { source_pc: 0, target_pc: None };
-                    trap.on_condition(&info, ctx, &mut |c, instr| out.instruction(c, instr))?;
-                }
-                let insn = Instruction::try_from(Operator::If { blockty: *blockty })
-                    .unwrap_or(Instruction::Unreachable);
-                out.instruction(ctx, &insn)?;
-            }
-            Operator::BrIf { relative_depth } => {
-                if let Some(ref trap) = self.cond_trap {
-                    let info = ConditionInfo { source_pc: 0, target_pc: None };
-                    trap.on_condition(&info, ctx, &mut |c, instr| out.instruction(c, instr))?;
-                }
-                out.instruction(ctx, &Instruction::BrIf(*relative_depth))?;
-            }
-            other => {
-                let insn = Instruction::try_from(other.clone()).unwrap_or(Instruction::Unreachable);
-                out.instruction(ctx, &insn)?;
-            }
-        }
         Ok(())
     }
 
@@ -1056,7 +822,6 @@ where
         op: &Operator<'_>,
         out: &mut F,
         base_scratch_idx: u32,
-        addr_width: AddressWidth,
         loop_dst_local: u32,
         loop_src_local: u32,
         loop_len_local: u32,
@@ -1066,17 +831,16 @@ where
         call_indirect_scratch: u32,
     ) -> Result<(), E> {
         let offsets = self.offsets;
-        let host_mem = self.host_memory;
         let mem_idx = |guest: u32| self.memory_index_for(guest);
 
         match op {
             // ── Memory loads ──────────────────────────────────────────────
             Operator::I32Load { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1086,11 +850,11 @@ where
                 )?;
             }
             Operator::I64Load { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1100,11 +864,11 @@ where
                 )?;
             }
             Operator::F32Load { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1114,11 +878,11 @@ where
                 )?;
             }
             Operator::F64Load { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1128,11 +892,11 @@ where
                 )?;
             }
             Operator::I32Load8S { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1142,11 +906,11 @@ where
                 )?;
             }
             Operator::I32Load8U { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1156,11 +920,11 @@ where
                 )?;
             }
             Operator::I32Load16S { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1170,11 +934,11 @@ where
                 )?;
             }
             Operator::I32Load16U { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I32,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1184,11 +948,11 @@ where
                 )?;
             }
             Operator::I64Load8S { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1198,11 +962,11 @@ where
                 )?;
             }
             Operator::I64Load8U { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1212,11 +976,11 @@ where
                 )?;
             }
             Operator::I64Load16S { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1226,11 +990,11 @@ where
                 )?;
             }
             Operator::I64Load16U { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1240,11 +1004,11 @@ where
                 )?;
             }
             Operator::I64Load32S { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1254,11 +1018,11 @@ where
                 )?;
             }
             Operator::I64Load32U { memarg } => {
-                emit_offset(ctx, out, memarg.offset, addr_width)?;
+                emit_offset(ctx, out, memarg.offset, self.addr_width_for_memory(memarg.memory as usize))?;
                 emit_load(
                     ctx,
                     out,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     IntWidth::I64,
                     mem_idx(memarg.memory),
                     self.per_memory
@@ -1274,7 +1038,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1289,7 +1053,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1304,7 +1068,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1319,7 +1083,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1334,7 +1098,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1349,7 +1113,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1364,7 +1128,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1379,7 +1143,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1394,7 +1158,7 @@ where
                     ctx,
                     out,
                     memarg,
-                    addr_width,
+                    self.addr_width_for_memory(memarg.memory as usize),
                     mem_idx(memarg.memory),
                     self.per_memory
                         .get_mut(memarg.memory as usize)
@@ -1507,21 +1271,20 @@ where
                 )?;
             }
 
-            // ── memory.size → static declared-page count ──────────────────
+            // ── memory.size ───────────────────────────────────────────────
             Operator::MemorySize { mem } => {
-                if self
-                    .per_memory
-                    .iter()
-                    .all(|c| c.memory_access.is_none())
-                {
-                    out.instruction(ctx, &Instruction::MemorySize(mem_idx(*mem)))?;
-                } else {
+                if self.memory_transforms_address(*mem) {
+                    // Address-translated memories may not share the guest's
+                    // page count with the host linear memory; use the declared
+                    // minimum as a static size.
                     let pages = self
                         .memory_infos
                         .get(*mem as usize)
                         .map(|m| m.min_pages)
                         .unwrap_or(0);
                     out.instruction(ctx, &Instruction::I32Const(pages as i32))?;
+                } else {
+                    out.instruction(ctx, &Instruction::MemorySize(mem_idx(*mem)))?;
                 }
             }
 
@@ -1532,31 +1295,42 @@ where
                 out.instruction(ctx, &Instruction::I32Const(-1))?;
             }
 
-            // ── memory.copy → per-chunk loop (mapper required) ────────────
+            // ── memory.copy ───────────────────────────────────────────────
             Operator::MemoryCopy { src_mem, dst_mem } => {
-                if self.per_memory.iter().any(|a| a.memory_access.is_some()) {
+                let src_x = self.memory_transforms_address(*src_mem);
+                let dst_x = self.memory_transforms_address(*dst_mem);
+                if src_x || dst_x {
                     // Stack: [dst_va, src_va, len]
-                    let chunk = self.chunk_size_for_memory(0).unwrap_or(0x10000) as i32;
+                    let chunk = self
+                        .chunk_size_for_memory(*dst_mem as usize)
+                        .or_else(|| self.chunk_size_for_memory(*src_mem as usize))
+                        .unwrap_or(0x10000) as i32;
+                    let src_host = mem_idx(*src_mem);
+                    let dst_host = mem_idx(*dst_mem);
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
                     out.instruction(ctx, &Instruction::Block(wasm_encoder::BlockType::Empty))?;
                     out.instruction(ctx, &Instruction::Loop(wasm_encoder::BlockType::Empty))?;
-                    // if len == 0 break
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Eqz)?;
                     out.instruction(ctx, &Instruction::BrIf(1))?;
-                    // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
-                    if let Some(ma) = self.per_memory[*dst_mem as usize].memory_access.as_deref_mut() {
-                        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+                    if dst_x {
+                        if let Some(ma) =
+                            self.per_memory[*dst_mem as usize].memory_access.as_deref_mut()
+                        {
+                            ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+                        }
                     }
-                    // physical src
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
-                    if let Some(ma) = self.per_memory[*src_mem as usize].memory_access.as_deref_mut() {
-                        ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+                    if src_x {
+                        if let Some(ma) =
+                            self.per_memory[*src_mem as usize].memory_access.as_deref_mut()
+                        {
+                            ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
+                        }
                     }
-                    // len = min(chunk, remaining_len)
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
@@ -1566,21 +1340,18 @@ where
                     out.instruction(
                         ctx,
                         &Instruction::MemoryCopy {
-                            src_mem: host_mem,
-                            dst_mem: host_mem,
+                            src_mem: src_host,
+                            dst_mem: dst_host,
                         },
                     )?;
-                    // dst_va += chunk
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32Add)?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
-                    // src_va += chunk
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32Add)?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?;
-                    // len -= chunk (saturating: already min'd above)
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32Sub)?;
@@ -1589,7 +1360,6 @@ where
                     out.instruction(ctx, &Instruction::End)?; // loop
                     out.instruction(ctx, &Instruction::End)?; // block
                 } else {
-                    // No mapper: pass through unchanged.
                     out.instruction(
                         ctx,
                         &Instruction::MemoryCopy {
@@ -1600,11 +1370,12 @@ where
                 }
             }
 
-            // ── memory.fill → per-chunk loop (mapper required) ────────────
+            // ── memory.fill ───────────────────────────────────────────────
             Operator::MemoryFill { mem } => {
-                if self.per_memory.iter().any(|a| a.memory_access.is_some()) {
+                if self.memory_transforms_address(*mem) {
                     // Stack: [dst_va, val, len]
                     let chunk = self.chunk_size_for_memory(*mem as usize).unwrap_or(0x10000) as i32;
+                    let dest = mem_idx(*mem);
                     out.instruction(ctx, &Instruction::LocalSet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::LocalSet(loop_src_local))?; // val (i32)
                     out.instruction(ctx, &Instruction::LocalSet(loop_dst_local))?;
@@ -1613,20 +1384,18 @@ where
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Eqz)?;
                     out.instruction(ctx, &Instruction::BrIf(1))?;
-                    // physical dst
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
                     if let Some(ma) = self.per_memory[*mem as usize].memory_access.as_deref_mut() {
                         ma.emit_store_addr(ctx, &mut EagerMemorySink::new(out))?;
                     }
                     out.instruction(ctx, &Instruction::LocalGet(loop_src_local))?; // val
-                    // len = min(chunk, remaining)
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::LocalGet(loop_len_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32LtU)?;
                     out.instruction(ctx, &Instruction::Select)?;
-                    out.instruction(ctx, &Instruction::MemoryFill(host_mem))?;
+                    out.instruction(ctx, &Instruction::MemoryFill(dest))?;
                     out.instruction(ctx, &Instruction::LocalGet(loop_dst_local))?;
                     out.instruction(ctx, &Instruction::I32Const(chunk))?;
                     out.instruction(ctx, &Instruction::I32Add)?;
@@ -1817,7 +1586,7 @@ fn emit_load<Context, E, F: InstructionSink<Context, E>>(
         LoadKind::I16U if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32U)?; }
         LoadKind::I32S if !mem64 && int64 => { out.instruction(ctx, &Instruction::I64ExtendI32S)?; }
         LoadKind::I32U if !mem64 => { out.instruction(ctx, &Instruction::I64ExtendI32U)?; }
-        LoadKind::F32 => { out.instruction(ctx, &Instruction::F64PromoteF32)?; }
+        // WASM-to-WASM: keep f32 as f32 (native frontends promote via DirectMemory).
         _ => {}
     }
     Ok(())
@@ -2349,5 +2118,99 @@ mod tests {
         let count =
             WasmFrontend::<(), TestError, Function>::parse_fn_count(&bytes).unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// Private memory 0 stays unmapped; memory 1 is identity-mapped to host index 1.
+    #[test]
+    fn multi_memory_mixed_mapping_validates() {
+        use speet_link_core::LinkerPlugin;
+        use speet_memory::DirectMemory;
+        use speet_module_builder::{assemble, MegabinaryBuilder};
+        use wasm_encoder::*;
+
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32], [ValType::I32]);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut mems = MemorySection::new();
+        for min in [1u64, 1] {
+            mems.memory(MemoryType {
+                minimum: min,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+        }
+        module.section(&mems);
+        let mut codes = CodeSection::new();
+        let mut f = Function::new([]);
+        // load from private memory 0
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        // load from host-shared memory 1
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 1,
+        }));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::End);
+        codes.function(&f);
+        module.section(&codes);
+        let bytes = module.finish();
+
+        let mut frontend: WasmFrontend<(), TestError> = WasmFrontend::with_wasm_encoder_fn(
+            alloc::vec![
+                GuestMemoryConfig {
+                    addr_width: AddressWidth::W32,
+                    memory_access: None,
+                },
+                GuestMemoryConfig {
+                    addr_width: AddressWidth::W32,
+                    memory_access: Some(Box::new(DirectMemory::new(
+                        (),
+                        1,
+                        AddressWidth::W32,
+                        IntWidth::I32,
+                    ))),
+                },
+            ],
+            1,
+            IndexOffsets::default(),
+        );
+
+        let mut builder = MegabinaryBuilder::<Function>::new();
+        builder.declare_memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        builder.declare_memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut linker = Linker::with_plugin(builder);
+        frontend
+            .translate_module(&mut (), &mut linker, &bytes)
+            .unwrap();
+        assert_eq!(frontend.memory_infos().len(), 2);
+        let unit = frontend.drain_unit_base(&mut linker, alloc::vec![]);
+        linker.plugin.on_unit(unit);
+        let wasm = assemble(linker.plugin.finish()).finish();
+        wasmparser::validate(&wasm).expect("multi-memory frontend module");
     }
 }

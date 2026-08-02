@@ -18,4 +18,6 @@ speet-traps = { path = "../../helper/speet-traps" }
 
 [dev-dependencies]
 speet-linker = { path = "../../os/speet-linker" }
+speet-module-builder = { path = "../../os/speet-module-builder" }
+wasmparser = { workspace = true, features = ["validate"] }
 
