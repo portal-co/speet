@@ -6,6 +6,7 @@ description = "Runtime shim sources for speet full-binary recompiler output (lin
 
 [dependencies]
 speet-host-api = { path = "../speet-host-api" }
+speet-abi-stubs = { path = "../speet-abi-stubs" }
 
 [lib]
 path = "src/lib.rs"

@@ -54,18 +54,21 @@ pub fn clang_arch_flag(arch: binary_io::BinArch) -> &'static str {
     }
 }
 
-/// Write `src` C to `path` and compile to `out_obj`.
-pub fn compile_c(
+/// Compile an on-disk `.c` file to `out_obj`.
+pub fn compile_c_path(
     tc: &LlvmToolchain,
-    src: &str,
+    src_path: &Path,
     out_obj: &Path,
     arch: binary_io::BinArch,
     os: binary_io::BinOs,
+    include_dirs: &[&Path],
 ) -> Result<(), String> {
-    std::fs::write(out_obj.with_extension("c"), src).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&tc.clang);
     cmd.args(["-c", "-O0", "-Wno-implicit-function-declaration"]);
     cmd.arg(format!("--target={}", llvm_target(arch, os)));
+    for inc in include_dirs {
+        cmd.arg(format!("-I{}", inc.display()));
+    }
     if matches!(os, binary_io::BinOs::MacOs) {
         cmd.args(["-arch", clang_arch_flag(arch), "-mmacosx-version-min=11.0"]);
         if let Some(sdk) = macos_sdk_path() {
@@ -77,7 +80,7 @@ pub fn compile_c(
     if let Some(fuse) = tc.fuse_ld_arg() {
         cmd.arg(fuse);
     }
-    cmd.arg(out_obj.with_extension("c"));
+    cmd.arg(src_path);
     cmd.arg("-o").arg(out_obj);
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -87,6 +90,25 @@ pub fn compile_c(
         ));
     }
     Ok(())
+}
+
+/// Write `src` C to `path` and compile to `out_obj`.
+pub fn compile_c(
+    tc: &LlvmToolchain,
+    src: &str,
+    out_obj: &Path,
+    arch: binary_io::BinArch,
+    os: binary_io::BinOs,
+) -> Result<(), String> {
+    std::fs::write(out_obj.with_extension("c"), src).map_err(|e| e.to_string())?;
+    compile_c_path(
+        tc,
+        &out_obj.with_extension("c"),
+        out_obj,
+        arch,
+        os,
+        &[],
+    )
 }
 
 /// Link object files into an executable.

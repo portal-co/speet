@@ -8,12 +8,14 @@
 //!
 //! See [`RUNTIME_C`] for the source and [`write_runtime_c`] to materialize it.
 
-mod shim;
+mod bridge;
 mod entry_bridge;
 mod guest_stubs;
 mod data_segments;
+mod memory;
 
-pub use shim::{generate_memory_tu, generate_shim};
+pub use bridge::{generate_shim, SpeetBridgeRegistry};
+pub use memory::generate_memory_tu;
 
 pub use entry_bridge::{entry_bridge_c, entry_bridge_direct_c};
 pub use guest_stubs::{
@@ -42,7 +44,7 @@ pub const DATA_INIT_SYMBOL: &str = "__speet_data_init";
 /// instead of a seeded register. `entry_bridge`'s `sp_init` computation
 /// subtracts this from `__wasm_mem_pages * 65536` before seeding SP, so the
 /// stack (which only ever grows *down* from its starting point) can never
-/// collide with this region; `shim.rs`'s stubs that copy host data in write
+/// collide with this region; bridge stubs that copy host data in write
 /// to `[__wasm_mem_pages * 65536 - HOST_STR_SCRATCH_BYTES, __wasm_mem_pages *
 /// 65536)` and return a wasm-relative offset into it. Not a general-purpose
 /// allocator — callers must not assume a copy survives past the next call

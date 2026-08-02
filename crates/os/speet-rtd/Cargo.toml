@@ -21,6 +21,7 @@ os-codesign-macho = { path = "../../../../os-emulation/crates/daemon/os-codesign
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
 os-rewrite-elf = { path = "../../../../os-emulation/crates/daemon/os-rewrite-elf" }
+os-interposer = { path = "../../../../os-emulation/crates/shim/os-interposer" }
 
 [dev-dependencies]
 tempfile = "3"

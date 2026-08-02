@@ -15,4 +15,22 @@
     <arg type="^?"/>
     <retval type="i"/>
   </function>
+  <function name="putchar">
+    <arg type="i"/>
+    <retval type="i"/>
+  </function>
+  <function name="strlen">
+    <arg type="*"/>
+    <retval type="Q"/>
+  </function>
+  <function name="getenv">
+    <arg type="*"/>
+    <retval type="*"/>
+  </function>
+  <function name="execve">
+    <arg type="*"/>
+    <arg type="^*"/>
+    <arg type="^*"/>
+    <retval type="i"/>
+  </function>
 </signatures>

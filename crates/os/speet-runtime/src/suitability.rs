@@ -77,9 +77,12 @@ pub fn analyze_imports(host: &dyn HostApi, bin: &LoadedBinary) -> (Vec<String>, 
             imp.name.as_str()
         };
         if !allow.contains(lookup) && !allow.contains(bare) && !allow.contains(imp.name.as_str()) {
-            if speet_abi_stubs::has_stub(lookup)
-                || speet_abi_stubs::has_stub(bare)
-                || speet_abi_stubs::has_stub(imp.name.as_str())
+            if speet_abi_stubs::has_wired_impl(lookup)
+                || speet_abi_stubs::has_wired_impl(bare)
+                || speet_abi_stubs::has_wired_impl(imp.name.as_str())
+                || os_shim_core::has_core_impl(lookup)
+                || os_shim_core::has_core_impl(bare)
+                || os_shim_core::has_core_impl(imp.name.as_str())
             {
                 continue;
             }

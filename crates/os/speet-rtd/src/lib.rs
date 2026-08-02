@@ -60,17 +60,31 @@ pub fn default_listen_path() -> PathBuf {
     speet_runtime::default_socket_path()
 }
 
-/// Registers the `"simple-rewrite"` backend only if `SIMPLE_REWRITE_SHIM`
-/// (path to the dylib/so to inject) is set — this is opt-in configuration,
-/// so an unconfigured deployment keeps today's exact recompile-only
-/// behavior. On macOS, signing also requires `SANDBOX_CODESIGN_IDENTITY`
-/// (a real identity, or `-` for the local-development ad-hoc fallback);
-/// see `hardened-runtime-library-validation-schema.md`.
+/// Resolve the interposer shim path: explicit `SIMPLE_REWRITE_SHIM`, or the
+/// built-in `os-interposer` artifact when `OS_USE_BUILTIN_INTERPOSER=1`.
+fn simple_rewrite_shim_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("SIMPLE_REWRITE_SHIM") {
+        return Some(PathBuf::from(path));
+    }
+    if std::env::var_os("OS_USE_BUILTIN_INTERPOSER").is_some_and(|v| !v.is_empty() && v != "0") {
+        let path = os_interposer::lib_path();
+        if path.exists() {
+            return Some(path);
+        }
+        eprintln!(
+            "simple-rewrite: OS_USE_BUILTIN_INTERPOSER set but {} missing (build os-interposer first)",
+            path.display()
+        );
+    }
+    None
+}
+
+/// Registers the `"simple-rewrite"` backend only if a shim path is configured.
 #[cfg(target_os = "macos")]
 fn maybe_register_simple_rewrite(daemon: &mut GenericDaemon) {
     use simple_rewrite::{SimpleRewriteBackend, SimpleRewriteConfig};
 
-    let Some(shim_path) = std::env::var_os("SIMPLE_REWRITE_SHIM") else {
+    let Some(shim_path) = simple_rewrite_shim_path() else {
         return;
     };
     let Ok(identity) = std::env::var("SANDBOX_CODESIGN_IDENTITY") else {
@@ -92,14 +106,12 @@ fn maybe_register_simple_rewrite(daemon: &mut GenericDaemon) {
     daemon.register(Box::new(SimpleRewriteBackend::new(config)));
 }
 
-/// Registers the `"simple-rewrite"` backend only if `SIMPLE_REWRITE_SHIM`
-/// (path to the `.so` to inject) is set. Linux/BSD have no code-signing
-/// gate, so no identity configuration is needed.
+/// Registers the `"simple-rewrite"` backend when a shim path is available.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 fn maybe_register_simple_rewrite(daemon: &mut GenericDaemon) {
     use simple_rewrite::{SimpleRewriteBackend, SimpleRewriteConfig};
 
-    let Some(shim_path) = std::env::var_os("SIMPLE_REWRITE_SHIM") else {
+    let Some(shim_path) = simple_rewrite_shim_path() else {
         return;
     };
     let config = SimpleRewriteConfig {

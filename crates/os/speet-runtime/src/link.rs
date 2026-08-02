@@ -1,7 +1,6 @@
 //! LLVM link orchestration.
 
-use crate::execve_hook;
-use crate::toolchain::{compile_c, link_executable, LlvmToolchain};
+use crate::toolchain::{compile_c, compile_c_path, link_executable, LlvmToolchain};
 use binary_io::{BinArch, BinOs};
 use speet_host_api::HostApi;
 use speet_recompile::frontend::DataSegment;
@@ -88,16 +87,6 @@ pub fn link_guest_integrated(
     let mem_path = work_dir.join("mem.o");
     compile_c(tc, &generate_memory_tu(), &mem_path, arch, os)?;
 
-    let shim_path = work_dir.join("shim.o");
-    let shim_src = generate_shim_integrated(&host.import_manifest());
-    compile_c(tc, &shim_src, &shim_path, arch, os)?;
-
-    // Only wasm-blitz's x86-64 backend implements `CallAbi::AllStack` as a
-    // true all-on-stack convention that ignores argument registers; its
-    // AArch64 counterpart implements the same enum variant as ordinary
-    // AAPCS64 marshalling (X0-X7 then stack), which already matches a plain
-    // C call. See `entry_bridge_direct_c`'s and `generate_guest_stubs_c`'s
-    // doc comments.
     let abi_pad_args: u32 = match arch {
         BinArch::X86_64 => 6,
         BinArch::AArch64 => 0,
@@ -113,10 +102,6 @@ pub fn link_guest_integrated(
             abi_pad_args,
         )
     } else {
-        // The seeded "return address" must be the halt entry's *guest*
-        // address (see `entry_bridge_c`'s doc comment) — read it straight
-        // from the catalog's own stub entries rather than threading yet
-        // another parameter through, since `stub_entries` already carries it.
         let halt_guest_pc = stub_entries
             .iter()
             .find(|e| e.local_func_idx == halt_local_idx)
@@ -132,12 +117,37 @@ pub fn link_guest_integrated(
     };
     compile_c(tc, &bridge_src, &bridge_path, arch, os)?;
 
-    let mut link_objs: Vec<&Path> = vec![
-        &guest_path,
-        &mem_path,
-        &shim_path,
-        &bridge_path,
-    ];
+    let shim_path = work_dir.join("shim.o");
+    let shim_src = generate_shim_integrated(&host.import_manifest());
+    compile_c_with_shim_include(tc, &shim_src, &shim_path, arch, os)?;
+
+    let mut link_objs: Vec<&Path> = vec![&guest_path, &mem_path, &shim_path, &bridge_path];
+
+    for (i, core_src) in os_shim_core::core_source_paths().iter().enumerate() {
+        let core_obj = work_dir.join(format!("os_shim_core_{i}.o"));
+        compile_c_path(
+            tc,
+            core_src,
+            &core_obj,
+            arch,
+            os,
+            &[os_shim_core::include_dir().as_path()],
+        )?;
+        link_objs.push(&core_obj);
+    }
+    if let Some(daemon_src) = os_shim_core::write_daemon_execve_override(work_dir)? {
+        let daemon_obj = work_dir.join("os_shim_execve_daemon.o");
+        compile_c_path(
+            tc,
+            &daemon_src,
+            &daemon_obj,
+            arch,
+            os,
+            &[os_shim_core::include_dir().as_path()],
+        )?;
+        link_objs.push(&daemon_obj);
+    }
+
     let stubs_path = work_dir.join("guest_stubs.o");
     if !stub_entries.is_empty() {
         let stubs_src = generate_guest_stubs_c(stub_entries, entry_param_count, abi_pad_args);
@@ -159,14 +169,28 @@ pub fn link_guest_integrated(
     compile_c(tc, &data_segs_src, &data_segs_path, arch, os)?;
     link_objs.push(&data_segs_path);
 
-    let hook_path = work_dir.join("execve_hook.o");
-    compile_c(tc, &execve_hook::generate_execve_hook_c(), &hook_path, arch, os)?;
-    link_objs.push(&hook_path);
-
     let recipe = host.link_recipe();
     let extra = dylib_flags_for_os(os, &recipe.dylib_flags);
 
     link_executable(tc, &link_objs, out_exe, arch, os, &extra)
+}
+
+fn compile_c_with_shim_include(
+    tc: &LlvmToolchain,
+    src: &str,
+    out_obj: &Path,
+    arch: BinArch,
+    os: BinOs,
+) -> Result<(), String> {
+    std::fs::write(out_obj.with_extension("c"), src).map_err(|e| e.to_string())?;
+    compile_c_path(
+        tc,
+        &out_obj.with_extension("c"),
+        out_obj,
+        arch,
+        os,
+        &[os_shim_core::include_dir().as_path()],
+    )
 }
 
 fn generate_shim_integrated(manifest: &speet_host_api::ImportManifest) -> String {
@@ -210,6 +234,7 @@ mod tests {
         let src = generate_shim_integrated(&speet_host_api::ImportManifest::integrated_native());
         assert!(src.contains("int main(int argc, char **argv)"));
         assert!(src.contains("__speet_start(argc, argv)"));
-        assert!(src.contains("__speet_execve_hook"));
+        assert!(src.contains("os_shim_execve"));
+        assert!(!src.contains("__speet_execve_hook"));
     }
 }
