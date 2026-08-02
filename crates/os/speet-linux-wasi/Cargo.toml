@@ -7,6 +7,8 @@ license-file.workspace = true
 
 [dependencies]
 os-linux-wasi        = { path = "../../../../os-emulation/crates/emit/os-linux-wasi" }
+os-syscall-emit      = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
 speet-link-core     = { path = "../speet-link-core" }
 speet-module-target = { path = "../speet-module-target" }
 wasm-encoder        = { workspace = true }
+wasmparser          = { workspace = true }

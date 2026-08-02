@@ -9,6 +9,9 @@
 #![no_std]
 extern crate alloc;
 
+mod handler_module;
+
+pub use handler_module::{emit_handler_function, HandlerModulePlan, HostMemImportIndices};
 pub use os_linux_wasi::{IOVEC_SCRATCH_OFFSET, LinuxToWasi, WasiImports};
 
 use speet_link_core::EntityIndexSpace;
