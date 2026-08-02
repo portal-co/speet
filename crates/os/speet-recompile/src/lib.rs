@@ -12,6 +12,7 @@
 //! (blitz -> object) live in the `frontend` and `backend` modules.
 
 pub mod backend;
+pub mod data_link;
 pub mod drive;
 pub mod frontend;
 pub mod guest_func_catalog;

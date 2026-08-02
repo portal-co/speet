@@ -48,8 +48,19 @@ struct ConditionSnippet {
 /// `docs/guides/thin-runtime-genericity.md` principle 1 and the AArch64
 /// analog, `A64IndirectTarget`, in `speet-aarch64`.
 struct ReturnAddressSnippet {
-    base_rip: u64,
+    text_base: speet_link_core::TextBaseSnippet,
     base_func_offset: u32,
+}
+
+impl ReturnAddressSnippet {
+    fn from_constant_base(base_rip: u64, base_func_offset: u32) -> Self {
+        Self {
+            text_base: speet_link_core::TextBaseSnippet::new(
+                speet_link_core::TextBaseSource::Constant(base_rip),
+            ),
+            base_func_offset,
+        }
+    }
 }
 
 /// Snippet for setting expected_ra to a constant return address in speculative calls
@@ -87,18 +98,13 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for ReturnAddres
         ctx: &mut Context,
         sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
     ) -> Result<(), E> {
-        // Load return address from local 23
-        sink.instruction(ctx, &Instruction::LocalGet(23))?;
-
-        // Subtract base_rip to get relative address: (return_addr - base_rip)
-        sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
-        sink.instruction(ctx, &Instruction::I64Sub)?;
-        // Shift into the WASM table's index space — see the struct doc.
-        sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
-        sink.instruction(ctx, &Instruction::I64Add)?;
-
-        // Keep this as i64: indirect jump plumbing expects architecture state words.
-        Ok(())
+        let indirect = speet_link_core::IndirectTableIdxSnippet {
+            gpr_local: 23,
+            text_base: &self.text_base,
+            slot_shift: 0,
+            base_func_offset: self.base_func_offset,
+        };
+        indirect.emit_instruction(ctx, sink)
     }
 }
 
@@ -108,13 +114,7 @@ impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Retu
         ctx: &mut Context,
         sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
-        // Same logic as emit_instruction
-        sink.instruction(ctx, &Instruction::LocalGet(23))?;
-        sink.instruction(ctx, &Instruction::I64Const(self.base_rip as i64))?;
-        sink.instruction(ctx, &Instruction::I64Sub)?;
-        sink.instruction(ctx, &Instruction::I64Const(self.base_func_offset as i64))?;
-        sink.instruction(ctx, &Instruction::I64Add)?;
-        Ok(())
+        self.emit_instruction(ctx, sink)
     }
 }
 
@@ -418,10 +418,8 @@ impl<Context, E> X86Recompiler<Context, E> {
         rctx.feed(ctx, tail_idx, &Instruction::I64Const(8))?;
         rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
-        let return_addr_snippet = ReturnAddressSnippet {
-            base_rip: self.base_rip,
-            base_func_offset: rctx.base_func_offset(),
-        };
+        let return_addr_snippet =
+            ReturnAddressSnippet::from_constant_base(self.base_rip, rctx.base_func_offset());
         {
             use crate::{JumpInfo, JumpKind, TrapAction};
             let ret_info = JumpInfo::indirect(inst_ip, 23, JumpKind::Return);
@@ -2415,10 +2413,8 @@ impl<Context, E> X86Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(8 + stack_cleanup as i64))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
-            let return_addr_snippet = ReturnAddressSnippet {
-                base_rip: self.base_rip,
-                base_func_offset: rctx.base_func_offset(),
-            };
+            let return_addr_snippet =
+                ReturnAddressSnippet::from_constant_base(self.base_rip, rctx.base_func_offset());
             {
                 use crate::{JumpInfo, JumpKind, TrapAction};
                 let ret_info = JumpInfo::indirect(inst.ip(), 23, JumpKind::Return);

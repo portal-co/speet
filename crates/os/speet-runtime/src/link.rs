@@ -121,7 +121,12 @@ pub fn link_guest_integrated(
     let shim_src = generate_shim_integrated(&host.import_manifest());
     compile_c_with_shim_include(tc, &shim_src, &shim_path, arch, os)?;
 
-    let mut link_objs: Vec<&Path> = vec![&guest_path, &mem_path, &shim_path, &bridge_path];
+    let mut owned_objs: Vec<std::path::PathBuf> = vec![
+        guest_path.clone(),
+        mem_path.clone(),
+        shim_path.clone(),
+        bridge_path.clone(),
+    ];
 
     for (i, core_src) in os_shim_core::core_source_paths().iter().enumerate() {
         let core_obj = work_dir.join(format!("os_shim_core_{i}.o"));
@@ -133,7 +138,7 @@ pub fn link_guest_integrated(
             os,
             &[os_shim_core::include_dir().as_path()],
         )?;
-        link_objs.push(&core_obj);
+        owned_objs.push(core_obj);
     }
     if let Some(daemon_src) = os_shim_core::write_daemon_execve_override(work_dir)? {
         let daemon_obj = work_dir.join("os_shim_execve_daemon.o");
@@ -145,14 +150,14 @@ pub fn link_guest_integrated(
             os,
             &[os_shim_core::include_dir().as_path()],
         )?;
-        link_objs.push(&daemon_obj);
+        owned_objs.push(daemon_obj);
     }
 
     let stubs_path = work_dir.join("guest_stubs.o");
     if !stub_entries.is_empty() {
         let stubs_src = generate_guest_stubs_c(stub_entries, entry_param_count, abi_pad_args);
         compile_c(tc, &stubs_src, &stubs_path, arch, os)?;
-        link_objs.push(&stubs_path);
+        owned_objs.push(stubs_path);
     }
 
     // Always linked: defines `__wasm_data_seg_N`/`__wasm_memory_init_copy`
@@ -167,7 +172,9 @@ pub fn link_guest_integrated(
         .collect();
     let data_segs_src = generate_data_segments_c(&segs);
     compile_c(tc, &data_segs_src, &data_segs_path, arch, os)?;
-    link_objs.push(&data_segs_path);
+    owned_objs.push(data_segs_path);
+
+    let link_objs: Vec<&Path> = owned_objs.iter().map(|p| p.as_path()).collect();
 
     let recipe = host.link_recipe();
     let extra = dylib_flags_for_os(os, &recipe.dylib_flags);

@@ -2,8 +2,6 @@
 
 use speet_host_api::FuncImport;
 
-use super::{BridgeHandler, SpeetBridgeRegistry};
-
 /// Pluggable speet bridge handlers (defaults + speet-internal overrides).
 pub struct SpeetBridgeRegistry {
     handlers: Vec<Box<dyn BridgeHandler + Send + Sync>>,

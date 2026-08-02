@@ -10,3 +10,8 @@ yecta        = { path = "../../helper/yecta" }
 speet-traps  = { path = "../../helper/speet-traps" }
 wasm-encoder = { workspace = true }
 wax-core     = { workspace = true }
+binary-io    = { path = "../../../../binary-io", optional = true }
+
+[features]
+default = ["binary-load"]
+binary-load = ["dep:binary-io"]

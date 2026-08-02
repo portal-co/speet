@@ -16,6 +16,8 @@ pub struct PltCallPlan {
     pub targets: ExternalTargetTable,
     /// Guest addresses that resolve to a WASM-import redirect (PC-check).
     pub wasm_import_by_addr: BTreeMap<(LibraryId, u64), u32>,
+    /// Guest addresses resolved to native `os_shim_*` shims (redirect shim slots).
+    pub native_shim_by_addr: BTreeMap<(LibraryId, u64), String>,
     /// Symbols resolved to ambient link aliases (not PC-check emitted).
     pub ambient_labels: BTreeMap<String, ()>,
 }
@@ -26,6 +28,7 @@ impl PltCallPlan {
     pub fn from_targets(targets: &ExternalTargetTable, host: &dyn HostApi) -> Self {
         let manifest = host.import_manifest();
         let mut wasm_import_by_addr = BTreeMap::new();
+        let mut native_shim_by_addr = BTreeMap::new();
         let mut ambient_labels = BTreeMap::new();
 
         for entry in targets.iter() {
@@ -38,6 +41,9 @@ impl PltCallPlan {
                         wasm_import_by_addr.insert((entry.library, entry.address), idx);
                     }
                 }
+                PltRedirect::NativeShim { core_symbol } => {
+                    native_shim_by_addr.insert((entry.library, entry.address), core_symbol);
+                }
                 PltRedirect::Ambient => {
                     ambient_labels.insert(entry.label.clone(), ());
                 }
@@ -47,12 +53,30 @@ impl PltCallPlan {
         Self {
             targets: targets.clone(),
             wasm_import_by_addr,
+            native_shim_by_addr,
             ambient_labels,
         }
     }
 
     pub fn lookup_wasm_import(&self, library: LibraryId, target: u64) -> Option<u32> {
         self.wasm_import_by_addr.get(&(library, target)).copied()
+    }
+
+    /// Resolve a native `os_shim_*` core symbol to a WASM import index via manifest intercepts.
+    pub fn import_idx_for_core_symbol(
+        &self,
+        manifest: &ImportManifest,
+        core_symbol: &str,
+    ) -> Option<u32> {
+        let bare = core_symbol.strip_prefix('_').unwrap_or(core_symbol);
+        for imp in &manifest.func_imports {
+            if imp.intercepts.iter().any(|s| {
+                s.strip_prefix('_').unwrap_or(s.as_str()) == bare
+            }) {
+                return manifest.index_of(&imp.module, &imp.name);
+            }
+        }
+        None
     }
 
     /// Realize WASM-import hooks as a [`PltHookTable`] for `arch`.

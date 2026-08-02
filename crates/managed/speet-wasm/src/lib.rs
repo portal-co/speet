@@ -84,6 +84,21 @@ pub struct IndexOffsets {
     pub table: u32,
 }
 
+impl IndexOffsets {
+    /// Standard WASM-runtime OS offsets: guest calls remap to externals hosted
+    /// at `external_slot` in a [`FuncSchedule`](speet_schedule::FuncSchedule).
+    pub fn wasm_os_external_hosting(
+        schedule: &speet_schedule::FuncSchedule<'_, impl Sized, impl Sized, impl Sized>,
+        external_slot: speet_link_core::IndexSlot,
+    ) -> Self {
+        Self {
+            func: schedule.entity_space().functions.base(external_slot),
+            global: 0,
+            table: 0,
+        }
+    }
+}
+
 // ── MemoryInfo ────────────────────────────────────────────────────────────────
 
 /// Information about one linear memory parsed from the guest WASM memory section.

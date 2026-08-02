@@ -26,7 +26,9 @@
 extern crate alloc;
 
 pub mod context;
+pub mod image_layout;
 pub mod layout;
+pub mod layout_params;
 pub mod linker;
 pub mod oob;
 pub mod recompiler;
@@ -38,7 +40,14 @@ mod tests;
 
 // Flat re-exports for the most commonly used items.
 pub use context::{BaseContext, FedContext, ReactorContext, ReactorAdapter, TrapReactorAdapter};
+pub use image_layout::{
+    DataSectionSpec, GuestImageLayout, LibrarySpec, MemoryModel, RelocKindTag, RelocSpec,
+};
 pub use layout::{EntityIndexSpace, FuncLayout, FuncSlot, IndexSlot, IndexSpace};
+pub use layout_params::{
+    IndirectTableIdxSnippet, ParamSlotMap, RuntimeLayoutParams, TextBaseSnippet, TextBaseSource,
+    default_runtime_layout_params,
+};
 pub use linker::LinkerPlugin;
 pub use oob::OobConfig;
 pub use recompiler::Recompile;

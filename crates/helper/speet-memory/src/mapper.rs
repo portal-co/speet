@@ -573,3 +573,49 @@ impl<Context, E, M: AddressMapper<Context, E>> MemoryAccess<Context, E> for Dire
             && matches!(kind, StoreKind::I8 | StoreKind::I16 | StoreKind::I32)
     }
 }
+
+// ── HostOffsetMapper ─────────────────────────────────────────────────────────
+
+use crate::paging::PageTableBase;
+
+/// Maps guest virtual addresses via `physical = guest_virtual + host_mem_base`.
+///
+/// `host_mem_base` is supplied as a layout param ([`PageTableBase::Local`]) bound
+/// from [`speet_link_core::ParamSlotMap::host_mem_base`].
+#[derive(Clone, Debug)]
+pub struct HostOffsetMapper {
+    host_base: PageTableBase,
+    use_i64: bool,
+}
+
+impl HostOffsetMapper {
+    pub fn new(host_base: PageTableBase, use_i64: bool) -> Self {
+        Self { host_base, use_i64 }
+    }
+
+    /// Bind `host_mem_base` from a layout param slot after Phase-1 seal.
+    pub fn bind_host_mem_base(&mut self, layout: &LocalLayout, slot: yecta::LocalSlot) {
+        self.host_base = PageTableBase::Local(layout.local(slot, 0));
+    }
+}
+
+impl<Context, E> AddressMapper<Context, E> for HostOffsetMapper {
+    fn translate(
+        &mut self,
+        ctx: &mut Context,
+        sink: &mut dyn MemorySink<Context, E>,
+    ) -> Result<(), E> {
+        self.host_base.emit_load(ctx, sink, self.use_i64)?;
+        sink.instruction(ctx, &Instruction::I64Add)?;
+        Ok(())
+    }
+}
+
+impl LocalDeclarator for HostOffsetMapper {
+    fn declare_params(&mut self, _cell: yecta::CellIdx, layout: &mut LocalLayout) {
+        if matches!(self.host_base, PageTableBase::Param) {
+            // Caller binds via `bind_host_mem_base` after layout seal.
+        }
+        let _ = layout;
+    }
+}

@@ -36,11 +36,11 @@ use yecta::{
     layout::CellRegistry,
 };
 
-pub use speet_link_core::linker::LinkerPlugin;
 pub use speet_link_core::{
     BaseContext, BinaryUnit, DataSegment, EntityIndexSpace, FuncLayout, FuncSlot, FuncType,
-    IndexSlot, IndexSpace, MemWidth, OobConfig, ParamSource, Place, ReactorAdapter, ReactorContext,
-    Recompile, SavePair, ShimSpec, TrapReactorAdapter, emit_shim,
+    IndexSlot, IndexSpace, MemWidth, OobConfig, ParamSource, ParamSlotMap, Place, ReactorAdapter,
+    ReactorContext, Recompile, RuntimeLayoutParams, SavePair, ShimSpec, TextBaseSource,
+    TrapReactorAdapter, emit_shim,
 };
 
 // ── LinkerInner ───────────────────────────────────────────────────────────────
@@ -76,6 +76,8 @@ pub struct LinkerInner<'cb, 'ctx, Context, E> {
     ///
     /// See `docs/entity-index-space.md`.
     pub entity_space: EntityIndexSpace,
+    /// Runtime layout params (`text_base`, `host_mem_base`, …).
+    pub layout_params: speet_link_core::RuntimeLayoutParams,
     /// WASM local index of the `target_pc: i64` parameter injected by
     /// [`declare_trap_params`](BaseContext::declare_trap_params).
     pub target_pc_local: u32,
@@ -124,9 +126,13 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
             let slot = self.layout.append(1, ValType::I64);
             self.target_pc_local = self.layout.base(slot);
         }
+        // Layout + trap params are returned (mirrored in FuncSignature::returns).
         self.injected_start = self.layout.mark();
+        self.layout_params
+            .declare_params(CellIdx(0), &mut self.layout);
         extra.declare_params(CellIdx(0), &mut self.layout);
         self.traps.declare_params(CellIdx(0), &mut self.layout);
+        self.layout_params.bind_snippets(&self.layout);
     }
     fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
         extra.declare_locals(CellIdx(0), &mut self.layout);
@@ -161,6 +167,12 @@ impl<'cb, 'ctx, Context, E> BaseContext<Context, E> for LinkerInner<'cb, 'ctx, C
     }
     fn target_pc_local(&self) -> Option<u32> {
         self.oob_config.as_ref().map(|_| self.target_pc_local)
+    }
+    fn runtime_layout_params(&self) -> Option<&RuntimeLayoutParams> {
+        Some(&self.layout_params)
+    }
+    fn runtime_layout_params_mut(&mut self) -> Option<&mut RuntimeLayoutParams> {
+        Some(&mut self.layout_params)
     }
     // on_instruction / on_jump: LinkerInner has no reactor, so traps cannot
     // emit instructions.  Real firing happens through ReactorHandle.
@@ -467,6 +479,7 @@ impl<'cb, 'ctx, Context, E, Plugin> Linker<'cb, 'ctx, Context, E, Plugin>
                 escape_tag: None,
                 cell_registry: CellRegistry::new(),
                 entity_space: EntityIndexSpace::empty(),
+                layout_params: speet_link_core::RuntimeLayoutParams::new(),
                 target_pc_local: 0,
                 oob_config: None,
                 current_cell: CellIdx(0),

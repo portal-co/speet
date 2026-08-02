@@ -23,6 +23,7 @@ pub struct GuestFuncCatalog {
     pub start_addr: u64,
     pub granularity: u64,
     pub n_imports: u32,
+    pub n_redirect_shims: u32,
     pub entries: Vec<GuestFuncEntry>,
 }
 
@@ -34,9 +35,10 @@ impl GuestFuncCatalog {
         n_imports: u32,
         n_translated_slots: u32,
         text_len: usize,
+        n_redirect_shims: u32,
     ) -> Self {
         let granularity = slot_granularity(arch);
-        let mut entries = Vec::with_capacity(n_translated_slots as usize + 1);
+        let mut entries = Vec::with_capacity(n_translated_slots as usize + n_redirect_shims as usize + 1);
         for local_idx in 0..n_translated_slots {
             entries.push(GuestFuncEntry {
                 guest_pc: start_addr + local_idx as u64 * granularity,
@@ -45,17 +47,37 @@ impl GuestFuncCatalog {
                 is_halt: false,
             });
         }
+        for shim_i in 0..n_redirect_shims {
+            let local_idx = n_translated_slots + shim_i;
+            entries.push(GuestFuncEntry {
+                guest_pc: speet_link_core::GuestImageLayout {
+                    text_base: start_addr,
+                    text_len,
+                    slot_granularity: granularity,
+                    data_sections: vec![],
+                    relocs: vec![],
+                    libraries: vec![],
+                    memory_model: speet_link_core::MemoryModel::OwnedLinear,
+                }
+                .shim_guest_pc(shim_i),
+                wasm_func_idx: n_imports + local_idx,
+                local_func_idx: local_idx,
+                is_halt: false,
+            });
+        }
+        let halt_local = n_translated_slots + n_redirect_shims;
         let halt_pc = halt_addr(start_addr, text_len);
         entries.push(GuestFuncEntry {
             guest_pc: halt_pc,
-            wasm_func_idx: n_imports + n_translated_slots,
-            local_func_idx: n_translated_slots,
+            wasm_func_idx: n_imports + halt_local,
+            local_func_idx: halt_local,
             is_halt: true,
         });
         Self {
             start_addr,
             granularity,
             n_imports,
+            n_redirect_shims,
             entries,
         }
     }
@@ -66,11 +88,15 @@ impl GuestFuncCatalog {
         start_addr: u64,
         arch: BinArch,
         text_len: usize,
+        n_redirect_shims: u32,
     ) -> Self {
         let n_imports = crate::drive::import_func_count(wasm);
         let n_code = crate::drive::code_func_count(wasm);
-        let n_translated_slots = n_code.saturating_sub(1);
-        Self::from_layout(start_addr, arch, n_imports, n_translated_slots, text_len)
+        // code funcs = translated + shims + halt [+ optional data_init]
+        let n_translated_slots = n_code
+            .saturating_sub(1 + n_redirect_shims)
+            .saturating_sub(if crate::drive::has_data_init_export(wasm) { 1 } else { 0 });
+        Self::from_layout(start_addr, arch, n_imports, n_translated_slots, text_len, n_redirect_shims)
     }
 
     pub fn to_stub_entries(&self) -> Vec<speet_rt::GuestStubEntry> {
@@ -91,31 +117,16 @@ impl GuestFuncCatalog {
         arch: BinArch,
         n_imports: u32,
         text_len: usize,
+        n_redirect_shims: u32,
     ) -> Self {
-        let granularity = slot_granularity(arch);
-        let n_local = translated.fns.len() as u32;
-        let mut entries = Vec::with_capacity(n_local as usize + 1);
-        for local_idx in 0..n_local {
-            entries.push(GuestFuncEntry {
-                guest_pc: start_addr + local_idx as u64 * granularity,
-                wasm_func_idx: n_imports + local_idx,
-                local_func_idx: local_idx,
-                is_halt: false,
-            });
-        }
-        let halt_pc = halt_addr(start_addr, text_len);
-        entries.push(GuestFuncEntry {
-            guest_pc: halt_pc,
-            wasm_func_idx: n_imports + n_local,
-            local_func_idx: n_local,
-            is_halt: true,
-        });
-        Self {
+        Self::from_layout(
             start_addr,
-            granularity,
+            arch,
             n_imports,
-            entries,
-        }
+            translated.fns.len() as u32,
+            text_len,
+            n_redirect_shims,
+        )
     }
 
     pub fn pc_to_entry(&self, guest_pc: u64) -> Option<&GuestFuncEntry> {
@@ -164,6 +175,7 @@ mod tests {
             BinArch::X86_64,
             5,
             12,
+            0,
         );
         assert_eq!(catalog.entries.len(), 3);
         assert_eq!(catalog.entry_func(1).unwrap().guest_pc, 0x1001);

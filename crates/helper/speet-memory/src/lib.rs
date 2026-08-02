@@ -42,7 +42,7 @@ pub mod paging;
 pub mod r#virtual;
 
 pub use layout::{LocalLayout, LocalSlot};
-pub use mapper::{AddressMapper, CallbackContext, ChunkedMapper, DirectMemory, MapperCallback, MemoryAccess, StackedMapper};
+pub use mapper::{AddressMapper, CallbackContext, ChunkedMapper, DirectMemory, HostOffsetMapper, MapperCallback, MemoryAccess, StackedMapper};
 pub use yecta::LocalDeclarator;
 pub use mem::{AddressWidth, IntWidth, LoadKind, StoreKind};
 pub use paging::{

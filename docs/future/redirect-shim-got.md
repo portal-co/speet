@@ -30,6 +30,18 @@ Replace the interim **PC-check inline hook** path (see [thin-runtime-genericity.
 - [`PltCallPlan`](../crates/os/speet-recompile/src/plt.rs) resolves `PltRedirect::WasmImport` hooks; `PltRedirect::Ambient` stays link-time only (no WASM PC-check emission).
 - Keys generalized to `(LibraryId, u64)`; default `LibraryId::MAIN_IMAGE` for same-platform ELF/Mach-O.
 
+## Phase 1 foundation (landed)
+
+The first-component plan adds shared infrastructure this doc's Phase 2 will consume:
+
+- [`GuestImageLayout`](../crates/os/speet-link-core/src/image_layout.rs) — text/data/GOT contract, `shim_guest_pc`, `MemoryModel::HostOffset`.
+- [`RuntimeLayoutParams`](../crates/os/speet-link-core/src/layout_params.rs) + user-specified [`TextBaseSnippet`](../crates/os/speet-link-core/src/layout_params.rs) — relocatable PC base via layout params (not hardcoded in arch frontends).
+- Redirect shim **WASM function slots** before halt in `finish_module`; [`data_link`](../crates/os/speet-recompile/src/data_link.rs) patches GOT cells.
+- `PltRedirect::NativeShim` resolves through manifest/`os_shim_*`; redirect shim bodies emitted for both WASM-import and native-shim addresses.
+- Dual-backend contract documented in [`dual-backends.md`](../guides/dual-backends.md) and AGENTS.md §10.
+
+PC-check hooks remain active until Phase 2 wires virtual GOT cells end-to-end.
+
 ## Cross-links
 
 - [thin-runtime-genericity.md](../guides/thin-runtime-genericity.md) — principle 2 (PC check, not instruction shape)

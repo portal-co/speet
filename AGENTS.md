@@ -109,6 +109,18 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
+## 10. Dual backends, generic paths, layout param handles
+
+**Guide:** [docs/guides/dual-backends.md](docs/guides/dual-backends.md)
+
+- Do not conflate **Backend A (full sandbox WASM → WAFFLE)** with **Backend B (wasm-blitz native `.o`)** — they consume the same megabinary but realize redirects, memory, and host calls differently. When adding a feature, state which backend(s) it targets.
+- Do not treat [`speet-wasm`](crates/managed/speet-wasm/src/lib.rs) as Backend B — it is a **WASM-runtime OS implementation** over Backend A. The [`FuncSchedule`](crates/os/speet-schedule/src/lib.rs) + [`IndexOffsets`](crates/managed/speet-wasm/src/lib.rs) external-hosting flow is the standard for arch-recompiler tests in WASM runtimes.
+- Do not add BridgeSupport/manifest special cases per memory model — **HostOffset** and **WASM-runtime OS** share one redirect policy and one [`EntityIndexSpace`](crates/os/speet-link-core/src/layout.rs) allocation discipline.
+- Do not store raw `u32` local indices in [`ParamSlotMap`](crates/os/speet-link-core/src/layout_params.rs), trap config fields, or recompiler struct fields when a [`LocalSlot`](crates/helper/wasm-layout/src/lib.rs) handle is available — resolve via `layout.local(slot, i)` or `layout.emit_get` at emission time only.
+- Do not hardcode `text_base` loading in arch frontends — the embedder supplies a user-specified [`Snippet`](crates/helper/yecta/src/lib.rs) via [`RuntimeLayoutParams`](crates/os/speet-link-core/src/layout_params.rs).
+
+---
+
 ## Compression-aware logging
 
 Token compression proxies can sit between this tool and an LLM provider, compressing

@@ -35,6 +35,7 @@
 //! trap tests).  Use `LinkerInner` for production multi-binary linking.
 
 use alloc::vec::Vec;
+use crate::RuntimeLayoutParams;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{FuncType, Instruction, ValType};
 use wax_core::build::{AmbientSink, InstructionSink};
@@ -190,6 +191,16 @@ pub trait BaseContext<Context, E> {
     fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
         let _ = cell;
         self.declare_trap_locals(extra);
+    }
+
+    /// Runtime layout params (`text_base`, `host_mem_base`, …) when wired.
+    fn runtime_layout_params(&self) -> Option<&RuntimeLayoutParams> {
+        None
+    }
+
+    /// Mutable access to [`runtime_layout_params`](Self::runtime_layout_params).
+    fn runtime_layout_params_mut(&mut self) -> Option<&mut RuntimeLayoutParams> {
+        None
     }
 }
 
@@ -405,6 +416,10 @@ where
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots.
     pub locals_mark: Mark,
+    /// Mark at the start of returned layout + trap params.
+    pub injected_start: Mark,
+    /// Runtime layout params threaded as function params/returns.
+    pub layout_params: RuntimeLayoutParams,
     /// Indirect-call pool handler and type.
     pub pool: Pool<'a, Context, E>,
     /// Optional escape tag.
@@ -457,10 +472,20 @@ where
     // Callers passing `&mut ()` (no mapper) see no behavior change, since
     // `()`'s own `declare_params`/`declare_locals` are themselves no-ops.
     fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) {
+        self.injected_start = self.layout.mark();
+        self.layout_params
+            .declare_params(CellIdx(0), &mut self.layout);
         extra.declare_params(CellIdx(0), &mut self.layout);
+        self.layout_params.bind_snippets(&self.layout);
     }
     fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
         extra.declare_locals(CellIdx(0), &mut self.layout);
+    }
+    fn runtime_layout_params(&self) -> Option<&RuntimeLayoutParams> {
+        Some(&self.layout_params)
+    }
+    fn runtime_layout_params_mut(&mut self) -> Option<&mut RuntimeLayoutParams> {
+        Some(&mut self.layout_params)
     }
     fn on_instruction(
         &mut self,
@@ -730,6 +755,10 @@ where
     pub layout: LocalLayout,
     /// Mark placed after all parameter slots.
     pub locals_mark: Mark,
+    /// Mark at the start of returned layout + trap params.
+    pub injected_start: Mark,
+    /// Runtime layout params threaded as function params/returns.
+    pub layout_params: RuntimeLayoutParams,
     /// Indirect-call pool handler and type.
     pub pool: Pool<'r, Context, E>,
     /// Optional escape tag for exception-based control flow.
@@ -762,6 +791,8 @@ where
             traps: TrapConfig::new(),
             layout: LocalLayout::empty(),
             locals_mark: Mark { slot_count: 0, total_locals: 0 },
+            injected_start: Mark { slot_count: 0, total_locals: 0 },
+            layout_params: RuntimeLayoutParams::new(),
             pool,
             escape_tag,
             cell_registry: CellRegistry::default(),
@@ -800,12 +831,22 @@ where
     fn set_base_func_offset(&mut self, n: u32) { self.reactor.set_base_func_offset(n); }
 
     fn declare_trap_params(&mut self, extra: &mut dyn LocalDeclarator) {
+        self.injected_start = self.layout.mark();
+        self.layout_params
+            .declare_params(CellIdx(0), &mut self.layout);
         extra.declare_params(CellIdx(0), &mut self.layout);
         self.traps.declare_params(CellIdx(0), &mut self.layout);
+        self.layout_params.bind_snippets(&self.layout);
     }
     fn declare_trap_locals(&mut self, extra: &mut dyn LocalDeclarator) {
         extra.declare_locals(CellIdx(0), &mut self.layout);
         self.traps.declare_locals(CellIdx(0), &mut self.layout);
+    }
+    fn runtime_layout_params(&self) -> Option<&RuntimeLayoutParams> {
+        Some(&self.layout_params)
+    }
+    fn runtime_layout_params_mut(&mut self) -> Option<&mut RuntimeLayoutParams> {
+        Some(&mut self.layout_params)
     }
     fn declare_trap_locals_with_cell(&mut self, cell: CellIdx, extra: &mut dyn LocalDeclarator) {
         extra.declare_locals(cell, &mut self.layout);

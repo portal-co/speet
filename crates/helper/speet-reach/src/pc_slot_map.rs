@@ -72,6 +72,22 @@ impl PcSlotMap {
     pub fn is_empty(&self) -> bool {
         self.sorted_pcs.is_empty()
     }
+
+    /// Extend a translated PC map with synthetic redirect-shim guest PCs after halt.
+    ///
+    /// Shim `i` lands at `halt_pc + (i + 1) * slot_granularity` — see
+    /// [`GuestImageLayout::shim_guest_pc`](speet_link_core::GuestImageLayout::shim_guest_pc).
+    pub fn with_redirect_shims(
+        mut self,
+        halt_pc: u64,
+        n_shims: u32,
+        slot_granularity: u64,
+    ) -> Self {
+        for i in 0..n_shims {
+            self.sorted_pcs.push(halt_pc + (i as u64 + 1) * slot_granularity);
+        }
+        self
+    }
 }
 
 impl SlotAssigner for PcSlotMap {

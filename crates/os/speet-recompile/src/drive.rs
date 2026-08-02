@@ -98,6 +98,21 @@ fn entry_export_func_idx(wasm: &[u8]) -> u32 {
     0
 }
 
+/// Whether the module exports [`crate::frontend::DATA_INIT_EXPORT_NAME`].
+pub fn has_data_init_export(wasm: &[u8]) -> bool {
+    use crate::frontend::DATA_INIT_EXPORT_NAME;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
+        if let wasmparser::Payload::ExportSection(reader) = payload {
+            for exp in reader.into_iter().flatten() {
+                if exp.name == DATA_INIT_EXPORT_NAME && matches!(exp.kind, wasmparser::ExternalKind::Func) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// The WASM function index the module exports under
 /// [`crate::frontend::DATA_INIT_EXPORT_NAME`], if any — `finish_module` only
 /// emits that export when the guest has data segments, so this is `None` for

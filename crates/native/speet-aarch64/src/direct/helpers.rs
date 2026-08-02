@@ -266,8 +266,24 @@ where S: wax_core::build::InstructionSink<Context, E> + ?Sized
 /// `Target::Static`/`rctx.jmp` cover automatically.
 pub(crate) struct A64IndirectTarget {
     pub(crate) gpr_local: u32,
-    pub(crate) base_pc: u64,
+    pub(crate) text_base: speet_link_core::TextBaseSnippet,
     pub(crate) base_func_offset: u32,
+}
+
+impl A64IndirectTarget {
+    pub(crate) fn from_constant_base(
+        gpr_local: u32,
+        base_pc: u64,
+        base_func_offset: u32,
+    ) -> Self {
+        Self {
+            gpr_local,
+            text_base: speet_link_core::TextBaseSnippet::new(
+                speet_link_core::TextBaseSource::Constant(base_pc),
+            ),
+            base_func_offset,
+        }
+    }
 }
 
 impl<Context, E> InstructionSource<Context, E> for A64IndirectTarget {
@@ -275,7 +291,13 @@ impl<Context, E> InstructionSource<Context, E> for A64IndirectTarget {
         &self, ctx: &mut Context,
         sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
     ) -> Result<(), E> {
-        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc, self.base_func_offset)
+        let indirect = speet_link_core::IndirectTableIdxSnippet {
+            gpr_local: self.gpr_local,
+            text_base: &self.text_base,
+            slot_shift: 2,
+            base_func_offset: self.base_func_offset,
+        };
+        indirect.emit_instruction(ctx, sink)
     }
 }
 impl<Context, E> InstructionOperatorSource<Context, E> for A64IndirectTarget {
@@ -283,27 +305,8 @@ impl<Context, E> InstructionOperatorSource<Context, E> for A64IndirectTarget {
         &self, ctx: &mut Context,
         sink: &mut (dyn InstructionOperatorSink<Context, E> + '_),
     ) -> Result<(), E> {
-        emit_indirect_target(ctx, sink, self.gpr_local, self.base_pc, self.base_func_offset)
+        self.emit_instruction(ctx, sink)
     }
-}
-
-pub(super) fn emit_indirect_target<Context, E, S>(
-    ctx: &mut Context, sink: &mut S, gpr_local: u32, base_pc: u64, base_func_offset: u32,
-) -> Result<(), E>
-where S: wax_core::build::InstructionSink<Context, E> + ?Sized
-{
-    // table_idx = ((gpr - base_pc) >> 2) + base_func_offset.  Leave the
-    // result as i64: the indirect call table is a 64-bit table
-    // (`table64`), so `return_call_indirect` consumes an i64 index.  (Do
-    // NOT wrap to i32.)
-    sink.instruction(ctx, &Instruction::LocalGet(gpr_local))?;
-    sink.instruction(ctx, &Instruction::I64Const(base_pc as i64))?;
-    sink.instruction(ctx, &Instruction::I64Sub)?;
-    sink.instruction(ctx, &Instruction::I64Const(2))?;
-    sink.instruction(ctx, &Instruction::I64ShrU)?;
-    sink.instruction(ctx, &Instruction::I64Const(base_func_offset as i64))?;
-    sink.instruction(ctx, &Instruction::I64Add)?;
-    Ok(())
 }
 
 // ── Compare-zero condition for CBZ / CBNZ ────────────────────────────────────

@@ -12,6 +12,7 @@ use speet_recompile::frontend::{
     assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt_with_data,
     external_targets_from_imports, DataSegment,
 };
+use speet_link_core::GuestImageLayout;
 use speet_recompile::plt::PltCallPlan;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -160,7 +161,8 @@ impl IntegratedNativeRuntime {
         let targets = external_targets_from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
-        let data_segments = data_segments_from_binary(&bin);
+        let layout = GuestImageLayout::from_loaded_binary(&bin);
+        let data_segments = data_segments_from_layout(&layout);
 
         let (wasm, _unsupported) = match guest_arch {
             BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_data(
@@ -268,15 +270,19 @@ impl IntegratedNativeRuntime {
                     || matches!(s.kind, binary_io::SectionKind::Text)
             })
             .ok_or_else(|| "no .text section".to_string())?;
+        let targets = external_targets_from_imports(&bin.imports);
+        let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
+        let n_redirect_shims = plt_plan.wasm_import_by_addr.len() as u32;
         let catalog = speet_recompile::guest_func_catalog::GuestFuncCatalog::from_wasm(
             &wasm,
             text.addr,
             guest_arch,
             text.data.len(),
+            n_redirect_shims,
         );
         let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
         let halt_local = catalog.halt_entry().local_func_idx;
-        let data_segments = data_segments_from_binary(&bin);
+        let data_segments = data_segments_from_layout(&GuestImageLayout::from_loaded_binary(&bin));
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -334,25 +340,26 @@ impl NativeRuntime for IntegratedNativeRuntime {
     }
 }
 
+/// Extract initialized data sections from a [`GuestImageLayout`].
+fn data_segments_from_layout(layout: &GuestImageLayout) -> Vec<DataSegment> {
+    layout
+        .data_sections
+        .iter()
+        .map(|s| DataSegment {
+            addr: s.addr,
+            bytes: s.bytes.clone(),
+        })
+        .collect()
+}
+
 /// Extract initialized data (`.data`/`.rodata`) sections as WASM passive data
 /// segments. `.bss` is skipped: `__wasm_mem` already starts zeroed, so it
 /// needs no `memory.init` copy. Section addresses are the guest's own virtual
 /// addresses, matching the identity address mapper wired into every
 /// architecture frontend (see `speet_recompile::frontend::translate_with_plt`).
+#[allow(dead_code)]
 fn data_segments_from_binary(bin: &binary_io::LoadedBinary) -> Vec<DataSegment> {
-    bin.sections
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.kind,
-                binary_io::SectionKind::Data | binary_io::SectionKind::RoData
-            ) && !s.data.is_empty()
-        })
-        .map(|s| DataSegment {
-            addr: s.addr,
-            bytes: s.data.clone(),
-        })
-        .collect()
+    data_segments_from_layout(&GuestImageLayout::from_loaded_binary(bin))
 }
 
 fn arch_label(a: BinArch) -> &'static str {

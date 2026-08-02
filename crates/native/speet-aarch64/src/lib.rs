@@ -308,11 +308,11 @@ impl<Context, E> AArch64Recompiler<Context, E> {
                 return Ok(());
             }
         }
-        let target_snippet = A64IndirectTarget {
-            gpr_local: lr_local,
-            base_pc: self.base_pc,
-            base_func_offset: rctx.base_func_offset(),
-        };
+        let target_snippet = A64IndirectTarget::from_constant_base(
+            lr_local,
+            self.base_pc,
+            rctx.base_func_offset(),
+        );
         let params = JumpCallParams::indirect_jump(&target_snippet, total, rctx.pool());
         rctx.ji_with_params(ctx, tail_idx, params)?;
         Ok(())

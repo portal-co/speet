@@ -1,0 +1,148 @@
+//! Relocation-aware data linking and GOT patching for [`GuestImageLayout`].
+
+use std::collections::BTreeMap;
+use std::vec::Vec;
+use speet_link_core::image_layout::{GuestImageLayout, RelocKindTag};
+use speet_plugin_api::external_target::LibraryId;
+
+use crate::frontend::DataSegment;
+use crate::plt::PltCallPlan;
+
+/// Apply relocations and patch GOT cells with redirect shim guest PCs.
+pub fn link_data_segments(
+    layout: &GuestImageLayout,
+    plt_plan: Option<&PltCallPlan>,
+    shim_index_by_symbol: &BTreeMap<String, u32>,
+) -> Vec<DataSegment> {
+    let mut sections: Vec<Vec<u8>> = layout
+        .data_sections
+        .iter()
+        .map(|s| s.bytes.clone())
+        .collect();
+
+    for reloc in &layout.relocs {
+        if reloc.section >= sections.len() {
+            continue;
+        }
+        let Some(value) = resolve_reloc_value(reloc, layout, plt_plan, shim_index_by_symbol) else {
+            continue;
+        };
+        let off = reloc.offset as usize;
+        if off + 8 <= sections[reloc.section].len() {
+            sections[reloc.section][off..off + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    // Patch PLT GOT slots with shim guest PCs when allocated.
+    if let Some(plan) = plt_plan {
+        for (&(library, addr), &import_idx) in &plan.wasm_import_by_addr {
+            let _ = import_idx;
+            if library != LibraryId::MAIN_IMAGE {
+                continue;
+            }
+            let label = plan
+                .targets
+                .lookup(library, addr)
+                .unwrap_or("")
+                .to_string();
+            if let Some(&shim_i) = shim_index_by_symbol.get(&label) {
+                let shim_pc = layout.shim_guest_pc(shim_i);
+                patch_got_at_addr(layout, &mut sections, addr, shim_pc);
+            }
+        }
+    }
+
+    layout
+        .data_sections
+        .iter()
+        .zip(sections)
+        .map(|(spec, bytes)| DataSegment {
+            addr: spec.addr,
+            bytes,
+        })
+        .collect()
+}
+
+fn resolve_reloc_value(
+    reloc: &speet_link_core::image_layout::RelocSpec,
+    layout: &GuestImageLayout,
+    plt_plan: Option<&PltCallPlan>,
+    shim_index_by_symbol: &BTreeMap<String, u32>,
+) -> Option<u64> {
+    match reloc.kind {
+        RelocKindTag::Abs64 | RelocKindTag::GotPcRel | RelocKindTag::Plt32 => {}
+        RelocKindTag::Other => return None,
+    }
+
+    if let Some(sym) = &reloc.target_symbol {
+        if let Some(&shim_i) = shim_index_by_symbol.get(sym) {
+            return Some(layout.shim_guest_pc(shim_i));
+        }
+        if let Some(plan) = plt_plan {
+            for entry in plan.targets.iter() {
+                if entry.label == *sym {
+                    if let Some(&idx) = plan.wasm_import_by_addr.get(&(entry.library, entry.address))
+                    {
+                        let _ = idx;
+                        if let Some(&shim_i) = shim_index_by_symbol.get(sym) {
+                            return Some(layout.shim_guest_pc(shim_i));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn patch_got_at_addr(
+    layout: &GuestImageLayout,
+    sections: &mut [Vec<u8>],
+    guest_addr: u64,
+    value: u64,
+) {
+    for (i, spec) in layout.data_sections.iter().enumerate() {
+        if guest_addr >= spec.addr && guest_addr < spec.addr + spec.bytes.len() as u64 {
+            let off = (guest_addr - spec.addr) as usize;
+            if i < sections.len() && off + 8 <= sections[i].len() {
+                sections[i][off..off + 8].copy_from_slice(&value.to_le_bytes());
+            }
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use speet_link_core::image_layout::{DataSectionSpec, MemoryModel};
+
+    #[test]
+    fn patches_abs64_reloc() {
+        let layout = GuestImageLayout {
+            text_base: 0x1000,
+            text_len: 0x100,
+            slot_granularity: 1,
+            data_sections: vec![DataSectionSpec {
+                name: ".data".into(),
+                addr: 0x2000,
+                bytes: vec![0; 16],
+            }],
+            relocs: vec![speet_link_core::image_layout::RelocSpec {
+                offset: 8,
+                section: 0,
+                target_symbol: Some("write".into()),
+                kind: RelocKindTag::Abs64,
+                addend: 0,
+            }],
+            libraries: vec![],
+            memory_model: MemoryModel::OwnedLinear,
+        };
+        let mut shims = BTreeMap::new();
+        shims.insert("write".into(), 0);
+        let segs = link_data_segments(&layout, None, &shims);
+        let expected = layout.shim_guest_pc(0);
+        assert_eq!(&segs[0].bytes[8..16], &expected.to_le_bytes());
+    }
+}

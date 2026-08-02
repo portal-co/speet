@@ -1,11 +1,9 @@
 //! Registry-driven speet WASM import bridge generation.
 
-use speet_host_api::{FuncImport, ImportManifest};
-
 mod defaults;
 mod internal;
 
-use speet_host_api::{FuncImport, ImportManifest};
+use speet_host_api::ImportManifest;
 
 pub use defaults::{BridgeHandler, SpeetBridgeRegistry};
 

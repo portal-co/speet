@@ -62,7 +62,7 @@ use crate::plt::PltCallPlan;
 use core::convert::Infallible;
 use speet_host_api::{ImportManifest, WasmValType};
 use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
-use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
+use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, RuntimeLayoutParams, TextBaseSource};
 use speet_memory::mapper::DirectMemory;
 use speet_memory::mem::{AddressWidth, IntWidth};
 use wasm_encoder::{
@@ -116,6 +116,7 @@ pub fn assemble_translated_module(
         &space,
         func_slot,
         fns,
+        &[],
         memory64,
         entry_func_idx,
         n_params,
@@ -198,22 +199,86 @@ pub fn build_halt_stub(n_params: u32) -> Function {
     f
 }
 
-/// Table/elements/exports scaffolding shared by every `assemble_*` variant,
-/// parameterized only over `memory64` (RV64's module uses 32-bit memory;
-/// the native paths use 64-bit) — see `build_import_section` for why the
-/// function-index math here reads back `space`/`func_slot` instead of a
-/// hand-counted constant. Appends the halt stub (see [`build_halt_stub`])
-/// as the last table entry, at local index `total` (guest address
-/// `start_addr + text.len()`, i.e. exactly where the granularity-based
-/// addr-to-slot formula already points with no special-casing) — `total`
-/// is a parameter count away from `entry_func_idx`'s numbering (both are
-/// 0-based, *before* `n_imports`), see [`Translated::entry_func_idx`].
+/// Build one redirect-shim WASM function: marshal register file → import call → return register file.
+pub fn build_redirect_shim_fn(
+    convention: &speet_plugin_api::external_target::CallingConvention,
+    import_idx: u32,
+    n_register_params: u32,
+) -> Function {
+    let mut f = Function::new([]);
+    for (i, &local) in convention.arg_locals.iter().enumerate() {
+        f.instruction(&Instruction::LocalGet(local));
+        if convention.wraps_i32(i) {
+            f.instruction(&Instruction::I32WrapI64);
+        }
+    }
+    f.instruction(&Instruction::Call(import_idx));
+    if let Some(result_local) = convention.result_local {
+        if convention.result_extend_i32 {
+            f.instruction(&Instruction::I64ExtendI32U);
+        }
+        f.instruction(&Instruction::LocalSet(result_local));
+    }
+    for p in 0..n_register_params {
+        f.instruction(&Instruction::LocalGet(p));
+    }
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
+    f
+}
+
+/// Build redirect shim bodies and a symbol → shim-index map from a [`PltCallPlan`].
+pub fn build_redirect_shims_from_plan(
+    plt_plan: &PltCallPlan,
+    arch: BinArch,
+    manifest: &ImportManifest,
+    n_register_params: u32,
+) -> (Vec<Function>, std::collections::BTreeMap<String, u32>) {
+    let mut shims = Vec::new();
+    let mut by_symbol = std::collections::BTreeMap::new();
+    let table = plt_plan.to_hook_table(arch, manifest);
+    let mut ordered: std::collections::BTreeSet<(speet_plugin_api::external_target::LibraryId, u64)> =
+        plt_plan.wasm_import_by_addr.keys().copied().collect();
+    ordered.extend(plt_plan.native_shim_by_addr.keys().copied());
+    for (shim_i, &(library, addr)) in ordered.iter().enumerate() {
+        let label = plt_plan
+            .targets
+            .lookup(library, addr)
+            .unwrap_or("?")
+            .to_string();
+        let import_idx = if let Some(&idx) = plt_plan.wasm_import_by_addr.get(&(library, addr)) {
+            idx
+        } else if let Some(core) = plt_plan.native_shim_by_addr.get(&(library, addr)) {
+            plt_plan
+                .import_idx_for_core_symbol(manifest, core)
+                .unwrap_or_else(|| panic!("no manifest import for native shim {core}"))
+        } else {
+            continue;
+        };
+        let convention = if let Some(hook) = table.lookup(library, addr) {
+            hook.convention.clone()
+        } else {
+            speet_abi_stubs::plt_calling_convention(manifest, arch, &label)
+        };
+        shims.push(build_redirect_shim_fn(
+            &convention,
+            import_idx,
+            n_register_params,
+        ));
+        by_symbol.insert(label, shim_i as u32);
+    }
+    (shims, by_symbol)
+}
+
+/// Table/elements/exports scaffolding shared by every `assemble_*` variant.
+/// Appends optional redirect shim functions, then the halt stub.
 fn finish_module(
     mut types: TypeSection,
     imports: ImportSection,
     space: &EntityIndexSpace,
     func_slot: IndexSlot,
     fns: &[Function],
+    redirect_shims: &[Function],
     memory64: bool,
     entry_func_idx: u32,
     n_register_params: u32,
@@ -221,6 +286,7 @@ fn finish_module(
 ) -> Vec<u8> {
     let n_imports = space.host_capabilities.total();
     let total = space.functions.count(func_slot);
+    let n_shims = redirect_shims.len() as u32;
     let halt_stub = build_halt_stub(n_register_params);
 
     // The data-init function (if any) gets its own `() -> ()` type, appended
@@ -236,12 +302,15 @@ fn finish_module(
     for _ in fns {
         funcs.function(0);
     }
+    for _ in redirect_shims {
+        funcs.function(0);
+    }
     funcs.function(0); // halt stub: also type 0, (registers) -> (registers)
     if let Some(ty) = data_init_type_idx {
         funcs.function(ty);
     }
 
-    let table_size = n_imports + total + 1;
+    let table_size = n_imports + total + n_shims + 1;
     let mut tables = TableSection::new();
     tables.table(TableType {
         element_type: RefType::FUNCREF,
@@ -269,10 +338,14 @@ fn finish_module(
     // — exported by name since the C entry shim calls it directly, not
     // through the table.
     if data_init_type_idx.is_some() {
-        exports.export(DATA_INIT_EXPORT_NAME, ExportKind::Func, n_imports + total + 1);
+        exports.export(
+            DATA_INIT_EXPORT_NAME,
+            ExportKind::Func,
+            n_imports + total + n_shims + 1,
+        );
     }
 
-    let indices: Vec<u32> = (n_imports..n_imports + total + 1).collect();
+    let indices: Vec<u32> = (n_imports..n_imports + total + n_shims + 1).collect();
     let mut elems = ElementSection::new();
     elems.active(
         Some(0),
@@ -282,6 +355,9 @@ fn finish_module(
 
     let mut code = CodeSection::new();
     for f in fns {
+        code.function(f);
+    }
+    for f in redirect_shims {
         code.function(f);
     }
     code.function(&halt_stub);
@@ -381,11 +457,14 @@ pub fn build_data_init_fn(segments: &[DataSegment]) -> Function {
 fn make_rctx<'r, E>(
     reactor: &'r mut Reactor<(), E, Function, LocalPool>,
     base_func_offset: u32,
+    text_base: TextBaseSource,
 ) -> ReactorAdapter<'r, (), E, Function, LocalPool> {
     let mut rctx = ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
         locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
+        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        layout_params: RuntimeLayoutParams::with_text_base_source(text_base),
         pool: yecta::Pool { handler: &REACTOR_TABLE, ty: TypeIdx(0) },
         escape_tag: None,
     };
@@ -473,7 +552,11 @@ pub fn translate_with_plt(
         _ => 0,
     } as u32;
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, n_imports);
+    let mut rctx = make_rctx(
+        &mut reactor,
+        n_imports,
+        TextBaseSource::Constant(start_addr),
+    );
     let mut ctx = ();
 
     let (params, unsupported) = match choice {
@@ -542,7 +625,11 @@ pub fn translate_with_plt(
             // unify into the same `Translated`.
             let mut plugin_reactor: Reactor<(), speet_plugin_api::error::PluginError, Function, LocalPool> =
                 Reactor::default();
-            let mut plugin_rctx = make_rctx(&mut plugin_reactor, n_imports);
+            let mut plugin_rctx = make_rctx(
+                &mut plugin_reactor,
+                n_imports,
+                TextBaseSource::Constant(start_addr),
+            );
             let mut plugin_ctx = ();
             let mut rc = speet_plugin_adapter::ArchPluginRecompiler::<
                 (),
@@ -568,7 +655,7 @@ pub fn translate_with_plt(
 /// and to resolve indices in [`crate::plt::PltCallPlan`] — see
 /// `docs/guides/thin-runtime-genericity.md` principle 1.
 pub fn assemble_module_instrumented(t: &Translated, arch: BinArch, manifest: &ImportManifest) -> Vec<u8> {
-    assemble_module_instrumented_with_data(t, arch, manifest, &[])
+    assemble_module_instrumented_with_data(t, arch, manifest, &[], None)
 }
 
 /// Like [`assemble_module_instrumented`], but also emits `data_segments` as
@@ -579,6 +666,7 @@ pub fn assemble_module_instrumented_with_data(
     arch: BinArch,
     manifest: &ImportManifest,
     data_segments: &[DataSegment],
+    plt_plan: Option<&PltCallPlan>,
 ) -> Vec<u8> {
     use crate::instrument::{instrument_unreachable_logging, GuestPcRef};
 
@@ -588,8 +676,22 @@ pub fn assemble_module_instrumented_with_data(
 
     let total = fns.len() as u32;
     let n_params = t.params.len() as u32;
+    let (redirect_shims, _) = plt_plan
+        .map(|p| build_redirect_shims_from_plan(p, arch, manifest, n_params))
+        .unwrap_or_default();
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &fns, true, t.entry_func_idx, n_params, data_segments)
+    finish_module(
+        types,
+        imports,
+        &space,
+        func_slot,
+        &fns,
+        &redirect_shims,
+        true,
+        t.entry_func_idx,
+        n_params,
+        data_segments,
+    )
 }
 
 /// Recompile with integrated unreachable instrumentation and optional PLT hooks.
@@ -635,7 +737,31 @@ pub fn recompile_to_wasm_instrumented_plt_with_data(
 ) -> (Vec<u8>, Vec<String>) {
     let t = translate_with_plt(text, start_addr, RecompilerChoice::Native(arch), plt_plan, entry_addr, manifest);
     let unsupported = t.unsupported.clone();
-    (assemble_module_instrumented_with_data(&t, arch, manifest, data_segments), unsupported)
+    let n_params = t.params.len() as u32;
+    let (_, shim_by_sym) = plt_plan
+        .map(|p| build_redirect_shims_from_plan(p, arch, manifest, n_params))
+        .unwrap_or_default();
+    let layout = speet_link_core::GuestImageLayout {
+        text_base: start_addr,
+        text_len: text.len(),
+        slot_granularity: slot_granularity(arch),
+        data_sections: data_segments
+            .iter()
+            .map(|s| speet_link_core::DataSectionSpec {
+                name: String::new(),
+                addr: s.addr,
+                bytes: s.bytes.clone(),
+            })
+            .collect(),
+        relocs: vec![],
+        libraries: vec![],
+        memory_model: speet_link_core::MemoryModel::OwnedLinear,
+    };
+    let linked_data = crate::data_link::link_data_segments(&layout, plt_plan, &shim_by_sym);
+    (
+        assemble_module_instrumented_with_data(&t, arch, manifest, &linked_data, plt_plan),
+        unsupported,
+    )
 }
 
 /// Assemble a single translated binary into a complete WASM module (no exception
@@ -657,7 +783,7 @@ pub fn assemble_module(t: &Translated, manifest: &ImportManifest) -> Vec<u8> {
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &t.fns, true, t.entry_func_idx, n_params, &[])
+    finish_module(types, imports, &space, func_slot, &t.fns, &[], true, t.entry_func_idx, n_params, &[])
 }
 
 /// Recompile a `.text` blob of guest machine code to a complete WASM module.
@@ -695,7 +821,11 @@ pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
             start_addr, false, true, false,
         );
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, n_imports);
+    let mut rctx = make_rctx(
+        &mut reactor,
+        n_imports,
+        TextBaseSource::Constant(start_addr),
+    );
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
@@ -724,7 +854,7 @@ pub fn assemble_syscall_module(t: &Translated, manifest: &ImportManifest) -> Vec
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &t.fns, false, t.entry_func_idx, n_params, &[])
+    finish_module(types, imports, &space, func_slot, &t.fns, &[], false, t.entry_func_idx, n_params, &[])
 }
 
 /// Recompile an RV64 Linux `.text` blob (with `ecall` → host syscalls) to WASM.
