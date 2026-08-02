@@ -9,7 +9,7 @@ use disarm64::decoder_full::Mnemonic;
 use speet_memory::mem::{LoadKind, StoreKind};
 use speet_ordering::EagerMemorySink;
 
-impl<Context, E> AArch64Recompiler<Context, E> {
+impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
 
     // ── LDST_POS (unsigned immediate offset) ──────────────────────────────────
 

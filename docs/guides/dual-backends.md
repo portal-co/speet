@@ -57,3 +57,16 @@ When changing emission or link:
 - [ ] Does lane B-native match lane A with blitz extension overlay?
 
 Note: A-OS (`WasmFrontend` + `FuncSchedule`) is **not** a parity lane — covered by A + B-wasm + unit tests.
+
+## Darwin-WASI / Linux-WASI guest rows
+
+| Guest | Lane A | Lane B-native | Notes |
+|-------|--------|---------------|-------|
+| RV64 Linux (`ecall`) | [`speet-linux-wasi`](../speet-linux-wasi.md) → wasmi | Thin runtime + `MacLibSystemTunnel` / `LinuxLibcTunnel` | Dual-lane harness: `speet-e2e/tests/dual_lane.rs` |
+| aarch64 Darwin/BSD (`svc #0x80`) | [`speet-darwin-wasi`](../speet-darwin-wasi.md) → wasmi | Thin runtime Mach-O path (when wired) | E2E: `darwin_wasi_tests.rs` (write+exit) |
+
+Parity for a shared corpus slice:
+
+- [ ] Megabinary validates under wasmparser
+- [ ] Lane A wasmi exit code / stdout match Lane B-native for the same guest bytes
+- [ ] Syscall numbers stay in the mapping crate (`os-linux-wasi` / `os-darwin-wasi`), not hand-matched in the recompiler

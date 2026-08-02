@@ -1,0 +1,26 @@
+[package]
+name = "speet-darwin-wasi"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+os-darwin-wasi       = { path = "../../../../os-emulation/crates/emit/os-darwin-wasi" }
+os-syscall-emit      = { path = "../../../../os-emulation/crates/emit/os-syscall-emit" }
+speet-host-api       = { path = "../speet-host-api" }
+speet-link-core      = { path = "../speet-link-core" }
+speet-linker         = { path = "../speet-linker" }
+speet-module-builder = { path = "../speet-module-builder" }
+speet-module-target  = { path = "../speet-module-target" }
+speet-memory         = { path = "../../helper/speet-memory" }
+speet-reach          = { path = "../../helper/speet-reach" }
+speet-aarch64        = { path = "../../native/speet-aarch64" }
+speet-schedule       = { path = "../speet-schedule" }
+speet-wasm           = { path = "../../managed/speet-wasm" }
+wasmparser           = { workspace = true, features = ["validate"] }
+wasm-encoder         = { workspace = true, features = ["wasmparser"] }
+yecta                = { path = "../../helper/yecta" }
+
+[build-dependencies]
+speet-host-mem-shim = { path = "../speet-host-mem-shim" }

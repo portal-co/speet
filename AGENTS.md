@@ -118,6 +118,7 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not add BridgeSupport/manifest special cases per memory model — **HostOffset** and **WASM-runtime OS** share one redirect policy and one [`EntityIndexSpace`](crates/os/speet-link-core/src/layout.rs) allocation discipline.
 - Do not store raw `u32` local indices in [`ParamSlotMap`](crates/os/speet-link-core/src/layout_params.rs), trap config fields, or recompiler struct fields when a [`LocalSlot`](crates/helper/wasm-layout/src/lib.rs) handle is available — resolve via `layout.local(slot, i)` or `layout.emit_get` at emission time only.
 - Do not hardcode `text_base` loading in arch frontends — the embedder supplies a user-specified [`Snippet`](crates/helper/yecta/src/lib.rs) via [`RuntimeLayoutParams`](crates/os/speet-link-core/src/layout_params.rs).
+- Dual-lane guest OS: RV64 Linux → [`speet-linux-wasi`](docs/speet-linux-wasi.md); aarch64 Darwin/BSD → [`speet-darwin-wasi`](docs/speet-darwin-wasi.md). Lane A is wasmi + preview1; Lane B-native is thin runtime (`cfg(macos)`). Keep syscall numbers in `os-*-wasi`, not hand-matched in the recompiler.
 
 ---
 

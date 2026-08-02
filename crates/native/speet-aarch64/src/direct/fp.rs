@@ -21,7 +21,7 @@ use wasm_encoder::Ieee64;
 #[inline(always)]
 fn f64c(v: f64) -> Instruction<'static> { Instruction::F64Const(Ieee64::from(v)) }
 
-impl<Context, E> AArch64Recompiler<Context, E> {
+impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
 
     // ── FLOATDP2 (binary arithmetic: FADD, FSUB, FMUL, FDIV, FNMUL, FMIN(NM), FMAX(NM)) ──
 

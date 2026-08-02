@@ -102,6 +102,9 @@ pub struct MegabinaryOutput<F> {
     pub func_type_indices: Vec<u32>,
     pub fns: Vec<F>,
     pub exports: Vec<(String, u32)>,
+    /// Memory exports as `(name, memory_index)`. Empty → default `"memory"` → 0
+    /// when at least one memory is declared.
+    pub memory_exports: Vec<(String, u32)>,
     pub passive_data: Vec<Vec<u8>>,
     pub data_init_fns: Vec<(F, FuncType)>,
     pub globals: Vec<(GlobalType, ConstExpr)>,
@@ -133,6 +136,7 @@ pub struct MegabinaryBuilder<F> {
     func_type_indices: Vec<u32>,
     fns: Vec<F>,
     exports: Vec<(String, u32)>,
+    memory_exports: Vec<(String, u32)>,
     passive_data: Vec<Vec<u8>>,
     data_init_fns: Vec<(F, FuncType)>,
     globals: Vec<(GlobalType, ConstExpr)>,
@@ -159,6 +163,7 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: Vec::new(),
             fns: Vec::new(),
             exports: Vec::new(),
+            memory_exports: Vec::new(),
             passive_data: Vec::new(),
             data_init_fns: Vec::new(),
             globals: Vec::new(),
@@ -170,6 +175,15 @@ impl<F> MegabinaryBuilder<F> {
             active_elements: Vec::new(),
             imports: Vec::new(),
         }
+    }
+
+    /// Export a declared memory under `name` (e.g. WASI hosts look up `"memory"`).
+    ///
+    /// For multi-memory megabinaries where mem0 is private guest scratch and
+    /// mem1 is the host-shared linear memory, call
+    /// `export_memory("memory", 1)` so WASI `fd_*` stubs see the host buffer.
+    pub fn export_memory(&mut self, name: impl Into<String>, index: u32) {
+        self.memory_exports.push((name.into(), index));
     }
 
     fn intern_type(&mut self, ft: FuncType) -> u32 {
@@ -240,6 +254,7 @@ impl<F> MegabinaryBuilder<F> {
             func_type_indices: self.func_type_indices,
             fns: self.fns,
             exports: self.exports,
+            memory_exports: self.memory_exports,
             passive_data: self.passive_data,
             data_init_fns: self.data_init_fns,
             globals: self.globals,
@@ -394,6 +409,7 @@ pub fn assemble(output: MegabinaryOutput<wasm_encoder::Function>) -> Module {
         mut func_type_indices,
         mut fns,
         exports,
+        memory_exports,
         passive_data,
         data_init_fns,
         globals,
@@ -480,8 +496,13 @@ pub fn assemble(output: MegabinaryOutput<wasm_encoder::Function>) -> Module {
 
     // ExportSection
     let mut export_sec = ExportSection::new();
-    if !memories.is_empty() {
-        export_sec.export("memory", ExportKind::Memory, 0);
+    let mem_exports = if memory_exports.is_empty() && !memories.is_empty() {
+        vec![(String::from("memory"), 0u32)]
+    } else {
+        memory_exports
+    };
+    for (name, idx) in &mem_exports {
+        export_sec.export(name, ExportKind::Memory, *idx);
     }
     for (name, idx) in &exports {
         export_sec.export(name, ExportKind::Func, *idx);

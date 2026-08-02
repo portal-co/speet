@@ -27,7 +27,7 @@ use alloc::collections::BTreeMap;
 use wax_core::build::{InstructionOperatorSink, InstructionOperatorSource, InstructionSource};
 use yecta::{FuncIdx, JumpCallParams, LocalDeclarator, Snippet, Target};
 
-impl<Context, E> AArch64Recompiler<Context, E> {
+impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
     /// Open a new WASM function for the instruction at `pc`.
     fn init_function<F>(
         &mut self,
@@ -165,8 +165,10 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             // ── PC-relative address ───────────────────────────────────────────
             Operation::PCRELADDR(ref i) => self.translate_pcreladdr(ctx, rctx, tail_idx, pc, i, mn)?,
 
-            // ── Exception (BRK) ───────────────────────────────────────────────
-            Operation::EXCEPTION(ref i) => self.translate_exception(ctx, rctx, tail_idx, i, mn)?,
+            // ── Exception (BRK / SVC) ─────────────────────────────────────────
+            Operation::EXCEPTION(ref i) => {
+                self.translate_exception(ctx, rctx, tail_idx, pc, i, mn)?
+            }
 
             // ── System — MRS/MSR NZCV ─────────────────────────────────────────
             Operation::IC_SYSTEM(ref i) => self.translate_ic_system(ctx, rctx, tail_idx, i, mn)?,

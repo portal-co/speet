@@ -25,8 +25,14 @@ yecta = { path = "../../helper/yecta" }
 wasm-layout = { path = "../../helper/wasm-layout" }
 speet-wasm = { path = "../../managed/speet-wasm" }
 speet-linux-wasi = { path = "../../os/speet-linux-wasi" }
+speet-darwin-wasi = { path = "../../os/speet-darwin-wasi" }
 speet-syscall = { path = "../../os/speet-syscall" }
 # Native backend (wasm-blitz) for the wasm-vs-native cross tests; re-exports binary-io.
 speet-recompile = { path = "../../os/speet-recompile" }
 speet-host-api = { path = "../../os/speet-host-api" }
 wasmtime = "45.0.2"
+
+# Lane B-native dual-lane tests (thin runtime) — macOS only.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+speet-runtime = { path = "../../os/speet-runtime" }
+binary-io = { path = "../../../../binary-io" }

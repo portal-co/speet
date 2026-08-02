@@ -30,6 +30,8 @@ members = [
     "crates/os/speet-module-builder",
     "crates/os/speet-linux-wasi",
     "crates/os/speet-linux-wasi-guest",
+    "crates/os/speet-darwin-wasi",
+    "crates/os/speet-darwin-wasi-guest",
     "crates/os/speet-rt",
     "crates/os/speet-host-syscall",
     "crates/os/speet-host-api",

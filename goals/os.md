@@ -53,7 +53,8 @@ Full architecture, formats, pipeline, security model, and phased rollout: [docs/
 - `speet-link`: `MegabinaryBuilder` needs multi-binary `base_func_offset` registry
 - `osctx`: `OS::syscall` / `OS::osfuncall` need concrete vkernel implementations
 - `speet-traps`: `RopDetectTrap` + `CfiReturnTrap` as standard hooks in all frontends
-- `speet-linux-wasi`: WASI preview1 bindings for the Linux target
+- `speet-linux-wasi`: WASI preview1 bindings for the Linux target (RV64 `ecall`)
+- `speet-darwin-wasi`: WASI preview1 bindings for Darwin/BSD guests (aarch64 `svc #0x80`)
 
 ---
 

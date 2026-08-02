@@ -36,6 +36,7 @@ Guides are alignment signals, not hard stops. They work like Claude Code's conte
 | [asm-arch-instruction-sync.md](asm-arch-instruction-sync.md) | `speet-x86_64`, `speet-aarch64` | Do not assume a `WriterCore` method name matches its real encoding — verify against the binary writer impl before concluding something is in sync or a gap |
 | [plugin-api.md](plugin-api.md) | `speet-plugin-api`, `speet-plugin-adapter`, `speet-plugin-host*` | Do not let plugin traits gain `Context`/`E`/`F` generics; do not bypass `PluginTransport`; do not add serde/bincode/rkyv; do not grant host-entity imports outside the manifest-declared allowlist |
 | [thin-runtime-genericity.md](thin-runtime-genericity.md) | `speet-recompile`, `speet-host-api`, `speet-plugin-api`, future `speet-abi-spec`/`speet-abi-codegen` | Do not hand-count a WASM import index; do not intercept external calls by instruction shape instead of PC; do not treat `unsupported_ops` as a correctness proof |
+| [dual-backends.md](dual-backends.md) | Backend A vs B, HostOffset / WASM-runtime OS, Linux-WASI / Darwin-WASI dual-lane | Do not conflate Backend A with Backend B; do not treat `speet-wasm` as Backend B; dual-lane WASI (wasmi) vs thin-runtime native for shared corpus slices |
 
 ---
 

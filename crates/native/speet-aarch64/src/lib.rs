@@ -49,11 +49,48 @@ use speet_traps::{
 use wasm_encoder::{Ieee64, Instruction, ValType};
 use yecta::{FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark, SlotAssigner};
 
+pub mod cfg;
 pub mod direct;
 use direct::A64IndirectTarget;
 
+pub use speet_memory::CallbackContext;
+pub use speet_memory::CallbackContext as SvcContext;
+
+/// Information about an encountered `svc` instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SvcInfo {
+    /// Program counter where the SVC was encountered.
+    pub pc: u64,
+    /// Immediate from the `svc #imm` encoding (Darwin uses `0x80`).
+    pub imm: u16,
+}
+
+/// Trait for SVC instruction callbacks (Darwin/BSD syscalls via `svc #0x80`).
+pub trait SvcCallback<Context, E> {
+    fn call(
+        &mut self,
+        svc: &SvcInfo,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E>,
+    );
+}
+
+impl<Context, E, F> SvcCallback<Context, E> for F
+where
+    F: FnMut(&SvcInfo, &mut Context, &mut CallbackContext<Context, E>),
+{
+    fn call(
+        &mut self,
+        svc: &SvcInfo,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E>,
+    ) {
+        self(svc, ctx, callback_ctx)
+    }
+}
+
 /// AArch64 to WebAssembly recompiler.
-pub struct AArch64Recompiler<Context, E> {
+pub struct AArch64Recompiler<'cb, 'ctx, Context, E> {
     pub(crate) base_pc: u64,
     unsupported_insns: BTreeSet<String>,
     pub(crate) memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
@@ -73,9 +110,11 @@ pub struct AArch64Recompiler<Context, E> {
     stub_for_pc_import_idx: Option<u32>,
     /// Optional slot assigner: controls which guest PCs get WASM function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
+    /// Optional SVC callback (Darwin/BSD `svc #imm`).
+    svc_callback: Option<&'cb mut (dyn SvcCallback<Context, E> + 'ctx)>,
 }
 
-impl<Context, E> AArch64Recompiler<Context, E> {
+impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
     /// AArch64 base parameter count: 31 GPRs (i64) + PC (i64) + 4 NZCV flags
     /// (i32) + 3 scratch temporaries (i64) + 32 FP registers (f64) + SP
     /// (i64) = 72. See the module doc's local-variable layout.
@@ -118,7 +157,21 @@ impl<Context, E> AArch64Recompiler<Context, E> {
             sp_slot: LocalSlot::default(),
             stub_for_pc_import_idx: None,
             slot_assigner: None,
+            svc_callback: None,
         }
+    }
+
+    /// Set a callback for `svc` instructions (e.g. Darwin `svc #0x80`).
+    pub fn set_svc_callback(
+        &mut self,
+        callback: &'cb mut (dyn SvcCallback<Context, E> + 'ctx),
+    ) {
+        self.svc_callback = Some(callback);
+    }
+
+    /// Clear any previously set SVC callback.
+    pub fn clear_svc_callback(&mut self) {
+        self.svc_callback = None;
     }
 
     /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
@@ -184,6 +237,10 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         _ctx: &mut Context,
     ) -> u32 {
+        // Always start from an empty layout. Prior emit closures on the same
+        // Linker (e.g. WasmFrontend) may have left guest scratch locals that
+        // would otherwise shift every arch param index.
+        *rctx.layout_mut() = LocalLayout::empty();
         self.gpr_slot  = rctx.layout_mut().append(31, ValType::I64); // x0–x30
         self.pc_slot   = rctx.layout_mut().append(1,  ValType::I64); // PC
         self.nzcv_slot = rctx.layout_mut().append(4,  ValType::I32); // N, Z, C, V

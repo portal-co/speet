@@ -8,7 +8,7 @@ use disarm64::decoder_full::{
 };
 use disarm64::decoder_full::Mnemonic;
 
-impl<Context, E> AArch64Recompiler<Context, E> {
+impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
 
     // ── ADDSUB_IMM ────────────────────────────────────────────────────────────
 
@@ -738,13 +738,14 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         Ok(())
     }
 
-    // ── EXCEPTION (BRK) ───────────────────────────────────────────────────────
+    // ── EXCEPTION (BRK / SVC) ─────────────────────────────────────────────────
 
     pub(super) fn translate_exception<F>(
         &mut self,
         ctx: &mut Context,
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         tail_idx: usize,
+        pc: u64,
         inner: &EXCEPTION,
         mnemonic: Mnemonic,
     ) -> Result<(), E> {
@@ -756,6 +757,21 @@ impl<Context, E> AArch64Recompiler<Context, E> {
         match inner {
             EXCEPTION::BRK_EXCEPTION(_) => {
                 rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+            }
+            EXCEPTION::SVC_EXCEPTION(svc) => {
+                // SVC encoding: imm16 in bits [20:5] of the instruction word.
+                let info = crate::SvcInfo {
+                    pc,
+                    imm: imm16(svc.0) as u16,
+                };
+                if let Some(ref mut callback) = self.svc_callback {
+                    let mut fed = FedContext::new(rctx, tail_idx);
+                    let mut callback_ctx = CallbackContext::new(&mut fed);
+                    callback.call(&info, ctx, &mut callback_ctx);
+                } else {
+                    // No callback: treat as privileged / unsupported.
+                    unsup!();
+                }
             }
             _ => unsup!(),
         }
