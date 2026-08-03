@@ -186,7 +186,13 @@ impl<F> MegabinaryBuilder<F> {
         self.memory_exports.push((name.into(), index));
     }
 
-    fn intern_type(&mut self, ft: FuncType) -> u32 {
+    /// Intern a function type and return its type-section index.
+    ///
+    /// Call this **before** declaring imports when the linker's
+    /// `return_call_indirect` pool must use [`TypeIdx(0)`](yecta::TypeIdx)
+    /// as the guest register-file signature (otherwise type 0 is a WASI
+    /// import type with an `i32` result and indirect calls fail validation).
+    pub fn intern_type(&mut self, ft: FuncType) -> u32 {
         let next_idx = self.types.len() as u32;
         *self.type_map.entry(ft.clone()).or_insert_with(|| {
             self.types.push(ft);

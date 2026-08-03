@@ -20,8 +20,7 @@ pub struct GuestFuncImport {
 pub const CANONICAL_GUEST_WASM: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/canonical_guest.wasm"));
 
-/// Stable export names inside the guest module.
-pub const EXPORT_SYSCALL_DISPATCH: &str = "syscall_dispatch";
+/// Stable export names inside the shared Unix guest module.
 pub const EXPORT_HANDLER_READ: &str = "handler_read";
 pub const EXPORT_HANDLER_WRITE: &str = "handler_write";
 pub const EXPORT_HANDLER_CLOSE: &str = "handler_close";
@@ -29,13 +28,39 @@ pub const EXPORT_HANDLER_EXIT: &str = "handler_exit";
 
 /// Map Darwin/BSD syscall numbers to guest handler export names.
 pub fn handler_export_name(syscall_num: u64) -> Option<&'static str> {
+    use os_darwin_wasi::sysno;
     match syscall_num {
-        3 => Some(EXPORT_HANDLER_READ),
-        4 => Some(EXPORT_HANDLER_WRITE),
-        6 => Some(EXPORT_HANDLER_CLOSE),
-        1 => Some(EXPORT_HANDLER_EXIT),
+        n if n == sysno::READ => Some(EXPORT_HANDLER_READ),
+        n if n == sysno::WRITE => Some(EXPORT_HANDLER_WRITE),
+        n if n == sysno::CLOSE => Some(EXPORT_HANDLER_CLOSE),
+        n if n == sysno::EXIT => Some(EXPORT_HANDLER_EXIT),
         _ => None,
     }
+}
+
+/// Resolve absolute WASM indices of the four Unix handlers in `wasm`.
+pub fn handler_indices(wasm: &[u8]) -> crate::svc::HandlerIndices {
+    use crate::svc::HandlerIndices;
+    HandlerIndices {
+        read: export_func_index(wasm, EXPORT_HANDLER_READ).expect("handler_read"),
+        write: export_func_index(wasm, EXPORT_HANDLER_WRITE).expect("handler_write"),
+        close: export_func_index(wasm, EXPORT_HANDLER_CLOSE).expect("handler_close"),
+        exit: export_func_index(wasm, EXPORT_HANDLER_EXIT).expect("handler_exit"),
+    }
+}
+
+fn export_func_index(wasm: &[u8], name: &str) -> Option<u32> {
+    for payload in Parser::new(0).parse_all(wasm) {
+        if let Payload::ExportSection(reader) = payload.ok()? {
+            for export in reader {
+                let export = export.ok()?;
+                if export.kind == wasmparser::ExternalKind::Func && export.name == name {
+                    return Some(export.index);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Plan mapping Darwin/BSD syscall numbers to handler function indices inside a linked module.
@@ -268,7 +293,6 @@ mod tests {
         validate_canonical_guest().expect("embedded guest module");
         let exports = guest_export_names(CANONICAL_GUEST_WASM).unwrap();
         for name in [
-            EXPORT_SYSCALL_DISPATCH,
             EXPORT_HANDLER_READ,
             EXPORT_HANDLER_WRITE,
             EXPORT_HANDLER_CLOSE,

@@ -13,7 +13,6 @@ use super::guest_module;
 use super::WasiImports;
 use super::{
     EXPORT_HANDLER_CLOSE, EXPORT_HANDLER_EXIT, EXPORT_HANDLER_READ, EXPORT_HANDLER_WRITE,
-    EXPORT_SYSCALL_DISPATCH,
 };
 
 /// All defined functions from the guest module, ready for a megabinary slot.
@@ -64,14 +63,12 @@ pub fn extract_guest_defined_module(
     })
 }
 
-/// One guest handler function ready to append after translated RV64 code.
+/// One guest handler function ready to append after translated guest code.
 pub struct GuestHandlerFunctions {
-    /// Defined functions in order: close, exit, read, write, dispatch.
+    /// Defined functions in order: close, exit, read, write.
     pub functions: Vec<Function>,
     /// Type-section indices for each function in `functions` (guest-module relative).
     pub type_indices: Vec<u32>,
-    /// Index of [`EXPORT_SYSCALL_DISPATCH`] within `functions`.
-    pub syscall_dispatch_offset: u32,
 }
 
 /// Parse the embedded guest module and rewrite calls to megabinary indices.
@@ -89,7 +86,6 @@ pub fn extract_guest_handlers(
         EXPORT_HANDLER_EXIT,
         EXPORT_HANDLER_READ,
         EXPORT_HANDLER_WRITE,
-        EXPORT_SYSCALL_DISPATCH,
     ];
 
     let mut export_to_defined: BTreeMap<&str, u32> = BTreeMap::new();
@@ -122,24 +118,19 @@ pub fn extract_guest_handlers(
 
     let mut functions = Vec::with_capacity(order.len());
     let mut type_indices = Vec::with_capacity(order.len());
-    let mut syscall_dispatch_offset = 0u32;
 
-    for (out_idx, name) in order.iter().enumerate() {
+    for name in order {
         let defined_idx = export_to_defined[name];
         let (func, ty_idx) = defined_bodies
             .remove(&defined_idx)
             .ok_or_else(|| format!("missing code for guest handler {name}"))?;
         functions.push(func);
         type_indices.push(ty_idx);
-        if *name == EXPORT_SYSCALL_DISPATCH {
-            syscall_dispatch_offset = out_idx as u32;
-        }
     }
 
     Ok(GuestHandlerFunctions {
         functions,
         type_indices,
-        syscall_dispatch_offset,
     })
 }
 
@@ -291,7 +282,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_five_handlers_with_dispatch_last() {
+    fn extracts_four_unix_handlers() {
         let wasi = WasiImports {
             fd_write: 0,
             fd_read: 1,
@@ -299,7 +290,6 @@ mod tests {
             proc_exit: 3,
         };
         let guest = extract_guest_handlers(&wasi, 10).expect("extract");
-        assert_eq!(guest.functions.len(), 5);
-        assert_eq!(guest.syscall_dispatch_offset, 4);
+        assert_eq!(guest.functions.len(), 4);
     }
 }

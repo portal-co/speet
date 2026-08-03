@@ -36,6 +36,16 @@ The shared WASM function type every recompiled guest function is registered unde
 - **Because every function shares one type, WASM's own validator is a free correctness check.** `return_call`/`return_call_indirect` require the *caller's* declared result type to equal the *callee's* — trivially true here since everyone shares type 0, regardless of that type's actual shape. The only way to violate the contract is a bare, non-tail `Instruction::Return` that doesn't push the full register file first (`n` locals, in slot order) — and if some code path does that, `wasmparser::validate()` rejects the module outright (arity/type mismatch) instead of silently miscompiling or (worse) type-punning a truncated register file into a live program's results. Don't add a runtime check for this — the module either validates or it doesn't, and that's the check.
 - If you add a new architecture or a new terminal control-flow path (anything that isn't `return_call`/`return_call_indirect`/`call`+`return_call_indirect`-to-hook), it must end in "push every register-file local as the WASM function's declared results, in slot order, then `return`" — copy the halt stub's shape, don't invent a shorter one.
 
+### Licensing / check-in (ABI stubs and shims)
+
+Canonical policy: AGENTS.md §9 and [future/abi-spec-redirects.md](../future/abi-spec-redirects.md) “Scope discipline”.
+
+1. **libc / libSystem BridgeSupport-derived stub metadata MAY be checked in** (baseline is licensed for this use; checked-in subset can grow with wiring; full baseline codegen into `.generated/` remains fine for local use).
+2. **Custom / AI-generated implementations that do not copy original system source are fine** (runtime tunnels, WASI handlers, hand-written shims).
+3. **Do NOT check in** BridgeSupport-derived definitions for **higher-level Apple frameworks** (beyond libSystem), GPLed SDK drops, other third-party licensed API surfaces, or **original system code** copied from Apple/GNU trees.
+
+Do not treat libc size or a gitignored `.generated/` path as a licensing exclusion of the libc/libSystem baseline.
+
 ---
 
 ## Examples (git history)

@@ -2,7 +2,7 @@
 //! adds `@speet`-specific index-space hooks (`register` / `declare`) that live
 //! on this side of the dependency boundary.
 //!
-//! Darwin/BSD→WASI handler bodies live in [`speet-darwin-wasi-guest`] (Rust → WASM),
+//! Darwin/BSD→WASI handler bodies live in [`speet-unix-wasi-guest`] (Rust → WASM),
 //! are host-mem lowered at build time, and exposed as [`CANONICAL_GUEST_WASM`].
 
 #![no_std]
@@ -16,15 +16,18 @@ mod merge;
 mod svc;
 mod translate;
 
-pub use assemble::recompile_aarch64_darwin_wasi_to_wasm;
+pub use assemble::{
+    recompile_aarch64_darwin_wasi_to_wasm,
+    recompile_aarch64_darwin_wasi_to_wasm_with_targets,
+};
 pub use link::HOST_MEMORY_INDEX;
-pub use svc::{X0_LOCAL, X1_LOCAL, X2_LOCAL, X16_LOCAL, DarwinWasiSvc};
+pub use svc::{X0_LOCAL, X1_LOCAL, X2_LOCAL, X16_LOCAL, DarwinWasiSvc, HandlerIndices};
 pub use guest_module::{
     guest_export_names, guest_func_imports, guest_defined_fn_count, guest_import_count,
-    handler_export_name, validate_canonical_guest, wasi_imports_for_guest_layout,
+    handler_export_name, handler_indices, validate_canonical_guest, wasi_imports_for_guest_layout,
     wasi_imports_from_guest_imports, GuestFuncImport, HandlerModulePlan,
     CANONICAL_GUEST_WASM, EXPORT_HANDLER_CLOSE, EXPORT_HANDLER_EXIT, EXPORT_HANDLER_READ,
-    EXPORT_HANDLER_WRITE, EXPORT_SYSCALL_DISPATCH,
+    EXPORT_HANDLER_WRITE,
 };
 pub use link::{
     func_export_index, link_canonical_guest_wasm, link_wasi_megabinary,

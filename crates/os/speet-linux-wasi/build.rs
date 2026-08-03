@@ -1,4 +1,4 @@
-//! Compile [`speet-linux-wasi-guest`] to WASM, lower host-mem imports, embed.
+//! Compile [`speet-unix-wasi-guest`] to WASM, lower host-mem imports, embed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,7 +6,7 @@ use std::process::Command;
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.join("../../..");
-    let guest_src = workspace_root.join("crates/os/speet-linux-wasi-guest/src");
+    let guest_src = workspace_root.join("crates/os/speet-unix-wasi-guest/src");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let canonical = out_dir.join("canonical_guest.wasm");
     let fallback = manifest_dir.join("guest/canonical.wasm");
@@ -23,7 +23,7 @@ fn main() {
         std::fs::copy(&fallback, &canonical).expect("copy fallback guest wasm");
     } else {
         panic!(
-            "speet-linux-wasi-guest build failed and no fallback at {}",
+            "speet-unix-wasi-guest build failed and no fallback at {}",
             fallback.display()
         );
     }
@@ -38,7 +38,7 @@ fn try_build_and_lower(workspace_root: &Path, out: &Path) -> bool {
             "cargo",
             "build",
             "-p",
-            "speet-linux-wasi-guest",
+            "speet-unix-wasi-guest",
             "--target",
             target,
             "--release",
@@ -70,7 +70,7 @@ fn guest_wasm_path(workspace_root: &Path, target: &str) -> PathBuf {
         let p = PathBuf::from(dir)
             .join(target)
             .join("release")
-            .join("speet_linux_wasi_guest.wasm");
+            .join("speet_unix_wasi_guest.wasm");
         if p.is_file() {
             return p;
         }
@@ -79,5 +79,5 @@ fn guest_wasm_path(workspace_root: &Path, target: &str) -> PathBuf {
         .join("target")
         .join(target)
         .join("release")
-        .join("speet_linux_wasi_guest.wasm")
+        .join("speet_unix_wasi_guest.wasm")
 }

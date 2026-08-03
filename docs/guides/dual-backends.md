@@ -63,7 +63,7 @@ Note: A-OS (`WasmFrontend` + `FuncSchedule`) is **not** a parity lane — covere
 | Guest | Lane A | Lane B-native | Notes |
 |-------|--------|---------------|-------|
 | RV64 Linux (`ecall`) | [`speet-linux-wasi`](../speet-linux-wasi.md) → wasmi | Thin runtime + `MacLibSystemTunnel` / `LinuxLibcTunnel` | Dual-lane harness: `speet-e2e/tests/dual_lane.rs` |
-| aarch64 Darwin/BSD (`svc #0x80`) | [`speet-darwin-wasi`](../speet-darwin-wasi.md) → wasmi | Thin runtime Mach-O path (when wired) | E2E: `darwin_wasi_tests.rs` (write+exit) |
+| aarch64 Darwin/BSD (libSystem dylib/GOT; `svc #0x80` optional) | [`speet-darwin-wasi`](../speet-darwin-wasi.md) → wasmi | Thin runtime Mach-O path (when wired) | Lane A primary path patches GOT/lazy pointers to virtual redirect shims; E2E: `darwin_wasi_tests.rs` |
 
 Parity for a shared corpus slice:
 

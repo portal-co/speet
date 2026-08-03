@@ -1,9 +1,0 @@
-[package]
-name = "speet-darwin-wasi-guest"
-version = "0.1.0"
-edition = "2021"
-publish = false
-description = "Darwin/BSD→WASI syscall handlers compiled to WASM (pre-shimming host-mem imports)"
-
-[lib]
-crate-type = ["cdylib"]

@@ -1,4 +1,4 @@
-//! Translate aarch64 Darwin `.text` with `svc` → merged guest [`syscall_dispatch`].
+//! Translate aarch64 Darwin `.text` with `svc` → Unix guest handlers.
 
 use core::convert::Infallible;
 
@@ -9,8 +9,10 @@ use speet_reach::PcSlotMap;
 use wasm_encoder::{Function, ValType};
 use yecta::{LocalPool, Reactor, SlotAssigner, TableIdx, TypeIdx};
 
+use crate::guest_module::{guest_defined_fn_count, handler_indices};
+use crate::link::N_SYNTHETIC_DISPATCH;
 use crate::manifest::wasi_preview1_manifest;
-use crate::svc::DarwinWasiSvc;
+use crate::svc::{DarwinWasiSvc, HandlerIndices};
 use crate::WasiImports;
 
 static REACTOR_TABLE: TableIdx = TableIdx(0);
@@ -22,6 +24,7 @@ pub struct WasiTranslation {
     pub entry_func_idx: u32,
     pub start_addr: u64,
     pub wasi: WasiImports,
+    pub handlers: HandlerIndices,
     pub syscall_dispatch_idx: u32,
 }
 
@@ -87,13 +90,11 @@ pub fn translate_aarch64_darwin_wasi(text: &[u8], start_addr: u64) -> WasiTransl
 
     let slots = PcSlotMap::all_slots(text, start_addr, &AArch64CfgDecoder);
     let n_translated = slots.total_slots();
-    let n_guest = crate::guest_module::guest_defined_fn_count(crate::CANONICAL_GUEST_WASM);
+    let n_handlers = guest_defined_fn_count(crate::CANONICAL_GUEST_WASM);
+    let n_guest = n_handlers + N_SYNTHETIC_DISPATCH;
     let aarch64_base = n_imports + n_guest;
-    let syscall_dispatch_idx = crate::link::func_export_index(
-        crate::CANONICAL_GUEST_WASM,
-        crate::EXPORT_SYSCALL_DISPATCH,
-    )
-    .expect("syscall_dispatch export");
+    let handlers = handler_indices(crate::CANONICAL_GUEST_WASM);
+    let syscall_dispatch_idx = n_imports + n_handlers;
     let halt_stub_idx = aarch64_base + n_translated;
 
     let mut recompiler = speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
@@ -130,6 +131,7 @@ pub fn translate_aarch64_darwin_wasi(text: &[u8], start_addr: u64) -> WasiTransl
         entry_func_idx: 0,
         start_addr,
         wasi,
+        handlers,
         syscall_dispatch_idx,
     }
 }

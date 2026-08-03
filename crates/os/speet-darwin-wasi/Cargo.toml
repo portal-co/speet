@@ -18,6 +18,9 @@ speet-reach          = { path = "../../helper/speet-reach" }
 speet-aarch64        = { path = "../../native/speet-aarch64" }
 speet-schedule       = { path = "../speet-schedule" }
 speet-wasm           = { path = "../../managed/speet-wasm" }
+speet-plugin-api     = { path = "../../plugin/speet-plugin-api" }
+speet-abi-stubs      = { path = "../speet-abi-stubs" }
+binary-io            = { path = "../../../../binary-io" }
 wasmparser           = { workspace = true, features = ["validate"] }
 wasm-encoder         = { workspace = true, features = ["wasmparser"] }
 yecta                = { path = "../../helper/yecta" }

@@ -1,5 +1,6 @@
 //! Integration tests for the Darwin/BSD-to-WASI syscall translation bridge (Lane A).
 
+use speet_plugin_api::external_target::{ExternalTargetTable, LibraryId};
 use wasmi::AsContext;
 
 /// Hand-written aarch64 Darwin: `write(1, 520, 6)` then `exit(0)`.
@@ -14,19 +15,16 @@ const WRITE_EXIT: &[u8] = &[
     0x01, 0x10, 0x00, 0xD4, // svc #0x80
 ];
 
-#[test]
-fn test_darwin_to_wasi_write_and_exit() {
-    let start_addr = 0x1000u64;
-    let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm(WRITE_EXIT, start_addr);
+#[derive(Default)]
+struct HostState {
+    stdout: Vec<u8>,
+    exit_code: Option<i32>,
+}
+
+fn run_darwin_wasi(wasm: Vec<u8>) -> HostState {
     wasmparser::validate(&wasm).expect("WASM module is invalid");
 
     use wasmi::{Engine, Linker, Module as WasmiModule, Store};
-
-    #[derive(Default)]
-    struct HostState {
-        stdout: Vec<u8>,
-        exit_code: Option<i32>,
-    }
 
     let engine = Engine::default();
     let mut store = Store::new(&engine, HostState::default());
@@ -131,7 +129,44 @@ fn test_darwin_to_wasi_write_and_exit() {
         })
         .collect();
     let _ = entry_func.call(&mut store, &call_params, &mut results);
-    let state = store.into_data();
+    store.into_data()
+}
+
+#[test]
+fn test_darwin_to_wasi_write_and_exit() {
+    let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm(WRITE_EXIT, 0x1000);
+    let state = run_darwin_wasi(wasm);
+    assert_eq!(std::str::from_utf8(&state.stdout).unwrap(), "hello\n");
+    assert_eq!(state.exit_code, Some(0));
+}
+
+/// Calls virtual PCs that a Mach-O loader would place into GOT/lazy-pointer
+/// cells. Both `blr`s land on redirect shim slots, never on `svc`.
+#[test]
+fn test_darwin_got_redirect_write_and_exit() {
+    // mov x0,#1; mov x1,#520; mov x2,#6; mov x3,#0x1024; blr x3;
+    // mov x0,#0; mov x4,#0x1028; blr x4
+    const GOT_WRITE_EXIT: &[u8] = &[
+        0x20, 0x00, 0x80, 0xD2,
+        0x01, 0x41, 0x80, 0xD2,
+        0xC2, 0x00, 0x80, 0xD2,
+        0x83, 0x04, 0x82, 0xD2,
+        0x60, 0x00, 0x3F, 0xD6,
+        0x00, 0x00, 0x80, 0xD2,
+        0x04, 0x05, 0x82, 0xD2,
+        0x80, 0x00, 0x3F, 0xD6,
+    ];
+    let start_addr = 0x1000;
+    let mut targets = ExternalTargetTable::new();
+    // `.text` is 0x20 bytes; shims are at halt + 4 and halt + 8.
+    targets.insert(LibraryId::MAIN_IMAGE, 0x1024, "_write");
+    targets.insert(LibraryId::MAIN_IMAGE, 0x1028, "_exit");
+    let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm_with_targets(
+        GOT_WRITE_EXIT,
+        start_addr,
+        &targets,
+    );
+    let state = run_darwin_wasi(wasm);
     assert_eq!(std::str::from_utf8(&state.stdout).unwrap(), "hello\n");
     assert_eq!(state.exit_code, Some(0));
 }

@@ -30,18 +30,22 @@ Checking in generated code (rather than shipping the raw ABI-spec files and inte
 
 ## Scope discipline (do not skip — see AGENTS.md §9)
 
-**Baseline (libc + libSystem):** codegen the **entire** surface from BridgeSupport inputs. Checked-in stubs under `speet-abi-stubs/src/generated/` (`STUB_SYMBOLS` / `-s`) are only the subset the runtime currently wires; everything else is still generated locally into `speet-abi-stubs/.generated/` (gitignored). Growing POSIX coverage is an **implementation** task (suitability, manifest intercepts, redirect emit), not a codegen allowlist decision.
+Licensing / check-in policy (same three bullets as AGENTS.md §9):
 
-**Outside the baseline:** do **not** check in stubs for other Apple frameworks, GPLed SDK artifacts, or other licensed third-party API surfaces — those stay generated-only/gitignored for **licensing** reasons, not because the codegen pipeline cannot handle them.
+1. **libc / libSystem BridgeSupport-derived stub metadata MAY be checked in** (baseline is licensed for this use; checked-in subset under `speet-abi-stubs/src/generated/` via `STUB_SYMBOLS` / `-s` can grow with wiring; full baseline codegen into `speet-abi-stubs/.generated/` remains fine for local use).
+2. **Custom / AI-generated implementations that do not copy original system source are fine** (runtime tunnels, WASI handlers, hand-written shims).
+3. **Do NOT check in** BridgeSupport-derived definitions for **higher-level Apple frameworks** (beyond libSystem), GPLed SDK drops, other third-party licensed API surfaces, or **original system code** copied from Apple/GNU trees.
+
+Growing POSIX coverage is an **implementation** task (suitability, manifest intercepts, redirect emit), not a codegen allowlist or “libc is too large” decision. `.generated/` is gitignored as local bulk convenience, not because libc/libSystem stubs are unlicensed for check-in.
 
 ```bash
-# Checked-in / wired symbols (committed)
+# Checked-in / wired symbols (committed under src/generated/)
 cargo run -p speet-abi-codegen -- \
   -i test-data/abi-spec/libc-minimal.bridgesupport.xml \
   -o crates/os/speet-abi-stubs/src/generated \
   -s write,exit,printf -a x86_64,aarch64
 
-# Full libc/libSystem baseline (gitignored; run when the BridgeSupport input grows)
+# Full libc/libSystem baseline locally (gitignored .generated/; optional bulk)
 cargo run -p speet-abi-codegen -- \
   -i PATH/TO/libc.bridgesupport.xml \
   -o crates/os/speet-abi-stubs/.generated/libc \

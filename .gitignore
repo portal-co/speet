@@ -2,5 +2,7 @@
 node_modules
 target
 
-# speet-abi-codegen bulk output (full libc/libSystem baseline; not checked in)
+# Local bulk codegen only (full libc/libSystem via --all-symbols). Checked-in
+# subset lives under speet-abi-stubs/src/generated/ — libc size is not a reason
+# to exclude; see AGENTS.md §9 licensing / check-in policy.
 crates/os/speet-abi-stubs/.generated/

@@ -3,17 +3,27 @@
 **Crate:** `crates/os/speet-darwin-wasi`  
 **Status: Active implementation.**
 
-Registers WASI preview1 imports for Darwin/BSD guests, bridging aarch64 `svc #0x80` syscalls onto the WASM runtime's WASI interface. Sibling of [`speet-linux-wasi`](speet-linux-wasi.md).
+Registers WASI preview1 imports for Darwin/BSD guests. Its primary Lane A path
+redirects libSystem dylib calls through virtual GOT/lazy-pointer targets; raw
+aarch64 `svc #0x80` remains supported for syscall-only guests. Sibling of
+[`speet-linux-wasi`](speet-linux-wasi.md).
 
 ---
 
 ## Purpose
 
-When a Mach-O / Darwin-ABI guest is translated for a WASI-compatible runtime (Lane A), its BSD syscalls must land on WASI preview1. `speet-darwin-wasi` provides that bridge:
+When a Mach-O / Darwin-ABI guest is translated for a WASI-compatible runtime
+(Lane A), libSystem calls normally arrive through PLT/GOT or lazy pointers.
+`speet-darwin-wasi` provides that bridge:
 
 1. Embeds a host-mem-lowered guest module (`speet-darwin-wasi-guest`) with `handler_{read,write,close,exit}` and `syscall_dispatch`.
 2. Links that module through `WasmFrontend` (multi-memory: mem0 private, mem1 host).
-3. Hooks aarch64 `svc` via [`DarwinWasiSvc`](../crates/os/speet-darwin-wasi/src/svc.rs) → `call syscall_dispatch`.
+3. Resolves `read`/`write`/`close`/`exit` (and leading-underscore aliases)
+   from an `ExternalTargetTable` into virtual redirect-shim PCs after `.text`.
+   A Mach-O loader patches its GOT/lazy-pointer cells to those PCs; indirect
+   calls then land in the shared handler path.
+4. Keeps [`DarwinWasiSvc`](../crates/os/speet-darwin-wasi/src/svc.rs) →
+   `call syscall_dispatch` as the secondary raw-syscall path.
 
 ---
 
@@ -47,7 +57,13 @@ Mapping table lives in `os-emulation`'s [`os-darwin-wasi`](../../os-emulation/cr
 let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm(text, start_addr);
 ```
 
-E2E: `crates/test/speet-e2e/tests/darwin_wasi_tests.rs` (Lane A write+exit).
+For dylib/GOT guests, use
+`recompile_aarch64_darwin_wasi_to_wasm_with_targets(text, start_addr, &targets)`.
+Target addresses must be the allocated virtual shim PCs; text-only callers
+must patch their data image/GOT before execution.
+
+E2E: `crates/test/speet-e2e/tests/darwin_wasi_tests.rs` (raw-svc and virtual
+redirect write+exit).
 
 ---
 

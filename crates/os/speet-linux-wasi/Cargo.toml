@@ -16,12 +16,17 @@ speet-module-target  = { path = "../speet-module-target" }
 speet-memory           = { path = "../../helper/speet-memory" }
 speet-reach          = { path = "../../helper/speet-reach" }
 speet-riscv          = { path = "../../native/speet-riscv" }
+speet-aarch64        = { path = "../../native/speet-aarch64" }
+speet-x86_64         = { path = "../../native/speet-x86_64" }
+speet-mips           = { path = "../../native/speet-mips" }
 speet-schedule       = { path = "../speet-schedule" }
 speet-wasm           = { path = "../../managed/speet-wasm" }
 rv-asm               = { workspace = true }
+rabbitizer           = { workspace = true }
 wasmparser           = { workspace = true, features = ["validate"] }
 wasm-encoder         = { workspace = true, features = ["wasmparser"] }
 yecta                = { path = "../../helper/yecta" }
+wax-core             = { workspace = true }
 
 [build-dependencies]
 speet-host-mem-shim = { path = "../speet-host-mem-shim" }

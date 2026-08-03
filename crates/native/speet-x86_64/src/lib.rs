@@ -45,6 +45,7 @@ use wax_core::build::InstructionSink;
 use yecta::{EscapeTag, Fed, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, SlotAssigner, TableIdx, TypeIdx, layout::{CellIdx, CellRegistry}};
 pub mod cfg;
 pub mod direct;
+pub use speet_memory::CallbackContext;
 use speet_memory::MemoryAccess;
 use speet_traps::{
     insn::{ArchTag, InsnClass},
@@ -88,6 +89,41 @@ pub struct X86Recompiler<Context, E> {
     /// scalar SSE only). FP handlers reinterpret around WASM FP ops.
     xmm_slot: yecta::LocalSlot,
     stub_for_pc_import_idx: Option<u32>,
+    /// Optional callback for the `syscall` instruction.
+    syscall_callback: Option<alloc::boxed::Box<dyn SyscallCallback<Context, E>>>,
+}
+
+/// Information about an encountered `syscall` instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallInfo {
+    /// Program counter where the instruction was encountered.
+    pub pc: u64,
+    /// Encoded instruction width, in bytes.
+    pub width: u8,
+}
+
+/// Receives x86-64 `syscall` instructions during translation.
+pub trait SyscallCallback<Context, E> {
+    fn call(
+        &mut self,
+        syscall: &SyscallInfo,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E>,
+    );
+}
+
+impl<Context, E, F> SyscallCallback<Context, E> for F
+where
+    F: FnMut(&SyscallInfo, &mut Context, &mut CallbackContext<Context, E>),
+{
+    fn call(
+        &mut self,
+        syscall: &SyscallInfo,
+        ctx: &mut Context,
+        callback_ctx: &mut CallbackContext<Context, E>,
+    ) {
+        self(syscall, ctx, callback_ctx)
+    }
 }
 
 impl<Context, E> X86Recompiler<Context, E> {
@@ -128,7 +164,21 @@ impl<Context, E> X86Recompiler<Context, E> {
             unsupported_insns: alloc::collections::BTreeSet::new(),
             memory_access: None,
             stub_for_pc_import_idx: None,
+            syscall_callback: None,
         }
+    }
+
+    /// Set the callback invoked for each `syscall` instruction.
+    pub fn set_syscall_callback(
+        &mut self,
+        callback: impl SyscallCallback<Context, E> + 'static,
+    ) {
+        self.syscall_callback = Some(alloc::boxed::Box::new(callback));
+    }
+
+    /// Clear the installed `syscall` callback.
+    pub fn clear_syscall_callback(&mut self) {
+        self.syscall_callback = None;
     }
 
     /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
@@ -297,6 +347,10 @@ impl<Context, E> X86Recompiler<Context, E> {
         rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
         _ctx: &mut Context,
     ) -> u32 {
+        // A previous schedule slot (such as the embedded WASI guest) may have
+        // left locals in the shared reactor. The x86 register indices are
+        // fixed, so rebuild the layout before declaring them.
+        *rctx.layout_mut() = LocalLayout::empty();
         self.gpr_slot   = rctx.layout_mut().append(16, wasm_encoder::ValType::I64); // RAX–R15
         self.rip_slot   = rctx.layout_mut().append(1,  wasm_encoder::ValType::I32); // RIP
         self.flags_slot = rctx.layout_mut().append(5,  wasm_encoder::ValType::I32); // ZF SF CF OF PF

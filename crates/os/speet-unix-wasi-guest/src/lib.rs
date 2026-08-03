@@ -1,13 +1,16 @@
-//! Darwin/BSD → WASI preview1 handlers as a linkable WASM module.
+//! Shared Unix → WASI preview1 handlers as a linkable WASM module.
 //!
-//! Scratch iovec marshalling uses [`__speet_host_mem`] imports; the parent
-//! `speet-darwin-wasi` build lowers them to multi-memory ops before embed.
+//! Scratch iovec marshalling uses [`__speet_host_mem`] imports; parent adapter
+//! builds lower them to multi-memory ops before embed.
+//!
+//! OS-specific syscall-number dispatch lives in the arch callback (not here),
+//! so one guest binary serves Linux and Darwin.
 
 #![no_std]
 
 use core::panic::PanicInfo;
 
-/// Shared with [`os_darwin_wasi::IOVEC_SCRATCH_OFFSET`].
+/// Shared with [`os_unix_wasi::IOVEC_SCRATCH_OFFSET`].
 const IOVEC_SCRATCH: i32 = 0x200;
 
 #[link(wasm_import_module = "__speet_host_mem")]
@@ -42,11 +45,10 @@ fn marshal_iovec(a1: i64, a2: i64) {
     }
 }
 
-/// Darwin/BSD `read(2)` → `wasi_snapshot_preview1::fd_read`.
+/// Unix `read(2)` → `wasi_snapshot_preview1::fd_read`.
 #[no_mangle]
 pub extern "C" fn handler_read(a0: i64, a1: i64, a2: i64) -> i64 {
     marshal_iovec(a1, a2);
-    // SAFETY: WASI imports are wired by the megabinary linker.
     let ret = unsafe {
         fd_read(
             a0 as i32,
@@ -58,7 +60,7 @@ pub extern "C" fn handler_read(a0: i64, a1: i64, a2: i64) -> i64 {
     wasi_result(ret, IOVEC_SCRATCH + 8)
 }
 
-/// Darwin/BSD `write(2)` → `wasi_snapshot_preview1::fd_write`.
+/// Unix `write(2)` → `wasi_snapshot_preview1::fd_write`.
 #[no_mangle]
 pub extern "C" fn handler_write(a0: i64, a1: i64, a2: i64) -> i64 {
     marshal_iovec(a1, a2);
@@ -73,7 +75,7 @@ pub extern "C" fn handler_write(a0: i64, a1: i64, a2: i64) -> i64 {
     wasi_result(ret, IOVEC_SCRATCH + 8)
 }
 
-/// Darwin/BSD `close(2)` → `wasi_snapshot_preview1::fd_close`.
+/// Unix `close(2)` → `wasi_snapshot_preview1::fd_close`.
 #[no_mangle]
 pub extern "C" fn handler_close(a0: i64) -> i64 {
     let ret = unsafe { fd_close(a0 as i32) };
@@ -84,22 +86,10 @@ pub extern "C" fn handler_close(a0: i64) -> i64 {
     }
 }
 
-/// Darwin/BSD `exit(2)` → `wasi_snapshot_preview1::proc_exit`.
+/// Unix `exit(2)` → `wasi_snapshot_preview1::proc_exit`.
 #[no_mangle]
 pub extern "C" fn handler_exit(a0: i64) -> ! {
     unsafe { proc_exit(a0 as i32) }
-}
-
-/// Syscall-number dispatch (Darwin/BSD numbers in `x16`).
-#[no_mangle]
-pub extern "C" fn syscall_dispatch(num: i64, a0: i64, a1: i64, a2: i64) -> i64 {
-    match num as u64 {
-        3 => handler_read(a0, a1, a2),
-        4 => handler_write(a0, a1, a2),
-        6 => handler_close(a0),
-        1 => handler_exit(a0),
-        _ => -(38i64), // ENOSYS
-    }
 }
 
 #[panic_handler]

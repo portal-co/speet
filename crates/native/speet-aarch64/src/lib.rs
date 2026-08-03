@@ -65,7 +65,10 @@ pub struct SvcInfo {
     pub imm: u16,
 }
 
-/// Trait for SVC instruction callbacks (Darwin/BSD syscalls via `svc #0x80`).
+/// Trait for SVC instruction callbacks.
+///
+/// An embedder installs one callback and selects its ABI there: Darwin/BSD
+/// reads the number from x16 for `svc #0x80`; Linux reads x8 for `svc #0`.
 pub trait SvcCallback<Context, E> {
     fn call(
         &mut self,

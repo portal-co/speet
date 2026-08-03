@@ -1,4 +1,4 @@
-//! Translate RV64 Linux `.text` with `ecall` → merged guest [`syscall_dispatch`].
+//! Translate RV64 Linux `.text` with `ecall` → Unix guest handlers.
 
 use core::convert::Infallible;
 
@@ -10,7 +10,9 @@ use speet_riscv::cfg::RiscVCfgDecoder;
 use wasm_encoder::{Function, ValType};
 use yecta::{LocalPool, Reactor, SlotAssigner, TableIdx, TypeIdx};
 
-use crate::ecall::LinuxWasiEcall;
+use crate::ecall::{HandlerIndices, LinuxWasiEcall};
+use crate::guest_module::{guest_defined_fn_count, handler_indices};
+use crate::link::N_SYNTHETIC_DISPATCH;
 use crate::manifest::wasi_preview1_manifest;
 use crate::WasiImports;
 
@@ -23,6 +25,7 @@ pub struct WasiTranslation {
     pub entry_func_idx: u32,
     pub start_addr: u64,
     pub wasi: WasiImports,
+    pub handlers: HandlerIndices,
     pub syscall_dispatch_idx: u32,
 }
 
@@ -94,13 +97,11 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
         },
     );
     let n_translated = slots.total_slots();
-    let n_guest = crate::guest_module::guest_defined_fn_count(crate::CANONICAL_GUEST_WASM);
+    let n_handlers = guest_defined_fn_count(crate::CANONICAL_GUEST_WASM);
+    let n_guest = n_handlers + N_SYNTHETIC_DISPATCH;
     let rv64_base = n_imports + n_guest;
-    let syscall_dispatch_idx = crate::link::func_export_index(
-        crate::CANONICAL_GUEST_WASM,
-        crate::EXPORT_SYSCALL_DISPATCH,
-    )
-    .expect("syscall_dispatch export");
+    let handlers = handler_indices(crate::CANONICAL_GUEST_WASM);
+    let syscall_dispatch_idx = n_imports + n_handlers;
     let halt_stub_idx = rv64_base + n_translated;
 
     let mut recompiler =
@@ -115,13 +116,13 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);
 
-    let mut ecall_cb = LinuxWasiEcall {
+    let mut ecall_cb = LinuxWasiEcall::rv64(
         syscall_dispatch_idx,
         slots,
-        base_func_offset: rv64_base,
+        rv64_base,
         halt_stub_idx,
-        num_params: params.len() as u32,
-    };
+        params.len() as u32,
+    );
     recompiler.set_ecall_callback(&mut ecall_cb);
 
     recompiler
@@ -141,6 +142,7 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
         entry_func_idx: 0,
         start_addr,
         wasi,
+        handlers,
         syscall_dispatch_idx,
     }
 }

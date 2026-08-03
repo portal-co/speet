@@ -1,4 +1,4 @@
-//! Route guest `svc` sites to the linked [`syscall_dispatch`](super::EXPORT_SYSCALL_DISPATCH) function.
+//! Route guest `svc` sites to a link-time Darwin number → Unix handler dispatch.
 
 use speet_reach::PcSlotMap;
 use wasm_encoder::Instruction;
@@ -11,17 +11,68 @@ pub const X2_LOCAL: u32 = 2;
 /// Syscall number register (Darwin/BSD convention).
 pub const X16_LOCAL: u32 = 16;
 
-/// [`speet_aarch64::SvcCallback`] that calls the merged Darwin-WASI guest module.
+/// Absolute WASM indices of shared Unix guest handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandlerIndices {
+    pub read: u32,
+    pub write: u32,
+    pub close: u32,
+    pub exit: u32,
+}
+
+/// Build a `(num, a0, a1, a2) -> i64` dispatch for Darwin/BSD numbers.
+pub fn build_syscall_dispatch(handlers: HandlerIndices) -> wasm_encoder::Function {
+    use os_darwin_wasi::sysno;
+    use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
+    let mut f = Function::new([]);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(sysno::READ as i64));
+    f.instruction(&I::I64Eq);
+    f.instruction(&I::If(BlockType::Result(ValType::I64)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::LocalGet(2));
+    f.instruction(&I::LocalGet(3));
+    f.instruction(&I::Call(handlers.read));
+    f.instruction(&I::Else);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(sysno::WRITE as i64));
+    f.instruction(&I::I64Eq);
+    f.instruction(&I::If(BlockType::Result(ValType::I64)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::LocalGet(2));
+    f.instruction(&I::LocalGet(3));
+    f.instruction(&I::Call(handlers.write));
+    f.instruction(&I::Else);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(sysno::CLOSE as i64));
+    f.instruction(&I::I64Eq);
+    f.instruction(&I::If(BlockType::Result(ValType::I64)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::Call(handlers.close));
+    f.instruction(&I::Else);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(sysno::EXIT as i64));
+    f.instruction(&I::I64Eq);
+    f.instruction(&I::If(BlockType::Result(ValType::I64)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::Call(handlers.exit));
+    f.instruction(&I::Unreachable);
+    f.instruction(&I::Else);
+    f.instruction(&I::I64Const(-38));
+    f.instruction(&I::End);
+    f.instruction(&I::End);
+    f.instruction(&I::End);
+    f.instruction(&I::End);
+    f.instruction(&I::End);
+    f
+}
+
+/// [`speet_aarch64::SvcCallback`] that calls a synthetic Darwin dispatch function.
 pub struct DarwinWasiSvc {
-    /// Absolute WASM index of [`super::EXPORT_SYSCALL_DISPATCH`].
     pub syscall_dispatch_idx: u32,
-    /// PC → sequential slot map for the translated `.text` blob.
     pub slots: PcSlotMap,
-    /// WASM index of the first translated guest function.
     pub base_func_offset: u32,
-    /// Halt stub index when fall-through PC has no translated slot.
     pub halt_stub_idx: u32,
-    /// Full translated-function param count (register file width).
     pub num_params: u32,
 }
 
@@ -32,7 +83,6 @@ impl DarwinWasiSvc {
         ctx: &mut Context,
         cb: &mut speet_aarch64::CallbackContext<'_, Context, E>,
     ) -> Result<(), E> {
-        // AArch64 `svc` is always 4 bytes wide.
         let next_pc = svc.pc + 4;
         let next_pc_func = self
             .slots

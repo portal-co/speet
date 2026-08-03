@@ -1394,6 +1394,21 @@ impl<Context, E> X86Recompiler<Context, E> {
                 // `Unreachable` to a native `hlt` (naive.rs), so this is the
                 // exact round-trip inverse — not a fallback/gap.
                 Mnemonic::Hlt => { rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?; Ok(Some(())) }
+                Mnemonic::Syscall => {
+                    let info = crate::SyscallInfo {
+                        pc: inst_rip,
+                        width: inst_len as u8,
+                    };
+                    if let Some(callback) = self.syscall_callback.as_mut() {
+                        let mut fed = speet_link_core::context::FedContext::new(rctx, tail_idx);
+                        let mut callback_ctx = speet_memory::CallbackContext::new(&mut fed);
+                        callback.call(&info, ctx, &mut callback_ctx);
+                        Ok(Some(()))
+                    } else {
+                        rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
+                        Ok(Some(()))
+                    }
+                }
                 Mnemonic::Lea => {
                     if inst.op0_kind() != OpKind::Register || inst.op1_kind() != OpKind::Memory {
                         Ok(None)

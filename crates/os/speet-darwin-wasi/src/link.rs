@@ -10,6 +10,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use speet_aarch64::cfg::AArch64CfgDecoder;
+use binary_io::BinArch;
+use speet_host_api::{FuncImport, ImportManifest, WasmValType};
 use speet_link_core::{
     unit::FuncType, BinaryUnit, ReactorContext, Recompile,
 };
@@ -19,14 +21,17 @@ use speet_module_builder::{assemble, ElementsOwned, MegabinaryBuilder};
 use speet_reach::PcSlotMap;
 use speet_schedule::FuncSchedule;
 use speet_wasm::{GuestMemoryConfig, IndexOffsets, WasmFrontend};
+use speet_plugin_api::external_target::{CallingConvention, ExternalTargetTable};
 use wasm_encoder::{
-    ConstExpr, Function, MemoryType, RefType, TableType, ValType,
+    ConstExpr, Function, Instruction, MemoryType, RefType, TableType, ValType,
 };
 use wasmparser::{BinaryReaderError, Parser, Payload};
 use yecta::SlotAssigner;
 
-use crate::guest_module::{self, guest_defined_fn_count, CANONICAL_GUEST_WASM, EXPORT_SYSCALL_DISPATCH};
-use crate::svc::DarwinWasiSvc;
+use crate::guest_module::{self, guest_defined_fn_count, handler_indices, CANONICAL_GUEST_WASM};
+use crate::svc::{build_syscall_dispatch, DarwinWasiSvc, HandlerIndices, X0_LOCAL};
+
+pub(crate) const N_SYNTHETIC_DISPATCH: u32 = 1;
 use crate::{WasiImports, WasiImportsExt};
 
 /// Host scratch memory index (guest linear memory stays at 0).
@@ -38,9 +43,10 @@ type LinkErr = BinaryReaderError;
 pub fn link_canonical_guest_wasm() -> Vec<u8> {
     let mut schedule: FuncSchedule<(), LinkErr, Function> = FuncSchedule::new();
     let wasi = WasiImports::register(schedule.entity_space_mut());
-    let n_guest = guest_defined_fn_count(CANONICAL_GUEST_WASM);
+    let n_guest = guest_defined_fn_count(CANONICAL_GUEST_WASM) + N_SYNTHETIC_DISPATCH;
+    let handlers = handler_indices(CANONICAL_GUEST_WASM);
     let _guest_slot = schedule.push(n_guest, move |rctx, ctx| {
-        emit_guest_unit(rctx, ctx)
+        emit_guest_unit(rctx, ctx, handlers)
     });
 
     let mut builder = MegabinaryBuilder::<Function>::new();
@@ -56,21 +62,60 @@ pub fn link_canonical_guest_wasm() -> Vec<u8> {
 
 /// Link guest (slot 0) + translated aarch64 (slot 1) into one WASI megabinary.
 pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
-    let slots = PcSlotMap::all_slots(text, start_addr, &AArch64CfgDecoder);
-    let n_aarch64 = slots.total_slots();
+    link_wasi_megabinary_inner(text, start_addr, &[])
+}
+
+/// Link guest handlers plus aarch64 text and virtual PLT redirect shims.
+///
+/// `targets` must name the virtual shim PCs placed directly after the halt
+/// slot. This is intentionally address-driven: an indirect `blr`, a function
+/// pointer, and a GOT/lazy pointer all reach the same slot-map entry.
+pub fn link_wasi_megabinary_with_targets(
+    text: &[u8],
+    start_addr: u64,
+    targets: &ExternalTargetTable,
+) -> Vec<u8> {
+    let redirects = resolve_redirects(targets);
+    let halt_pc = start_addr + text.len() as u64;
+    for (i, redirect) in redirects.iter().enumerate() {
+        let expected = halt_pc + (i as u64 + 1) * 4;
+        assert_eq!(
+            redirect.address, expected,
+            "Darwin redirect target {} must use virtual shim PC {expected:#x}, got {:#x}",
+            redirect.symbol, redirect.address,
+        );
+    }
+    link_wasi_megabinary_inner(text, start_addr, &redirects)
+}
+
+fn link_wasi_megabinary_inner(
+    text: &[u8],
+    start_addr: u64,
+    redirects: &[DarwinRedirect],
+) -> Vec<u8> {
+    let text_slots = PcSlotMap::all_slots(text, start_addr, &AArch64CfgDecoder);
+    let n_aarch64 = text_slots.total_slots();
+    // Redirect PCs are reached by indirect-table arithmetic, so they do not
+    // need decoded instruction slots. Keeping the assigner text-only avoids
+    // materializing synthetic "instructions" outside the input blob.
+    let slots = text_slots;
     let n_halt = 1u32;
 
     let mut schedule: FuncSchedule<(), LinkErr, Function> = FuncSchedule::new();
     let wasi = WasiImports::register(schedule.entity_space_mut());
 
-    let n_guest = guest_defined_fn_count(CANONICAL_GUEST_WASM);
-    let guest_slot = schedule.push(n_guest, move |rctx, ctx| emit_guest_unit(rctx, ctx));
+    let n_handlers = guest_defined_fn_count(CANONICAL_GUEST_WASM);
+    let n_guest = n_handlers + N_SYNTHETIC_DISPATCH;
+    let handlers = handler_indices(CANONICAL_GUEST_WASM);
+    let guest_slot = schedule.push(n_guest, move |rctx, ctx| {
+        emit_guest_unit(rctx, ctx, handlers)
+    });
     let guest_base = schedule.entity_space().functions.base(guest_slot);
-    let syscall_dispatch_idx =
-        func_export_index(CANONICAL_GUEST_WASM, EXPORT_SYSCALL_DISPATCH)
-            .expect("syscall_dispatch export");
+    let syscall_dispatch_idx = guest_base + n_handlers;
 
-    let aarch64_slot = schedule.push(n_aarch64 + n_halt, move |rctx, ctx| {
+    let n_shims = redirects.len() as u32;
+    let redirects = redirects.to_vec();
+    let aarch64_slot = schedule.push(n_aarch64 + n_shims + n_halt, move |rctx, ctx| {
         emit_aarch64_unit(
             rctx,
             ctx,
@@ -78,13 +123,19 @@ pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
             start_addr,
             &slots,
             syscall_dispatch_idx,
-            guest_base + n_guest,
+            &redirects,
         )
     });
     let aarch64_base = schedule.entity_space().functions.base(aarch64_slot);
     let aarch64_total = schedule.entity_space().functions.count(aarch64_slot);
 
     let mut builder = MegabinaryBuilder::<Function>::new();
+    // Pool `TypeIdx(0)` must be the aarch64 register-file signature before any
+    // WASI import types are interned — otherwise `blr`/`return_call_indirect`
+    // validates against an i32-returning import type.
+    let reg_types = aarch64_register_val_types();
+    let reg_ty = FuncType::from_val_types(&reg_types, &reg_types);
+    assert_eq!(builder.intern_type(reg_ty), 0);
     let mut declare_ctx = ();
     wasi.declare(&mut builder, &mut declare_ctx).expect("declare wasi");
     declare_guest_memories(&mut builder);
@@ -100,7 +151,14 @@ pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
         },
         None,
     );
-    let elem_indices: Vec<u32> = (aarch64_base..table_size).collect();
+    // The address-to-table formula reserves the PC at `halt_pc` for the halt
+    // function. Redirect PCs start one slot after it, while their function
+    // bodies stay physically before halt in the code section. The element
+    // segment is therefore the indirection that keeps virtual PCs and bodies
+    // in their respective contractual orders.
+    let mut elem_indices: Vec<u32> = (aarch64_base..aarch64_base + n_aarch64).collect();
+    elem_indices.push(aarch64_base + n_aarch64 + n_shims);
+    elem_indices.extend(aarch64_base + n_aarch64..aarch64_base + n_aarch64 + n_shims);
     builder.add_element_segment(
         0,
         ConstExpr::i64_const(aarch64_base as i64),
@@ -113,14 +171,71 @@ pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
     assemble(linker.plugin.finish()).finish()
 }
 
+#[derive(Clone)]
+struct DarwinRedirect {
+    address: u64,
+    symbol: String,
+    handler: HandlerKind,
+}
+
+#[derive(Clone, Copy)]
+enum HandlerKind {
+    Read,
+    Write,
+    Close,
+    Exit,
+}
+
+impl HandlerKind {
+    fn from_symbol(symbol: &str) -> Option<Self> {
+        match symbol {
+            "read" | "_read" => Some(Self::Read),
+            "write" | "_write" => Some(Self::Write),
+            "close" | "_close" => Some(Self::Close),
+            "exit" | "_exit" => Some(Self::Exit),
+            _ => None,
+        }
+    }
+
+    fn arity(self) -> usize {
+        match self {
+            Self::Read | Self::Write => 3,
+            Self::Close | Self::Exit => 1,
+        }
+    }
+
+    fn syscall_number(self) -> u64 {
+        use os_darwin_wasi::sysno;
+        match self {
+            Self::Read => sysno::READ,
+            Self::Write => sysno::WRITE,
+            Self::Close => sysno::CLOSE,
+            Self::Exit => sysno::EXIT,
+        }
+    }
+}
+
+fn resolve_redirects(targets: &ExternalTargetTable) -> Vec<DarwinRedirect> {
+    targets
+        .iter()
+        .filter_map(|entry| {
+            HandlerKind::from_symbol(&entry.label).map(|handler| DarwinRedirect {
+                address: entry.address,
+                symbol: entry.label,
+                handler,
+            })
+        })
+        .collect()
+}
+
 /// Same as [`link_wasi_megabinary`] but also returns layout metadata.
 pub fn link_wasi_megabinary_with_plan(text: &[u8], start_addr: u64) -> (Vec<u8>, WasiLinkPlan) {
     let n_imports = guest_module::guest_import_count(CANONICAL_GUEST_WASM);
-    let n_guest = guest_defined_fn_count(CANONICAL_GUEST_WASM);
     let slots = PcSlotMap::all_slots(text, start_addr, &AArch64CfgDecoder);
     let n_aarch64 = slots.total_slots();
-    let syscall_dispatch_idx =
-        func_export_index(CANONICAL_GUEST_WASM, EXPORT_SYSCALL_DISPATCH).unwrap();
+    let n_handlers = guest_defined_fn_count(CANONICAL_GUEST_WASM);
+    let n_guest = n_handlers + N_SYNTHETIC_DISPATCH;
+    let handlers = handler_indices(CANONICAL_GUEST_WASM);
     let guest_base = n_imports;
     let aarch64_base = guest_base + n_guest;
     let wasm = link_wasi_megabinary(text, start_addr);
@@ -133,7 +248,8 @@ pub fn link_wasi_megabinary_with_plan(text: &[u8], start_addr: u64) -> (Vec<u8>,
         n_imports,
         guest_base,
         guest_count: n_guest,
-        syscall_dispatch_idx,
+        handlers,
+        syscall_dispatch_idx: guest_base + n_handlers,
         aarch64_base,
         aarch64_count: n_aarch64 + 1,
     };
@@ -147,6 +263,7 @@ pub struct WasiLinkPlan {
     pub n_imports: u32,
     pub guest_base: u32,
     pub guest_count: u32,
+    pub handlers: HandlerIndices,
     pub syscall_dispatch_idx: u32,
     pub aarch64_base: u32,
     pub aarch64_count: u32,
@@ -222,6 +339,7 @@ pub fn func_export_index(wasm: &[u8], name: &str) -> Option<u32> {
 fn emit_guest_unit(
     rctx: &mut dyn ReactorContext<(), LinkErr, FnType = Function>,
     ctx: &mut (),
+    handlers: HandlerIndices,
 ) -> BinaryUnit<Function> {
     let mut frontend = WasmFrontend::with_wasm_encoder_fn(
         guest_memory_configs(),
@@ -231,7 +349,14 @@ fn emit_guest_unit(
     frontend
         .translate_module(ctx, rctx, CANONICAL_GUEST_WASM)
         .expect("guest translate_module");
-    frontend.drain_unit(rctx, guest_export_entry_points())
+    let mut unit = frontend.drain_unit(rctx, guest_export_entry_points());
+    let dispatch_ty = FuncType::from_val_types(
+        &[ValType::I64, ValType::I64, ValType::I64, ValType::I64],
+        &[ValType::I64],
+    );
+    unit.fns.push(build_syscall_dispatch(handlers));
+    unit.func_types.push(dispatch_ty);
+    unit
 }
 
 fn emit_aarch64_unit(
@@ -241,7 +366,7 @@ fn emit_aarch64_unit(
     start_addr: u64,
     slots: &PcSlotMap,
     syscall_dispatch_idx: u32,
-    halt_stub_idx: u32,
+    redirects: &[DarwinRedirect],
 ) -> BinaryUnit<Function> {
     let mut recompiler =
         speet_aarch64::AArch64Recompiler::<(), LinkErr>::new_with_base_pc(start_addr);
@@ -253,7 +378,7 @@ fn emit_aarch64_unit(
         syscall_dispatch_idx,
         slots: slots.clone(),
         base_func_offset: rctx.base_func_offset(),
-        halt_stub_idx,
+        halt_stub_idx: rctx.base_func_offset() + slots.total_slots(),
         num_params: params.len() as u32,
     };
     recompiler.set_svc_callback(&mut svc_cb);
@@ -271,6 +396,18 @@ fn emit_aarch64_unit(
     let mut fns = rctx.drain_fns();
     let register_type = FuncType::from_val_types(&params, &params);
     let mut func_types = vec![register_type.clone(); fns.len()];
+    // Redirect PCs are table-only synthetic addresses, not decoded slots;
+    // append their bodies after the translated text functions.
+    for redirect in redirects {
+        fns.push(build_redirect_shim(
+            redirect,
+            syscall_dispatch_idx,
+            params.len() as u32,
+            start_addr,
+            rctx.base_func_offset(),
+        ));
+        func_types.push(register_type.clone());
+    }
     fns.push(build_halt_stub(&params));
     func_types.push(register_type);
 
@@ -292,6 +429,25 @@ fn collect_params(rctx: &dyn ReactorContext<(), LinkErr, FnType = Function>) -> 
         .collect()
 }
 
+/// Fixed aarch64 register-file param types matching
+/// [`speet_aarch64::AArch64Recompiler::setup_traps`] plus the two
+/// [`RuntimeLayoutParams`](speet_link_core::RuntimeLayoutParams) i64s the
+/// linker injects (`text_base`, `host_mem_base`).
+fn aarch64_register_val_types() -> Vec<ValType> {
+    let mut v = Vec::with_capacity(
+        speet_aarch64::AArch64Recompiler::<(), LinkErr>::BASE_PARAMS as usize + 2,
+    );
+    v.extend(core::iter::repeat(ValType::I64).take(31)); // x0–x30
+    v.push(ValType::I64); // PC
+    v.extend(core::iter::repeat(ValType::I32).take(4)); // NZCV
+    v.extend(core::iter::repeat(ValType::I64).take(3)); // scratch
+    v.extend(core::iter::repeat(ValType::F64).take(32)); // V0–V31
+    v.push(ValType::I64); // SP
+    v.push(ValType::I64); // layout: text_base
+    v.push(ValType::I64); // layout: host_mem_base
+    v
+}
+
 fn build_halt_stub(params: &[ValType]) -> Function {
     let mut f = Function::new([]);
     for p in 0..params.len() as u32 {
@@ -302,10 +458,80 @@ fn build_halt_stub(params: &[ValType]) -> Function {
     f
 }
 
+/// Build a redirect slot that preserves the aarch64 register-file ABI while
+/// calling one of the shared Unix/WASI handlers.
+///
+/// Guest `blr` is lowered as `return_call_indirect`, so the shim must
+/// `return_call_indirect` through LR (`x30`) to resume after the call site —
+/// a bare `return` would unwind past `_start` and skip the rest of the guest.
+fn build_redirect_shim(
+    redirect: &DarwinRedirect,
+    syscall_dispatch_idx: u32,
+    n_register_params: u32,
+    text_base: u64,
+    base_func_offset: u32,
+) -> Function {
+    let convention = handler_calling_convention(&redirect.symbol, redirect.handler.arity());
+    let mut f = Function::new([]);
+    f.instruction(&Instruction::I64Const(redirect.handler.syscall_number() as i64));
+    for &local in convention.arg_locals.iter().take(redirect.handler.arity()) {
+        f.instruction(&Instruction::LocalGet(local));
+    }
+    for _ in redirect.handler.arity()..3 {
+        f.instruction(&Instruction::I64Const(0));
+    }
+    f.instruction(&Instruction::Call(syscall_dispatch_idx));
+    if matches!(redirect.handler, HandlerKind::Exit) {
+        // `proc_exit` may return under wasmi stubs; never resume the guest.
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        return f;
+    }
+    f.instruction(&Instruction::LocalSet(X0_LOCAL));
+    for p in 0..n_register_params {
+        f.instruction(&Instruction::LocalGet(p));
+    }
+    // table_idx = (x30 - text_base) / 4 + base_func_offset
+    f.instruction(&Instruction::LocalGet(30)); // LR
+    f.instruction(&Instruction::I64Const(text_base as i64));
+    f.instruction(&Instruction::I64Sub);
+    f.instruction(&Instruction::I64Const(2));
+    f.instruction(&Instruction::I64ShrU);
+    f.instruction(&Instruction::I64Const(base_func_offset as i64));
+    f.instruction(&Instruction::I64Add);
+    f.instruction(&Instruction::ReturnCallIndirect {
+        type_index: 0,
+        table_index: 0,
+    });
+    f.instruction(&Instruction::End);
+    f
+}
+
+fn handler_calling_convention(symbol: &str, arity: usize) -> CallingConvention {
+    let manifest = ImportManifest {
+        func_imports: vec![FuncImport {
+            module: String::from("speet_darwin_wasi"),
+            name: String::from("handler"),
+            params: core::iter::repeat_n(WasmValType::I64, arity).collect(),
+            results: vec![WasmValType::I64],
+            intercepts: vec![String::from(symbol)],
+        }],
+    };
+    let mut convention =
+        speet_abi_stubs::plt_calling_convention(&manifest, BinArch::AArch64, symbol);
+    // The shared handler functions accept/return i64 even where the source
+    // libSystem declaration is i32; preserve ABI-selected registers but not
+    // the source-import conversion operations.
+    convention.arg_wrap_i32 = vec![false; convention.arg_locals.len()];
+    convention.result_local = Some(X0_LOCAL);
+    convention.result_extend_i32 = false;
+    convention
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EXPORT_HANDLER_WRITE;
+    use crate::{EXPORT_HANDLER_EXIT, EXPORT_HANDLER_WRITE};
 
     /// Hand-written aarch64: write(1, 520, 6) then exit(0).
     const WRITE_EXIT: &[u8] = &[
@@ -323,18 +549,19 @@ mod tests {
     fn link_guest_via_wasm_frontend_validates() {
         let wasm = link_canonical_guest_wasm();
         wasmparser::validate(&wasm).expect("linked guest module");
-        assert!(func_export_index(&wasm, EXPORT_SYSCALL_DISPATCH).is_some());
         assert!(func_export_index(&wasm, EXPORT_HANDLER_WRITE).is_some());
+        assert!(func_export_index(&wasm, EXPORT_HANDLER_EXIT).is_some());
     }
 
     #[test]
-    fn guest_first_slot_preserves_syscall_dispatch_index() {
+    fn guest_first_slot_preserves_handler_indices() {
         let (_wasm, plan) = link_wasi_megabinary_with_plan(WRITE_EXIT, 0x1000);
         assert_eq!(plan.guest_base, plan.n_imports);
         assert_eq!(plan.guest_count, 5);
+        assert_eq!(plan.handlers, handler_indices(CANONICAL_GUEST_WASM));
         assert_eq!(
             plan.syscall_dispatch_idx,
-            func_export_index(CANONICAL_GUEST_WASM, EXPORT_SYSCALL_DISPATCH).unwrap()
+            plan.guest_base + guest_defined_fn_count(CANONICAL_GUEST_WASM)
         );
         assert_eq!(plan.aarch64_base, plan.guest_base + plan.guest_count);
     }

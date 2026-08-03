@@ -1,0 +1,9 @@
+[package]
+name = "speet-unix-wasi-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared Unix→WASI handlers compiled to WASM (pre-shimming host-mem imports)"
+
+[lib]
+crate-type = ["cdylib"]
