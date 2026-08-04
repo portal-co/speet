@@ -67,6 +67,15 @@ pub fn link_canonical_guest_wasm() -> Vec<u8> {
 
 /// Link guest (slot 0) + translated RV64 (slot 1) into one WASI megabinary.
 pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
+    link_wasi_megabinary_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Like [`link_wasi_megabinary`], with an explicit speculative-call escape policy.
+pub fn link_wasi_megabinary_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> Vec<u8> {
     let slots = PcSlotMap::all_slots(
         text,
         start_addr,
@@ -90,6 +99,7 @@ pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
     let syscall_dispatch_idx = guest_base + n_handlers;
 
     let rv64_slot = schedule.push(n_rv64 + n_halt, move |rctx, ctx| {
+        rctx.set_escape(speculative.escape);
         emit_rv64_unit(
             rctx,
             ctx,
@@ -98,6 +108,7 @@ pub fn link_wasi_megabinary(text: &[u8], start_addr: u64) -> Vec<u8> {
             &slots,
             syscall_dispatch_idx,
             guest_base + n_guest,
+            speculative,
         )
     });
     let rv64_base = schedule.entity_space().functions.base(rv64_slot);
@@ -265,6 +276,8 @@ fn declare_guest_memories(builder: &mut MegabinaryBuilder<Function>) {
         shared: false,
         page_size_log2: None,
     });
+    // WASI hosts look up export `"memory"`; guest scratch is mem0, host buffer is mem1.
+    builder.export_memory("memory", HOST_MEMORY_INDEX);
 }
 
 fn guest_memory_configs() -> Vec<GuestMemoryConfig<(), LinkErr>> {
@@ -349,12 +362,14 @@ fn emit_rv64_unit(
     slots: &PcSlotMap,
     syscall_dispatch_idx: u32,
     halt_stub_idx: u32,
+    speculative: yecta::SpeculativeEscape,
 ) -> BinaryUnit<Function> {
     let mut recompiler =
         speet_riscv::RiscVRecompiler::<(), LinkErr, Function>::new_with_full_config(
             start_addr, false, true, false,
         );
     recompiler.set_slot_assigner(slots.clone());
+    recompiler.set_speculative_calls(speculative.enable);
     recompiler.setup_traps(rctx, ctx);
     let params = collect_params(rctx);
 
@@ -379,9 +394,10 @@ fn emit_rv64_unit(
         .expect("translate_bytes");
 
     let mut fns = rctx.drain_fns();
-    let register_type = FuncType::from_val_types(&params, &params);
+    let results = register_file_results(&params, speculative.escape);
+    let register_type = FuncType::from_val_types(&params, &results);
     let mut func_types = vec![register_type.clone(); fns.len()];
-    fns.push(build_halt_stub(&params));
+    fns.push(build_halt_stub(&params, speculative.escape));
     func_types.push(register_type);
 
     BinaryUnit {
@@ -391,6 +407,17 @@ fn emit_rv64_unit(
         func_types,
         data_segments: vec![],
         data_init_fn: None,
+    }
+}
+
+fn register_file_results(params: &[ValType], escape: yecta::CallEscape) -> Vec<ValType> {
+    match escape {
+        yecta::CallEscape::Flag => {
+            let mut r = params.to_vec();
+            r.push(ValType::I32);
+            r
+        }
+        yecta::CallEscape::Jump | yecta::CallEscape::Exception(_) => params.to_vec(),
     }
 }
 
@@ -487,9 +514,11 @@ fn finish_arch_unit(
     params: Vec<ValType>,
 ) -> BinaryUnit<Function> {
     let mut fns = rctx.drain_fns();
-    let register_type = FuncType::from_val_types(&params, &params);
+    let escape = rctx.escape();
+    let results = register_file_results(&params, escape);
+    let register_type = FuncType::from_val_types(&params, &results);
     let mut func_types = vec![register_type.clone(); fns.len()];
-    fns.push(build_halt_stub(&params));
+    fns.push(build_halt_stub(&params, escape));
     func_types.push(register_type);
     BinaryUnit {
         fns,
@@ -509,10 +538,13 @@ fn collect_params(rctx: &dyn ReactorContext<(), LinkErr, FnType = Function>) -> 
         .collect()
 }
 
-fn build_halt_stub(params: &[ValType]) -> Function {
+fn build_halt_stub(params: &[ValType], escape: yecta::CallEscape) -> Function {
     let mut f = Function::new([]);
     for p in 0..params.len() as u32 {
         f.instruction(&wasm_encoder::Instruction::LocalGet(p));
+    }
+    if matches!(escape, yecta::CallEscape::Flag) {
+        f.instruction(&wasm_encoder::Instruction::I32Const(0));
     }
     f.instruction(&wasm_encoder::Instruction::Return);
     f.instruction(&wasm_encoder::Instruction::End);

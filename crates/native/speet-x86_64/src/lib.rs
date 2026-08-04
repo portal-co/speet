@@ -228,7 +228,8 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// instructions wrapped in try-catch blocks. Returns (`ret`) compare stack top with expected
     /// return address and use direct WASM return for ABI-compliant cases.
     ///
-    /// Requires an escape tag to be configured via `set_escape_tag()`.
+    /// Requires a native-stack escape policy (`Exception` or `Flag`) via
+    /// [`set_escape`](Self::set_escape) / [`set_escape_tag`](Self::set_escape_tag).
     pub fn set_speculative_calls(&mut self, enable: bool) {
         self.enable_speculative_calls = enable;
     }
@@ -236,6 +237,15 @@ impl<Context, E> X86Recompiler<Context, E> {
     /// Check if speculative call optimization is enabled
     pub fn is_speculative_calls_enabled(&self) -> bool {
         self.enable_speculative_calls
+    }
+
+    /// Set the speculative-call escape policy.
+    pub fn set_escape<F>(
+        &mut self,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        escape: yecta::CallEscape,
+    ) {
+        rctx.set_escape(escape);
     }
 
     /// Set the escape tag used for exception-based control flow in speculative calls

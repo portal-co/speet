@@ -46,11 +46,29 @@ impl Runtime {
 
     /// Recompile RV64 guest `.text` to WASM (syscall path).
     pub fn recompile_rv64_text(&mut self, text: &[u8], start_addr: u64) -> Vec<u8> {
-        let key = format!("{}:{start_addr:x}", ArtifactCache::hash_input(text));
+        self.recompile_rv64_text_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+    }
+
+    /// Like [`recompile_rv64_text`], with an explicit speculative-call escape policy.
+    pub fn recompile_rv64_text_with_escape(
+        &mut self,
+        text: &[u8],
+        start_addr: u64,
+        speculative: yecta::SpeculativeEscape,
+    ) -> Vec<u8> {
+        let key = format!(
+            "{}:{start_addr:x}:{:?}",
+            ArtifactCache::hash_input(text),
+            speculative
+        );
         if let Some(w) = self.cache.get_wasm(&key) {
             return w;
         }
-        let wasm = recompile_rv64_to_wasm(text, start_addr);
+        let wasm = speet_recompile::frontend::recompile_rv64_to_wasm_with_escape(
+            text,
+            start_addr,
+            speculative,
+        );
         self.cache.put_wasm(&key, wasm.clone());
         wasm
     }
@@ -82,7 +100,25 @@ impl Runtime {
         arch: BinArch,
         os: BinOs,
     ) -> Result<ExitStatus, String> {
-        let wasm = self.recompile_rv64_text(text, start_addr);
+        self.recompile_rv64_and_run_with_escape(
+            text,
+            start_addr,
+            arch,
+            os,
+            yecta::SpeculativeEscape::JUMP,
+        )
+    }
+
+    /// Like [`recompile_rv64_and_run`], with an explicit speculative-call escape policy.
+    pub fn recompile_rv64_and_run_with_escape(
+        &mut self,
+        text: &[u8],
+        start_addr: u64,
+        arch: BinArch,
+        os: BinOs,
+        speculative: yecta::SpeculativeEscape,
+    ) -> Result<ExitStatus, String> {
+        let wasm = self.recompile_rv64_text_with_escape(text, start_addr, speculative);
         validate_wasm(&wasm)?;
         let obj = self.compile_to_object(&wasm, arch, os)?;
         // Guest is RV64 regardless of `arch` (the native *output* target) —

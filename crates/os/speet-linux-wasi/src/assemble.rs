@@ -20,3 +20,12 @@ pub fn recompile_x86_64_linux_wasi_to_wasm(text: &[u8], start_addr: u64) -> allo
 pub fn recompile_mips_linux_wasi_to_wasm(text: &[u8], start_addr: u64) -> alloc::vec::Vec<u8> {
     crate::link::link_mips_linux_wasi_megabinary(text, start_addr)
 }
+
+/// Recompile with an explicit [`yecta::SpeculativeEscape`] policy.
+pub fn recompile_rv64_wasi_to_wasm_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> alloc::vec::Vec<u8> {
+    crate::link::link_wasi_megabinary_with_escape(text, start_addr, speculative)
+}

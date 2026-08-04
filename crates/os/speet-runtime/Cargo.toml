@@ -10,6 +10,7 @@ speet-host-api = { path = "../speet-host-api" }
 speet-abi-stubs = { path = "../speet-abi-stubs" }
 speet-host-syscall = { path = "../speet-host-syscall" }
 speet-recompile = { path = "../speet-recompile" }
+yecta = { path = "../../helper/yecta" }
 speet-link-core = { path = "../speet-link-core", features = ["binary-load"] }
 speet-riscv = { path = "../../native/speet-riscv" }
 speet-rt = { path = "../speet-rt" }

@@ -448,6 +448,87 @@ pub struct EscapeTag {
     pub ty: TypeIdx,
 }
 
+/// How a speculative native-stack call signals a return-address mismatch.
+///
+/// - [`CallEscape::Jump`] — no native-stack call; emit `return_call` / jump.
+/// - [`CallEscape::Exception`] — WASM `call` inside `TryTable`; mismatch `throw`s.
+/// - [`CallEscape::Flag`] — WASM `call` with trailing `i32` result flag; mismatch
+///   returns flag=`1` (no exception tags / `TagSection` required).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub enum CallEscape {
+    Jump,
+    Exception(EscapeTag),
+    Flag,
+}
+
+impl CallEscape {
+    /// True when ABI calls should use a real WASM `call` (native stack).
+    pub fn is_native_stack(self) -> bool {
+        matches!(self, Self::Exception(_) | Self::Flag)
+    }
+
+    /// The exception tag when this is [`CallEscape::Exception`], else `None`.
+    pub fn exception_tag(self) -> Option<EscapeTag> {
+        match self {
+            Self::Exception(tag) => Some(tag),
+            Self::Jump | Self::Flag => None,
+        }
+    }
+}
+
+impl From<Option<EscapeTag>> for CallEscape {
+    fn from(tag: Option<EscapeTag>) -> Self {
+        match tag {
+            Some(t) => Self::Exception(t),
+            None => Self::Jump,
+        }
+    }
+}
+
+impl From<EscapeTag> for CallEscape {
+    fn from(tag: EscapeTag) -> Self {
+        Self::Exception(tag)
+    }
+}
+
+/// Recompiler knobs for speculative native-stack calls.
+///
+/// Default is [`SpeculativeEscape::JUMP`] (no native-stack calls).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct SpeculativeEscape {
+    pub escape: CallEscape,
+    pub enable: bool,
+}
+
+impl SpeculativeEscape {
+    pub const JUMP: Self = Self {
+        escape: CallEscape::Jump,
+        enable: false,
+    };
+
+    pub fn exception_spec(tag: EscapeTag) -> Self {
+        Self {
+            escape: CallEscape::Exception(tag),
+            enable: true,
+        }
+    }
+
+    pub const FLAG_SPEC: Self = Self {
+        escape: CallEscape::Flag,
+        enable: true,
+    };
+
+    pub fn is_native_stack(self) -> bool {
+        self.enable && self.escape.is_native_stack()
+    }
+}
+
+impl Default for SpeculativeEscape {
+    fn default() -> Self {
+        Self::JUMP
+    }
+}
+
 /// Pool configuration for indirect function calls.
 ///
 /// Carries the [`TypeIdx`] of the `call_indirect` / `return_call_indirect`
@@ -512,8 +593,8 @@ pub struct JumpCallParams<'a, Context, E> {
     pub fixups: BTreeMap<u32, &'a (dyn Snippet<Context, E> + 'a)>,
     /// The target function (static or dynamic).
     pub target: Target<'a, Context, E>,
-    /// If Some, emit a call with exception handling; if None, emit a jump.
-    pub call: Option<EscapeTag>,
+    /// Escape strategy: jump/`return_call`, call+exception, or call+flag.
+    pub call: CallEscape,
     /// Pool configuration for indirect calls.
     pub pool: Pool<'a, Context, E>,
     /// If Some, make the jump/call conditional on this snippet.
@@ -537,14 +618,14 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             params,
             fixups: BTreeMap::new(),
             target: Target::Static { func },
-            call: None,
+            call: CallEscape::Jump,
             pool,
             condition: None,
             condition_hook: None,
         }
     }
 
-    /// Create parameters for an unconditional call to a static function with exception handling.
+    /// Create parameters for an unconditional call with exception-tag escape.
     ///
     /// # Arguments
     /// * `func` - The target function index
@@ -561,7 +642,25 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             params,
             fixups: BTreeMap::new(),
             target: Target::Static { func },
-            call: Some(escape_tag),
+            call: CallEscape::Exception(escape_tag),
+            pool,
+            condition: None,
+            condition_hook: None,
+        }
+    }
+
+    /// Create parameters for an unconditional call with returned-flag escape
+    /// (`(register_file) -> (register_file, i32)`; no exception tags).
+    pub fn call_flag(
+        func: FuncIdx,
+        params: u32,
+        pool: Pool<'a, Context, E>,
+    ) -> Self {
+        Self {
+            params,
+            fixups: BTreeMap::new(),
+            target: Target::Static { func },
+            call: CallEscape::Flag,
             pool,
             condition: None,
             condition_hook: None,
@@ -585,7 +684,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             params,
             fixups: BTreeMap::new(),
             target: Target::Static { func },
-            call: None,
+            call: CallEscape::Jump,
             pool,
             condition: Some(condition),
             condition_hook: None,
@@ -607,7 +706,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             params,
             fixups: BTreeMap::new(),
             target: Target::Dynamic { idx },
-            call: None,
+            call: CallEscape::Jump,
             pool,
             condition: None,
             condition_hook: None,
@@ -650,15 +749,21 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
         self
     }
 
-    /// Convert this jump to a call with exception handling.
-    ///
-    /// When set, the target is called with a try-catch wrapper that handles
-    /// non-local returns via the specified exception tag.
-    ///
-    /// # Arguments
-    /// * `escape_tag` - The exception tag used for non-local returns
-    pub fn with_call(mut self, escape_tag: EscapeTag) -> Self {
-        self.call = Some(escape_tag);
+    /// Convert this jump to a call with the given escape strategy.
+    pub fn with_call(mut self, escape: CallEscape) -> Self {
+        self.call = escape;
+        self
+    }
+
+    /// Convert this jump to a call with exception-tag escape.
+    pub fn with_exception_call(mut self, escape_tag: EscapeTag) -> Self {
+        self.call = CallEscape::Exception(escape_tag);
+        self
+    }
+
+    /// Convert this jump to a call with returned-flag escape.
+    pub fn with_flag_call(mut self) -> Self {
+        self.call = CallEscape::Flag;
         self
     }
 }
@@ -1421,6 +1526,13 @@ impl ConstFoldState {
         // unobservable because every Block/Loop/TryTable in this codebase
         // used an empty-params blocktype; `Entry::ensure_call_region_open`'s
         // hoisted call region is the first one with non-empty params.
+        // `Return` / `Throw*` / `Unreachable` terminate the function (or
+        // transfer) with whatever is on the operand stack as results/payload.
+        // Their `stack_pops` is conservatively 0 (arity is the function type,
+        // not a fixed count), so they must be listed here — otherwise a
+        // deferred `i32.const` from [`Reactor::ret_flag`] (or a folded
+        // `local.get`) stays on `const_stack` and never reaches the module,
+        // and the validator sees a type mismatch at the `return`.
         let needs_flush = Self::stack_pops(insn) > 0
             || Self::stack_pushes(insn) > 0
             || matches!(
@@ -1435,6 +1547,10 @@ impl ConstFoldState {
                     | Instruction::Loop(_)
                     | Instruction::If(_)
                     | Instruction::TryTable(_, _)
+                    | Instruction::Return
+                    | Instruction::Throw(_)
+                    | Instruction::ThrowRef
+                    | Instruction::Unreachable
             );
 
         if needs_flush {
@@ -2168,30 +2284,17 @@ impl<F> Entry<F> {
         Ok(())
     }
 
-    /// Emit the bare `call`/`call_indirect`/`call_ref` for a speculative call
-    /// into this entry's currently-open (or lazily-opened) hoisted exception
-    /// region — see [`ensure_call_region_open`](Self::ensure_call_region_open).
-    /// Does **not** emit `Return` or close the region: on the success path,
-    /// execution falls through to whatever is fed next (typically the
-    /// caller's `restore_params_after_call`, now running unconditionally
-    /// instead of only on the exception path — that's the point of hoisting).
-    /// Does **not** flush deferred stores — that is the Reactor's cross-entry
-    /// responsibility before the loop.
-    fn emit_call_body<Context, E>(
+    /// Emit the bare `call`/`call_indirect`/`call_ref` (no try-region, no restore).
+    fn emit_bare_call<Context, E>(
         &mut self,
         ctx: &mut Context,
         target: Target<Context, E>,
-        tag: EscapeTag,
         pool: Pool<'_, Context, E>,
-        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
-        params: u32,
         base_func_offset: u32,
     ) -> Result<(), E>
     where
         F: InstructionSink<Context, E>,
     {
-        let fixup_keys: BTreeSet<u32> = fixups.keys().copied().collect();
-        self.ensure_call_region_open(ctx, tag, &fixup_keys, params)?;
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -2223,6 +2326,57 @@ impl<F> Entry<F> {
         Ok(())
     }
 
+    /// Emit the bare `call`/`call_indirect`/`call_ref` for a speculative call
+    /// into this entry's currently-open (or lazily-opened) hoisted exception
+    /// region — see [`ensure_call_region_open`](Self::ensure_call_region_open).
+    /// Does **not** emit `Return` or close the region: on the success path,
+    /// execution falls through to whatever is fed next (typically the
+    /// caller's `restore_params_after_call`, now running unconditionally
+    /// instead of only on the exception path — that's the point of hoisting).
+    /// Does **not** flush deferred stores — that is the Reactor's cross-entry
+    /// responsibility before the loop.
+    fn emit_call_body<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        target: Target<Context, E>,
+        tag: EscapeTag,
+        pool: Pool<'_, Context, E>,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        params: u32,
+        base_func_offset: u32,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        let fixup_keys: BTreeSet<u32> = fixups.keys().copied().collect();
+        self.ensure_call_region_open(ctx, tag, &fixup_keys, params)?;
+        self.emit_bare_call(ctx, target, pool, base_func_offset)
+    }
+
+    /// Emit a speculative call that returns `(register_file, i32)` where the
+    /// trailing flag is `0` on ABI match and `1` on RA mismatch. No `TryTable`.
+    /// After the call, consumes the flag with an empty `if`/`else` (both paths
+    /// fall through identically, mirroring EH catch), then restores params.
+    fn emit_flag_call_body<Context, E>(
+        &mut self,
+        ctx: &mut Context,
+        target: Target<Context, E>,
+        pool: Pool<'_, Context, E>,
+        fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
+        params: u32,
+        base_func_offset: u32,
+    ) -> Result<(), E>
+    where
+        F: InstructionSink<Context, E>,
+    {
+        self.emit_bare_call(ctx, target, pool, base_func_offset)?;
+        // Results: (register_file..., flag). Branch on flag; both arms empty.
+        self.feed_one(ctx, &Instruction::If(BlockType::Empty))?;
+        self.feed_one(ctx, &Instruction::Else)?;
+        self.feed_one(ctx, &Instruction::End)?;
+        self.restore_params_after_call(ctx, params, fixups)
+    }
+
     /// Emit one entry's conditional branch arm: the per-entry half of the
     /// Reactor↔Entry handshake for conditional jumps and calls.
     ///
@@ -2232,7 +2386,7 @@ impl<F> Entry<F> {
     ///
     /// ```text
     /// <condition>; [<hook>]; if
-    ///   <params>; <body: return_call | try-table call>; [<restore>]
+    ///   <params>; <body: return_call | try-table call | flag call>; [<restore>]
     /// else
     /// ```
     ///
@@ -2246,7 +2400,7 @@ impl<F> Entry<F> {
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: &(dyn Snippet<Context, E> + '_),
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
@@ -2263,21 +2417,25 @@ impl<F> Entry<F> {
         self.feed_one(ctx, &Instruction::If(BlockType::Empty))?;
 
         match call {
-            Some(escape_tag) => {
+            CallEscape::Exception(escape_tag) => {
                 self.emit_params_with_fixups(ctx, params, fixups)?;
                 self.emit_call_body(ctx, target, escape_tag, pool, fixups, params, base_func_offset)?;
                 self.restore_params_after_call(ctx, params, fixups)?;
             }
-            None => {
+            CallEscape::Flag => {
+                self.emit_params_with_fixups(ctx, params, fixups)?;
+                self.emit_flag_call_body(ctx, target, pool, fixups, params, base_func_offset)?;
+            }
+            CallEscape::Jump => {
                 self.emit_unconditional_jump_body(ctx, params, fixups, target, pool, base_func_offset)?;
             }
         }
 
         // A hoisted call region cannot validly straddle this `Else` — WASM
         // block nesting must stay balanced within each arm of an `If`. Any
-        // region opened above (inside this arm's `Some(escape_tag)` body) is
-        // closed here; a later call in a *different* arm (or after this
-        // whole `If`/`Else` closes) opens its own fresh region.
+        // region opened above (inside this arm's Exception body) is closed
+        // here; a later call in a *different* arm (or after this whole
+        // `If`/`Else` closes) opens its own fresh region.
         self.close_call_region(ctx)?;
         self.feed_one(ctx, &Instruction::Else)?;
         Ok(())
@@ -3057,31 +3215,60 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         Ok(())
     }
 
-    /// Emit a call instruction with exception handling.
-    /// The call is wrapped in a try-catch block to handle escapes via the specified tag.
+    /// Emit a speculative native-stack call.
+    ///
+    /// - [`CallEscape::Exception`] — opens/reuses a hoisted `TryTable` region.
+    /// - [`CallEscape::Flag`] — bare `call`; caller must restore `(regs, i32)`.
+    /// - [`CallEscape::Jump`] — returns `Ok` without emitting (use `ji` instead).
     ///
     /// # Arguments
     /// * `target` - The function to call (static or dynamic)
-    /// * `tag` - Exception tag configuration for escape handling
+    /// * `escape` - Escape strategy for RA mismatch
     /// * `pool` - Pool configuration for indirect calls
-    /// * `params` - Register-file width; the hoisted call region's
-    ///   `Block`/`TryTable` is `(register_file) -> (register_file)`, and
-    ///   closing it (e.g. at `seal_to`) needs to know how many values to
-    ///   re-derive from locals to satisfy that on the success path.
+    /// * `params` - Register-file width; for Exception, the hoisted call region's
+    ///   `Block`/`TryTable` is `(register_file) -> (register_file)`.
     pub fn call(
         &self,
         ctx: &mut Context,
         target: Target<Context, E>,
-        tag: EscapeTag,
+        escape: impl Into<CallEscape>,
         pool: Pool<'_, Context, E>,
         params: u32,
         tail_idx: usize,
     ) -> Result<(), E> {
-        self.flush_bundles(ctx, tail_idx)?;
-        let target = self.try_resolve_static_if_unambiguous(ctx, tail_idx, target)?;
-        // Open (or reuse) the hoisted call region in every reachable entry —
-        // this API takes no `fixups`, so the key set is always empty.
-        self.ensure_call_region_open_fanned_out(ctx, tail_idx, tag, &BTreeSet::new(), params)?;
+        let escape = escape.into();
+        match escape {
+            CallEscape::Jump => Ok(()),
+            CallEscape::Exception(tag) => {
+                self.flush_bundles(ctx, tail_idx)?;
+                let target = self.try_resolve_static_if_unambiguous(ctx, tail_idx, target)?;
+                // Open (or reuse) the hoisted call region in every reachable entry —
+                // this API takes no `fixups`, so the key set is always empty.
+                self.ensure_call_region_open_fanned_out(
+                    ctx,
+                    tail_idx,
+                    tag,
+                    &BTreeSet::new(),
+                    params,
+                )?;
+                self.feed_bare_call_fanned_out(ctx, tail_idx, target, pool)
+            }
+            CallEscape::Flag => {
+                self.flush_bundles(ctx, tail_idx)?;
+                let target = self.try_resolve_static_if_unambiguous(ctx, tail_idx, target)?;
+                self.feed_bare_call_fanned_out(ctx, tail_idx, target, pool)
+            }
+        }
+    }
+
+    /// Fan out a bare `call`/`call_indirect`/`call_ref` to all reachable entries.
+    fn feed_bare_call_fanned_out(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        target: Target<Context, E>,
+        pool: Pool<'_, Context, E>,
+    ) -> Result<(), E> {
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -3120,6 +3307,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         }
         Ok(())
     }
+
     /// Emit a return via exception throw.
     /// Loads the specified number of parameter locals and throws them with the tag.
     ///
@@ -3142,6 +3330,28 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             self.feed_to(tail_idx, ctx, &Instruction::LocalGet(p))?;
         }
         self.feed_to(tail_idx, ctx, &Instruction::Throw(tag_idx))
+    }
+
+    /// Emit a WASM `Return` of `(register_file..., i32_flag)` for flag-escape mode.
+    ///
+    /// `escaped == false` pushes flag `0` (ABI match); `true` pushes flag `1`.
+    pub fn ret_flag(
+        &self,
+        tail_idx: usize,
+        ctx: &mut Context,
+        params: u32,
+        escaped: bool,
+    ) -> Result<(), E> {
+        self.flush_bundles(ctx, tail_idx)?;
+        for p in 0..params {
+            self.feed_to(tail_idx, ctx, &Instruction::LocalGet(p))?;
+        }
+        self.feed_to(
+            tail_idx,
+            ctx,
+            &Instruction::I32Const(if escaped { 1 } else { 0 }),
+        )?;
+        self.feed_to(tail_idx, ctx, &Instruction::Return)
     }
     /// Emit a jump or call instruction using a parameter struct.
     ///
@@ -3205,7 +3415,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
     /// * `params` - Number of parameters to pass
     /// * `fixups` - Map of parameter indices to snippets that compute new values
     /// * `target` - The target function (static or dynamic)
-    /// * `call` - If Some, emit a call with exception handling; if None, emit a jump
+    /// * `call` - Escape strategy (`Jump`, `Exception`, or `Flag`)
     /// * `pool` - Pool configuration for indirect calls
     /// * `condition` - If Some, make the jump/call conditional on this snippet
     pub fn ji(
@@ -3214,12 +3424,22 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: impl Into<CallEscape>,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
-        self.ji_internal(ctx, params, fixups, target, call, pool, condition, None, tail_idx)
+        self.ji_internal(
+            ctx,
+            params,
+            fixups,
+            target,
+            call.into(),
+            pool,
+            condition,
+            None,
+            tail_idx,
+        )
     }
 
     fn ji_internal(
@@ -3228,7 +3448,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
@@ -3241,13 +3461,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         }
 
         match call {
-            Some(escape_tag) => {
+            CallEscape::Exception(_) | CallEscape::Flag => {
                 self.emit_conditional_call(
-                    ctx, params, fixups, target, escape_tag, pool, condition, condition_hook,
+                    ctx, params, fixups, target, call, pool, condition, condition_hook,
                     tail_idx,
                 )?;
             }
-            None => {
+            CallEscape::Jump => {
                 self.emit_conditional_jump(
                     ctx, params, fixups, target, pool, condition, condition_hook, tail_idx,
                 )?;
@@ -3452,12 +3672,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         params: u32,
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
-        escape_tag: EscapeTag,
+        escape: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
+        debug_assert!(escape.is_native_stack());
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for FuncIdx(idx) in reachable {
             // Resolve the (possibly dynamic) target before taking the
@@ -3476,8 +3697,22 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                             Self::emit_resolved_condition_side_effects(&mut e, ctx, cond, condition_hook)?;
                             if known {
                                 e.emit_params_with_fixups(ctx, params, fixups)?;
-                                e.emit_call_body(ctx, target, escape_tag, pool, fixups, params, self.base_func_offset)?;
-                                e.restore_params_after_call(ctx, params, fixups)?;
+                                match escape {
+                                    CallEscape::Exception(tag) => {
+                                        e.emit_call_body(
+                                            ctx, target, tag, pool, fixups, params,
+                                            self.base_func_offset,
+                                        )?;
+                                        e.restore_params_after_call(ctx, params, fixups)?;
+                                    }
+                                    CallEscape::Flag => {
+                                        e.emit_flag_call_body(
+                                            ctx, target, pool, fixups, params,
+                                            self.base_func_offset,
+                                        )?;
+                                    }
+                                    CallEscape::Jump => unreachable!(),
+                                }
                             }
                             // else: branch never taken — nothing else to emit.
                         }
@@ -3487,7 +3722,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                                 params,
                                 fixups,
                                 target,
-                                Some(escape_tag),
+                                escape,
                                 pool,
                                 cond,
                                 condition_hook,
@@ -3500,8 +3735,22 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 None => {
                     let mut e = self.lock_entry(idx as usize, false);
                     e.emit_params_with_fixups(ctx, params, fixups)?;
-                    e.emit_call_body(ctx, target, escape_tag, pool, fixups, params, self.base_func_offset)?;
-                    e.restore_params_after_call(ctx, params, fixups)?;
+                    match escape {
+                        CallEscape::Exception(tag) => {
+                            e.emit_call_body(
+                                ctx, target, tag, pool, fixups, params,
+                                self.base_func_offset,
+                            )?;
+                            e.restore_params_after_call(ctx, params, fixups)?;
+                        }
+                        CallEscape::Flag => {
+                            e.emit_flag_call_body(
+                                ctx, target, pool, fixups, params,
+                                self.base_func_offset,
+                            )?;
+                        }
+                        CallEscape::Jump => unreachable!(),
+                    }
                 }
             }
         }
@@ -3555,7 +3804,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                             params,
                             fixups,
                             target,
-                            None,
+                            CallEscape::Jump,
                             pool,
                             cond,
                             condition_hook,

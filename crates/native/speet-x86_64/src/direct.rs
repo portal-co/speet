@@ -2247,10 +2247,10 @@ impl<Context, E> X86Recompiler<Context, E> {
             _ => return Ok(None),
         };
 
-        let use_speculative = self.enable_speculative_calls && rctx.escape_tag().is_some();
+        let use_speculative = self.enable_speculative_calls && rctx.escape().is_native_stack();
 
         if use_speculative {
-            let escape_tag = rctx.escape_tag().unwrap();
+            let escape = rctx.escape();
             let Some(target_func) = self.rip_to_func_idx(rctx, target) else {
                 rctx.oob_jump(ctx, tail_idx, target, rctx.locals_mark().total_locals)?;
                 return Ok(Some(()));
@@ -2265,8 +2265,16 @@ impl<Context, E> X86Recompiler<Context, E> {
             self.emit_memory_store(ctx, rctx, tail_idx, 64)?;
 
             let expected_ra_snippet = ExpectedRaSnippet { return_addr };
-            let params = yecta::JumpCallParams::call(target_func, rctx.locals_mark().total_locals, escape_tag, rctx.pool())
-                .with_fixup(Self::EXPECTED_RA_LOCAL, &expected_ra_snippet);
+            let params = match escape {
+                yecta::CallEscape::Exception(tag) => yecta::JumpCallParams::call(
+                    target_func, rctx.locals_mark().total_locals, tag, rctx.pool(),
+                ),
+                yecta::CallEscape::Flag => yecta::JumpCallParams::call_flag(
+                    target_func, rctx.locals_mark().total_locals, rctx.pool(),
+                ),
+                yecta::CallEscape::Jump => unreachable!(),
+            }
+            .with_fixup(Self::EXPECTED_RA_LOCAL, &expected_ra_snippet);
             rctx.ji_with_params(ctx, tail_idx, params)?;
             return Ok(Some(()));
         } else {
@@ -2296,10 +2304,10 @@ impl<Context, E> X86Recompiler<Context, E> {
 
     fn handle_ret<F>(&mut self, ctx: &mut Context, rctx: &mut dyn ReactorContext<Context, E, FnType = F>, tail_idx: usize, inst: &IxInst) -> Result<Option<()>, E> {
         let stack_cleanup = if inst.op_count() > 0 { match inst.op0_kind() { OpKind::Immediate16 | OpKind::Immediate32 => inst.immediate16() as u64, _ => 0 } } else { 0 };
-        let use_speculative = self.enable_speculative_calls && rctx.escape_tag().is_some();
+        let use_speculative = self.enable_speculative_calls && rctx.escape().is_native_stack();
 
         if use_speculative {
-            let escape_tag = rctx.escape_tag().unwrap();
+            let escape = rctx.escape();
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(4))?;
             self.emit_memory_load(ctx, rctx, tail_idx, 64, false)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalGet(Self::EXPECTED_RA_LOCAL))?;
@@ -2309,15 +2317,27 @@ impl<Context, E> X86Recompiler<Context, E> {
             rctx.feed(ctx, tail_idx, &Instruction::I64Const(8 + stack_cleanup as i64))?;
             rctx.feed(ctx, tail_idx, &Instruction::I64Add)?;
             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(4))?;
-            // The generated function's ABI is (register_file) -> (register_file)
-            // — a bare `Return` must push the full, current register file as
-            // its results, matching the shape `ret`'s `Throw` below pushes.
-            for p in 0..rctx.locals_mark().total_locals {
-                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+            match escape {
+                yecta::CallEscape::Flag => {
+                    rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, false)?;
+                }
+                yecta::CallEscape::Exception(_) | yecta::CallEscape::Jump => {
+                    for p in 0..rctx.locals_mark().total_locals {
+                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                    }
+                    rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                }
             }
-            rctx.feed(ctx, tail_idx, &Instruction::Return)?;
             rctx.feed(ctx, tail_idx, &Instruction::Else)?;
-            rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, escape_tag)?;
+            match escape {
+                yecta::CallEscape::Exception(tag) => {
+                    rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, tag)?;
+                }
+                yecta::CallEscape::Flag => {
+                    rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, true)?;
+                }
+                yecta::CallEscape::Jump => unreachable!(),
+            }
             rctx.feed(ctx, tail_idx, &Instruction::End)?;
             return Ok(Some(()));
         } else {

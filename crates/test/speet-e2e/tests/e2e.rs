@@ -25,23 +25,27 @@ use rv_asm::Xlen;
 // ── Native test macros ────────────────────────────────────────────────────────
 
 macro_rules! smoke {
-    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, $rel:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
             println!("  ✓ {} ({:?}) — {} bytes",
-                path.file_name().unwrap().to_string_lossy(), $eh, wasm.len());
+                path.file_name().unwrap().to_string_lossy(), $cfg, wasm.len());
         }
+    };
+    // Legacy (Eh, speculative) form — kept for hand-written tests.
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        smoke!($name, $rel, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
     };
 }
 
 macro_rules! smoke_c {
-    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, env = $env:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = match c_obj($env) { Some(p) => p, None => {
@@ -49,93 +53,100 @@ macro_rules! smoke_c {
                 return;
             }};
             let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
             println!("  ✓ {} ({:?}) — {} bytes",
-                path.file_name().unwrap().to_string_lossy(), $eh, wasm.len());
+                path.file_name().unwrap().to_string_lossy(), $cfg, wasm.len());
         }
+    };
+    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        smoke_c!($name, env = $env, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
     };
 }
 
 macro_rules! run {
-    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, $rel:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let cfg: EscapeConfig = $cfg;
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, cfg);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
             match run_module(&wasm, "_start") {
                 Ok(state) => {
-                    println!("  ✓ {} hints, {:?}", state.hints.len(), $eh);
+                    println!("  ✓ {} hints, {:?}", state.hints.len(), cfg);
                     for (id, snap) in &state.hints {
                         println!("    hint={id} a0={}", snap.reg("a0"));
                     }
                 }
-                // Speculative runs are a deliberate, asserted feature — never
-                // soft-skip a failure here, or a real regression would
-                // silently downgrade to a log line instead of failing CI.
-                // wasmi can't run exception-handling modules at all, so fall
-                // back to wasmtime (which implements that proposal) and
-                // still assert correctness rather than just logging the gap.
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                // ExceptionSpec uses try_table/throw — wasmi gap → wasmtime.
+                // FlagSpec must run on wasmi (no exception proposal); hard-fail.
+                Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
                     eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
                     match run_module_wasmtime(&wasm, "_start") {
                         Ok(state) => {
-                            println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), $eh);
+                            println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), cfg);
                             for (id, snap) in &state.hints {
                                 println!("    hint={id} a0={}", snap.reg("a0"));
                             }
                         }
-                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                        Err(e) => panic!("ExceptionSpec run failed under wasmtime fallback: {e}"),
                     }
                 }
-                Err(e) if $spec => panic!("speculative run failed: {e}"),
-                Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
+                Err(e) if cfg.speculative() => panic!("speculative run failed: {e}"),
+                Err(e) if cfg.needs_exception_tags() => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
             }
         }
     };
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        run!($name, $rel, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
+    };
 }
 
 macro_rules! run_trap {
-    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, $rel:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, _) = build_single_with_trap_speculative(&text, addr, $arch, $eh, $spec);
+            let cfg: EscapeConfig = $cfg;
+            let (wasm, _) = build_single_with_trap_config(&text, addr, $arch, cfg);
             wasmparser::validate(&wasm).expect("WASM with trap is invalid");
             match run_module(&wasm, "_start") {
                 Ok(state) => {
                     let n_ret  = state.hints.iter().filter(|(id, _)| *id == HINT_RETURN).count();
                     let n_call = state.hints.iter().filter(|(id, _)| *id == HINT_CALL).count();
-                    println!("  ✓ trap {:?}: {} returns, {} calls", $eh, n_ret, n_call);
+                    println!("  ✓ trap {:?}: {} returns, {} calls", cfg, n_ret, n_call);
                 }
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
                     eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
                     match run_module_wasmtime(&wasm, "_start") {
                         Ok(state) => {
                             let n_ret  = state.hints.iter().filter(|(id, _)| *id == HINT_RETURN).count();
                             let n_call = state.hints.iter().filter(|(id, _)| *id == HINT_CALL).count();
-                            println!("  ✓ (wasmtime) trap {:?}: {} returns, {} calls", $eh, n_ret, n_call);
+                            println!("  ✓ (wasmtime) trap {:?}: {} returns, {} calls", cfg, n_ret, n_call);
                         }
-                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                        Err(e) => panic!("ExceptionSpec run failed under wasmtime fallback: {e}"),
                     }
                 }
-                Err(e) if $spec => panic!("speculative run failed: {e}"),
-                Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
+                Err(e) if cfg.speculative() => panic!("speculative run failed: {e}"),
+                Err(e) if cfg.needs_exception_tags() => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
             }
         }
     };
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        run_trap!($name, $rel, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
+    };
 }
 
 macro_rules! run_c {
-    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, env = $env:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = match c_obj($env) { Some(p) => p, None => {
@@ -143,28 +154,32 @@ macro_rules! run_c {
                 return;
             }};
             let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let cfg: EscapeConfig = $cfg;
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, cfg);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("generated WASM is invalid");
             match run_module(&wasm, "_start") {
-                Ok(state) => println!("  ✓ {} hints, {:?}", state.hints.len(), $eh),
-                Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                Ok(state) => println!("  ✓ {} hints, {:?}", state.hints.len(), cfg),
+                Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
                     eprintln!("  ! wasmi lacks exception-handling support ({e}); retrying under wasmtime");
                     match run_module_wasmtime(&wasm, "_start") {
-                        Ok(state) => println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), $eh),
-                        Err(e) => panic!("speculative run failed under wasmtime fallback: {e}"),
+                        Ok(state) => println!("  ✓ (wasmtime) {} hints, {:?}", state.hints.len(), cfg),
+                        Err(e) => panic!("ExceptionSpec run failed under wasmtime fallback: {e}"),
                     }
                 }
-                Err(e) if $spec => panic!("speculative run failed: {e}"),
-                Err(e) if $eh == Eh::With => eprintln!("  ! EH run skipped: {e}"),
+                Err(e) if cfg.speculative() => panic!("speculative run failed: {e}"),
+                Err(e) if cfg.needs_exception_tags() => eprintln!("  ! EH run skipped: {e}"),
                 Err(e) => panic!("run failed: {e}"),
             }
         }
     };
+    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        run_c!($name, env = $env, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
+    };
 }
 
 macro_rules! link {
-    ($name:ident, [ $( ($rel:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, [ $( ($rel:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $cfg:expr) => {
         #[test]
         fn $name() {
             let mut specs_data: Vec<(Vec<u8>, u64, Arch, &'static str)> = Vec::new();
@@ -175,34 +190,38 @@ macro_rules! link {
                     specs_data.push((text, addr, $arch, $entry));
                 }
             )+
+            let cfg: EscapeConfig = $cfg;
             let specs: Vec<LinkSpec<'_>> = specs_data.iter()
                 .map(|(t, a, arch, e)| LinkSpec { text: t, start_addr: *a, arch: *arch, entry: e })
                 .collect();
-            let (wasm, unsupported) = build_linked_speculative(&specs, $eh, $spec);
+            let (wasm, unsupported) = build_linked_config(&specs, cfg);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("linked WASM is invalid");
-            println!("  linked: {} bytes, {:?}", wasm.len(), $eh);
+            println!("  linked: {} bytes, {:?}", wasm.len(), cfg);
             for spec in &specs {
                 match run_module(&wasm, spec.entry) {
                     Ok(state) => println!("  ✓ {}: {} hints", spec.entry, state.hints.len()),
-                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                    Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
                         eprintln!("  ! wasmi lacks exception-handling support ({}: {e}); retrying under wasmtime", spec.entry);
                         match run_module_wasmtime(&wasm, spec.entry) {
                             Ok(state) => println!("  ✓ (wasmtime) {}: {} hints", spec.entry, state.hints.len()),
-                            Err(e) => panic!("speculative run {} failed under wasmtime fallback: {e}", spec.entry),
+                            Err(e) => panic!("ExceptionSpec run {} failed under wasmtime fallback: {e}", spec.entry),
                         }
                     }
-                    Err(e) if $spec => panic!("speculative run {} failed: {e}", spec.entry),
-                    Err(e) if $eh == Eh::With => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
+                    Err(e) if cfg.speculative() => panic!("speculative run {} failed: {e}", spec.entry),
+                    Err(e) if cfg.needs_exception_tags() => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
                     Err(e) => panic!("run {} failed: {e}", spec.entry),
                 }
             }
         }
     };
+    ($name:ident, [ $( ($rel:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $eh:expr, speculative = $spec:expr) => {
+        link!($name, [ $( ($rel, arch = $arch, entry = $entry) ),+ ], EscapeConfig::from_eh_spec($eh, $spec));
+    };
 }
 
 macro_rules! link_c {
-    ($name:ident, [ $( ($env_or_corpus:expr, is_corpus = $is_corpus:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, [ $( ($env_or_corpus:expr, is_corpus = $is_corpus:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $cfg:expr) => {
         #[test]
         fn $name() {
             let mut specs_data: Vec<(Vec<u8>, u64, Arch, &'static str)> = Vec::new();
@@ -225,29 +244,33 @@ macro_rules! link_c {
                     specs_data.push((text, addr, $arch, $entry));
                 }
             )+
+            let cfg: EscapeConfig = $cfg;
             let specs: Vec<LinkSpec<'_>> = specs_data.iter()
                 .map(|(t, a, arch, e)| LinkSpec { text: t, start_addr: *a, arch: *arch, entry: e })
                 .collect();
-            let (wasm, unsupported) = build_linked_speculative(&specs, $eh, $spec);
+            let (wasm, unsupported) = build_linked_config(&specs, cfg);
             report_unsupported(&unsupported, stringify!($name));
             wasmparser::validate(&wasm).expect("linked WASM is invalid");
-            println!("  linked: {} bytes, {:?}", wasm.len(), $eh);
+            println!("  linked: {} bytes, {:?}", wasm.len(), cfg);
             for spec in &specs {
                 match run_module(&wasm, spec.entry) {
                     Ok(state) => println!("  ✓ {}: {} hints", spec.entry, state.hints.len()),
-                    Err(e) if $spec && is_known_wasmi_exception_gap(&e) => {
+                    Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
                         eprintln!("  ! wasmi lacks exception-handling support ({}: {e}); retrying under wasmtime", spec.entry);
                         match run_module_wasmtime(&wasm, spec.entry) {
                             Ok(state) => println!("  ✓ (wasmtime) {}: {} hints", spec.entry, state.hints.len()),
-                            Err(e) => panic!("speculative run {} failed under wasmtime fallback: {e}", spec.entry),
+                            Err(e) => panic!("ExceptionSpec run {} failed under wasmtime fallback: {e}", spec.entry),
                         }
                     }
-                    Err(e) if $spec => panic!("speculative run {} failed: {e}", spec.entry),
-                    Err(e) if $eh == Eh::With => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
+                    Err(e) if cfg.speculative() => panic!("speculative run {} failed: {e}", spec.entry),
+                    Err(e) if cfg.needs_exception_tags() => eprintln!("  ! EH skipped ({}): {e}", spec.entry),
                     Err(e) => panic!("run {} failed: {e}", spec.entry),
                 }
             }
         }
+    };
+    ($name:ident, [ $( ($env_or_corpus:expr, is_corpus = $is_corpus:expr, arch = $arch:expr, entry = $entry:expr) ),+ ], $eh:expr, speculative = $spec:expr) => {
+        link_c!($name, [ $( ($env_or_corpus, is_corpus = $is_corpus, arch = $arch, entry = $entry) ),+ ], EscapeConfig::from_eh_spec($eh, $spec));
     };
 }
 
@@ -313,21 +336,24 @@ macro_rules! wasm_run_cond_trap {
 // instruction gaps are tolerated and reported (see `native_compile_check`).
 
 macro_rules! native {
-    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, $rel:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
             native_compile_check(&wasm, stringify!($name));
         }
     };
+    ($name:ident, $rel:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        native!($name, $rel, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
+    };
 }
 
 macro_rules! native_c {
-    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+    ($name:ident, env = $env:expr, arch = $arch:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = match c_obj($env) { Some(p) => p, None => {
@@ -335,11 +361,14 @@ macro_rules! native_c {
                 return;
             }};
             let (text, addr) = match load_text_optional(&path) { Some(v) => v, None => return };
-            let (wasm, unsupported) = build_single_speculative(&text, addr, $arch, $eh, $spec);
+            let (wasm, unsupported) = build_single_config(&text, addr, $arch, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
             native_compile_check(&wasm, stringify!($name));
         }
+    };
+    ($name:ident, env = $env:expr, arch = $arch:expr, $eh:expr, speculative = $spec:expr) => {
+        native_c!($name, env = $env, arch = $arch, EscapeConfig::from_eh_spec($eh, $spec));
     };
 }
 
@@ -362,7 +391,7 @@ macro_rules! native_aarch64 {
         fn $name() {
             let path = aarch64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::AArch64, EscapeConfig::None);
             report_unsupported(&unsupported, stringify!($name));
             if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
             native_compile_check(&wasm, stringify!($name));
@@ -376,7 +405,7 @@ macro_rules! native_x86_64 {
         fn $name() {
             let path = x86_64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::X86_64, EscapeConfig::None);
             report_unsupported(&unsupported, stringify!($name));
             if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
             native_compile_check(&wasm, stringify!($name));
@@ -384,128 +413,102 @@ macro_rules! native_x86_64 {
     };
 }
 
-// ── AArch64 corpus tests ──────────────────────────────────────────────────────
+// ── Non-RV corpus macros (path helpers differ; EscapeConfig-parameterized) ───
 
 macro_rules! smoke_aarch64 {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = aarch64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::AArch64, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("WASM invalid");
         }
     };
+    ($name:ident, $rel:expr) => { smoke_aarch64!($name, $rel, EscapeConfig::None); };
 }
 
 macro_rules! run_aarch64 {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = aarch64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, _) = build_single(&text, addr, Arch::AArch64, Eh::None);
+            let (wasm, _) = build_single_config(&text, addr, Arch::AArch64, $cfg);
             wasmparser::validate(&wasm).expect("WASM invalid");
             run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
         }
     };
+    ($name:ident, $rel:expr) => { run_aarch64!($name, $rel, EscapeConfig::None); };
 }
 
-smoke_aarch64!(smoke_aarch64_01_arith_no_eh,        "01_integer_computational");
-run_aarch64!(  run_aarch64_01_arith_no_eh,           "01_integer_computational");
-smoke_aarch64!(smoke_aarch64_02_control_no_eh,       "02_control_transfer");
-run_aarch64!(  run_aarch64_02_control_no_eh,         "02_control_transfer");
-smoke_aarch64!(smoke_aarch64_03_load_store_no_eh,    "03_load_store");
-run_aarch64!(  run_aarch64_03_load_store_no_eh,      "03_load_store");
-smoke_aarch64!(smoke_aarch64_04_integer_ext_no_eh,   "04_integer_ext");
-run_aarch64!(  run_aarch64_04_integer_ext_no_eh,     "04_integer_ext");
-smoke_aarch64!(smoke_aarch64_05_load_store_ext_no_eh,"05_load_store_ext");
-run_aarch64!(  run_aarch64_05_load_store_ext_no_eh,  "05_load_store_ext");
-smoke_aarch64!(smoke_aarch64_06_fp_no_eh,            "06_floating_point");
-run_aarch64!(  run_aarch64_06_fp_no_eh,              "06_floating_point");
-
-// Native-backend cross for the AArch64 frontend (guest aarch64 → WASM → native).
-native_aarch64!(native_aarch64_01_arith,        "01_integer_computational");
-native_aarch64!(native_aarch64_02_control,      "02_control_transfer");
-native_aarch64!(native_aarch64_03_load_store,   "03_load_store");
-native_aarch64!(native_aarch64_04_integer_ext,  "04_integer_ext");
-native_aarch64!(native_aarch64_05_load_store_ext,"05_load_store_ext");
-native_aarch64!(native_aarch64_06_fp,           "06_floating_point");
-
-// ── x86-64 corpus tests ───────────────────────────────────────────────────────
-
 macro_rules! smoke_x86_64 {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = x86_64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::X86_64, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("WASM invalid");
         }
     };
+    ($name:ident, $rel:expr) => { smoke_x86_64!($name, $rel, EscapeConfig::None); };
 }
 
 macro_rules! run_x86_64 {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = x86_64_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, _) = build_single(&text, addr, Arch::X86_64, Eh::None);
+            let cfg: EscapeConfig = $cfg;
+            let (wasm, _) = build_single_config(&text, addr, Arch::X86_64, cfg);
             wasmparser::validate(&wasm).expect("WASM invalid");
-            run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
+            match run_module(&wasm, "_start") {
+                Ok(_) => {}
+                Err(e) if cfg.uses_exception_opcodes() && is_known_wasmi_exception_gap(&e) => {
+                    run_module_wasmtime(&wasm, "_start")
+                        .unwrap_or_else(|e| panic!("wasmtime fallback failed: {e}"));
+                }
+                Err(e) if cfg.speculative() => panic!("speculative run failed: {e}"),
+                Err(e) => panic!("run failed: {e}"),
+            }
         }
     };
+    ($name:ident, $rel:expr) => { run_x86_64!($name, $rel, EscapeConfig::None); };
 }
 
-smoke_x86_64!(smoke_x86_64_01_arith_no_eh,  "01_integer_computational");
-run_x86_64!(  run_x86_64_01_arith_no_eh,    "01_integer_computational");
-native_x86_64!(native_x86_64_01_arith,      "01_integer_computational");
-smoke_x86_64!(smoke_x86_64_02_control_no_eh,  "02_control_transfer");
-run_x86_64!(  run_x86_64_02_control_no_eh,    "02_control_transfer");
-native_x86_64!(native_x86_64_02_control,      "02_control_transfer");
-smoke_x86_64!(smoke_x86_64_03_load_store_no_eh,  "03_load_store");
-run_x86_64!(  run_x86_64_03_load_store_no_eh,    "03_load_store");
-native_x86_64!(native_x86_64_03_load_store,      "03_load_store");
-smoke_x86_64!(smoke_x86_64_04_flags_no_eh,  "04_flags_and_setcc");
-run_x86_64!(  run_x86_64_04_flags_no_eh,    "04_flags_and_setcc");
-native_x86_64!(native_x86_64_04_flags,      "04_flags_and_setcc");
-smoke_x86_64!(smoke_x86_64_05_edge_cases_no_eh,  "05_edge_cases");
-run_x86_64!(  run_x86_64_05_edge_cases_no_eh,    "05_edge_cases");
-native_x86_64!(native_x86_64_05_edge_cases,      "05_edge_cases");
-
-// ── MIPS corpus tests ─────────────────────────────────────────────────────────
-
 macro_rules! smoke_mips {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = mips_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::Mips, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::Mips, $cfg);
             report_unsupported(&unsupported, stringify!($name));
             assert!(!wasm.is_empty());
             wasmparser::validate(&wasm).expect("WASM invalid");
         }
     };
+    ($name:ident, $rel:expr) => { smoke_mips!($name, $rel, EscapeConfig::None); };
 }
 
 macro_rules! run_mips {
-    ($name:ident, $rel:expr) => {
+    ($name:ident, $rel:expr, $cfg:expr) => {
         #[test]
         fn $name() {
             let path = mips_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, _) = build_single(&text, addr, Arch::Mips, Eh::None);
+            let (wasm, _) = build_single_config(&text, addr, Arch::Mips, $cfg);
             wasmparser::validate(&wasm).expect("WASM invalid");
             run_module(&wasm, "_start").unwrap_or_else(|e| panic!("run failed: {e}"));
         }
     };
+    ($name:ident, $rel:expr) => { run_mips!($name, $rel, EscapeConfig::None); };
 }
 
 macro_rules! native_mips {
@@ -514,7 +517,7 @@ macro_rules! native_mips {
         fn $name() {
             let path = mips_corpus($rel);
             let (text, addr) = load_text(&path);
-            let (wasm, unsupported) = build_single(&text, addr, Arch::Mips, Eh::None);
+            let (wasm, unsupported) = build_single_config(&text, addr, Arch::Mips, EscapeConfig::None);
             report_unsupported(&unsupported, stringify!($name));
             if wasm.is_empty() || wasmparser::validate(&wasm).is_err() { return; }
             native_compile_check(&wasm, stringify!($name));
@@ -522,2261 +525,3044 @@ macro_rules! native_mips {
     };
 }
 
-smoke_mips!(smoke_mips_01_arith_no_eh,       "01_integer_computational");
-run_mips!(  run_mips_01_arith_no_eh,         "01_integer_computational");
-native_mips!(native_mips_01_arith,           "01_integer_computational");
-smoke_mips!(smoke_mips_02_control_no_eh,     "02_control_transfer");
-run_mips!(  run_mips_02_control_no_eh,       "02_control_transfer");
-native_mips!(native_mips_02_control,         "02_control_transfer");
-smoke_mips!(smoke_mips_03_load_store_no_eh,  "03_load_store");
-run_mips!(  run_mips_03_load_store_no_eh,    "03_load_store");
-native_mips!(native_mips_03_load_store,      "03_load_store");
-smoke_mips!(smoke_mips_04_muldiv_no_eh,      "04_multiply_divide");
-run_mips!(  run_mips_04_muldiv_no_eh,        "04_multiply_divide");
-native_mips!(native_mips_04_muldiv,          "04_multiply_divide");
-smoke_mips!(smoke_mips_05_edge_cases_no_eh,  "05_edge_cases");
-run_mips!(  run_mips_05_edge_cases_no_eh,    "05_edge_cases");
-native_mips!(native_mips_05_edge_cases,      "05_edge_cases");
+// ── Dual-lane path macros (linux-wasi / darwin-wasi / thin-native) ────────────
+
+macro_rules! linux_wasi {
+    ($name:ident, bytes = $bytes:expr, addr = $addr:expr, $cfg:expr, expect_exit = $exit:expr) => {
+        #[test]
+        fn $name() {
+            let cfg: EscapeConfig = $cfg;
+            let wasm = speet_linux_wasi::recompile_rv64_wasi_to_wasm_with_escape(
+                $bytes, $addr, cfg.speculative_escape(),
+            );
+            let state = run_preview1(&wasm, "_start", 0, &[])
+                .unwrap_or_else(|e| panic!("linux_wasi preview1 failed: {e}"));
+            assert_eq!(state.exit_code, Some($exit));
+        }
+    };
+    ($name:ident, bytes = $bytes:expr, addr = $addr:expr, $cfg:expr,
+     seed_addr = $seed_addr:expr, seed = $seed:expr, expect_stdout = $stdout:expr, expect_exit = $exit:expr) => {
+        #[test]
+        fn $name() {
+            let cfg: EscapeConfig = $cfg;
+            let wasm = speet_linux_wasi::recompile_rv64_wasi_to_wasm_with_escape(
+                $bytes, $addr, cfg.speculative_escape(),
+            );
+            let state = run_preview1(&wasm, "_start", $seed_addr, $seed)
+                .unwrap_or_else(|e| panic!("linux_wasi preview1 failed: {e}"));
+            assert_eq!(state.stdout, $stdout);
+            assert_eq!(state.exit_code, Some($exit));
+        }
+    };
+}
+
+macro_rules! thin_native {
+    ($name:ident, bytes = $bytes:expr, addr = $addr:expr, $cfg:expr, expect_exit = $exit:expr) => {
+        #[test]
+        fn $name() {
+            let cfg: EscapeConfig = $cfg;
+            match run_thin_rv64_with_escape($bytes, $addr, cfg.speculative_escape()) {
+                Ok(outcome) => assert_eq!(outcome.exit_code, Some($exit)),
+                Err(reason) => {
+                    eprintln!("  soft-skip {}: {reason}", stringify!($name));
+                }
+            }
+        }
+    };
+}
+
+macro_rules! darwin_wasi {
+    ($name:ident, bytes = $bytes:expr, addr = $addr:expr, $cfg:expr,
+     seed_addr = $seed_addr:expr, seed = $seed:expr, expect_stdout = $stdout:expr, expect_exit = $exit:expr) => {
+        #[test]
+        fn $name() {
+            let _cfg: EscapeConfig = $cfg; // aarch64 is Jump-only today
+            let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm($bytes, $addr);
+            let state = run_preview1(&wasm, "_start", $seed_addr, $seed)
+                .unwrap_or_else(|e| panic!("darwin_wasi preview1 failed: {e}"));
+            assert_eq!(state.stdout, $stdout);
+            assert_eq!(state.exit_code, Some($exit));
+        }
+    };
+}
 
 // @generated-tests-begin
 
-// ── Corpus smoke tests ──────────────────────────────────────────────────────────
+// ── Corpus smoke tests (wasmi) ──────────────────────────────────────────────────
 
-smoke!(smoke_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke!(smoke_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke!(smoke_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke!(smoke_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None, speculative=false);
-smoke!(smoke_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=false);
-smoke!(smoke_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=true);
-smoke!(smoke_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None, speculative=false);
-smoke!(smoke_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=false);
-smoke!(smoke_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=true);
-smoke!(smoke_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None, speculative=false);
-smoke!(smoke_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=false);
-smoke!(smoke_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=true);
+smoke!(smoke_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32d_01_flag_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32f_01_flag_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32fd_01_flag_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_01_flag_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_02_flag_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_03_flag_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_04_flag_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_05_flag_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_06_flag_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_07_flag_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32i_zicsr_01_flag_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32im_01_flag_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::None);
+smoke!(smoke_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke!(smoke_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv32ima_01_flag_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke!(smoke_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::None);
+smoke!(smoke_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::Exception);
+smoke!(smoke_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv64d_01_flag_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+smoke!(smoke_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::None);
+smoke!(smoke_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::Exception);
+smoke!(smoke_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv64i_01_flag_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+smoke!(smoke_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::None);
+smoke!(smoke_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::Exception);
+smoke!(smoke_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+smoke!(smoke_rv64im_01_flag_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::FlagSpec);
 
-// ── C smoke tests ───────────────────────────────────────────────────────────────
+// ── C smoke tests (wasmi) ───────────────────────────────────────────────────────
 
-smoke_c!(smoke_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None, speculative=false);
-smoke_c!(smoke_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=false);
-smoke_c!(smoke_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=true);
-smoke_c!(smoke_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None, speculative=false);
-smoke_c!(smoke_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=false);
-smoke_c!(smoke_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=true);
-smoke_c!(smoke_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None, speculative=false);
-smoke_c!(smoke_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=false);
-smoke_c!(smoke_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=true);
+smoke_c!(smoke_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::None);
+smoke_c!(smoke_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::Exception);
+smoke_c!(smoke_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+smoke_c!(smoke_rv32c_arith_flag_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+smoke_c!(smoke_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::None);
+smoke_c!(smoke_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::Exception);
+smoke_c!(smoke_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+smoke_c!(smoke_rv64c_arith_flag_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+smoke_c!(smoke_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::None);
+smoke_c!(smoke_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::Exception);
+smoke_c!(smoke_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::ExceptionSpec);
+smoke_c!(smoke_x86c_arith_flag_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::FlagSpec);
 
-// ── Corpus run tests ────────────────────────────────────────────────────────────
+// ── Corpus run tests (wasmi) ────────────────────────────────────────────────────
 
-run!(run_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None, speculative=false);
-run!(run_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=false);
-run!(run_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=true);
-run!(run_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None, speculative=false);
-run!(run_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=false);
-run!(run_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=true);
-run!(run_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None, speculative=false);
-run!(run_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=false);
-run!(run_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=true);
-run!(run_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None, speculative=false);
-run!(run_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=false);
-run!(run_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=true);
+run!(run_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32d_01_flag_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32f_01_flag_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32fd_01_flag_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_01_flag_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_02_flag_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_03_flag_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_04_flag_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_05_flag_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_06_flag_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_07_flag_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32i_zicsr_01_flag_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32im_01_flag_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::None);
+run!(run_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::Exception);
+run!(run_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run!(run_rv32ima_01_flag_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run!(run_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::None);
+run!(run_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::Exception);
+run!(run_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run!(run_rv64d_01_flag_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+run!(run_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::None);
+run!(run_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::Exception);
+run!(run_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run!(run_rv64i_01_flag_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+run!(run_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::None);
+run!(run_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::Exception);
+run!(run_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run!(run_rv64im_01_flag_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::FlagSpec);
 
-// ── C run tests ─────────────────────────────────────────────────────────────────
+// ── C run tests (wasmi) ─────────────────────────────────────────────────────────
 
-run_c!(run_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None, speculative=false);
-run_c!(run_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=false);
-run_c!(run_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=true);
-run_c!(run_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None, speculative=false);
-run_c!(run_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=false);
-run_c!(run_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=true);
-run_c!(run_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None, speculative=false);
-run_c!(run_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=false);
-run_c!(run_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=true);
+run_c!(run_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::None);
+run_c!(run_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::Exception);
+run_c!(run_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_c!(run_rv32c_arith_flag_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_c!(run_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::None);
+run_c!(run_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::Exception);
+run_c!(run_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run_c!(run_rv64c_arith_flag_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+run_c!(run_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::None);
+run_c!(run_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::Exception);
+run_c!(run_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::ExceptionSpec);
+run_c!(run_x86c_arith_flag_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::FlagSpec);
 
-// ── Corpus run-with-trap tests ──────────────────────────────────────────────────
+// ── Corpus run-with-trap tests (wasmi) ──────────────────────────────────────────
 
-run_trap!(run_trap_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None, speculative=false);
-run_trap!(run_trap_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=false);
-run_trap!(run_trap_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=true);
-run_trap!(run_trap_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None, speculative=false);
-run_trap!(run_trap_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=false);
-run_trap!(run_trap_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=true);
-run_trap!(run_trap_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None, speculative=false);
-run_trap!(run_trap_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=false);
-run_trap!(run_trap_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=true);
-run_trap!(run_trap_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None, speculative=false);
-run_trap!(run_trap_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=false);
-run_trap!(run_trap_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=true);
+run_trap!(run_trap_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32d_01_flag_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32f_01_flag_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32fd_01_flag_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_01_flag_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_02_flag_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_03_flag_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_04_flag_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_05_flag_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_06_flag_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_07_flag_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32i_zicsr_01_flag_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32im_01_flag_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::None);
+run_trap!(run_trap_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::Exception);
+run_trap!(run_trap_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv32ima_01_flag_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::None);
+run_trap!(run_trap_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::Exception);
+run_trap!(run_trap_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv64d_01_flag_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::None);
+run_trap!(run_trap_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::Exception);
+run_trap!(run_trap_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv64i_01_flag_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+run_trap!(run_trap_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::None);
+run_trap!(run_trap_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::Exception);
+run_trap!(run_trap_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+run_trap!(run_trap_rv64im_01_flag_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::FlagSpec);
 
-// ── Corpus-corpus link tests ────────────────────────────────────────────────────
+// ── Corpus-corpus link tests (wasmi) ────────────────────────────────────────────
 
 link!(link_rv32d_01_x_rv32f_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32f_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32f_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32f_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32fd_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32fd_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32fd_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32fd_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_02_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_02_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_02_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_02_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_03_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_03_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_03_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_03_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_04_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_04_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_04_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_04_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_05_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_05_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_05_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_05_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_06_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_06_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_06_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_06_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_07_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_07_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_07_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_07_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32i_zicsr_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32i_zicsr_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32i_zicsr_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32i_zicsr_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32im_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32im_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32im_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32im_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv32ima_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv32ima_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv32ima_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv32ima_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv64d_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv64d_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv64d_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv64d_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv64i_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv64i_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv64i_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv64i_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32d_01_x_rv64im_01_no_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32d_01_x_rv64im_01_eh,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32d_01_x_rv64im_01_eh_spec,
     [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32d_01_x_rv64im_01_flag_spec,
+    [("rv32d/01_double_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32fd_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32fd_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32fd_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32fd_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_02_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_02_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_02_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_02_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_03_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_03_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_03_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_03_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_04_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_04_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_04_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_04_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_05_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_05_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_05_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_05_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_06_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_06_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_06_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_06_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_07_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_07_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_07_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_07_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32i_zicsr_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32i_zicsr_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32i_zicsr_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32i_zicsr_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32im_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32im_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32im_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32im_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv32ima_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv32ima_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv32ima_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv32ima_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv64d_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv64d_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv64d_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv64d_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv64i_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv64i_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv64i_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv64i_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32f_01_x_rv64im_01_no_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32f_01_x_rv64im_01_eh,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32f_01_x_rv64im_01_eh_spec,
     [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32f_01_x_rv64im_01_flag_spec,
+    [("rv32f/01_single_precision_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_02_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_02_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_02_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_02_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_03_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_03_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_03_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_03_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_04_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_04_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_04_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_04_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_05_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_05_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_05_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_05_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_06_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_06_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_06_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_06_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_07_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_07_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_07_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_07_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32i_zicsr_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32i_zicsr_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32i_zicsr_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32i_zicsr_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32im_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32im_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32im_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32im_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv32ima_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv32ima_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv32ima_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv32ima_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv64d_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv64d_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv64d_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv64d_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv64i_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv64i_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv64i_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv64i_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32fd_01_x_rv64im_01_no_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32fd_01_x_rv64im_01_eh,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32fd_01_x_rv64im_01_eh_spec,
     [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32fd_01_x_rv64im_01_flag_spec,
+    [("rv32fd/01_combined_fp", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_02_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_02_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_02_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_02_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_03_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_03_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_03_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_03_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_04_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_04_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_04_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_04_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_05_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_05_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_05_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_05_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_06_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_06_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_06_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_06_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_07_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_07_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_07_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_07_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32i_zicsr_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32i_zicsr_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32im_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32im_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32im_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32im_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv32ima_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv32ima_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv32ima_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv32ima_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv64d_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv64d_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv64d_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv64d_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv64i_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv64i_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv64i_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv64i_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_01_x_rv64im_01_no_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_01_x_rv64im_01_eh,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_01_x_rv64im_01_eh_spec,
     [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_01_x_rv64im_01_flag_spec,
+    [("rv32i/01_integer_computational", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_03_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_03_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_03_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_03_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_04_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_04_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_04_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_04_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_05_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_05_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_05_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_05_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_06_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_06_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_06_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_06_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_07_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_07_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_07_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_07_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32i_zicsr_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32i_zicsr_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32im_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32im_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32im_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32im_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv32ima_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv32ima_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv32ima_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv32ima_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv64d_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv64d_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv64d_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv64d_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv64i_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv64i_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv64i_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv64i_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_02_x_rv64im_01_no_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_02_x_rv64im_01_eh,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_02_x_rv64im_01_eh_spec,
     [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_02_x_rv64im_01_flag_spec,
+    [("rv32i/02_control_transfer", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32i_04_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32i_04_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32i_04_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32i_04_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32i_05_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32i_05_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32i_05_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32i_05_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32i_06_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32i_06_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32i_06_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32i_06_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32i_07_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32i_07_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32i_07_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32i_07_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32i_zicsr_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32i_zicsr_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32im_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32im_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32im_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32im_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv32ima_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv32ima_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv32ima_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv32ima_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv64d_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv64d_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv64d_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv64d_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv64i_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv64i_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv64i_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv64i_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_03_x_rv64im_01_no_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_03_x_rv64im_01_eh,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_03_x_rv64im_01_eh_spec,
     [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_03_x_rv64im_01_flag_spec,
+    [("rv32i/03_load_store", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32i_05_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32i_05_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32i_05_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32i_05_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32i_06_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32i_06_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32i_06_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32i_06_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32i_07_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32i_07_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32i_07_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32i_07_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32i_zicsr_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32i_zicsr_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32im_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32im_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32im_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32im_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv32ima_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv32ima_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv32ima_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv32ima_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv64d_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv64d_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv64d_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv64d_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv64i_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv64i_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv64i_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv64i_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_04_x_rv64im_01_no_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_04_x_rv64im_01_eh,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_04_x_rv64im_01_eh_spec,
     [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_04_x_rv64im_01_flag_spec,
+    [("rv32i/04_edge_cases", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv32i_06_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv32i_06_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv32i_06_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv32i_06_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv32i_07_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv32i_07_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv32i_07_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv32i_07_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv32i_zicsr_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv32i_zicsr_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv32im_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv32im_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv32im_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv32im_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv32ima_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv32ima_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv32ima_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv32ima_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv64d_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv64d_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv64d_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv64d_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv64i_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv64i_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv64i_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv64i_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_05_x_rv64im_01_no_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_05_x_rv64im_01_eh,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_05_x_rv64im_01_eh_spec,
     [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_05_x_rv64im_01_flag_spec,
+    [("rv32i/05_simple_program", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv32i_07_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv32i_07_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv32i_07_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv32i_07_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv32i_zicsr_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv32i_zicsr_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv32im_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv32im_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv32im_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv32im_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv32ima_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv32ima_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv32ima_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv32ima_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv64d_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv64d_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv64d_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv64d_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv64i_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv64i_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv64i_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv64i_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_06_x_rv64im_01_no_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_06_x_rv64im_01_eh,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_06_x_rv64im_01_eh_spec,
     [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_06_x_rv64im_01_flag_spec,
+    [("rv32i/06_nop_and_hints", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv32i_zicsr_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv32i_zicsr_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv32i_zicsr_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv32i_zicsr_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv32im_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv32im_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv32im_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv32im_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv32ima_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv32ima_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv32ima_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv32ima_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv64d_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv64d_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv64d_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv64d_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv64i_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv64i_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv64i_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv64i_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_07_x_rv64im_01_no_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_07_x_rv64im_01_eh,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_07_x_rv64im_01_eh_spec,
     [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_07_x_rv64im_01_flag_spec,
+    [("rv32i/07_pseudo_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_zicsr_01_x_rv32im_01_no_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_zicsr_01_x_rv32im_01_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_zicsr_01_x_rv32im_01_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_zicsr_01_x_rv32im_01_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_zicsr_01_x_rv32ima_01_no_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_zicsr_01_x_rv32ima_01_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_zicsr_01_x_rv32ima_01_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_zicsr_01_x_rv32ima_01_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_zicsr_01_x_rv64d_01_no_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_zicsr_01_x_rv64d_01_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_zicsr_01_x_rv64d_01_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_zicsr_01_x_rv64d_01_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_zicsr_01_x_rv64i_01_no_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_zicsr_01_x_rv64i_01_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_zicsr_01_x_rv64i_01_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_zicsr_01_x_rv64i_01_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32i_zicsr_01_x_rv64im_01_no_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32i_zicsr_01_x_rv64im_01_eh,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32i_zicsr_01_x_rv64im_01_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32i_zicsr_01_x_rv64im_01_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32im_01_x_rv32ima_01_no_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32im_01_x_rv32ima_01_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32im_01_x_rv32ima_01_eh_spec,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32im_01_x_rv32ima_01_flag_spec,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32im_01_x_rv64d_01_no_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32im_01_x_rv64d_01_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32im_01_x_rv64d_01_eh_spec,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32im_01_x_rv64d_01_flag_spec,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32im_01_x_rv64i_01_no_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32im_01_x_rv64i_01_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32im_01_x_rv64i_01_eh_spec,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32im_01_x_rv64i_01_flag_spec,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32im_01_x_rv64im_01_no_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32im_01_x_rv64im_01_eh,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32im_01_x_rv64im_01_eh_spec,
     [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32im_01_x_rv64im_01_flag_spec,
+    [("rv32im/01_multiply_divide", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32ima_01_x_rv64d_01_no_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32ima_01_x_rv64d_01_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32ima_01_x_rv64d_01_eh_spec,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32ima_01_x_rv64d_01_flag_spec,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32ima_01_x_rv64i_01_no_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32ima_01_x_rv64i_01_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32ima_01_x_rv64i_01_eh_spec,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32ima_01_x_rv64i_01_flag_spec,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv32ima_01_x_rv64im_01_no_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv32ima_01_x_rv64im_01_eh,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv32ima_01_x_rv64im_01_eh_spec,
     [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv32ima_01_x_rv64im_01_flag_spec,
+    [("rv32ima/01_atomic_operations", arch=Arch::Rv32, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv64d_01_x_rv64i_01_no_eh,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv64d_01_x_rv64i_01_eh,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv64d_01_x_rv64i_01_eh_spec,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv64d_01_x_rv64i_01_flag_spec,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv64d_01_x_rv64im_01_no_eh,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv64d_01_x_rv64im_01_eh,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv64d_01_x_rv64im_01_eh_spec,
     [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv64d_01_x_rv64im_01_flag_spec,
+    [("rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link!(link_rv64i_01_x_rv64im_01_no_eh,
     [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link!(link_rv64i_01_x_rv64im_01_eh,
     [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link!(link_rv64i_01_x_rv64im_01_eh_spec,
     [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
      ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link!(link_rv64i_01_x_rv64im_01_flag_spec,
+    [("rv64i/01_basic_64bit", arch=Arch::Rv64, entry="entry_0"),
+     ("rv64im/01_multiply_divide_64", arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 
-// ── Corpus-C link tests ─────────────────────────────────────────────────────────
+// ── Corpus-C link tests (wasmi) ─────────────────────────────────────────────────
 
 link_c!(link_rv32d_01_x_rv32c_arith_no_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32d_01_x_rv32c_arith_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32d_01_x_rv32c_arith_eh_spec,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32d_01_x_rv32c_arith_flag_spec,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32d_01_x_rv64c_arith_no_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32d_01_x_rv64c_arith_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32d_01_x_rv64c_arith_eh_spec,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32d_01_x_rv64c_arith_flag_spec,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32d_01_x_x86c_arith_no_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32d_01_x_x86c_arith_eh,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32d_01_x_x86c_arith_eh_spec,
     [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32d_01_x_x86c_arith_flag_spec,
+    [("rv32d/01_double_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32f_01_x_rv32c_arith_no_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32f_01_x_rv32c_arith_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32f_01_x_rv32c_arith_eh_spec,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32f_01_x_rv32c_arith_flag_spec,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32f_01_x_rv64c_arith_no_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32f_01_x_rv64c_arith_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32f_01_x_rv64c_arith_eh_spec,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32f_01_x_rv64c_arith_flag_spec,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32f_01_x_x86c_arith_no_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32f_01_x_x86c_arith_eh,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32f_01_x_x86c_arith_eh_spec,
     [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32f_01_x_x86c_arith_flag_spec,
+    [("rv32f/01_single_precision_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32fd_01_x_rv32c_arith_no_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32fd_01_x_rv32c_arith_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32fd_01_x_rv32c_arith_eh_spec,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32fd_01_x_rv32c_arith_flag_spec,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32fd_01_x_rv64c_arith_no_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32fd_01_x_rv64c_arith_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32fd_01_x_rv64c_arith_eh_spec,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32fd_01_x_rv64c_arith_flag_spec,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32fd_01_x_x86c_arith_no_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32fd_01_x_x86c_arith_eh,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32fd_01_x_x86c_arith_eh_spec,
     [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32fd_01_x_x86c_arith_flag_spec,
+    [("rv32fd/01_combined_fp", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_01_x_rv32c_arith_no_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_01_x_rv32c_arith_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_01_x_rv32c_arith_eh_spec,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_01_x_rv32c_arith_flag_spec,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_01_x_rv64c_arith_no_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_01_x_rv64c_arith_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_01_x_rv64c_arith_eh_spec,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_01_x_rv64c_arith_flag_spec,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_01_x_x86c_arith_no_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_01_x_x86c_arith_eh,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_01_x_x86c_arith_eh_spec,
     [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_01_x_x86c_arith_flag_spec,
+    [("rv32i/01_integer_computational", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_02_x_rv32c_arith_no_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_02_x_rv32c_arith_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_02_x_rv32c_arith_eh_spec,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_02_x_rv32c_arith_flag_spec,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_02_x_rv64c_arith_no_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_02_x_rv64c_arith_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_02_x_rv64c_arith_eh_spec,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_02_x_rv64c_arith_flag_spec,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_02_x_x86c_arith_no_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_02_x_x86c_arith_eh,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_02_x_x86c_arith_eh_spec,
     [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_02_x_x86c_arith_flag_spec,
+    [("rv32i/02_control_transfer", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_03_x_rv32c_arith_no_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_03_x_rv32c_arith_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_03_x_rv32c_arith_eh_spec,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_03_x_rv32c_arith_flag_spec,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_03_x_rv64c_arith_no_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_03_x_rv64c_arith_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_03_x_rv64c_arith_eh_spec,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_03_x_rv64c_arith_flag_spec,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_03_x_x86c_arith_no_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_03_x_x86c_arith_eh,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_03_x_x86c_arith_eh_spec,
     [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_03_x_x86c_arith_flag_spec,
+    [("rv32i/03_load_store", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_04_x_rv32c_arith_no_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_04_x_rv32c_arith_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_04_x_rv32c_arith_eh_spec,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_04_x_rv32c_arith_flag_spec,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_04_x_rv64c_arith_no_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_04_x_rv64c_arith_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_04_x_rv64c_arith_eh_spec,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_04_x_rv64c_arith_flag_spec,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_04_x_x86c_arith_no_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_04_x_x86c_arith_eh,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_04_x_x86c_arith_eh_spec,
     [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_04_x_x86c_arith_flag_spec,
+    [("rv32i/04_edge_cases", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_05_x_rv32c_arith_no_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_05_x_rv32c_arith_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_05_x_rv32c_arith_eh_spec,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_05_x_rv32c_arith_flag_spec,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_05_x_rv64c_arith_no_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_05_x_rv64c_arith_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_05_x_rv64c_arith_eh_spec,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_05_x_rv64c_arith_flag_spec,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_05_x_x86c_arith_no_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_05_x_x86c_arith_eh,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_05_x_x86c_arith_eh_spec,
     [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_05_x_x86c_arith_flag_spec,
+    [("rv32i/05_simple_program", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_06_x_rv32c_arith_no_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_06_x_rv32c_arith_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_06_x_rv32c_arith_eh_spec,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_06_x_rv32c_arith_flag_spec,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_06_x_rv64c_arith_no_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_06_x_rv64c_arith_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_06_x_rv64c_arith_eh_spec,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_06_x_rv64c_arith_flag_spec,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_06_x_x86c_arith_no_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_06_x_x86c_arith_eh,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_06_x_x86c_arith_eh_spec,
     [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_06_x_x86c_arith_flag_spec,
+    [("rv32i/06_nop_and_hints", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_07_x_rv32c_arith_no_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_07_x_rv32c_arith_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_07_x_rv32c_arith_eh_spec,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_07_x_rv32c_arith_flag_spec,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_07_x_rv64c_arith_no_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_07_x_rv64c_arith_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_07_x_rv64c_arith_eh_spec,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_07_x_rv64c_arith_flag_spec,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_07_x_x86c_arith_no_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_07_x_x86c_arith_eh,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_07_x_x86c_arith_eh_spec,
     [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_07_x_x86c_arith_flag_spec,
+    [("rv32i/07_pseudo_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_zicsr_01_x_rv32c_arith_no_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_zicsr_01_x_rv32c_arith_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_zicsr_01_x_rv32c_arith_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_zicsr_01_x_rv32c_arith_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_zicsr_01_x_rv64c_arith_no_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_zicsr_01_x_rv64c_arith_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_zicsr_01_x_rv64c_arith_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_zicsr_01_x_rv64c_arith_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32i_zicsr_01_x_x86c_arith_no_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32i_zicsr_01_x_x86c_arith_eh,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32i_zicsr_01_x_x86c_arith_eh_spec,
     [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32i_zicsr_01_x_x86c_arith_flag_spec,
+    [("rv32i_zicsr/01_csr_instructions", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32im_01_x_rv32c_arith_no_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32im_01_x_rv32c_arith_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32im_01_x_rv32c_arith_eh_spec,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32im_01_x_rv32c_arith_flag_spec,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32im_01_x_rv64c_arith_no_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32im_01_x_rv64c_arith_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32im_01_x_rv64c_arith_eh_spec,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32im_01_x_rv64c_arith_flag_spec,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32im_01_x_x86c_arith_no_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32im_01_x_x86c_arith_eh,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32im_01_x_x86c_arith_eh_spec,
     [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32im_01_x_x86c_arith_flag_spec,
+    [("rv32im/01_multiply_divide", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32ima_01_x_rv32c_arith_no_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32ima_01_x_rv32c_arith_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32ima_01_x_rv32c_arith_eh_spec,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32ima_01_x_rv32c_arith_flag_spec,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32ima_01_x_rv64c_arith_no_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32ima_01_x_rv64c_arith_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32ima_01_x_rv64c_arith_eh_spec,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32ima_01_x_rv64c_arith_flag_spec,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32ima_01_x_x86c_arith_no_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32ima_01_x_x86c_arith_eh,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32ima_01_x_x86c_arith_eh_spec,
     [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32ima_01_x_x86c_arith_flag_spec,
+    [("rv32ima/01_atomic_operations", is_corpus=true,  arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64d_01_x_rv32c_arith_no_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64d_01_x_rv32c_arith_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64d_01_x_rv32c_arith_eh_spec,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64d_01_x_rv32c_arith_flag_spec,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64d_01_x_rv64c_arith_no_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64d_01_x_rv64c_arith_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64d_01_x_rv64c_arith_eh_spec,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64d_01_x_rv64c_arith_flag_spec,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64d_01_x_x86c_arith_no_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64d_01_x_x86c_arith_eh,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64d_01_x_x86c_arith_eh_spec,
     [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64d_01_x_x86c_arith_flag_spec,
+    [("rv64d/01_rv64_double_precision_fp", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64i_01_x_rv32c_arith_no_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64i_01_x_rv32c_arith_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64i_01_x_rv32c_arith_eh_spec,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64i_01_x_rv32c_arith_flag_spec,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64i_01_x_rv64c_arith_no_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64i_01_x_rv64c_arith_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64i_01_x_rv64c_arith_eh_spec,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64i_01_x_rv64c_arith_flag_spec,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64i_01_x_x86c_arith_no_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64i_01_x_x86c_arith_eh,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64i_01_x_x86c_arith_eh_spec,
     [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64i_01_x_x86c_arith_flag_spec,
+    [("rv64i/01_basic_64bit", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64im_01_x_rv32c_arith_no_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64im_01_x_rv32c_arith_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64im_01_x_rv32c_arith_eh_spec,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64im_01_x_rv32c_arith_flag_spec,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64im_01_x_rv64c_arith_no_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64im_01_x_rv64c_arith_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64im_01_x_rv64c_arith_eh_spec,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64im_01_x_rv64c_arith_flag_spec,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64im_01_x_x86c_arith_no_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64im_01_x_x86c_arith_eh,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64im_01_x_x86c_arith_eh_spec,
     [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64im_01_x_x86c_arith_flag_spec,
+    [("rv64im/01_multiply_divide_64", is_corpus=true,  arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 
-// ── C-C link tests ──────────────────────────────────────────────────────────────
+// ── C-C link tests (wasmi) ──────────────────────────────────────────────────────
 
 link_c!(link_rv32c_arith_x_rv64c_arith_no_eh,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32c_arith_x_rv64c_arith_eh,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32c_arith_x_rv64c_arith_eh_spec,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32c_arith_x_rv64c_arith_flag_spec,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv32c_arith_x_x86c_arith_no_eh,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv32c_arith_x_x86c_arith_eh,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv32c_arith_x_x86c_arith_eh_spec,
     [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv32c_arith_x_x86c_arith_flag_spec,
+    [("E2E_RV32_ARITH", is_corpus=false, arch=Arch::Rv32, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 link_c!(link_rv64c_arith_x_x86c_arith_no_eh,
     [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::None, speculative=false);
+    EscapeConfig::None);
 link_c!(link_rv64c_arith_x_x86c_arith_eh,
     [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=false);
+    EscapeConfig::Exception);
 link_c!(link_rv64c_arith_x_x86c_arith_eh_spec,
     [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
      ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
-    Eh::With, speculative=true);
+    EscapeConfig::ExceptionSpec);
+link_c!(link_rv64c_arith_x_x86c_arith_flag_spec,
+    [("E2E_RV64_ARITH", is_corpus=false, arch=Arch::Rv64, entry="entry_0"),
+     ("E2E_X86_ARITH", is_corpus=false, arch=Arch::X86_64, entry="entry_1")],
+    EscapeConfig::FlagSpec);
 
 // ── WASM smoke tests ────────────────────────────────────────────────────────────
 
@@ -2827,70 +3613,89 @@ wasm_run_cond_trap!(run_wasm_branches_hook_override_false, wasm_branches(), entr
 wasm_run_cond_trap!(run_wasm_branches_hook_override_true, wasm_branches(), entry = "test",
     input = 0, decide_fn = |_| 1, expected = 1);
 
-// ── Native-backend corpus tests ─────────────────────────────────────────────────
+// ── Native-backend (blitz) corpus tests ─────────────────────────────────────────
 
-native!(native_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::None, speculative=false);
-native!(native_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=false);
-native!(native_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, Eh::With, speculative=true);
-native!(native_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::None, speculative=false);
-native!(native_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=false);
-native!(native_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, Eh::With, speculative=true);
-native!(native_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::None, speculative=false);
-native!(native_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=false);
-native!(native_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, Eh::With, speculative=true);
-native!(native_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::None, speculative=false);
-native!(native_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=false);
-native!(native_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, Eh::With, speculative=true);
+native!(native_rv32d_01_no_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32d_01_eh, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32d_01_eh_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32d_01_flag_spec, "rv32d/01_double_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32f_01_no_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32f_01_eh, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32f_01_eh_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32f_01_flag_spec, "rv32f/01_single_precision_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32fd_01_no_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32fd_01_eh, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32fd_01_eh_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32fd_01_flag_spec, "rv32fd/01_combined_fp", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_01_no_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_01_eh, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_01_eh_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_01_flag_spec, "rv32i/01_integer_computational", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_02_no_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_02_eh, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_02_eh_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_02_flag_spec, "rv32i/02_control_transfer", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_03_no_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_03_eh, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_03_eh_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_03_flag_spec, "rv32i/03_load_store", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_04_no_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_04_eh, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_04_eh_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_04_flag_spec, "rv32i/04_edge_cases", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_05_no_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_05_eh, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_05_eh_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_05_flag_spec, "rv32i/05_simple_program", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_06_no_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_06_eh, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_06_eh_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_06_flag_spec, "rv32i/06_nop_and_hints", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_07_no_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_07_eh, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_07_eh_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_07_flag_spec, "rv32i/07_pseudo_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32i_zicsr_01_no_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32i_zicsr_01_eh, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32i_zicsr_01_eh_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32i_zicsr_01_flag_spec, "rv32i_zicsr/01_csr_instructions", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32im_01_no_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32im_01_eh, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32im_01_eh_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32im_01_flag_spec, "rv32im/01_multiply_divide", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv32ima_01_no_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::None);
+native!(native_rv32ima_01_eh, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::Exception);
+native!(native_rv32ima_01_eh_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native!(native_rv32ima_01_flag_spec, "rv32ima/01_atomic_operations", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native!(native_rv64d_01_no_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::None);
+native!(native_rv64d_01_eh, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::Exception);
+native!(native_rv64d_01_eh_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+native!(native_rv64d_01_flag_spec, "rv64d/01_rv64_double_precision_fp", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+native!(native_rv64i_01_no_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::None);
+native!(native_rv64i_01_eh, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::Exception);
+native!(native_rv64i_01_eh_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+native!(native_rv64i_01_flag_spec, "rv64i/01_basic_64bit", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+native!(native_rv64im_01_no_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::None);
+native!(native_rv64im_01_eh, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::Exception);
+native!(native_rv64im_01_eh_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+native!(native_rv64im_01_flag_spec, "rv64im/01_multiply_divide_64", arch=Arch::Rv64, EscapeConfig::FlagSpec);
 
-// ── Native-backend C tests ──────────────────────────────────────────────────────
+// ── Native-backend (blitz) C tests ──────────────────────────────────────────────
 
-native_c!(native_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::None, speculative=false);
-native_c!(native_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=false);
-native_c!(native_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, Eh::With, speculative=true);
-native_c!(native_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::None, speculative=false);
-native_c!(native_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=false);
-native_c!(native_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, Eh::With, speculative=true);
-native_c!(native_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::None, speculative=false);
-native_c!(native_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=false);
-native_c!(native_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, Eh::With, speculative=true);
+native_c!(native_rv32c_arith_no_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::None);
+native_c!(native_rv32c_arith_eh, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::Exception);
+native_c!(native_rv32c_arith_eh_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::ExceptionSpec);
+native_c!(native_rv32c_arith_flag_spec, env="E2E_RV32_ARITH", arch=Arch::Rv32, EscapeConfig::FlagSpec);
+native_c!(native_rv64c_arith_no_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::None);
+native_c!(native_rv64c_arith_eh, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::Exception);
+native_c!(native_rv64c_arith_eh_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::ExceptionSpec);
+native_c!(native_rv64c_arith_flag_spec, env="E2E_RV64_ARITH", arch=Arch::Rv64, EscapeConfig::FlagSpec);
+native_c!(native_x86c_arith_no_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::None);
+native_c!(native_x86c_arith_eh, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::Exception);
+native_c!(native_x86c_arith_eh_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::ExceptionSpec);
+native_c!(native_x86c_arith_flag_spec, env="E2E_X86_ARITH", arch=Arch::X86_64, EscapeConfig::FlagSpec);
 
-// ── Native-backend WASM tests ───────────────────────────────────────────────────
+// ── Native-backend (blitz) WASM tests ───────────────────────────────────────────
 
 native_wasm!(native_wasm_arith_no_mapper_no_cond_trap, wasm_arith(), mapper = None, cond_trap = None);
 native_wasm!(native_wasm_arith_no_mapper_with_flip_trap, wasm_arith(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
@@ -2904,6 +3709,125 @@ native_wasm!(native_wasm_memory_rw_no_mapper_no_cond_trap, wasm_memory_rw(), map
 native_wasm!(native_wasm_memory_rw_no_mapper_with_flip_trap, wasm_memory_rw(), mapper = None, cond_trap = Some(Box::new(FlipConditionTrap)));
 native_wasm!(native_wasm_memory_rw_with_mapper_no_cond_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = None);
 native_wasm!(native_wasm_memory_rw_with_mapper_with_flip_trap, wasm_memory_rw(), mapper = Some(make_test_mapper()), cond_trap = Some(Box::new(FlipConditionTrap)));
+
+// ── AArch64 corpus (wasmi + blitz) ──────────────────────────────────────────────
+
+smoke_aarch64!(aarch64_01_no_eh, "01_integer_computational", EscapeConfig::None);
+run_aarch64!(run_aarch64_01_no_eh, "01_integer_computational", EscapeConfig::None);
+smoke_aarch64!(aarch64_01_eh, "01_integer_computational", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_01_eh, "01_integer_computational", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_01, "01_integer_computational");
+smoke_aarch64!(aarch64_02_no_eh, "02_control_transfer", EscapeConfig::None);
+run_aarch64!(run_aarch64_02_no_eh, "02_control_transfer", EscapeConfig::None);
+smoke_aarch64!(aarch64_02_eh, "02_control_transfer", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_02_eh, "02_control_transfer", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_02, "02_control_transfer");
+smoke_aarch64!(aarch64_03_no_eh, "03_load_store", EscapeConfig::None);
+run_aarch64!(run_aarch64_03_no_eh, "03_load_store", EscapeConfig::None);
+smoke_aarch64!(aarch64_03_eh, "03_load_store", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_03_eh, "03_load_store", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_03, "03_load_store");
+smoke_aarch64!(aarch64_04_no_eh, "04_integer_ext", EscapeConfig::None);
+run_aarch64!(run_aarch64_04_no_eh, "04_integer_ext", EscapeConfig::None);
+smoke_aarch64!(aarch64_04_eh, "04_integer_ext", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_04_eh, "04_integer_ext", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_04, "04_integer_ext");
+smoke_aarch64!(aarch64_05_no_eh, "05_load_store_ext", EscapeConfig::None);
+run_aarch64!(run_aarch64_05_no_eh, "05_load_store_ext", EscapeConfig::None);
+smoke_aarch64!(aarch64_05_eh, "05_load_store_ext", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_05_eh, "05_load_store_ext", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_05, "05_load_store_ext");
+smoke_aarch64!(aarch64_06_no_eh, "06_floating_point", EscapeConfig::None);
+run_aarch64!(run_aarch64_06_no_eh, "06_floating_point", EscapeConfig::None);
+smoke_aarch64!(aarch64_06_eh, "06_floating_point", EscapeConfig::Exception);
+run_aarch64!(run_aarch64_06_eh, "06_floating_point", EscapeConfig::Exception);
+native_aarch64!(native_aarch64_06, "06_floating_point");
+
+// ── x86-64 corpus (wasmi + blitz) ───────────────────────────────────────────────
+
+smoke_x86_64!(x86_64_01_no_eh, "01_integer_computational", EscapeConfig::None);
+run_x86_64!(run_x86_64_01_no_eh, "01_integer_computational", EscapeConfig::None);
+smoke_x86_64!(x86_64_01_eh, "01_integer_computational", EscapeConfig::Exception);
+run_x86_64!(run_x86_64_01_eh, "01_integer_computational", EscapeConfig::Exception);
+smoke_x86_64!(x86_64_01_eh_spec, "01_integer_computational", EscapeConfig::ExceptionSpec);
+run_x86_64!(run_x86_64_01_eh_spec, "01_integer_computational", EscapeConfig::ExceptionSpec);
+smoke_x86_64!(x86_64_01_flag_spec, "01_integer_computational", EscapeConfig::FlagSpec);
+run_x86_64!(run_x86_64_01_flag_spec, "01_integer_computational", EscapeConfig::FlagSpec);
+native_x86_64!(native_x86_64_01, "01_integer_computational");
+smoke_x86_64!(x86_64_02_no_eh, "02_control_transfer", EscapeConfig::None);
+run_x86_64!(run_x86_64_02_no_eh, "02_control_transfer", EscapeConfig::None);
+smoke_x86_64!(x86_64_02_eh, "02_control_transfer", EscapeConfig::Exception);
+run_x86_64!(run_x86_64_02_eh, "02_control_transfer", EscapeConfig::Exception);
+smoke_x86_64!(x86_64_02_eh_spec, "02_control_transfer", EscapeConfig::ExceptionSpec);
+run_x86_64!(run_x86_64_02_eh_spec, "02_control_transfer", EscapeConfig::ExceptionSpec);
+smoke_x86_64!(x86_64_02_flag_spec, "02_control_transfer", EscapeConfig::FlagSpec);
+run_x86_64!(run_x86_64_02_flag_spec, "02_control_transfer", EscapeConfig::FlagSpec);
+native_x86_64!(native_x86_64_02, "02_control_transfer");
+smoke_x86_64!(x86_64_03_no_eh, "03_load_store", EscapeConfig::None);
+run_x86_64!(run_x86_64_03_no_eh, "03_load_store", EscapeConfig::None);
+smoke_x86_64!(x86_64_03_eh, "03_load_store", EscapeConfig::Exception);
+run_x86_64!(run_x86_64_03_eh, "03_load_store", EscapeConfig::Exception);
+smoke_x86_64!(x86_64_03_eh_spec, "03_load_store", EscapeConfig::ExceptionSpec);
+run_x86_64!(run_x86_64_03_eh_spec, "03_load_store", EscapeConfig::ExceptionSpec);
+smoke_x86_64!(x86_64_03_flag_spec, "03_load_store", EscapeConfig::FlagSpec);
+run_x86_64!(run_x86_64_03_flag_spec, "03_load_store", EscapeConfig::FlagSpec);
+native_x86_64!(native_x86_64_03, "03_load_store");
+smoke_x86_64!(x86_64_04_no_eh, "04_flags_and_setcc", EscapeConfig::None);
+run_x86_64!(run_x86_64_04_no_eh, "04_flags_and_setcc", EscapeConfig::None);
+smoke_x86_64!(x86_64_04_eh, "04_flags_and_setcc", EscapeConfig::Exception);
+run_x86_64!(run_x86_64_04_eh, "04_flags_and_setcc", EscapeConfig::Exception);
+smoke_x86_64!(x86_64_04_eh_spec, "04_flags_and_setcc", EscapeConfig::ExceptionSpec);
+run_x86_64!(run_x86_64_04_eh_spec, "04_flags_and_setcc", EscapeConfig::ExceptionSpec);
+smoke_x86_64!(x86_64_04_flag_spec, "04_flags_and_setcc", EscapeConfig::FlagSpec);
+run_x86_64!(run_x86_64_04_flag_spec, "04_flags_and_setcc", EscapeConfig::FlagSpec);
+native_x86_64!(native_x86_64_04, "04_flags_and_setcc");
+smoke_x86_64!(x86_64_05_no_eh, "05_edge_cases", EscapeConfig::None);
+run_x86_64!(run_x86_64_05_no_eh, "05_edge_cases", EscapeConfig::None);
+smoke_x86_64!(x86_64_05_eh, "05_edge_cases", EscapeConfig::Exception);
+run_x86_64!(run_x86_64_05_eh, "05_edge_cases", EscapeConfig::Exception);
+smoke_x86_64!(x86_64_05_eh_spec, "05_edge_cases", EscapeConfig::ExceptionSpec);
+run_x86_64!(run_x86_64_05_eh_spec, "05_edge_cases", EscapeConfig::ExceptionSpec);
+smoke_x86_64!(x86_64_05_flag_spec, "05_edge_cases", EscapeConfig::FlagSpec);
+run_x86_64!(run_x86_64_05_flag_spec, "05_edge_cases", EscapeConfig::FlagSpec);
+native_x86_64!(native_x86_64_05, "05_edge_cases");
+
+// ── MIPS corpus (wasmi + blitz) ─────────────────────────────────────────────────
+
+smoke_mips!(mips_01_no_eh, "01_integer_computational", EscapeConfig::None);
+run_mips!(run_mips_01_no_eh, "01_integer_computational", EscapeConfig::None);
+smoke_mips!(mips_01_eh, "01_integer_computational", EscapeConfig::Exception);
+run_mips!(run_mips_01_eh, "01_integer_computational", EscapeConfig::Exception);
+native_mips!(native_mips_01, "01_integer_computational");
+smoke_mips!(mips_02_no_eh, "02_control_transfer", EscapeConfig::None);
+run_mips!(run_mips_02_no_eh, "02_control_transfer", EscapeConfig::None);
+smoke_mips!(mips_02_eh, "02_control_transfer", EscapeConfig::Exception);
+run_mips!(run_mips_02_eh, "02_control_transfer", EscapeConfig::Exception);
+native_mips!(native_mips_02, "02_control_transfer");
+smoke_mips!(mips_03_no_eh, "03_load_store", EscapeConfig::None);
+run_mips!(run_mips_03_no_eh, "03_load_store", EscapeConfig::None);
+smoke_mips!(mips_03_eh, "03_load_store", EscapeConfig::Exception);
+run_mips!(run_mips_03_eh, "03_load_store", EscapeConfig::Exception);
+native_mips!(native_mips_03, "03_load_store");
+smoke_mips!(mips_04_no_eh, "04_multiply_divide", EscapeConfig::None);
+run_mips!(run_mips_04_no_eh, "04_multiply_divide", EscapeConfig::None);
+smoke_mips!(mips_04_eh, "04_multiply_divide", EscapeConfig::Exception);
+run_mips!(run_mips_04_eh, "04_multiply_divide", EscapeConfig::Exception);
+native_mips!(native_mips_04, "04_multiply_divide");
+smoke_mips!(mips_05_no_eh, "05_edge_cases", EscapeConfig::None);
+run_mips!(run_mips_05_no_eh, "05_edge_cases", EscapeConfig::None);
+smoke_mips!(mips_05_eh, "05_edge_cases", EscapeConfig::Exception);
+run_mips!(run_mips_05_eh, "05_edge_cases", EscapeConfig::Exception);
+native_mips!(native_mips_05, "05_edge_cases");
+
+// ── Dual-lane linux-wasi / thin-native / darwin-wasi ────────────────────────────
+
+linux_wasi!(linux_wasi_exit_42_no_eh, bytes = FIXTURE_EXIT_42, addr = 0x1000, EscapeConfig::None, expect_exit = 42);
+linux_wasi!(linux_wasi_write_exit_no_eh, bytes = FIXTURE_WRITE_EXIT, addr = 0x1000, EscapeConfig::None, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
+thin_native!(thin_native_exit_42_no_eh, bytes = FIXTURE_EXIT_42, addr = 0x1000, EscapeConfig::None, expect_exit = 42);
+linux_wasi!(linux_wasi_exit_42_flag_spec, bytes = FIXTURE_EXIT_42, addr = 0x1000, EscapeConfig::FlagSpec, expect_exit = 42);
+linux_wasi!(linux_wasi_write_exit_flag_spec, bytes = FIXTURE_WRITE_EXIT, addr = 0x1000, EscapeConfig::FlagSpec, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
+thin_native!(thin_native_exit_42_flag_spec, bytes = FIXTURE_EXIT_42, addr = 0x1000, EscapeConfig::FlagSpec, expect_exit = 42);
+darwin_wasi!(darwin_wasi_write_exit_no_eh, bytes = FIXTURE_DARWIN_WRITE_EXIT, addr = 0x1000, EscapeConfig::None, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
 
 // @generated-tests-end
 

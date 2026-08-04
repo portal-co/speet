@@ -33,6 +33,7 @@ fn make_rctx<'r>(
     reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
     base_func_offset: u32,
     start_addr: u64,
+    escape: yecta::CallEscape,
 ) -> ReactorAdapter<'r, (), Infallible, Function, LocalPool> {
     let mut rctx = ReactorAdapter {
         reactor,
@@ -52,7 +53,7 @@ fn make_rctx<'r>(
             handler: &REACTOR_TABLE,
             ty: TypeIdx(0),
         },
-        escape_tag: None,
+        escape,
     };
     rctx.set_base_func_offset(base_func_offset);
     rctx
@@ -85,6 +86,15 @@ fn wasi_imports_from_manifest(manifest: &ImportManifest) -> WasiImports {
 
 /// Translate an RV64 `.text` blob, lowering `ecall` to the embedded guest module.
 pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
+    translate_rv64_wasi_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Like [`translate_rv64_wasi`], with an explicit speculative-call escape policy.
+pub fn translate_rv64_wasi_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> WasiTranslation {
     let manifest = wasi_preview1_manifest();
     let wasi = wasi_imports_from_manifest(&manifest);
     let n_imports = manifest.func_imports.len() as u32;
@@ -109,9 +119,10 @@ pub fn translate_rv64_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
             start_addr, false, true, false,
         );
     recompiler.set_slot_assigner(slots.clone());
+    recompiler.set_speculative_calls(speculative.enable);
 
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, rv64_base, start_addr);
+    let mut rctx = make_rctx(&mut reactor, rv64_base, start_addr, speculative.escape);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);

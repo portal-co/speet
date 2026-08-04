@@ -110,7 +110,7 @@ pub fn assemble_translated_module(
     let total = fns.len() as u32;
     let n_params = register_file_params.len() as u32;
     let (types, imports, space, func_slot) =
-        build_import_section(manifest, register_file_params, total);
+        build_import_section(manifest, register_file_params, total, yecta::CallEscape::Jump);
     finish_module(
         types,
         imports,
@@ -145,6 +145,7 @@ fn build_import_section(
     manifest: &ImportManifest,
     register_file_params: Vec<ValType>,
     n_fns: u32,
+    escape: yecta::CallEscape,
 ) -> (TypeSection, ImportSection, EntityIndexSpace, IndexSlot) {
     let mut types = TypeSection::new();
     // type 0: (registers) -> (registers) — symmetric, not `-> ()`. Every
@@ -155,7 +156,13 @@ fn build_import_section(
     // past the end of the translated set — e.g. `main` returning with no
     // crt0 chain — and every other function trivially satisfies this same
     // type via `return_call`/`return_call_indirect`, never a bare `Return`).
-    types.ty().function(register_file_params.clone(), register_file_params);
+    //
+    // Flag escape appends a trailing i32 result (0 = ABI match, 1 = mismatch).
+    let mut results = register_file_params.clone();
+    if matches!(escape, yecta::CallEscape::Flag) {
+        results.push(ValType::I32);
+    }
+    types.ty().function(register_file_params, results);
     let mut imports = ImportSection::new();
     let mut space = EntityIndexSpace::empty();
     for (i, imp) in manifest.func_imports.iter().enumerate() {
@@ -182,6 +189,11 @@ fn build_import_section(
 /// `docs/guides/thin-runtime-genericity.md` principle 4 — copy this shape
 /// for any new terminal control-flow path, don't invent a shorter one.
 pub fn build_halt_stub(n_params: u32) -> Function {
+    build_halt_stub_with_escape(n_params, yecta::CallEscape::Jump)
+}
+
+/// Halt stub matching the register-file ABI for `escape` (Flag appends `i32.const 0`).
+pub fn build_halt_stub_with_escape(n_params: u32, escape: yecta::CallEscape) -> Function {
     let mut f = Function::new([]);
     // Push in normal (ascending) param order, per the WASM multi-value
     // spec: result 0 pushed first/deepest, result n-1 pushed last/on top.
@@ -194,6 +206,9 @@ pub fn build_halt_stub(n_params: u32) -> Function {
     // `docs/guides/thin-runtime-genericity.md` principle 4.
     for p in 0..n_params {
         f.instruction(&Instruction::LocalGet(p));
+    }
+    if matches!(escape, yecta::CallEscape::Flag) {
+        f.instruction(&Instruction::I32Const(0));
     }
     f.instruction(&Instruction::Return);
     f.instruction(&Instruction::End);
@@ -274,7 +289,7 @@ pub fn build_redirect_shims_from_plan(
 /// Table/elements/exports scaffolding shared by every `assemble_*` variant.
 /// Appends optional redirect shim functions, then the halt stub.
 fn finish_module(
-    mut types: TypeSection,
+    types: TypeSection,
     imports: ImportSection,
     space: &EntityIndexSpace,
     func_slot: IndexSlot,
@@ -285,10 +300,38 @@ fn finish_module(
     n_register_params: u32,
     data_segments: &[DataSegment],
 ) -> Vec<u8> {
+    finish_module_with_escape(
+        types,
+        imports,
+        space,
+        func_slot,
+        fns,
+        redirect_shims,
+        memory64,
+        entry_func_idx,
+        n_register_params,
+        data_segments,
+        yecta::CallEscape::Jump,
+    )
+}
+
+fn finish_module_with_escape(
+    mut types: TypeSection,
+    imports: ImportSection,
+    space: &EntityIndexSpace,
+    func_slot: IndexSlot,
+    fns: &[Function],
+    redirect_shims: &[Function],
+    memory64: bool,
+    entry_func_idx: u32,
+    n_register_params: u32,
+    data_segments: &[DataSegment],
+    escape: yecta::CallEscape,
+) -> Vec<u8> {
     let n_imports = space.host_capabilities.total();
     let total = space.functions.count(func_slot);
     let n_shims = redirect_shims.len() as u32;
-    let halt_stub = build_halt_stub(n_register_params);
+    let halt_stub = build_halt_stub_with_escape(n_register_params, escape);
 
     // The data-init function (if any) gets its own `() -> ()` type, appended
     // after every import's type — `types.len()` before the append is exactly
@@ -460,6 +503,15 @@ fn make_rctx<'r, E>(
     base_func_offset: u32,
     text_base: TextBaseSource,
 ) -> ReactorAdapter<'r, (), E, Function, LocalPool> {
+    make_rctx_with_escape(reactor, base_func_offset, text_base, yecta::CallEscape::Jump)
+}
+
+fn make_rctx_with_escape<'r, E>(
+    reactor: &'r mut Reactor<(), E, Function, LocalPool>,
+    base_func_offset: u32,
+    text_base: TextBaseSource,
+    escape: yecta::CallEscape,
+) -> ReactorAdapter<'r, (), E, Function, LocalPool> {
     let mut rctx = ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
@@ -467,7 +519,7 @@ fn make_rctx<'r, E>(
         injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
         layout_params: RuntimeLayoutParams::with_text_base_source(text_base),
         pool: yecta::Pool { handler: &REACTOR_TABLE, ty: TypeIdx(0) },
-        escape_tag: None,
+        escape,
     };
     rctx.set_base_func_offset(base_func_offset);
     rctx
@@ -573,7 +625,6 @@ fn bind_memory_after_traps_aarch64<E>(
     rc.bind_memory_layout(rctx);
 }
 
-
 fn build_pc_slot_map(
     arch: BinArch,
     text: &[u8],
@@ -601,7 +652,6 @@ fn build_pc_slot_map(
     }
     map
 }
-
 
 /// Like [`translate`], but redirects PLT/external calls per `plt_plan` and,
 /// when `entry_addr` is given, exports the function at that guest address
@@ -742,7 +792,8 @@ pub fn assemble_module_instrumented_with_data(
     let (redirect_shims, _) = plt_plan
         .map(|p| build_redirect_shims_from_plan(p, arch, manifest, n_params))
         .unwrap_or_default();
-    let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
+    let (types, imports, space, func_slot) =
+        build_import_section(manifest, t.params.clone(), total, yecta::CallEscape::Jump);
     finish_module(
         types,
         imports,
@@ -855,7 +906,7 @@ pub fn recompile_to_wasm_instrumented_plt_with_layout(
 /// handling). The entry (first function) is exported as `_start`. Mirrors the
 /// speet-e2e harness `assemble_module` for one slice.
 ///
-/// This builder's `make_rctx` always sets `escape_tag: None` — no
+/// This builder's `make_rctx` always sets `escape: yecta::CallEscape::Jump` — no
 /// exceptions/speculative calls ever run through this path. Unlike the
 /// separate speet-e2e test harness's own `assemble_module` (which still
 /// deliberately keeps `Eh::None` archs at `-> ()` — see the warning
@@ -869,7 +920,8 @@ pub fn recompile_to_wasm_instrumented_plt_with_layout(
 pub fn assemble_module(t: &Translated, manifest: &ImportManifest) -> Vec<u8> {
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
-    let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
+    let (types, imports, space, func_slot) =
+        build_import_section(manifest, t.params.clone(), total, yecta::CallEscape::Jump);
     finish_module(types, imports, &space, func_slot, &t.fns, &[], true, t.entry_func_idx, n_params, &[])
 }
 
@@ -897,6 +949,15 @@ pub fn native_syscall_imports() -> speet_host_syscall::NativeSyscallImports {
 /// Translate an RV64 Linux `.text` blob, lowering `ecall` to the native host
 /// syscall imports (`env.exit`/`env.write`) via [`speet_syscall::WasmSyscallDispatcher`].
 pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
+    translate_rv64_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Like [`translate_rv64`], with an explicit speculative-call escape policy.
+pub fn translate_rv64_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> Translated {
     use rv_asm::Xlen;
     let manifest = ImportManifest::rv64_syscall();
     let n_imports = manifest.func_imports.len() as u32;
@@ -907,11 +968,13 @@ pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
         speet_riscv::RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
             start_addr, false, true, false,
         );
+    recompiler.set_speculative_calls(speculative.enable);
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(
+    let mut rctx = make_rctx_with_escape(
         &mut reactor,
         n_imports,
         TextBaseSource::Constant(start_addr),
+        speculative.escape,
     );
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
@@ -938,21 +1001,61 @@ pub fn translate_rv64(text: &[u8], start_addr: u64) -> Translated {
 /// Assemble an RV64 translation with the native syscall imports
 /// (`env.exit`/`env.write`), entry exported as `_start`. 32-bit linear memory.
 pub fn assemble_syscall_module(t: &Translated, manifest: &ImportManifest) -> Vec<u8> {
+    assemble_syscall_module_with_escape(t, manifest, yecta::CallEscape::Jump)
+}
+
+/// Like [`assemble_syscall_module`], with an explicit escape ABI (Flag adds trailing i32).
+pub fn assemble_syscall_module_with_escape(
+    t: &Translated,
+    manifest: &ImportManifest,
+    escape: yecta::CallEscape,
+) -> Vec<u8> {
     let total = t.fns.len() as u32;
     let n_params = t.params.len() as u32;
-    let (types, imports, space, func_slot) = build_import_section(manifest, t.params.clone(), total);
-    finish_module(types, imports, &space, func_slot, &t.fns, &[], false, t.entry_func_idx, n_params, &[])
+    let (types, imports, space, func_slot) =
+        build_import_section(manifest, t.params.clone(), total, escape);
+    finish_module_with_escape(
+        types,
+        imports,
+        &space,
+        func_slot,
+        &t.fns,
+        &[],
+        false,
+        t.entry_func_idx,
+        n_params,
+        &[],
+        escape,
+    )
 }
 
 /// Recompile an RV64 Linux `.text` blob (with `ecall` → host syscalls) to WASM.
 pub fn recompile_rv64_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
-    let t = translate_rv64(text, start_addr);
-    assemble_syscall_module(&t, &ImportManifest::rv64_syscall())
+    recompile_rv64_to_wasm_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Like [`recompile_rv64_to_wasm`], with an explicit speculative-call escape policy.
+pub fn recompile_rv64_to_wasm_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> Vec<u8> {
+    let t = translate_rv64_with_escape(text, start_addr, speculative);
+    assemble_syscall_module_with_escape(&t, &ImportManifest::rv64_syscall(), speculative.escape)
 }
 
 /// Recompile an RV64 Linux `.text` blob with Linux→WASI preview1 lowering.
 pub fn recompile_rv64_wasi_to_wasm(text: &[u8], start_addr: u64) -> Vec<u8> {
     speet_linux_wasi::recompile_rv64_wasi_to_wasm(text, start_addr)
+}
+
+/// WASI recompile with an explicit speculative-call escape policy.
+pub fn recompile_rv64_wasi_to_wasm_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> Vec<u8> {
+    speet_linux_wasi::recompile_rv64_wasi_to_wasm_with_escape(text, start_addr, speculative)
 }
 
 #[cfg(test)]

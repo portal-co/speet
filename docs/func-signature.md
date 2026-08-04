@@ -105,8 +105,14 @@ local.set $depth_counter ...
 ```
 
 The multi-value return puts the injected params back in the caller's locals.  No
-`EscapeTag` unwinding is needed for the injected-param restoration path; `EscapeTag`
-is retained only for speculative-call *return-address mismatch* detection.
+`EscapeTag` unwinding is needed for the injected-param restoration path.
+
+Speculative-call *return-address mismatch* is orthogonal to injected trap returns
+(e.g. ROP depth): Exception mode uses `EscapeTag` throw/catch; Flag mode appends a
+trailing `i32` escape flag on the speculative ABI
+(`(register_file) -> (register_file, i32)`). Do not conflate that flag with injected
+trap results — Flag is part of the native-stack call ABI, not `FuncSignature`'s
+injected-return convention.
 
 The WASM frontend's `injected_params: Vec<ValType>` field is removed; `FuncSignature`
 is the authoritative source.

@@ -1037,12 +1037,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Check if this is an ABI-compliant call (dest == x1/ra) and speculative calls are enabled
                 let use_speculative = self.enable_speculative_calls
                     && dest.0 == 1  // x1 is the return address register (ra)
-                    && rctx.escape_tag().is_some();
+                    && rctx.escape().is_native_stack();
 
                 if use_speculative {
                     // Speculative call lowering: emit a native WASM call
                     // See SPECULATIVE_CALLS.md and set_speculative_calls() docs for the full pattern
-                    let escape_tag = rctx.escape_tag().unwrap();
+                    let escape = rctx.escape();
                     let Some(target_func) = self.pc_to_func_idx(target_pc) else {
                         rctx.oob_jump(ctx, tail_idx, target_pc, rctx.locals_mark().total_locals)?;
                         return Ok(());
@@ -1062,21 +1062,23 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         enable_rv64: self.enable_rv64,
                     };
 
-                    // Use fixups to set expected_ra (local 65) only for this call
-                    let params = yecta::JumpCallParams::call(
-                        target_func,
-                        rctx.locals_mark().total_locals,
-                        escape_tag,
-                        rctx.pool(),
-                    )
+                    let params = match escape {
+                        yecta::CallEscape::Exception(tag) => yecta::JumpCallParams::call(
+                            target_func,
+                            rctx.locals_mark().total_locals,
+                            tag,
+                            rctx.pool(),
+                        ),
+                        yecta::CallEscape::Flag => yecta::JumpCallParams::call_flag(
+                            target_func,
+                            rctx.locals_mark().total_locals,
+                            rctx.pool(),
+                        ),
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
                     .with_fixup(rctx.layout().local(self.expected_ra_slot, 0), &expected_ra_snippet);
 
-                    // Emit the speculative call using yecta's ji_with_params API
-                    // This wraps the call in a try-catch block and uses fixups mechanism
                     rctx.ji_with_params(ctx, tail_idx, params)?;
-
-                    // After the call returns (via exception catch), execution continues here
-                    // No manual validation needed - the ret() in the callee threw the state
                     return Ok(());
                 } else {
                     // Non-speculative path: original jump-based implementation
@@ -1119,7 +1121,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     && dest.0 == 0       // x0 = no link (return, not call)
                     && base.0 == 1       // ra = return address register
                     && offset.as_i32() == 0
-                    && rctx.escape_tag().is_some();
+                    && rctx.escape().is_native_stack();
 
                 if is_abi_return {
                     // Jump trap: jalr x0, ra, 0 → Return (indirect)
@@ -1140,8 +1142,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                     }
 
                     // ABI-compliant return: check if ra matches expected_ra
-                    // If they match, use regular WASM Return; if not, throw escape tag
-                    let escape_tag = rctx.escape_tag().unwrap();
+                    let escape = rctx.escape();
 
                     // Load ra (current return address)
                     self.emit_xreg_get(ctx, rctx, tail_idx, Reg(1))?;
@@ -1156,23 +1157,32 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         rctx.feed(ctx, tail_idx, &Instruction::I32Eq)?;
                     }
 
-                    // If equal (ABI-compliant), use regular return; else throw exception
                     rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
 
-                    // ABI-compliant return - use WASM Return. The generated
-                    // function's ABI is (register_file) -> (register_file) —
-                    // a bare `Return` must push the full, current register
-                    // file as its results, matching the shape `ret`'s
-                    // `Throw` below pushes.
-                    for p in 0..rctx.locals_mark().total_locals {
-                        rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                    match escape {
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, false)?;
+                        }
+                        yecta::CallEscape::Exception(_) | yecta::CallEscape::Jump => {
+                            // (register_file) -> (register_file)
+                            for p in 0..rctx.locals_mark().total_locals {
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                            }
+                            rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                        }
                     }
-                    rctx.feed(ctx, tail_idx, &Instruction::Return)?;
 
                     rctx.feed(ctx, tail_idx, &Instruction::Else)?;
 
-                    // Non-ABI-compliant return - throw escape tag with all register state
-                    rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, escape_tag)?;;
+                    match escape {
+                        yecta::CallEscape::Exception(tag) => {
+                            rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, tag)?;
+                        }
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, true)?;
+                        }
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
 
                     rctx.feed(ctx, tail_idx, &Instruction::End)?;
                     return Ok(());
@@ -1181,12 +1191,12 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // Check if this is an ABI-compliant call (dest == x1/ra) and speculative calls are enabled
                 let use_speculative = self.enable_speculative_calls
                     && dest.0 == 1  // x1 is the return address register (ra)
-                    && rctx.escape_tag().is_some();
+                    && rctx.escape().is_native_stack();
 
                 if use_speculative {
                     // Speculative call lowering for indirect calls
                     // Since JALR is indirect, we use dynamic dispatch through the pool table
-                    let escape_tag = rctx.escape_tag().unwrap();
+                    let escape = rctx.escape();
 
                     // Save return address to ra (x1)
                     if self.enable_rv64 {
@@ -1315,7 +1325,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                         target: yecta::Target::Dynamic {
                             idx: &target_snippet,
                         },
-                        call: Some(escape_tag),
+                        call: escape,
                         pool: rctx.pool(),
                         condition: None,
                         condition_hook: None,
@@ -3217,7 +3227,7 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
             rctx.locals_mark().total_locals,
             &BTreeMap::new(),
             target,
-            None,
+            yecta::CallEscape::Jump,
             rctx.pool(),
             Some(&condition),
         )?;

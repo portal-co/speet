@@ -11,36 +11,34 @@ The recompiler toolchain analyzes binary patterns to identify standard function 
 ## 2. Lowering to WASM Function Calls
 When an ABI call is detected, it is lowered to a standard WASM `call` (instead of a `return_call` or jump). This allows the megabinary to utilize the host's native call stack.
 
-### Lowering Pattern (Call Site):
-**RISC-V:**
-1. **Set Return Metadata**: Store the expected return address in both:
-   - The guest `ra` register (x1) - visible to the callee
-   - A hidden `expected_ra` local via the fixups mechanism - isolated per call
-2. **Native Call**: Emit a WASM `call` wrapped in a `TryTable`/catch block
+Escape of a return-address mismatch is selected by [`CallEscape`](src/lib.rs):
 
-**x86_64:**
-1. **Set Return Metadata**: Store the expected return address in:
-   - Push return address to the guest stack (normal x86_64 behavior)
-   - A hidden `expected_ra` local via the fixups mechanism - isolated per call
-2. **Native Call**: Emit a WASM `call` wrapped in a `TryTable`/catch block
+| `CallEscape` | Call site | Mismatch signal | Function results |
+|--------------|-----------|-----------------|------------------|
+| `Jump` | `return_call` / jump (no native stack) | n/a | existing jump ABI |
+| `Exception(EscapeTag)` | `call` inside hoisted `TryTable` | `throw` tag payload | `(register_file)` |
+| `Flag` | bare `call` (no `TagSection`) | trailing `i32` flag (`0` match / `1` mismatch) | `(register_file, i32)` |
+
+`SpeculativeEscape { escape, enable }` is the recompiler knob; `FLAG_SPEC` and `exception_spec(tag)` enable native-stack calls. AArch64/MIPS stay on `CallEscape::Jump` until speculative wiring exists.
+
+### Lowering Pattern (Call Site):
+**RISC-V / x86_64 (shared shape):**
+1. **Set Return Metadata**: Store the expected return address in the guest ABI location (`ra` / stack) *and* a hidden `expected_ra` local via fixups.
+2. **Native Call**:
+   - **Exception**: WASM `call` inside a hoisted `TryTable`/catch region.
+   - **Flag**: bare WASM `call`; after results, branch on the trailing `i32` flag (both arms empty), then restore the register file — same fallthrough-after-restore shape as EH catch.
 
 ### Lowering Pattern (Return Site):
-**RISC-V:**
-When an ABI-compliant return is detected (`jalr x0, ra, 0`):
-1. **Compare Return Addresses**: Check if `ra` matches `expected_ra`
-2. **ABI-Compliant Path**: If they match, use direct WASM `Return` instruction
-3. **Non-ABI Path**: If they don't match, throw the escape tag for validation
-4. **Caller Handles**: The caller either receives a normal return or catches the exception
+When an ABI-compliant return is detected (`jalr x0, ra, 0` / `ret`):
+1. **Compare** guest return address with `expected_ra`.
+2. **Match**: push register file (+ `i32.const 0` in Flag mode) and `Return`.
+3. **Mismatch**:
+   - **Exception**: `throw` with the register-file payload.
+   - **Flag**: push register file + `i32.const 1` and `Return` (no throw).
+4. **Caller**: Exception catch / Flag `if` both restore and fall through after the call.
 
-**x86_64:**
-When an ABI-compliant return is detected (`ret` or `ret <imm>`):
-1. **Compare Return Addresses**: Check if stack top matches `expected_ra`
-2. **ABI-Compliant Path**: If they match, pop stack and use direct WASM `Return` instruction
-3. **Non-ABI Path**: If they don't match, throw the escape tag for validation
-4. **Caller Handles**: The caller either receives a normal return or catches the exception
-
-## 3. Speculative Return & Exception Escapes
-The mechanism uses WebAssembly exceptions for call/return matching:
+## 3. Speculative Return & Escape Strategies
+Exception mode uses WebAssembly exception tags; Flag mode uses a trailing result:
 
 ### RISC-V Implementation
 
@@ -135,30 +133,25 @@ else                   ;; If they don't match
 end
 ```
 
-## 4. Exception Handler Integration
-The `yecta::Reactor` wraps speculative calls in `TryTable`/catch regions with fixup parameter handling:
+## 4. Escape Integration (`CallEscape`)
+The `yecta::Reactor` implements both escape strategies with shared fixup/`expected_ra` plumbing:
 
+**Exception (`CallEscape::Exception`):**
 - **Tag**: `$ESCAPE_TAG` (configured via `EscapeTag`)
-- **Payload**: All guest registers (x0-x31, f0-f31, PC, expected_ra) for non-ABI returns
-- **Fixups**: The `expected_ra` parameter (index 65) is set via yecta's fixup mechanism
-- **Behavior**: 
-  1. **ABI-compliant return** (`ra` matches `expected_ra`) → direct WASM `Return` → normal function return
-  2. **Non-ABI return** (`ra` doesn't match) → throws exception → caught by caller → state restored
-  3. **Normal execution**: continues after the call instruction
+- **Payload**: Guest register file for non-ABI returns
+- **Call**: hoisted `TryTable` region; catch restores and falls through
+- Requires a `TagSection` and a runtime with the exception-handling proposal (wasmi gap → wasmtime in e2e)
 
-### Why This Works
-**RISC-V:**
-- **ABI-compliant code**: Call sets `ra` via fixup, return compares and uses direct return → optimal performance path
-- **Non-standard returns** (longjmp, corrupted ra, etc.): Comparison fails → exception thrown → handled by dispatcher
-- **Nested calls**: Each call has its own fixup-isolated `expected_ra` → exceptions propagate correctly through the WASM call stack
-- **Performance**: Most returns are ABI-compliant and use direct WASM returns instead of exceptions
+**Flag (`CallEscape::Flag`):**
+- **No tags / no `TryTable`** — runs under plain wasmi
+- **ABI**: `(register_file) -> (register_file, i32)`; flag `0` = match, `1` = mismatch
+- **Call**: bare `call`, then empty `if`/`else` on the flag, then restore (mirrors EH catch fallthrough)
+- Nested frames see the flag at the nearest call site (same “nearest handler” shape as `Catch::One`)
 
-**x86_64:**
-- **ABI-compliant code**: Call pushes return address and sets `expected_ra` via fixup, return compares stack top and uses direct return → optimal performance path
-- **Non-standard returns** (longjmp, stack manipulation, etc.): Comparison fails → exception thrown → handled by dispatcher
-- **Nested calls**: Each call has its own fixup-isolated `expected_ra` → exceptions propagate correctly through the WASM call stack
-- **Performance**: Most returns are ABI-compliant and use direct WASM returns instead of exceptions
-- **Stack integrity**: Stack operations continue normally, comparison ensures return address wasn't corrupted
+**Behavior (both modes):**
+1. ABI-compliant return → `Return` with flag `0` / no throw
+2. Non-ABI return → Flag `1` or `throw` → caller restores and continues after the call
+3. Fixups isolate `expected_ra` per call site on the WASM call stack
 
 ## 5. Hidden State: `expected_ra` Local and Fixups
 Each generated function includes a hidden local (`expected_ra`) that tracks the return address set by speculative calls:
@@ -186,6 +179,9 @@ The yecta fixups system ensures `expected_ra` is set only for calls and isolated
 let expected_ra_snippet = ExpectedRaSnippet { return_addr, enable_rv64 };
 let params = JumpCallParams::call(target_func, 66, escape_tag, pool)
     .with_fixup(65, &expected_ra_snippet);
+// Or Flag mode (no TagSection):
+// let params = JumpCallParams::call_flag(target_func, 66, pool)
+//     .with_fixup(65, &expected_ra_snippet);
 reactor.ji_with_params(ctx, params)?;
 ```
 
@@ -195,6 +191,7 @@ reactor.ji_with_params(ctx, params)?;
 let expected_ra_snippet = ExpectedRaSnippet { return_addr };
 let params = JumpCallParams::call(target_func, total_locals, escape_tag, pool)
     .with_fixup(expected_ra_local_idx, &expected_ra_snippet);
+// Or: JumpCallParams::call_flag(target_func, total_locals, pool)...
 reactor.ji_with_params(ctx, params)?;
 ```
 
@@ -238,8 +235,7 @@ This approach provides better isolation than manual local setting and ensures `e
   - **RISC-V**: The comparison-based escape ensures `ra` register integrity
   - **x86_64**: The comparison-based escape ensures stack-based return address integrity
   - Any deviation from expected control flow is intercepted and handled by the vkernel-backed dispatcher
-- **Compatibility**: 
-  - **RISC-V**: Non-ABI code (longjmp, setjmp, computed gotos) still works through the exception path and standard dispatcher
-  - **x86_64**: Non-ABI code (longjmp, setjmp, stack manipulation) still works through the exception path and standard dispatcher
+- **Compatibility**: Non-ABI code (longjmp, setjmp, computed gotos / stack manipulation) still works through the mismatch path (throw or flag=`1`) and the standard dispatcher.
+- **Runtime portability**: Flag mode does not need the exception-handling proposal — preferred for wasmi Lane A and thin-runtime assemble paths that omit `TagSection`.
 - **Isolation**: The fixups mechanism ensures each call site gets a fresh, isolated `expected_ra` value without global state pollution.
-- **Architecture Agnostic**: The same yecta fixups and exception mechanisms work for both register-based (RISC-V) and stack-based (x86_64) calling conventions.
+- **Architecture Agnostic**: The same yecta fixups + `CallEscape` policy work for both register-based (RISC-V) and stack-based (x86_64) calling conventions.

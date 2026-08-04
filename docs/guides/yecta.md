@@ -89,11 +89,18 @@ Float stores (`F32Store`, `F64Store`) are always emitted eagerly: float values c
 **Code:** `crates/native/speet-riscv/src/direct.rs`, `crates/native/speet-x86_64/src/direct.rs`  
 **Design doc:** [SPECULATIVE_CALLS.md](../../crates/helper/yecta/SPECULATIVE_CALLS.md)
 
-When the recompiler detects an ABI-compliant call instruction (RISC-V `jal x1`/`jalr x1`, x86-64 `call`), it lowers it to a native WASM `call` wrapped in a `TryTable`/catch block rather than a `return_call`. The expected return address is stored in a hidden `expected_ra` local (via the fixups mechanism) *and* in the guest register (`ra`/stack).
+When the recompiler detects an ABI-compliant call instruction (RISC-V `jal x1`/`jalr x1`, x86-64 `call`) and speculative calls are enabled, it lowers to a native WASM `call` rather than a `return_call`. The expected return address is stored in a hidden `expected_ra` local (via fixups) *and* in the guest register (`ra`/stack).
 
-On the matching ABI-compliant return, if the guest `ra` (or stack top) matches `expected_ra`, a direct WASM `Return` is emitted. If not, the escape tag is thrown so the caller can fall back to the indirect dispatch path.
+Mismatch signaling is selected by `CallEscape` (see design doc):
 
-**Do not** remove or short-circuit the `expected_ra` comparison — it is the mechanism that distinguishes a legitimate ABI return from a computed jump that happens to land on a return instruction.
+- `Exception(EscapeTag)` — `TryTable`/`Throw` (requires `TagSection` + EH runtime)
+- `Flag` — trailing `i32` result (`0` match / `1` mismatch); no exception opcodes
+
+On match, emit `Return` (Flag: plus `i32.const 0`). On mismatch, Exception throws; Flag returns with `i32.const 1`. The caller's catch / flag `if` restores the register file and falls through — same shape for both modes.
+
+**Do not** remove or short-circuit the `expected_ra` comparison — it distinguishes a legitimate ABI return from a computed jump that lands on a return instruction.
+
+**Do not** require exception handling for speculative calls — Flag mode is a supported escape path and must keep the post-call flag check (empty `if`/`else` then restore). Do not open `HoistedCallRegion` / `TryTable` on the Flag path.
 
 ---
 

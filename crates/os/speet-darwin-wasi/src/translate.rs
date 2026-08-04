@@ -32,6 +32,7 @@ fn make_rctx<'r>(
     reactor: &'r mut Reactor<(), Infallible, Function, LocalPool>,
     base_func_offset: u32,
     start_addr: u64,
+    escape: yecta::CallEscape,
 ) -> ReactorAdapter<'r, (), Infallible, Function, LocalPool> {
     let mut rctx = ReactorAdapter {
         reactor,
@@ -51,7 +52,7 @@ fn make_rctx<'r>(
             handler: &REACTOR_TABLE,
             ty: TypeIdx(0),
         },
-        escape_tag: None,
+        escape,
     };
     rctx.set_base_func_offset(base_func_offset);
     rctx
@@ -101,7 +102,7 @@ pub fn translate_aarch64_darwin_wasi(text: &[u8], start_addr: u64) -> WasiTransl
     recompiler.set_slot_assigner(slots.clone());
 
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, aarch64_base, start_addr);
+    let mut rctx = make_rctx(&mut reactor, aarch64_base, start_addr, yecta::CallEscape::Jump);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);

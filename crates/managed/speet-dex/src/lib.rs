@@ -1915,7 +1915,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -1932,7 +1932,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -1949,7 +1949,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -1966,7 +1966,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -1983,7 +1983,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2000,7 +2000,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2019,7 +2019,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2036,7 +2036,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2053,7 +2053,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2070,7 +2070,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2087,7 +2087,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;
@@ -2104,7 +2104,7 @@ where
                     total_params,
                     &BTreeMap::new(),
                     Target::Static { func: tgt },
-                    None,
+                    yecta::CallEscape::Jump,
                     pool,
                     Some(&cond),
                 )?;

@@ -251,7 +251,7 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                 rctx.ji(
                     ctx, tail_idx, total, &BTreeMap::new(),
                     Target::Static { func: taken_func },
-                    None,
+                    yecta::CallEscape::Jump,
                     rctx.pool(),
                     Some(&condition),
                 )?;
@@ -276,7 +276,7 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                 rctx.ji(
                     ctx, tail_idx, total, &BTreeMap::new(),
                     Target::Static { func: taken_func },
-                    None,
+                    yecta::CallEscape::Jump,
                     rctx.pool(),
                     Some(&condition),
                 )?;

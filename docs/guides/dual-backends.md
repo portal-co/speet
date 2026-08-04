@@ -55,18 +55,30 @@ When changing emission or link:
 - [ ] Are layout params declared via `RuntimeLayoutParams` (`LocalSlot` handles)?
 - [ ] Does lane B-wasm match lane A semantics on merged-with-mock?
 - [ ] Does lane B-native match lane A with blitz extension overlay?
+- [ ] Does `flag_spec` (`CallEscape::Flag`) execute under wasmi without soft-skip (no EH proposal)?
+- [ ] Does `eh_spec` still use the known wasmi→wasmtime exception gap fallback only when needed?
 
 Note: A-OS (`WasmFrontend` + `FuncSchedule`) is **not** a parity lane — covered by A + B-wasm + unit tests.
+
+## Canonical dual-lane e2e matrix
+
+Generator: [`crates/test/speet-e2e/generate_tests.py`](../../crates/test/speet-e2e/generate_tests.py)  
+Filter: [`harness/capabilities.rs`](../../crates/test/speet-e2e/tests/harness/capabilities.rs)  
+Configs: `EscapeConfig::{None, Exception, ExceptionSpec, FlagSpec}`  
+Paths: wasmi (A), blitz (B-wasm), thin_native (B-native), linux_wasi (A), darwin_wasi (A)
+
+Capability filter (no invalid cartesian): speculative configs only for RV/x86; darwin-wasi Jump-only until aarch64 speculative exists; linux-wasi / thin_native Jump + FlagSpec until TagSection is wired in those assemblers. Hand-written WASI/dual_lane files are thin wrappers over `harness/env_*`; regenerate `e2e.rs` after editing the generator.
 
 ## Darwin-WASI / Linux-WASI guest rows
 
 | Guest | Lane A | Lane B-native | Notes |
 |-------|--------|---------------|-------|
-| RV64 Linux (`ecall`) | [`speet-linux-wasi`](../speet-linux-wasi.md) → wasmi | Thin runtime + `MacLibSystemTunnel` / `LinuxLibcTunnel` | Dual-lane harness: `speet-e2e/tests/dual_lane.rs` |
-| aarch64 Darwin/BSD (libSystem dylib/GOT; `svc #0x80` optional) | [`speet-darwin-wasi`](../speet-darwin-wasi.md) → wasmi | Thin runtime Mach-O path (when wired) | Lane A primary path patches GOT/lazy pointers to virtual redirect shims; E2E: `darwin_wasi_tests.rs` |
+| RV64 Linux (`ecall`) | [`speet-linux-wasi`](../speet-linux-wasi.md) → wasmi | Thin runtime + `MacLibSystemTunnel` / `LinuxLibcTunnel` | Matrix cells + `dual_lane.rs` wrappers; export `"memory"` is host mem (index 1) |
+| aarch64 Darwin/BSD (libSystem dylib/GOT; `svc #0x80` optional) | [`speet-darwin-wasi`](../speet-darwin-wasi.md) → wasmi | Thin runtime Mach-O path (when wired) | Lane A GOT/lazy → redirect shims; GOT edge case in `darwin_wasi_tests.rs` |
 
 Parity for a shared corpus slice:
 
 - [ ] Megabinary validates under wasmparser
 - [ ] Lane A wasmi exit code / stdout match Lane B-native for the same guest bytes
 - [ ] Syscall numbers stay in the mapping crate (`os-linux-wasi` / `os-darwin-wasi`), not hand-matched in the recompiler
+- [ ] Preview1 `fd_write` / seed use exported host `"memory"` (mem1), not private guest mem0

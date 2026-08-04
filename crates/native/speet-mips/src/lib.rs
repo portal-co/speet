@@ -1001,7 +1001,7 @@ where
             rctx.locals_mark().total_locals, // params: pass all registers (including trap params)
             &BTreeMap::new(),  // fixups: none needed
             target,            // target: branch target
-            None,              // call: not an escape call
+            yecta::CallEscape::Jump, // call: not an escape call
             rctx.pool(),  // pool: for indirect calls
             Some(&condition),  // condition: branch condition
         )?;

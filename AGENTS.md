@@ -14,6 +14,7 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not eliminate `return_call` chains — O(1) stack depth depends on them.
 - Do not remove the `locals_virtual` flush in `materialize_for`.
 - Do not flush all stores before every load — use the runtime alias-check `if` blocks.
+- Do not require exception tags for speculative native-stack calls — `CallEscape::Flag` is a supported escape path (trailing `i32`); keep the flag check and do not open `TryTable` on that path.
 
 ---
 

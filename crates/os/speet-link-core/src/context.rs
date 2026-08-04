@@ -39,7 +39,7 @@ use crate::RuntimeLayoutParams;
 use speet_traps::{InstructionInfo, JumpInfo, TrapAction, TrapConfig};
 use wasm_encoder::{FuncType, Instruction, ValType};
 use wax_core::build::{AmbientSink, InstructionSink};
-use yecta::{EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
+use yecta::{CallEscape, EscapeTag, Fed, FuncIdx, LocalDeclarator, LocalLayout, LocalPoolBackend, Mark, Pool, Reactor, TableIdx, TypeIdx};
 use yecta::layout::{CellIdx, CellRegistry};
 
 // ── BaseContext ───────────────────────────────────────────────────────────────
@@ -268,11 +268,21 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
     /// valid for the duration of the borrow.
     fn pool(&self) -> Pool<'_, Context, E>;
 
-    /// The escape tag used for exception-based control flow, if any.
-    fn escape_tag(&self) -> Option<EscapeTag>;
+    /// Speculative-call escape policy (`Jump` / `Exception` / `Flag`).
+    fn escape(&self) -> CallEscape;
 
-    /// Set the escape tag.
-    fn set_escape_tag(&mut self, tag: Option<EscapeTag>);
+    /// Set the speculative-call escape policy.
+    fn set_escape(&mut self, escape: CallEscape);
+
+    /// Convenience: exception tag when escape is [`CallEscape::Exception`].
+    fn escape_tag(&self) -> Option<EscapeTag> {
+        self.escape().exception_tag()
+    }
+
+    /// Convenience: set escape from an optional exception tag (`None` → `Jump`).
+    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
+        self.set_escape(tag.into());
+    }
 
     /// Emit an indirect jump or call using yecta's `ji` API.
     fn ji(
@@ -282,7 +292,7 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
         params: u32,
         fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E>;
@@ -295,8 +305,17 @@ pub trait ReactorContext<Context, E>: BaseContext<Context, E> + InstructionSink<
         params: yecta::JumpCallParams<'_, Context, E>,
     ) -> Result<(), E>;
 
-    /// Emit a return through the escape-tag mechanism.
+    /// Emit a return through the escape-tag mechanism (exception mode).
     fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E>;
+
+    /// Emit a `(register_file..., i32_flag)` return for flag-escape mode.
+    fn ret_flag(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        params: u32,
+        escaped: bool,
+    ) -> Result<(), E>;
 
     /// Seed the underlying local pool.
     ///
@@ -422,8 +441,8 @@ where
     pub layout_params: RuntimeLayoutParams,
     /// Indirect-call pool handler and type.
     pub pool: Pool<'a, Context, E>,
-    /// Optional escape tag.
-    pub escape_tag: Option<EscapeTag>,
+    /// Speculative-call escape policy.
+    pub escape: CallEscape,
 }
 
 impl<'a, Context, E, F, P> ReactorAdapter<'a, Context, E, F, P>
@@ -443,7 +462,7 @@ where
             injected_start: Mark { slot_count: 0, total_locals: 0 },
             layout_params: RuntimeLayoutParams::new(),
             pool,
-            escape_tag: None,
+            escape: CallEscape::Jump,
         }
     }
 }
@@ -555,11 +574,11 @@ where
     fn pool(&self) -> Pool<'_, Context, E> {
         self.pool
     }
-    fn escape_tag(&self) -> Option<EscapeTag> {
-        self.escape_tag
+    fn escape(&self) -> CallEscape {
+        self.escape
     }
-    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) {
-        self.escape_tag = tag;
+    fn set_escape(&mut self, escape: CallEscape) {
+        self.escape = escape;
     }
 
     fn ji(
@@ -569,7 +588,7 @@ where
         params: u32,
         fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
@@ -587,6 +606,16 @@ where
 
     fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
         self.reactor.ret(tail_idx, ctx, params, tag)
+    }
+
+    fn ret_flag(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        params: u32,
+        escaped: bool,
+    ) -> Result<(), E> {
+        self.reactor.ret_flag(tail_idx, ctx, params, escaped)
     }
 
     fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {
@@ -673,13 +702,16 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> FedContext<'a, Con
     pub fn ret(&self, ctx: &mut Context, params: u32, tag: EscapeTag) -> Result<(), E> {
         self.rctx.ret(ctx, self.tail_idx, params, tag)
     }
+    pub fn ret_flag(&self, ctx: &mut Context, params: u32, escaped: bool) -> Result<(), E> {
+        self.rctx.ret_flag(ctx, self.tail_idx, params, escaped)
+    }
     pub fn ji(
         &self,
         ctx: &mut Context,
         params: u32,
         fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
@@ -697,6 +729,7 @@ impl<'a, Context, E, RC: ReactorContext<Context, E> + ?Sized> FedContext<'a, Con
     }
 
     pub fn pool(&self) -> Pool<'_, Context, E> { self.rctx.pool() }
+    pub fn escape(&self) -> CallEscape { self.rctx.escape() }
     pub fn escape_tag(&self) -> Option<EscapeTag> { self.rctx.escape_tag() }
     pub fn locals_mark(&self) -> Mark { self.rctx.locals_mark() }
     pub fn base_func_offset(&self) -> u32 { self.rctx.base_func_offset() }
@@ -783,8 +816,8 @@ where
     pub layout_params: RuntimeLayoutParams,
     /// Indirect-call pool handler and type.
     pub pool: Pool<'r, Context, E>,
-    /// Optional escape tag for exception-based control flow.
-    pub escape_tag: Option<EscapeTag>,
+    /// Speculative-call escape policy.
+    pub escape: CallEscape,
     /// Registry mapping unique `(params, locals)` signatures to [`CellIdx`] handles.
     pub cell_registry: CellRegistry,
     /// The cell most recently allocated for the current function.
@@ -806,7 +839,7 @@ where
     pub fn new(
         reactor: &'r mut Reactor<Context, E, F, P>,
         pool: Pool<'r, Context, E>,
-        escape_tag: Option<EscapeTag>,
+        escape: impl Into<CallEscape>,
     ) -> Self {
         Self {
             reactor,
@@ -816,7 +849,7 @@ where
             injected_start: Mark { slot_count: 0, total_locals: 0 },
             layout_params: RuntimeLayoutParams::new(),
             pool,
-            escape_tag,
+            escape: escape.into(),
             cell_registry: CellRegistry::default(),
             current_cell: CellIdx(0),
         }
@@ -929,8 +962,8 @@ where
     }
 
     fn pool(&self) -> Pool<'_, Context, E> { self.pool }
-    fn escape_tag(&self) -> Option<EscapeTag> { self.escape_tag }
-    fn set_escape_tag(&mut self, tag: Option<EscapeTag>) { self.escape_tag = tag; }
+    fn escape(&self) -> CallEscape { self.escape }
+    fn set_escape(&mut self, escape: CallEscape) { self.escape = escape; }
 
     fn ji(
         &self,
@@ -939,7 +972,7 @@ where
         params: u32,
         fixups: &alloc::collections::BTreeMap<u32, &dyn yecta::Snippet<Context, E>>,
         target: yecta::Target<Context, E>,
-        call: Option<EscapeTag>,
+        call: CallEscape,
         pool: Pool<'_, Context, E>,
         condition: Option<&dyn yecta::Snippet<Context, E>>,
     ) -> Result<(), E> {
@@ -955,6 +988,15 @@ where
     }
     fn ret(&self, ctx: &mut Context, tail_idx: usize, params: u32, tag: EscapeTag) -> Result<(), E> {
         self.reactor.ret(tail_idx, ctx, params, tag)
+    }
+    fn ret_flag(
+        &self,
+        ctx: &mut Context,
+        tail_idx: usize,
+        params: u32,
+        escaped: bool,
+    ) -> Result<(), E> {
+        self.reactor.ret_flag(tail_idx, ctx, params, escaped)
     }
 
     fn with_local_pool(&self, f: &mut dyn FnMut(&mut dyn yecta::LocalPoolApi)) {

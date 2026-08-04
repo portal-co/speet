@@ -18,7 +18,8 @@ mod translate;
 
 pub use assemble::{
     recompile_aarch64_linux_wasi_to_wasm, recompile_mips_linux_wasi_to_wasm,
-    recompile_rv64_wasi_to_wasm, recompile_x86_64_linux_wasi_to_wasm,
+    recompile_rv64_wasi_to_wasm, recompile_rv64_wasi_to_wasm_with_escape,
+    recompile_x86_64_linux_wasi_to_wasm,
 };
 pub use link::HOST_MEMORY_INDEX;
 pub use ecall::{
@@ -34,8 +35,8 @@ pub use guest_module::{
 };
 pub use link::{
     func_export_index, link_aarch64_linux_wasi_megabinary, link_canonical_guest_wasm,
-    link_mips_linux_wasi_megabinary, link_wasi_megabinary, link_x86_64_linux_wasi_megabinary,
-    link_wasi_megabinary_with_plan, WasiLinkPlan,
+    link_mips_linux_wasi_megabinary, link_wasi_megabinary, link_wasi_megabinary_with_escape,
+    link_x86_64_linux_wasi_megabinary, link_wasi_megabinary_with_plan, WasiLinkPlan,
 };
 pub use manifest::wasi_preview1_manifest;
 pub use merge::{extract_guest_defined_module, extract_guest_handlers, GuestDefinedModule, GuestHandlerFunctions};
