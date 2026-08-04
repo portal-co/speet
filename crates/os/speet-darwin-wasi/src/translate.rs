@@ -85,6 +85,15 @@ fn wasi_imports_from_manifest(manifest: &ImportManifest) -> WasiImports {
 
 /// Translate an aarch64 Darwin `.text` blob, lowering `svc` to the embedded guest module.
 pub fn translate_aarch64_darwin_wasi(text: &[u8], start_addr: u64) -> WasiTranslation {
+    translate_aarch64_darwin_wasi_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Like [`translate_aarch64_darwin_wasi`], with an explicit speculative-call escape policy.
+pub fn translate_aarch64_darwin_wasi_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> WasiTranslation {
     let manifest = wasi_preview1_manifest();
     let wasi = wasi_imports_from_manifest(&manifest);
     let n_imports = manifest.func_imports.len() as u32;
@@ -100,9 +109,10 @@ pub fn translate_aarch64_darwin_wasi(text: &[u8], start_addr: u64) -> WasiTransl
 
     let mut recompiler = speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
     recompiler.set_slot_assigner(slots.clone());
+    recompiler.set_speculative_calls(speculative.enable);
 
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, aarch64_base, start_addr, yecta::CallEscape::Jump);
+    let mut rctx = make_rctx(&mut reactor, aarch64_base, start_addr, speculative.escape);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_params(&rctx);

@@ -169,14 +169,16 @@ impl IntegratedNativeRuntime {
         let manifest = self.manifest();
         let layout = GuestImageLayout::from_loaded_binary(&bin);
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_layout(
-                &text.data,
-                &layout,
-                guest_arch,
-                Some(&plt_plan),
-                Some(bin.entry),
-                &manifest,
-            ),
+            BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 => {
+                recompile_to_wasm_instrumented_plt_with_layout(
+                    &text.data,
+                    &layout,
+                    guest_arch,
+                    Some(&plt_plan),
+                    Some(bin.entry),
+                    &manifest,
+                )
+            }
         };
         self.cache.put_wasm(&input_hash, wasm.clone());
         Ok(wasm)
@@ -380,6 +382,7 @@ fn arch_label(a: BinArch) -> &'static str {
     match a {
         BinArch::X86_64 => "x86_64",
         BinArch::AArch64 => "aarch64",
+        BinArch::RiscV64 => "riscv64",
     }
 }
 

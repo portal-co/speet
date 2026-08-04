@@ -7,6 +7,7 @@ This document outlines the strategy for statically detecting and lowering ABI-co
 The recompiler toolchain analyzes binary patterns to identify standard function calls:
 - **x86_64**: `call <offset>` (E8) and `call <reg>` (FF /2) following the System V ABI (return address pushed to stack).
 - **RISC-V**: `jal x1, <offset>` and `jalr x1, x2, <offset>` following the standard calling convention (return address in `ra`/`x1`).
+- **AArch64**: `BL` / `BLR` (link address in `LR`/`x30`) and ABI `RET` (`RET` / `RET X30`).
 
 ## 2. Lowering to WASM Function Calls
 When an ABI call is detected, it is lowered to a standard WASM `call` (instead of a `return_call` or jump). This allows the megabinary to utilize the host's native call stack.
@@ -19,7 +20,7 @@ Escape of a return-address mismatch is selected by [`CallEscape`](src/lib.rs):
 | `Exception(EscapeTag)` | `call` inside hoisted `TryTable` | `throw` tag payload | `(register_file)` |
 | `Flag` | bare `call` (no `TagSection`) | trailing `i32` flag (`0` match / `1` mismatch) | `(register_file, i32)` |
 
-`SpeculativeEscape { escape, enable }` is the recompiler knob; `FLAG_SPEC` and `exception_spec(tag)` enable native-stack calls. AArch64/MIPS stay on `CallEscape::Jump` until speculative wiring exists.
+`SpeculativeEscape { escape, enable }` is the recompiler knob; `FLAG_SPEC` and `exception_spec(tag)` enable native-stack calls. AArch64 supports Flag (and Exception when a tag is wired); MIPS stays on `CallEscape::Jump` until speculative wiring exists.
 
 ### Lowering Pattern (Call Site):
 **RISC-V / x86_64 (shared shape):**

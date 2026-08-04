@@ -161,6 +161,7 @@ pub fn sp_param_index(arch: BinArch) -> u32 {
     match arch {
         BinArch::AArch64 => speet_aarch64::AArch64Recompiler::<(), ()>::SP_PARAM_INDEX,
         BinArch::X86_64 => speet_x86_64::X86Recompiler::<(), ()>::SP_PARAM_INDEX,
+        BinArch::RiscV64 => speet_riscv::RV64_SP_PARAM_INDEX,
     }
 }
 
@@ -172,6 +173,7 @@ pub fn sp_param_index(arch: BinArch) -> u32 {
 pub fn lr_param_index(arch: BinArch) -> Option<u32> {
     match arch {
         BinArch::AArch64 => Some(speet_aarch64::AArch64Recompiler::<(), ()>::LR_PARAM_INDEX),
+        BinArch::RiscV64 => Some(speet_riscv::RV64_RA_PARAM_INDEX),
         BinArch::X86_64 => None,
     }
 }
@@ -258,6 +260,9 @@ pub fn compile_wasm_to_object(
             ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
             &sig_results, arch, os, entry_func_idx, data_init_func_idx,
         ),
+        BinArch::RiscV64 => Err(
+            "host-riscv object emission is not wired (thin runtime hosts x86_64/aarch64)".into(),
+        ),
     }
 }
 
@@ -312,6 +317,9 @@ where
     let abs64 = match arch {
         BinArch::X86_64 => RelocKind::X86Abs64,
         BinArch::AArch64 => RelocKind::A64Abs64,
+        BinArch::RiscV64 => {
+            return Err("RiscV64 abs64 reloc not modeled in binary-io yet".into());
+        }
     };
     let mut table_relocs = Vec::with_capacity(n_slots as usize);
     for i in 0..n_slots {

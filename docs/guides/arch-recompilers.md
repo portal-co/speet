@@ -1,6 +1,6 @@
 # Architecture Recompilers Component Guide
 
-**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`, `crates/managed/speet-dex`  
+**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`, `crates/managed/speet-dex`  
 **Design doc:** [recompiler-guide.md](../recompiler-guide.md)
 
 ---
@@ -37,7 +37,18 @@ The `TrapConfig` field and `setup_traps` call sites are present in all architect
 
 - **Compressed instructions (RVC)**: slots exist at every 2-byte offset, including inside 4-byte instructions. See [yecta.md](yecta.md) §1a.
 - **Weak memory model**: loads and stores use `speet-ordering` with `MemOrder::Relaxed` for ordinary memory accesses and `MemOrder::SeqCst` for fence instructions. Deferred stores use `feed_lazy`. See [yecta.md](yecta.md) §2.
-- **Direct calls**: ABI-compliant `jal x1`/`jalr x1` are lowered to speculative WASM `call`s. See [yecta.md](yecta.md) §3.
+- **Direct calls**: ABI-compliant `jal x1`/`jalr x1` are lowered to speculative WASM `call`s (`CallEscape::Flag` / Exception). See [yecta.md](yecta.md) §3.
+- **Thin-runtime surface**: `bind_memory_layout`, `set_stub_for_pc_import_idx`, and `plt_calling_convention` mirror x86/aarch64 so RV guests share HostOffset/ZeroOffset + PLT shims (`BinArch::RiscV64`).
+
+---
+
+## 4b. speet-aarch64 — AArch64 specifics
+
+**Code:** `crates/native/speet-aarch64/src/`
+
+- **Fixed-width slots**: 4-byte granularity; thin frontend uses `AArch64CfgDecoder` (not a fallthrough-only stub) for `PcSlotMap`.
+- **Speculative calls**: ABI `BL`/`BLR` + `RET` support `CallEscape::Flag` (primary; wasmi-safe) and Exception when a tag is wired. Expected RA lives in guest `LR` (x30) plus a hidden `expected_ra` param. Conditional branches stay Jump-only.
+- **DP_3SRC**: `MADD`/`MSUB`/`SMADDL`/`UMADDL`/`SMSUBL`/`UMSUBL` plus `SMULH`/`UMULH` via `speet-wasm-helpers` mulh sequences.
 
 ---
 

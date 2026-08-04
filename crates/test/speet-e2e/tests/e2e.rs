@@ -576,8 +576,10 @@ macro_rules! darwin_wasi {
      seed_addr = $seed_addr:expr, seed = $seed:expr, expect_stdout = $stdout:expr, expect_exit = $exit:expr) => {
         #[test]
         fn $name() {
-            let _cfg: EscapeConfig = $cfg; // aarch64 is Jump-only today
-            let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm($bytes, $addr);
+            let cfg: EscapeConfig = $cfg;
+            let wasm = speet_darwin_wasi::recompile_aarch64_darwin_wasi_to_wasm_with_escape(
+                $bytes, $addr, cfg.speculative_escape(),
+            );
             let state = run_preview1(&wasm, "_start", $seed_addr, $seed)
                 .unwrap_or_else(|e| panic!("darwin_wasi preview1 failed: {e}"));
             assert_eq!(state.stdout, $stdout);
@@ -3716,31 +3718,55 @@ smoke_aarch64!(aarch64_01_no_eh, "01_integer_computational", EscapeConfig::None)
 run_aarch64!(run_aarch64_01_no_eh, "01_integer_computational", EscapeConfig::None);
 smoke_aarch64!(aarch64_01_eh, "01_integer_computational", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_01_eh, "01_integer_computational", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_01_eh_spec, "01_integer_computational", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_01_eh_spec, "01_integer_computational", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_01_flag_spec, "01_integer_computational", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_01_flag_spec, "01_integer_computational", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_01, "01_integer_computational");
 smoke_aarch64!(aarch64_02_no_eh, "02_control_transfer", EscapeConfig::None);
 run_aarch64!(run_aarch64_02_no_eh, "02_control_transfer", EscapeConfig::None);
 smoke_aarch64!(aarch64_02_eh, "02_control_transfer", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_02_eh, "02_control_transfer", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_02_eh_spec, "02_control_transfer", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_02_eh_spec, "02_control_transfer", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_02_flag_spec, "02_control_transfer", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_02_flag_spec, "02_control_transfer", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_02, "02_control_transfer");
 smoke_aarch64!(aarch64_03_no_eh, "03_load_store", EscapeConfig::None);
 run_aarch64!(run_aarch64_03_no_eh, "03_load_store", EscapeConfig::None);
 smoke_aarch64!(aarch64_03_eh, "03_load_store", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_03_eh, "03_load_store", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_03_eh_spec, "03_load_store", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_03_eh_spec, "03_load_store", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_03_flag_spec, "03_load_store", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_03_flag_spec, "03_load_store", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_03, "03_load_store");
 smoke_aarch64!(aarch64_04_no_eh, "04_integer_ext", EscapeConfig::None);
 run_aarch64!(run_aarch64_04_no_eh, "04_integer_ext", EscapeConfig::None);
 smoke_aarch64!(aarch64_04_eh, "04_integer_ext", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_04_eh, "04_integer_ext", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_04_eh_spec, "04_integer_ext", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_04_eh_spec, "04_integer_ext", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_04_flag_spec, "04_integer_ext", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_04_flag_spec, "04_integer_ext", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_04, "04_integer_ext");
 smoke_aarch64!(aarch64_05_no_eh, "05_load_store_ext", EscapeConfig::None);
 run_aarch64!(run_aarch64_05_no_eh, "05_load_store_ext", EscapeConfig::None);
 smoke_aarch64!(aarch64_05_eh, "05_load_store_ext", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_05_eh, "05_load_store_ext", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_05_eh_spec, "05_load_store_ext", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_05_eh_spec, "05_load_store_ext", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_05_flag_spec, "05_load_store_ext", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_05_flag_spec, "05_load_store_ext", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_05, "05_load_store_ext");
 smoke_aarch64!(aarch64_06_no_eh, "06_floating_point", EscapeConfig::None);
 run_aarch64!(run_aarch64_06_no_eh, "06_floating_point", EscapeConfig::None);
 smoke_aarch64!(aarch64_06_eh, "06_floating_point", EscapeConfig::Exception);
 run_aarch64!(run_aarch64_06_eh, "06_floating_point", EscapeConfig::Exception);
+smoke_aarch64!(aarch64_06_eh_spec, "06_floating_point", EscapeConfig::ExceptionSpec);
+run_aarch64!(run_aarch64_06_eh_spec, "06_floating_point", EscapeConfig::ExceptionSpec);
+smoke_aarch64!(aarch64_06_flag_spec, "06_floating_point", EscapeConfig::FlagSpec);
+run_aarch64!(run_aarch64_06_flag_spec, "06_floating_point", EscapeConfig::FlagSpec);
 native_aarch64!(native_aarch64_06, "06_floating_point");
 
 // ── x86-64 corpus (wasmi + blitz) ───────────────────────────────────────────────
@@ -3828,6 +3854,7 @@ linux_wasi!(linux_wasi_exit_42_flag_spec, bytes = FIXTURE_EXIT_42, addr = 0x1000
 linux_wasi!(linux_wasi_write_exit_flag_spec, bytes = FIXTURE_WRITE_EXIT, addr = 0x1000, EscapeConfig::FlagSpec, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
 thin_native!(thin_native_exit_42_flag_spec, bytes = FIXTURE_EXIT_42, addr = 0x1000, EscapeConfig::FlagSpec, expect_exit = 42);
 darwin_wasi!(darwin_wasi_write_exit_no_eh, bytes = FIXTURE_DARWIN_WRITE_EXIT, addr = 0x1000, EscapeConfig::None, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
+darwin_wasi!(darwin_wasi_write_exit_flag_spec, bytes = FIXTURE_DARWIN_WRITE_EXIT, addr = 0x1000, EscapeConfig::FlagSpec, seed_addr = 520, seed = b"hello\n", expect_stdout = b"hello\n", expect_exit = 0);
 
 // @generated-tests-end
 

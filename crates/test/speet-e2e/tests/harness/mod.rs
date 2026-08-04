@@ -430,11 +430,9 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
-/// `speculative` enables `set_speculative_calls(true)` on the recompiler
-/// (x86-64/RISC-V only; ignored for AArch64, which has no such method).
-/// Meaningful only when paired with `eh = Eh::With` — speculative calls
-/// require an escape tag (`Eh::None` leaves `escape_tag` unset, so the
-/// recompiler's speculative path never activates regardless of this flag).
+/// `speculative` enables `set_speculative_calls(true)` on the recompiler.
+/// Meaningful only when paired with a native-stack escape (`Exception`/`Flag`);
+/// `Eh::None` leaves `CallEscape::Jump`, so the speculative path never activates.
 pub fn translate_rv(
     text: &[u8],
     start_addr: u32,
@@ -525,20 +523,29 @@ pub fn translate_x86(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
-/// `AArch64Recompiler` has no speculative-call support yet — the parameter
-/// exists only so `translate`'s dispatch signature stays uniform across
-/// architectures; it's ignored here.
 pub fn translate_aarch64(
     text: &[u8],
     start_addr: u64,
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
-    _speculative: bool,
+    speculative: bool,
+) -> Translated {
+    let config = EscapeConfig::from_eh_spec(eh, speculative);
+    translate_aarch64_for_config(text, start_addr, base_func_offset, type_idx, config)
+}
+
+pub fn translate_aarch64_for_config(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    config: EscapeConfig,
 ) -> Translated {
     let mut recompiler = AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+    recompiler.set_speculative_calls(config.speculative());
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
+    let mut rctx = make_rctx_config(&mut reactor, base_func_offset, type_idx, config);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_rv_params(&rctx);
@@ -793,7 +800,7 @@ pub fn translate_for_config(
         Arch::Rv32 => translate_rv_for_config(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, config),
         Arch::Rv64 => translate_rv_for_config(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, config),
         Arch::X86_64 => translate_x86_for_config(text, start_addr, base_func_offset, type_idx, config),
-        Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, Eh::None, false),
+        Arch::AArch64 => translate_aarch64_for_config(text, start_addr, base_func_offset, type_idx, config),
         Arch::Mips => translate_mips(text, start_addr, base_func_offset, type_idx, Eh::None, false),
     }
 }

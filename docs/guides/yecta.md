@@ -89,7 +89,7 @@ Float stores (`F32Store`, `F64Store`) are always emitted eagerly: float values c
 **Code:** `crates/native/speet-riscv/src/direct.rs`, `crates/native/speet-x86_64/src/direct.rs`  
 **Design doc:** [SPECULATIVE_CALLS.md](../../crates/helper/yecta/SPECULATIVE_CALLS.md)
 
-When the recompiler detects an ABI-compliant call instruction (RISC-V `jal x1`/`jalr x1`, x86-64 `call`) and speculative calls are enabled, it lowers to a native WASM `call` rather than a `return_call`. The expected return address is stored in a hidden `expected_ra` local (via fixups) *and* in the guest register (`ra`/stack).
+When the recompiler detects an ABI-compliant call instruction (RISC-V `jal x1`/`jalr x1`, x86-64 `call`, AArch64 `BL`/`BLR`) and speculative calls are enabled, it lowers to a native WASM `call` rather than a `return_call`. The expected return address is stored in a hidden `expected_ra` local (via fixups) *and* in the guest ABI location (`ra` / stack / `LR`).
 
 Mismatch signaling is selected by `CallEscape` (see design doc):
 

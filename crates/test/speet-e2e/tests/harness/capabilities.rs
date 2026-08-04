@@ -32,7 +32,7 @@ pub enum FixtureClass {
 }
 
 pub fn arch_supports_speculative(arch: Arch) -> bool {
-    matches!(arch, Arch::Rv32 | Arch::Rv64 | Arch::X86_64)
+    matches!(arch, Arch::Rv32 | Arch::Rv64 | Arch::X86_64 | Arch::AArch64)
 }
 
 /// Whether `(arch, path, config)` is a legal matrix cell.
@@ -54,8 +54,9 @@ pub fn cell_supported(arch: Arch, path: PathKind, config: EscapeConfig, class: F
         }
         (PathKind::LinuxWasi, _) => false,
         (PathKind::DarwinWasi, FixtureClass::DarwinSvc) => {
-            // No aarch64 speculative yet — Jump only.
-            matches!(config, EscapeConfig::None)
+            // Exception TagSection not yet declared in darwin-wasi assemble;
+            // FlagSpec + Jump are fully wired (mirrors linux-wasi).
+            matches!(config, EscapeConfig::None | EscapeConfig::FlagSpec)
         }
         (PathKind::DarwinWasi, _) => false,
         (PathKind::ThinNative, FixtureClass::LinuxEcall) => {

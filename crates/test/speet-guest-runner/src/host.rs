@@ -32,7 +32,7 @@ fn host_arch() -> BinArch {
     match env::consts::ARCH {
         "x86_64" => BinArch::X86_64,
         "aarch64" => BinArch::AArch64,
-        "riscv64" => BinArch::AArch64, // treat as non-native for BinArch purposes
+        "riscv64" => BinArch::RiscV64,
         other => panic!("unsupported host arch: {other}"),
     }
 }

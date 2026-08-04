@@ -1,4 +1,4 @@
-//! Guest architecture vocabulary (includes RISC-V not yet in binary-io).
+//! Guest architecture vocabulary (maps to [`BinArch`] where applicable).
 
 use binary_io::{BinArch, BinOs};
 
@@ -25,7 +25,8 @@ impl GuestArch {
         match self {
             Self::X86_64 => Some(BinArch::X86_64),
             Self::AArch64 => Some(BinArch::AArch64),
-            Self::Riscv32 | Self::Riscv64 => None,
+            Self::Riscv64 => Some(BinArch::RiscV64),
+            Self::Riscv32 => None,
         }
     }
 

@@ -96,7 +96,7 @@ pub fn link_guest_integrated(
 
     let abi_pad_args: u32 = match arch {
         BinArch::X86_64 => 6,
-        BinArch::AArch64 => 0,
+        BinArch::AArch64 | BinArch::RiscV64 => 0,
     };
 
     let bridge_path = work_dir.join("entry_bridge.o");

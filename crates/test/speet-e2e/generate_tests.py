@@ -47,7 +47,7 @@ ESCAPE_CONFIGS = [
 ]
 
 SPECULATIVE_SUFS = {"eh_spec", "flag_spec"}
-ARCH_SUPPORTS_SPEC = {"Arch::Rv32", "Arch::Rv64", "Arch::X86_64"}
+ARCH_SUPPORTS_SPEC = {"Arch::Rv32", "Arch::Rv64", "Arch::X86_64", "Arch::AArch64"}
 
 
 def configs_for_arch(arch: str):
@@ -365,12 +365,13 @@ def dual_lane_lines():
             f'thin_native!(thin_native_exit_42_{suf}, bytes = FIXTURE_EXIT_42, addr = 0x1000, '
             f'{cfg}, expect_exit = 42);'
         )
-    # darwin_wasi: Jump only
-    lines.append(
-        'darwin_wasi!(darwin_wasi_write_exit_no_eh, bytes = FIXTURE_DARWIN_WRITE_EXIT, '
-        'addr = 0x1000, EscapeConfig::None, seed_addr = 520, seed = b"hello\\n", '
-        'expect_stdout = b"hello\\n", expect_exit = 0);'
-    )
+    # darwin_wasi: Jump + FlagSpec (ExceptionSpec needs TagSection)
+    for suf, cfg in [("no_eh", "EscapeConfig::None"), ("flag_spec", "EscapeConfig::FlagSpec")]:
+        lines.append(
+            f'darwin_wasi!(darwin_wasi_write_exit_{suf}, bytes = FIXTURE_DARWIN_WRITE_EXIT, '
+            f'addr = 0x1000, {cfg}, seed_addr = 520, seed = b"hello\\n", '
+            f'expect_stdout = b"hello\\n", expect_exit = 0);'
+        )
     return lines
 
 

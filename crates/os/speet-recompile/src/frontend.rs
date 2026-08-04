@@ -65,7 +65,7 @@ use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, RuntimeLayoutParams, TextBaseSource};
 use speet_link_core::image_layout::MemoryModel;
 use speet_memory::memory_access_for_model;
-use speet_reach::{CfgDecoder, CfgEdges, PcSlotMap};
+use speet_reach::PcSlotMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection, Elements, EntityType,
     ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
@@ -573,15 +573,16 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice, manifes
 
 /// Guest-address-offset → relative function-slot-index granularity (bytes
 /// per decode slot) for a native arch — the same mapping each recompiler's
-/// own `pc_to_func_idx` uses internally (`speet-x86_64`: 1, every byte
-/// offset is a candidate slot; `speet-aarch64`: 4, fixed-width encoding).
-/// Kept in sync manually today; see `docs/guides/thin-runtime-genericity.md`
-/// principle 1 for why a mismatch here (vs. what the arch's own recompiler
-/// uses) would silently point `_start` at the wrong function.
+/// own `pc_to_func_idx` uses internally (`speet-x86_64`: 1; `speet-aarch64`:
+/// 4; `speet-riscv`/RVC: 2). Kept in sync manually today; see
+/// `docs/guides/thin-runtime-genericity.md` principle 1 for why a mismatch
+/// here (vs. what the arch's own recompiler uses) would silently point
+/// `_start` at the wrong function.
 fn slot_granularity(arch: BinArch) -> u64 {
     match arch {
         BinArch::X86_64 => 1,
         BinArch::AArch64 => 4,
+        BinArch::RiscV64 => 2,
     }
 }
 
@@ -593,22 +594,6 @@ fn redirect_shim_count(plt_plan: Option<&PltCallPlan>) -> u32 {
         plan.wasm_import_by_addr.keys().copied().collect();
     keys.extend(plan.native_shim_by_addr.keys().copied());
     keys.len() as u32
-}
-
-struct Fixed4CfgDecoder;
-
-impl CfgDecoder for Fixed4CfgDecoder {
-    fn decode_edges(&self, _pc: u64, bytes: &[u8]) -> Option<CfgEdges> {
-        if bytes.len() < 4 {
-            return None;
-        }
-        Some(CfgEdges {
-            static_successors: vec![],
-            fallthrough: true,
-            insn_len: 4,
-            has_indirect: false,
-        })
-    }
 }
 
 fn bind_memory_after_traps<E>(
@@ -625,6 +610,7 @@ fn bind_memory_after_traps_aarch64<E>(
     rc.bind_memory_layout(rctx);
 }
 
+
 fn build_pc_slot_map(
     arch: BinArch,
     text: &[u8],
@@ -639,7 +625,16 @@ fn build_pc_slot_map(
             let dec = speet_x86_64::cfg::X86CfgDecoder;
             PcSlotMap::all_slots(text, start_addr, &dec)
         }
-        BinArch::AArch64 => PcSlotMap::all_slots(text, start_addr, &Fixed4CfgDecoder),
+        BinArch::AArch64 => {
+            let dec = speet_aarch64::cfg::AArch64CfgDecoder;
+            PcSlotMap::all_slots(text, start_addr, &dec)
+        }
+        BinArch::RiscV64 => {
+            let dec = speet_riscv::cfg::RiscVCfgDecoder {
+                xlen: rv_asm::Xlen::Rv64,
+            };
+            PcSlotMap::all_slots(text, start_addr, &dec)
+        }
     };
     let n_text = map.len() as u32;
     let mut map = map.with_redirect_shims(halt, n_shims, gran);
@@ -725,6 +720,36 @@ pub fn translate_with_plt(
                 })
                 .expect("translate_bytes");
                 (params, rc.unsupported_insns().iter().cloned().collect())
+            }
+            BinArch::RiscV64 => {
+                use rv_asm::Xlen;
+                let mut rc =
+                    speet_riscv::RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+                        start_addr, false, true, false,
+                    );
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::RiscV64,
+                    text,
+                    start_addr,
+                    plt_plan,
+                ));
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
+                }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
+                rc.setup_traps(&mut rctx, &mut ctx);
+                rc.bind_memory_layout(&rctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(
+                    &mut ctx,
+                    &mut rctx,
+                    text,
+                    start_addr as u32,
+                    Xlen::Rv64,
+                    &mut |a| Function::new(a.collect::<Vec<_>>()),
+                )
+                .expect("translate_bytes");
+                (params, Vec::new())
             }
         },
         RecompilerChoice::Plugin(plugin) => {
@@ -958,6 +983,24 @@ pub fn translate_rv64_with_escape(
     start_addr: u64,
     speculative: yecta::SpeculativeEscape,
 ) -> Translated {
+    translate_rv64_with_layout(
+        text,
+        start_addr,
+        speculative,
+        MemoryModel::OwnedLinear,
+        None,
+    )
+}
+
+/// RV64 translate with HostOffset/ZeroOffset memory model and optional PLT plan
+/// (binds layout slots + `__speet_stub_for_pc` like the native thin path).
+pub fn translate_rv64_with_layout(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+    memory_model: MemoryModel,
+    plt_plan: Option<&PltCallPlan>,
+) -> Translated {
     use rv_asm::Xlen;
     let manifest = ImportManifest::rv64_syscall();
     let n_imports = manifest.func_imports.len() as u32;
@@ -969,6 +1012,16 @@ pub fn translate_rv64_with_escape(
             start_addr, false, true, false,
         );
     recompiler.set_speculative_calls(speculative.enable);
+    recompiler.set_slot_assigner(build_pc_slot_map(
+        BinArch::RiscV64,
+        text,
+        start_addr,
+        plt_plan,
+    ));
+    if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+        recompiler.set_stub_for_pc_import_idx(idx);
+    }
+    recompiler.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
     let mut rctx = make_rctx_with_escape(
         &mut reactor,
@@ -978,6 +1031,7 @@ pub fn translate_rv64_with_escape(
     );
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
+    recompiler.bind_memory_layout(&rctx);
     let params = collect_params(&rctx);
 
     let mut dispatcher = speet_syscall::WasmSyscallDispatcher {

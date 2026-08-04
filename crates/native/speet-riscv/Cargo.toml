@@ -22,6 +22,10 @@ speet-traps = {path = "../../helper/speet-traps"}
 speet-reach = {path = "../../helper/speet-reach"}
 speet-link-core = {path = "../../os/speet-link-core"}
 speet-interp = {path = "../../helper/speet-interp"}
+speet-abi-stubs = { path = "../../os/speet-abi-stubs" }
+speet-host-api = { path = "../../os/speet-host-api" }
+speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
+binary-io = { path = "../../../../binary-io" }
 
 [dev-dependencies]
 object = "0.36"

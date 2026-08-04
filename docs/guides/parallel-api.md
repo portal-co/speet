@@ -1,6 +1,6 @@
 # Parallel API Guide
 
-**Crates affected:** `crates/helper/yecta`, `crates/helper/speet-ordering`, `crates/os/speet-link`, `crates/native/speet-x86_64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`  
+**Crates affected:** `crates/helper/yecta`, `crates/helper/speet-ordering`, `crates/os/speet-link`, `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`  
 **Migration doc:** [parallel-api-migration.md](../parallel-api-migration.md)  
 **Active goals:** [goals/active.md](../../goals/active.md)
 

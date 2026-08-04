@@ -29,6 +29,8 @@
 //! - Params 32–35: condition flags N, Z, C, V (each `i32`).
 //! - Params 36–38: scratch temporaries (`i64`).
 //! - Params 39–70: V0–V31 floating-point registers (`f64`).
+//! - Param  71:    expected return address for speculative BL/BLR/RET (`i64`).
+//! - Param  72:    stack pointer / SP (`i64`).
 //!
 //! x31 is XZR in most contexts: reads emit `i64.const 0`, writes are dropped.
 
@@ -47,7 +49,7 @@ use speet_traps::{
     LocalDeclarator,
 };
 use wasm_encoder::{Ieee64, Instruction, ValType};
-use yecta::{FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark, SlotAssigner};
+use yecta::{EscapeTag, FuncIdx, JumpCallParams, LocalLayout, LocalSlot, Mark, SlotAssigner};
 
 pub mod cfg;
 pub mod direct;
@@ -107,10 +109,14 @@ pub struct AArch64Recompiler<'cb, 'ctx, Context, E> {
     pub(crate) tmp_slot: LocalSlot,
     /// V0–V31 floating-point registers (32 × f64).
     pub(crate) fp_slot: LocalSlot,
+    /// Hidden expected-RA for speculative BL/BLR/RET (`CallEscape::{Flag,Exception}`).
+    pub(crate) expected_ra_slot: LocalSlot,
     /// Stack pointer (1 × i64).  AArch64 encodes SP as register 31 in load/store and
     /// `ADD`/`SUB` immediate forms; x31 remains XZR everywhere else.
     pub(crate) sp_slot: LocalSlot,
     stub_for_pc_import_idx: Option<u32>,
+    /// When true, ABI BL/BLR/RET use native-stack speculative lowering.
+    enable_speculative_calls: bool,
     /// Optional slot assigner: controls which guest PCs get WASM function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
     /// Optional SVC callback (Darwin/BSD `svc #imm`).
@@ -119,9 +125,11 @@ pub struct AArch64Recompiler<'cb, 'ctx, Context, E> {
 
 impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
     /// AArch64 base parameter count: 31 GPRs (i64) + PC (i64) + 4 NZCV flags
-    /// (i32) + 3 scratch temporaries (i64) + 32 FP registers (f64) + SP
-    /// (i64) = 72. See the module doc's local-variable layout.
-    pub const BASE_PARAMS: u32 = 72;
+    /// (i32) + 3 scratch temporaries (i64) + 32 FP registers (f64) +
+    /// expected_ra (i64) + SP (i64) = 73. See the module doc's local-variable
+    /// layout. SP remains last so entry shims can keep seeding it at
+    /// [`SP_PARAM_INDEX`].
+    pub const BASE_PARAMS: u32 = 73;
 
     /// WASM param/local index of the guest SP register. Stable regardless of
     /// trap params, which `setup_traps` always appends *after*
@@ -157,11 +165,49 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
             nzcv_slot: LocalSlot::default(),
             tmp_slot: LocalSlot::default(),
             fp_slot: LocalSlot::default(),
+            expected_ra_slot: LocalSlot::default(),
             sp_slot: LocalSlot::default(),
             stub_for_pc_import_idx: None,
+            enable_speculative_calls: false,
             slot_assigner: None,
             svc_callback: None,
         }
+    }
+
+    /// Enable ABI BL/BLR/RET speculative native-stack lowering (`CallEscape::{Flag,Exception}`).
+    pub fn set_speculative_calls(&mut self, enable: bool) {
+        self.enable_speculative_calls = enable;
+    }
+
+    /// Whether speculative call optimization is enabled.
+    pub fn is_speculative_calls_enabled(&self) -> bool {
+        self.enable_speculative_calls
+    }
+
+    /// Set the speculative-call escape policy on the reactor.
+    pub fn set_escape<F>(
+        &mut self,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        escape: yecta::CallEscape,
+    ) {
+        rctx.set_escape(escape);
+    }
+
+    /// Set exception-tag escape (convenience for [`CallEscape::Exception`]).
+    pub fn set_escape_tag<F>(
+        &mut self,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tag: Option<EscapeTag>,
+    ) {
+        rctx.set_escape_tag(tag);
+    }
+
+    /// Current escape tag, if any.
+    pub fn get_escape_tag<F>(
+        &self,
+        rctx: &dyn ReactorContext<Context, E, FnType = F>,
+    ) -> Option<EscapeTag> {
+        rctx.escape_tag()
     }
 
     /// Set a callback for `svc` instructions (e.g. Darwin `svc #0x80`).
@@ -249,7 +295,8 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
         self.nzcv_slot = rctx.layout_mut().append(4,  ValType::I32); // N, Z, C, V
         self.tmp_slot  = rctx.layout_mut().append(3,  ValType::I64); // 3 scratch i64
         self.fp_slot   = rctx.layout_mut().append(32, ValType::F64); // V0–V31
-        self.sp_slot   = rctx.layout_mut().append(1,  ValType::I64); // SP
+        self.expected_ra_slot = rctx.layout_mut().append(1, ValType::I64); // speculative expected LR
+        self.sp_slot   = rctx.layout_mut().append(1,  ValType::I64); // SP (last fixed slot)
 
         let mut unit = ();
         let extra: &mut dyn LocalDeclarator = match self.memory_access.as_deref_mut() {
@@ -356,6 +403,19 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
             return rctx.feed(ctx, tail_idx, &Instruction::Drop);
         }
         for instr in rctx.layout().emit_set(self.gpr_slot, reg) {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        Ok(())
+    }
+
+    /// Push the expected-RA slot onto the WASM stack.
+    pub(crate) fn emit_expected_ra_get<RC: ReactorContext<Context, E> + ?Sized>(
+        &self,
+        ctx: &mut Context,
+        rctx: &RC,
+        tail_idx: usize,
+    ) -> Result<(), E> {
+        for instr in rctx.layout().emit_get(self.expected_ra_slot, 0) {
             rctx.feed(ctx, tail_idx, &instr)?;
         }
         Ok(())

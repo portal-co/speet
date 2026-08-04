@@ -171,7 +171,7 @@ impl Runtime {
             let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
             let manifest = self.host.import_manifest();
             let wasm = match bin.arch {
-                BinArch::X86_64 | BinArch::AArch64 => {
+                BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 => {
                     let (w, unsupported) = recompile_to_wasm_instrumented_plt(
                         &text.data,
                         start,
@@ -198,7 +198,7 @@ impl Runtime {
         let (text, start) = load_text_from_object(path)?;
         let guest_arch = guest_arch_from_object_path(path)?;
         let wasm = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => {
+            BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 => {
                 let (w, unsupported) = recompile_to_wasm(&text, start, guest_arch);
                 if !unsupported.is_empty() {
                     eprintln!("recompile unsupported: {:?}", unsupported);
@@ -321,6 +321,7 @@ fn arch_label(a: BinArch) -> &'static str {
     match a {
         BinArch::X86_64 => "x86_64",
         BinArch::AArch64 => "aarch64",
+        BinArch::RiscV64 => "riscv64",
     }
 }
 
@@ -339,11 +340,15 @@ fn guest_arch_from_object_path(path: &Path) -> Result<BinArch, String> {
     if s.contains("x86_64") {
         return Ok(BinArch::X86_64);
     }
+    if s.contains("riscv64") || s.contains("riscv") {
+        return Ok(BinArch::RiscV64);
+    }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let obj = object::File::parse(&*bytes).map_err(|e| e.to_string())?;
     match obj.architecture() {
         object::Architecture::Aarch64 => Ok(BinArch::AArch64),
         object::Architecture::X86_64 => Ok(BinArch::X86_64),
+        object::Architecture::Riscv64 => Ok(BinArch::RiscV64),
         other => Err(format!("unsupported guest arch in {}: {other:?}", path.display())),
     }
 }

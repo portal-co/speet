@@ -3,7 +3,16 @@ pub use crate::link::HOST_MEMORY_INDEX;
 
 /// Translate aarch64 Darwin `.text` and assemble a WASI megabinary.
 pub fn recompile_aarch64_darwin_wasi_to_wasm(text: &[u8], start_addr: u64) -> alloc::vec::Vec<u8> {
-    crate::link::link_wasi_megabinary(text, start_addr)
+    recompile_aarch64_darwin_wasi_to_wasm_with_escape(text, start_addr, yecta::SpeculativeEscape::JUMP)
+}
+
+/// Recompile with an explicit [`yecta::SpeculativeEscape`] policy.
+pub fn recompile_aarch64_darwin_wasi_to_wasm_with_escape(
+    text: &[u8],
+    start_addr: u64,
+    speculative: yecta::SpeculativeEscape,
+) -> alloc::vec::Vec<u8> {
+    crate::link::link_wasi_megabinary_with_escape(text, start_addr, speculative)
 }
 
 /// Translate a Mach-O-style aarch64 guest whose external calls already point

@@ -27,6 +27,31 @@ use alloc::collections::BTreeMap;
 use wax_core::build::{InstructionOperatorSink, InstructionOperatorSource, InstructionSource};
 use yecta::{FuncIdx, JumpCallParams, LocalDeclarator, Snippet, Target};
 
+/// Sets `expected_ra` to a constant link address for speculative BL/BLR.
+struct ExpectedRaSnippet {
+    return_addr: u64,
+}
+
+impl<Context, E> InstructionSource<Context, E> for ExpectedRaSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &Instruction::I64Const(self.return_addr as i64))
+    }
+}
+
+impl<Context, E> InstructionOperatorSource<Context, E> for ExpectedRaSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        InstructionSource::emit_instruction(self, ctx, sink)
+    }
+}
+
 impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
     /// Open a new WASM function for the instruction at `pc`.
     fn init_function<F>(
@@ -180,12 +205,44 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                     BRANCH_IMM::BL_ADDR_PCREL26(x) => (x.0, true),
                     _ => unsup!(),
                 };
-                if is_bl {
-                    rctx.feed(ctx, tail_idx, &Instruction::I64Const((pc + 4) as i64))?;
-                    self.emit_gpr_set(ctx, rctx, tail_idx, 30)?;
-                }
                 let off    = sign_ext26(imm26(w)) * 4;
                 let target = pc.wrapping_add_signed(off);
+                let return_addr = pc + 4;
+
+                let use_speculative = is_bl
+                    && self.enable_speculative_calls
+                    && rctx.escape().is_native_stack();
+
+                if use_speculative {
+                    let escape = rctx.escape();
+                    let Some(target_func) = self.pc_to_func_idx(target) else {
+                        rctx.oob_jump(ctx, tail_idx, target, total)?;
+                        return Ok(());
+                    };
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, 30)?;
+                    let expected_ra_snippet = ExpectedRaSnippet { return_addr };
+                    let params = match escape {
+                        yecta::CallEscape::Exception(tag) => JumpCallParams::call(
+                            target_func, total, tag, rctx.pool(),
+                        ),
+                        yecta::CallEscape::Flag => JumpCallParams::call_flag(
+                            target_func, total, rctx.pool(),
+                        ),
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
+                    .with_fixup(
+                        rctx.layout().local(self.expected_ra_slot, 0),
+                        &expected_ra_snippet,
+                    );
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
+                    return Ok(());
+                }
+
+                if is_bl {
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, 30)?;
+                }
                 {
                     let kind = if is_bl { JumpKind::Call } else { JumpKind::DirectJump };
                     let info = JumpInfo::direct(pc, target, kind);
@@ -206,9 +263,87 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                     _ => unsup!(),
                 };
                 let reg = rn(w);
+                let return_addr = pc + 4;
+                let is_blr = matches!(inner, BRANCH_REG::BLR_Rn(_));
+                let is_ret = matches!(inner, BRANCH_REG::RET_Rn(_));
 
-                if matches!(inner, BRANCH_REG::BLR_Rn(_)) {
-                    rctx.feed(ctx, tail_idx, &Instruction::I64Const((pc + 4) as i64))?;
+                // ABI RET (typically `RET` / `RET X30`): compare LR vs expected_ra.
+                let use_speculative_ret = is_ret
+                    && reg == 30
+                    && self.enable_speculative_calls
+                    && rctx.escape().is_native_stack();
+
+                if use_speculative_ret {
+                    let gpr_local = rctx.layout().local(self.gpr_slot, reg);
+                    {
+                        let info = JumpInfo::indirect(pc, gpr_local, JumpKind::Return);
+                        if rctx.on_jump(&info, ctx)? == TrapAction::Skip { return Ok(()); }
+                    }
+                    let escape = rctx.escape();
+                    self.emit_gpr_get(ctx, rctx, tail_idx, reg)?;
+                    self.emit_expected_ra_get(ctx, rctx, tail_idx)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Eq)?;
+                    rctx.feed(ctx, tail_idx, &Instruction::If(wasm_encoder::BlockType::Empty))?;
+                    match escape {
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, total, false)?;
+                        }
+                        yecta::CallEscape::Exception(_) | yecta::CallEscape::Jump => {
+                            for p in 0..total {
+                                rctx.feed(ctx, tail_idx, &Instruction::LocalGet(p))?;
+                            }
+                            rctx.feed(ctx, tail_idx, &Instruction::Return)?;
+                        }
+                    }
+                    rctx.feed(ctx, tail_idx, &Instruction::Else)?;
+                    match escape {
+                        yecta::CallEscape::Exception(tag) => {
+                            rctx.ret(ctx, tail_idx, total, tag)?;
+                        }
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, total, true)?;
+                        }
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
+                    rctx.feed(ctx, tail_idx, &Instruction::End)?;
+                    return Ok(());
+                }
+
+                let use_speculative_blr = is_blr
+                    && self.enable_speculative_calls
+                    && rctx.escape().is_native_stack();
+
+                if use_speculative_blr {
+                    let escape = rctx.escape();
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, 30)?;
+                    let expected_ra_snippet = ExpectedRaSnippet { return_addr };
+                    let gpr_local = rctx.layout().local(self.gpr_slot, reg);
+                    let target_snippet = A64IndirectTarget::from_constant_base(
+                        gpr_local,
+                        self.base_pc,
+                        rctx.base_func_offset(),
+                    );
+                    let mut fixups = BTreeMap::new();
+                    fixups.insert(
+                        rctx.layout().local(self.expected_ra_slot, 0),
+                        &expected_ra_snippet as &(dyn yecta::Snippet<Context, E> + '_),
+                    );
+                    let params = JumpCallParams {
+                        params: total,
+                        fixups,
+                        target: Target::Dynamic { idx: &target_snippet },
+                        call: escape,
+                        pool: rctx.pool(),
+                        condition: None,
+                        condition_hook: None,
+                    };
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
+                    return Ok(());
+                }
+
+                if is_blr {
+                    rctx.feed(ctx, tail_idx, &Instruction::I64Const(return_addr as i64))?;
                     self.emit_gpr_set(ctx, rctx, tail_idx, 30)?;
                 }
 

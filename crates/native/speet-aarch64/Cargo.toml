@@ -19,6 +19,7 @@ speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 speet-abi-stubs = { path = "../../os/speet-abi-stubs" }
 speet-host-api = { path = "../../os/speet-host-api" }
 speet-reach = { path = "../../helper/speet-reach" }
+speet-wasm-helpers = { path = "../../helper/speet-wasm-helpers" }
 binary-io = { path = "../../../../binary-io" }
 
 [dev-dependencies]

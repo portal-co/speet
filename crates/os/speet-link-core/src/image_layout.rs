@@ -197,6 +197,8 @@ mod binary_load {
             let slot_granularity = match bin.arch {
                 binary_io::BinArch::X86_64 => 1,
                 binary_io::BinArch::AArch64 => 4,
+                // RVC: instructions may start on 2-byte boundaries.
+                binary_io::BinArch::RiscV64 => 2,
             };
 
             let data_sections: Vec<DataSectionSpec> = bin

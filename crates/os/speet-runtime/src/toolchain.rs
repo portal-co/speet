@@ -43,6 +43,9 @@ pub fn llvm_target(arch: binary_io::BinArch, os: binary_io::BinOs) -> &'static s
         (binary_io::BinArch::AArch64, binary_io::BinOs::Linux) => "aarch64-unknown-linux-gnu",
         (binary_io::BinArch::X86_64, binary_io::BinOs::MacOs) => "x86_64-apple-macosx",
         (binary_io::BinArch::AArch64, binary_io::BinOs::MacOs) => "aarch64-apple-darwin",
+        // Host-RV thin link is not wired; triple kept for completeness.
+        (binary_io::BinArch::RiscV64, binary_io::BinOs::Linux) => "riscv64-unknown-linux-gnu",
+        (binary_io::BinArch::RiscV64, binary_io::BinOs::MacOs) => "riscv64-apple-darwin",
     }
 }
 
@@ -51,6 +54,7 @@ pub fn clang_arch_flag(arch: binary_io::BinArch) -> &'static str {
     match arch {
         binary_io::BinArch::X86_64 => "x86_64",
         binary_io::BinArch::AArch64 => "arm64",
+        binary_io::BinArch::RiscV64 => "riscv64",
     }
 }
 

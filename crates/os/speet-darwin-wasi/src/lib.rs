@@ -18,6 +18,7 @@ mod translate;
 
 pub use assemble::{
     recompile_aarch64_darwin_wasi_to_wasm,
+    recompile_aarch64_darwin_wasi_to_wasm_with_escape,
     recompile_aarch64_darwin_wasi_to_wasm_with_targets,
 };
 pub use link::HOST_MEMORY_INDEX;
@@ -31,11 +32,13 @@ pub use guest_module::{
 };
 pub use link::{
     func_export_index, link_canonical_guest_wasm, link_wasi_megabinary,
-    link_wasi_megabinary_with_plan, WasiLinkPlan,
+    link_wasi_megabinary_with_escape, link_wasi_megabinary_with_plan, WasiLinkPlan,
 };
 pub use manifest::wasi_preview1_manifest;
 pub use merge::{extract_guest_defined_module, extract_guest_handlers, GuestDefinedModule, GuestHandlerFunctions};
-pub use translate::{translate_aarch64_darwin_wasi, WasiTranslation};
+pub use translate::{
+    translate_aarch64_darwin_wasi, translate_aarch64_darwin_wasi_with_escape, WasiTranslation,
+};
 pub use os_darwin_wasi::{IOVEC_SCRATCH_OFFSET, DarwinToWasi, WasiImports};
 
 use speet_link_core::EntityIndexSpace;

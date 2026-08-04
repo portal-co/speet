@@ -17,6 +17,8 @@ impl GuestPcRef {
         match arch {
             binary_io::BinArch::X86_64 => GuestPcRef::LocalI64(16),
             binary_io::BinArch::AArch64 => GuestPcRef::ParamI64(31),
+            // RV64: PC is param 64 (after x0–x31 + f0–f31).
+            binary_io::BinArch::RiscV64 => GuestPcRef::ParamI64(64),
         }
     }
 

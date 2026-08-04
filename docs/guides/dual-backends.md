@@ -69,7 +69,7 @@ Filter: [`harness/capabilities.rs`](../../crates/test/speet-e2e/tests/harness/ca
 Configs: `EscapeConfig::{None, Exception, ExceptionSpec, FlagSpec}`  
 Paths: wasmi (A), blitz (B-wasm), thin_native (B-native), linux_wasi (A), darwin_wasi (A)
 
-Capability filter (no invalid cartesian): speculative configs only for RV/x86; darwin-wasi Jump-only until aarch64 speculative exists; linux-wasi / thin_native Jump + FlagSpec until TagSection is wired in those assemblers. Hand-written WASI/dual_lane files are thin wrappers over `harness/env_*`; regenerate `e2e.rs` after editing the generator.
+Capability filter (no invalid cartesian): speculative configs for RV/x86/aarch64; darwin-wasi / linux-wasi / thin_native support Jump + FlagSpec until TagSection is wired for ExceptionSpec. Hand-written WASI/dual_lane files are thin wrappers over `harness/env_*`; regenerate `e2e.rs` after editing the generator.
 
 ## Darwin-WASI / Linux-WASI guest rows
 

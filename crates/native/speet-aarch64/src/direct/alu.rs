@@ -7,8 +7,44 @@ use disarm64::decoder_full::{
     EXCEPTION, IC_SYSTEM, LOG_IMM, LOG_SHIFT, MOVEWIDE, PCRELADDR,
 };
 use disarm64::decoder_full::Mnemonic;
+use speet_wasm_helpers::{MulhTemps, mulh_signed, mulh_unsigned};
 
 impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
+    /// High 64 bits of a 64×64→128 multiply into `rd` (SMULH / UMULH).
+    fn emit_mulh<F>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut dyn ReactorContext<Context, E, FnType = F>,
+        tail_idx: usize,
+        rn: u32,
+        rm: u32,
+        rd: u32,
+        signed: bool,
+    ) -> Result<(), E> {
+        // XZR × anything → 0 in the high half.
+        if rn >= 31 || rm >= 31 {
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(0))?;
+            return self.emit_gpr_set(ctx, rctx, tail_idx, rd);
+        }
+        let (src1, src2, temps) = {
+            let layout = rctx.layout();
+            (
+                layout.local(self.gpr_slot, rn),
+                layout.local(self.gpr_slot, rm),
+                MulhTemps::new(layout.local(self.tmp_slot, 0)),
+            )
+        };
+        let instrs = if signed {
+            mulh_signed(src1, src2, temps)
+        } else {
+            mulh_unsigned(src1, src2, temps)
+        };
+        for instr in instrs {
+            rctx.feed(ctx, tail_idx, &instr)?;
+        }
+        self.emit_gpr_set(ctx, rctx, tail_idx, rd)
+    }
+
 
     // ── ADDSUB_IMM ────────────────────────────────────────────────────────────
 
@@ -504,7 +540,18 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                 self.emit_gpr_set(ctx, rctx, tail_idx, rd(w))?;
                 return Ok(());
             }
-            // SMULH/UMULH: upper 64 bits of 128-bit multiply — not yet implemented
+            DP_3SRC::SMULH_Rd_Rn_Rm(x) => {
+                let w = x.0;
+                // Rd = high 64 bits of signed Rn * Rm (128-bit product).
+                self.emit_mulh(ctx, rctx, tail_idx, rn(w), rm(w), rd(w), true)?;
+                return Ok(());
+            }
+            DP_3SRC::UMULH_Rd_Rn_Rm(x) => {
+                let w = x.0;
+                // Rd = high 64 bits of unsigned Rn * Rm (128-bit product).
+                self.emit_mulh(ctx, rctx, tail_idx, rn(w), rm(w), rd(w), false)?;
+                return Ok(());
+            }
             _ => unsup!(),
         };
         let _ = w;

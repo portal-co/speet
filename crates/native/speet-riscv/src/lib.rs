@@ -259,6 +259,9 @@ pub struct RiscVRecompiler<
     /// Replaces the old `mapper_callback`.  The implementation's
     /// `declare_locals` will be called during `init_function`.
     memory_access: Option<alloc::boxed::Box<dyn MemoryAccess<Context, E>>>,
+    /// Import index of `env.__speet_stub_for_pc` when the thin-runtime
+    /// fn-ptr rewrite path is active.
+    stub_for_pc_import_idx: Option<u32>,
     /// Whether to enable RV64 instruction support (disabled by default)
     enable_rv64: bool,
     /// Whether to use memory64 (i64 addresses) instead of memory32 (i32 addresses)
@@ -331,6 +334,7 @@ where
             ecall_callback: None,
             ebreak_callback: None,
             memory_access: None,
+            stub_for_pc_import_idx: None,
             enable_rv64,
             use_memory64,
             enable_speculative_calls: false,
@@ -578,6 +582,29 @@ where
         self.memory_access = None;
     }
 
+    /// Bind HostOffset / ZeroOffset layout param slots into the installed
+    /// [`MemoryAccess`] after [`Self::setup_traps`] has sealed the param mark.
+    pub fn bind_memory_layout<RC: ReactorContext<Context, E> + ?Sized>(&mut self, rctx: &RC) {
+        if let (Some(ma), Some(params)) = (
+            self.memory_access.as_deref_mut(),
+            rctx.runtime_layout_params(),
+        ) {
+            ma.bind_layout_slots(rctx.layout(), &params.slots);
+        }
+    }
+
+    /// Record the megabinary import index of `env.__speet_stub_for_pc`.
+    pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
+        self.stub_for_pc_import_idx = Some(idx);
+    }
+
+    pub(crate) fn arg_needs_fn_ptr_rewrite(&self, label: &str, arg_idx: usize) -> bool {
+        let bare = label.strip_prefix('_').unwrap_or(label);
+        speet_abi_stubs::fn_ptr_arg_indices(label)
+            .or_else(|| speet_abi_stubs::fn_ptr_arg_indices(bare))
+            .is_some_and(|indices| indices.contains(&arg_idx))
+    }
+
     /// Set the memory ordering mode for load/store emission.
     ///
     /// * [`MemOrder::Strong`] (default) — all stores are emitted eagerly.
@@ -627,6 +654,8 @@ where
     /// caller supplies real initial values for every one of them.
     pub const SP_PARAM_INDEX: u32 = 2;
 
+    /// WASM param index of the guest link register (`x1` / `ra`).
+    pub const LR_PARAM_INDEX: u32 = 1;
 
     /// **Phase 1** — register trap parameters and compute [`total_params`].
     ///
@@ -2665,6 +2694,17 @@ use speet_link_core::{
     recompiler::Recompile,
     unit::{BinaryUnit, FuncType},
 };
+
+/// Calling convention for a compile-time PLT redirect of `symbol` on RV64.
+pub fn plt_calling_convention(symbol: &str) -> speet_plugin_api::external_target::CallingConvention {
+    use binary_io::BinArch;
+    use speet_host_api::ImportManifest;
+    speet_abi_stubs::plt_calling_convention(
+        &ImportManifest::integrated_native(),
+        BinArch::RiscV64,
+        symbol,
+    )
+}
 
 impl<'cb, 'ctx, Context, E, F> Recompile<Context, E, F>
     for RiscVRecompiler<'cb, 'ctx, Context, E, F>
