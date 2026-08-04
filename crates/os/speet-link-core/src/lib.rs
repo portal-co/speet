@@ -42,6 +42,7 @@ mod tests;
 pub use context::{BaseContext, FedContext, ReactorContext, ReactorAdapter, TrapReactorAdapter};
 pub use image_layout::{
     DataSectionSpec, GuestImageLayout, LibrarySpec, MemoryModel, RelocKindTag, RelocSpec,
+    ZERO_OFFSET_MAX_DATA_END,
 };
 pub use layout::{EntityIndexSpace, FuncLayout, FuncSlot, IndexSlot, IndexSpace};
 pub use layout_params::{

@@ -54,6 +54,7 @@ cargo run -p speet-abi-codegen -- \
 
 ## Relationship to other plans
 
-- **Suitability gate:** once a symbol has an ABI spec with a generated stub, `speet-runtime::suitability` should move it off the `fn_ptr_free_allowlist` denial path and onto the "safe via translation" path — the allowlist and the ABI-spec set are the same tradeoff (deny vs. translate) and must be kept in sync deliberately, not left to drift apart.
+- **Zero-offset memory ([zero-offset.md](zero-offset.md)):** when the guest uses identity VA offsets into a host-mirrored `__wasm_mem` with unrecompiled `.text` unmapped, BridgeSupport **data-pointer** stubs are safe to autogenerate (`__wasm_mem + ptr`) without a shared process address space for code. Fn-ptr args still need trampolines.
+- **Suitability gate:** once a symbol has an ABI spec with a generated stub, `speet-runtime::suitability` should move it off the `fn_ptr_free_allowlist` denial path and onto the "safe via translation" path — the allowlist and the ABI-spec set are the same tradeoff (deny vs. translate) and must be kept in sync deliberately, not left to drift apart. Under ZeroOffset, `zero_offset_data_pointer_safe` additionally admits data-pointer-only stub metadata.
 - **Direct linking ([direct-linking.md](direct-linking.md)):** the redirect-stub layer is intentional, permanent indirection, not a stopgap for a future "link everything in-host" mode. The two are meant to coexist — stub generation doesn't need to be torn out if/when in-process linking lands.
 - **Host JIT ([host-jit.md](host-jit.md)):** the same generated stub-emission functions are what a future asm→asm host-JIT path calls inline during translation instead of routing through a WASM import at all.

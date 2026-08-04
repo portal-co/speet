@@ -22,8 +22,9 @@ Both backends must receive the same artifact from `finish_module`:
 
 This foundation unblocks uniform BridgeSupport-driven handling:
 
-1. **HostOffset memory** — `guest_va + host_mem_base` via [`HostOffsetMapper`](../../crates/helper/speet-memory/src/mapper.rs) and [`ParamSlotMap`](../../crates/os/speet-link-core/src/layout_params.rs)
-2. **WASM-runtime OS** — in-binary externals via [`FuncSchedule`](../../crates/os/speet-schedule/src/lib.rs) + [`IndexOffsets`](../../crates/managed/speet-wasm/src/lib.rs)
+1. **ZeroOffset / OwnedLinear memory** — `guest_va` == WASM linear offset (`host_mem_base = 0`); ZeroOffset additionally leaves unrecompiled `.text` unmapped at `text_base` so BridgeSupport pointer stubs can autogen safely — see [`zero-offset.md`](../future/zero-offset.md)
+2. **HostOffset memory** — `guest_va + host_mem_base` via [`HostOffsetMapper`](../../crates/helper/speet-memory/src/mapper.rs) and [`ParamSlotMap`](../../crates/os/speet-link-core/src/layout_params.rs) (high-VA packing)
+3. **WASM-runtime OS** — in-binary externals via [`FuncSchedule`](../../crates/os/speet-schedule/src/lib.rs) + [`IndexOffsets`](../../crates/managed/speet-wasm/src/lib.rs)
 
 ## WASM-runtime OS standard flow
 
@@ -53,6 +54,7 @@ When changing emission or link:
 - [ ] Are redirect shims in the elem segment before halt?
 - [ ] Does `PltCallPlan` use manifest indices only?
 - [ ] Are layout params declared via `RuntimeLayoutParams` (`LocalSlot` handles)?
+- [ ] Under ZeroOffset, is unrecompiled `.text` omitted from data-init and protected in the host mirror?
 - [ ] Does lane B-wasm match lane A semantics on merged-with-mock?
 - [ ] Does lane B-native match lane A with blitz extension overlay?
 - [ ] Does `flag_spec` (`CallEscape::Flag`) execute under wasmi without soft-skip (no EH proposal)?

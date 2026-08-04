@@ -26,12 +26,33 @@ pub fn entry_bridge_c(
     entry_stub_sym: &str,
     halt_guest_pc: u64,
 ) -> String {
+    entry_bridge_c_with_text_hole(
+        entry_param_count,
+        sp_param_index,
+        lr_param_index,
+        entry_stub_sym,
+        halt_guest_pc,
+        None,
+    )
+}
+
+/// Like [`entry_bridge_c`], but under ZeroOffset also `mprotect`s the
+/// unrecompiled text hole after bootstrap (see `speet_protect_text_hole`).
+pub fn entry_bridge_c_with_text_hole(
+    entry_param_count: u32,
+    sp_param_index: u32,
+    lr_param_index: Option<u32>,
+    entry_stub_sym: &str,
+    halt_guest_pc: u64,
+    text_hole: Option<(u64, u64)>,
+) -> String {
     entry_bridge_with_catalog(
         entry_param_count,
         sp_param_index,
         lr_param_index,
         entry_stub_sym,
         halt_guest_pc,
+        text_hole,
     )
 }
 
@@ -173,6 +194,7 @@ fn entry_bridge_with_catalog(
     lr_param_index: Option<u32>,
     entry_stub_sym: &str,
     halt_guest_pc: u64,
+    text_hole: Option<(u64, u64)>,
 ) -> String {
     let n = entry_param_count as usize;
     let sp_idx = sp_param_index as usize;
@@ -212,6 +234,18 @@ fn entry_bridge_with_catalog(
         .map(|i| format!("    __speet_set_reg_seed({i}, 0);\n"))
         .collect::<String>();
 
+    let protect = match text_hole {
+        Some((base, len)) if len > 0 => format!(
+            "    speet_protect_text_hole({base}ULL, {len}ULL);\n"
+        ),
+        _ => String::new(),
+    };
+    let protect_decl = if text_hole.is_some_and(|(_, len)| len > 0) {
+        "extern void speet_protect_text_hole(uint64_t text_base, uint64_t text_len);\n"
+    } else {
+        ""
+    };
+
     format!(
         r#"#include <stdint.h>
 #include <unistd.h>
@@ -245,14 +279,14 @@ extern uint32_t __wasm_mem_pages;
 // symbols, and still hard-errors "symbol not found" for an unresolved weak
 // reference against a plain relocatable object.
 extern void __speet_data_init(void);
-
+{protect_decl}
 extern uint64_t {entry_stub_sym}(void);
 
 void __speet_start(int argc, char **argv) {{
     __speet_set_argv(argc, argv);
     uint64_t __speet_guest_sp = {sp_init};
 {seed_stack_ra}{seed_lr}{zero_seeds}    __speet_set_reg_seed({sp_idx}, __speet_guest_sp);
-    __speet_data_init();
+{protect}    __speet_data_init();
     long ret = (long){entry_stub_sym}();
     _exit((int)ret);
 }}
@@ -266,6 +300,18 @@ mod tests {
 
     #[test]
     fn seeds_halt_guest_pc_into_the_link_register() {
+        let src = entry_bridge_c_with_text_hole(
+            72,
+            71,
+            Some(30),
+            "__speet_guest_fn_1",
+            0x100000370,
+            Some((0x1000, 0x100)),
+        );
+        assert!(
+            src.contains("speet_protect_text_hole(4096ULL, 256ULL)"),
+            "protect call missing in:\n{src}"
+        );
         let src = entry_bridge_c(72, 71, Some(30), "__speet_guest_fn_1", 0x100000370);
         assert!(src.contains("__speet_guest_fn_1"));
         assert!(src.contains("__speet_set_reg_seed(71, __speet_guest_sp)"));

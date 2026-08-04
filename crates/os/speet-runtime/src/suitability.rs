@@ -2,6 +2,7 @@
 
 use binary_io::LoadedBinary;
 use speet_host_api::HostApi;
+use speet_link_core::image_layout::{GuestImageLayout, MemoryModel, ZERO_OFFSET_MAX_DATA_END};
 use std::collections::HashSet;
 
 /// Symbols allowed to be linked: tunnel-resolvable, and every pointer
@@ -58,9 +59,31 @@ fn is_linker_internal(name: &str) -> bool {
 
 /// Analyze a loaded binary's imports against the host tunnel and fn-ptr-free list.
 pub fn analyze_imports(host: &dyn HostApi, bin: &LoadedBinary) -> (Vec<String>, Vec<String>) {
+    analyze_imports_with_model(host, bin, MemoryModel::OwnedLinear)
+}
+
+/// Like [`analyze_imports`], but under [`MemoryModel::ZeroOffset`] also allows
+/// BridgeSupport data-pointer stubs (`zero_offset_data_pointer_safe`) and
+/// rejects images whose data span cannot fit the default host mirror.
+pub fn analyze_imports_with_model(
+    host: &dyn HostApi,
+    bin: &LoadedBinary,
+    model: MemoryModel,
+) -> (Vec<String>, Vec<String>) {
     let allow = fn_ptr_free_allowlist();
     let mut unresolved_deps = Vec::new();
     let mut fn_ptr_deps = Vec::new();
+    let zero = model.text_unmapped();
+
+    if zero && bin.sections.iter().any(|s| matches!(s.kind, binary_io::SectionKind::Text)) {
+        let layout = GuestImageLayout::from_loaded_binary(bin);
+        if layout.data_end_max() > ZERO_OFFSET_MAX_DATA_END {
+            unresolved_deps.push(format!(
+                "zero-offset data span 0x{:x} exceeds mirror cap 0x{ZERO_OFFSET_MAX_DATA_END:x}",
+                layout.data_end_max()
+            ));
+        }
+    }
 
     for imp in &bin.imports {
         if is_linker_internal(&imp.name) {
@@ -83,6 +106,13 @@ pub fn analyze_imports(host: &dyn HostApi, bin: &LoadedBinary) -> (Vec<String>, 
                 || os_shim_core::has_core_impl(lookup)
                 || os_shim_core::has_core_impl(bare)
                 || os_shim_core::has_core_impl(imp.name.as_str())
+            {
+                continue;
+            }
+            if zero
+                && (speet_abi_stubs::zero_offset_data_pointer_safe(lookup)
+                    || speet_abi_stubs::zero_offset_data_pointer_safe(bare)
+                    || speet_abi_stubs::zero_offset_data_pointer_safe(imp.name.as_str()))
             {
                 continue;
             }
@@ -168,6 +198,22 @@ mod tests {
         }]);
         let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
         assert_eq!(unresolved, vec!["not_a_real_symbol"]);
+        assert!(fn_ptr.is_empty());
+    }
+
+    #[test]
+    fn zero_offset_admits_data_pointer_stub_metadata() {
+        assert!(speet_abi_stubs::zero_offset_data_pointer_safe("write"));
+        assert!(speet_abi_stubs::zero_offset_data_pointer_safe("exit"));
+        assert!(!speet_abi_stubs::zero_offset_data_pointer_safe("printf"));
+        let host = TunneledHostApi::for_host();
+        let bin = empty_bin(vec![ImportSym {
+            name: "write".into(),
+            plt_addr: Some(0x1000),
+        }]);
+        let (unresolved, fn_ptr) =
+            analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
+        assert!(unresolved.is_empty());
         assert!(fn_ptr.is_empty());
     }
 }

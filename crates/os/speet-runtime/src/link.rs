@@ -5,8 +5,9 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::HostApi;
 use speet_recompile::frontend::DataSegment;
 use speet_rt::{
-    entry_bridge_c, entry_bridge_direct_c, entry_stub_symbol, generate_data_segments_c,
-    generate_guest_stubs_c, generate_memory_tu, generate_shim, DataSegmentBytes, GuestStubEntry,
+    entry_bridge_c_with_text_hole, entry_bridge_direct_c, entry_stub_symbol,
+    generate_data_segments_c, generate_guest_stubs_c, generate_memory_tu, generate_shim,
+    DataSegmentBytes, GuestStubEntry,
 };
 use std::path::{Path, PathBuf};
 
@@ -56,12 +57,17 @@ pub fn link_guest(
         0,
         Some(_halt_addr),
         &[],
+        None,
         work_dir,
         out_exe,
     )
 }
 
 /// Integrated link: shim + entry bridge + execve hook + optional per-guest-function stubs.
+///
+/// `text_hole` is `(text_base, text_len)` under [`MemoryModel::ZeroOffset`](speet_link_core::MemoryModel::ZeroOffset):
+/// the entry bridge `mprotect`s that range in the host mirror so unrecompiled
+/// `.text` is never host-readable.
 #[allow(clippy::too_many_arguments)]
 pub fn link_guest_integrated(
     tc: &LlvmToolchain,
@@ -77,6 +83,7 @@ pub fn link_guest_integrated(
     halt_local_idx: u32,
     legacy_halt_addr: Option<u64>,
     data_segments: &[DataSegment],
+    text_hole: Option<(u64, u64)>,
     work_dir: &Path,
     out_exe: &Path,
 ) -> Result<(), String> {
@@ -107,12 +114,13 @@ pub fn link_guest_integrated(
             .find(|e| e.local_func_idx == halt_local_idx)
             .map(|e| e.guest_pc)
             .unwrap_or_else(|| legacy_halt_addr.unwrap_or(0));
-        entry_bridge_c(
+        entry_bridge_c_with_text_hole(
             entry_param_count,
             sp_param_index,
             lr_param_index,
             &entry_stub_symbol(entry_local_idx),
             halt_guest_pc,
+            text_hole,
         )
     };
     compile_c(tc, &bridge_src, &bridge_path, arch, os)?;

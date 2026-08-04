@@ -3,7 +3,7 @@
 use crate::cache::{load_binary, ArtifactCache};
 use crate::link::link_guest_integrated;
 use crate::runtime::validate_wasm_public;
-use crate::suitability::analyze_imports;
+use crate::suitability::analyze_imports_with_model;
 use crate::toolchain::LlvmToolchain;
 use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
@@ -125,7 +125,17 @@ impl IntegratedNativeRuntime {
     }
 
     pub fn analyze_binary(&self, bin: &binary_io::LoadedBinary) -> SuitabilityReport {
-        let (unresolved_deps, fn_ptr_deps) = analyze_imports(self.host.as_ref(), bin);
+        let model = if bin
+            .sections
+            .iter()
+            .any(|s| matches!(s.kind, binary_io::SectionKind::Text))
+        {
+            GuestImageLayout::from_loaded_binary(bin).memory_model
+        } else {
+            speet_link_core::MemoryModel::OwnedLinear
+        };
+        let (unresolved_deps, fn_ptr_deps) =
+            analyze_imports_with_model(self.host.as_ref(), bin, model);
         let suitable = unresolved_deps.is_empty() && fn_ptr_deps.is_empty();
         SuitabilityReport {
             suitable,
@@ -271,7 +281,12 @@ impl IntegratedNativeRuntime {
         );
         let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
         let halt_local = catalog.halt_entry().local_func_idx;
-        let data_segments = data_segments_from_layout(&GuestImageLayout::from_loaded_binary(&bin));
+        let layout = GuestImageLayout::from_loaded_binary(&bin);
+        let data_segments = data_segments_from_layout(&layout);
+        let text_hole = layout
+            .memory_model
+            .text_unmapped()
+            .then_some((layout.text_base, layout.text_len as u64));
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -286,6 +301,7 @@ impl IntegratedNativeRuntime {
             halt_local,
             None,
             &data_segments,
+            text_hole,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;
@@ -330,10 +346,19 @@ impl NativeRuntime for IntegratedNativeRuntime {
 }
 
 /// Extract initialized data sections from a [`GuestImageLayout`].
+/// Under [`MemoryModel::ZeroOffset`], sections overlapping the unrecompiled
+/// text hole are dropped (`.text` must never appear in the host mirror).
 fn data_segments_from_layout(layout: &GuestImageLayout) -> Vec<DataSegment> {
     layout
         .data_sections
         .iter()
+        .filter(|s| {
+            if !layout.memory_model.text_unmapped() {
+                return true;
+            }
+            let end = s.addr.saturating_add(s.bytes.len() as u64);
+            end <= layout.text_base || s.addr >= layout.text_end()
+        })
         .map(|s| DataSegment {
             addr: s.addr,
             bytes: s.bytes.clone(),

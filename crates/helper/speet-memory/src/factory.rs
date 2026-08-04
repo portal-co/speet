@@ -101,15 +101,19 @@ where
     E: 'static,
 {
     match model {
-        MemoryModel::OwnedLinear => Box::new(LayoutMemoryAccess::<Context, E>::Linear(
-            DirectMemory::new(
-                (),
-                GUEST_MEMORY_INDEX,
-                AddressWidth::W64 { memory64: true },
-                IntWidth::I64,
-            ),
-            PhantomData,
-        )),
+        // ZeroOffset shares identity address math with OwnedLinear; text-hole
+        // policy is enforced at data-init / runtime, not in the mapper.
+        MemoryModel::OwnedLinear | MemoryModel::ZeroOffset => {
+            Box::new(LayoutMemoryAccess::<Context, E>::Linear(
+                DirectMemory::new(
+                    (),
+                    GUEST_MEMORY_INDEX,
+                    AddressWidth::W64 { memory64: true },
+                    IntWidth::I64,
+                ),
+                PhantomData,
+            ))
+        }
         MemoryModel::HostOffset => Box::new(LayoutMemoryAccess::<Context, E>::HostOffset(
             DirectMemory::new(
                 HostOffsetMapper::new(PageTableBase::Param, true),
@@ -135,5 +139,13 @@ mod tests {
         let mut mem =
             memory_access_for_model::<(), core::convert::Infallible>(MemoryModel::HostOffset);
         mem.bind_layout_slots(&layout, &params.slots);
+    }
+
+    #[test]
+    fn zero_offset_is_identity_mapper() {
+        let mem =
+            memory_access_for_model::<(), core::convert::Infallible>(MemoryModel::ZeroOffset);
+        assert!(!mem.transforms_address());
+        assert_eq!(mem.data_memory_index(), Some(GUEST_MEMORY_INDEX));
     }
 }

@@ -17,7 +17,7 @@ pub use integrated::{
 };
 pub use link::{link_guest, link_guest_integrated};
 pub use runtime::{Runtime, validate_wasm_public};
-pub use suitability::analyze_imports;
+pub use suitability::{analyze_imports, analyze_imports_with_model};
 pub use toolchain::LlvmToolchain;
 
 pub use speet_host_api::{

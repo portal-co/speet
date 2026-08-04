@@ -42,6 +42,14 @@ pub fn link_data_segments(
         .data_sections
         .iter()
         .zip(sections)
+        .filter(|(spec, _)| {
+            // ZeroOffset: never place bytes that overlap the unrecompiled text hole.
+            if !layout.memory_model.text_unmapped() {
+                return true;
+            }
+            let end = spec.addr.saturating_add(spec.bytes.len() as u64);
+            end <= layout.text_base || spec.addr >= layout.text_end()
+        })
         .map(|(spec, bytes)| DataSegment {
             addr: spec.addr,
             bytes,
@@ -153,5 +161,33 @@ mod tests {
         let segs = link_data_segments(&layout, None, &shims);
         let expected = layout.shim_guest_pc(0);
         assert_eq!(&segs[0].bytes[8..16], &expected.to_le_bytes());
+    }
+
+    #[test]
+    fn zero_offset_drops_sections_overlapping_text_hole() {
+        let layout = GuestImageLayout {
+            text_base: 0x1000,
+            text_len: 0x100,
+            slot_granularity: 1,
+            data_sections: vec![
+                DataSectionSpec {
+                    name: ".text_fake".into(),
+                    addr: 0x1000,
+                    bytes: vec![0x90; 16],
+                },
+                DataSectionSpec {
+                    name: ".rodata".into(),
+                    addr: 0x2000,
+                    bytes: b"hi".to_vec(),
+                },
+            ],
+            relocs: vec![],
+            libraries: vec![],
+            memory_model: MemoryModel::ZeroOffset,
+        };
+        let segs = link_data_segments(&layout, None, &BTreeMap::new());
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].addr, 0x2000);
+        assert_eq!(segs[0].bytes, b"hi");
     }
 }

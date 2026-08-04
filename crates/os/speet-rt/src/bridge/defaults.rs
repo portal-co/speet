@@ -113,7 +113,73 @@ impl BridgeHandler for DefaultBridgeHandler {
                 ));
                 true
             }
+            // ZeroOffset autogen: BridgeSupport data-pointer stubs with
+            // checked-in metadata and no unbound fn-ptr args → rewrite each
+            // pointer arg as `__wasm_mem + (unsigned)arg` and call `os_shim_*`.
+            // Handlers above take precedence for symbols with custom glue.
+            name if speet_abi_stubs::zero_offset_data_pointer_safe(name) => {
+                emit_autogen_mem_base_stub(out, &sym, name, &imp.params, &imp.results)
+            }
             _ => false,
         }
     }
+}
+
+fn emit_autogen_mem_base_stub(
+    out: &mut String,
+    sym: &str,
+    name: &str,
+    params: &[speet_host_api::WasmValType],
+    results: &[speet_host_api::WasmValType],
+) -> bool {
+    use speet_host_api::WasmValType;
+    let ptr_idxs: std::collections::HashSet<usize> = speet_abi_stubs::pointer_arg_indices(name)
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .collect();
+    let c_ty = |t: &WasmValType| -> &'static str {
+        match t {
+            WasmValType::I32 => "int",
+            WasmValType::I64 => "long",
+            WasmValType::F32 => "float",
+            WasmValType::F64 => "double",
+        }
+    };
+    let ret_ty = match results.first() {
+        None => "void",
+        Some(t) => c_ty(t),
+    };
+    let formals: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{} a{i}", c_ty(t)))
+        .collect();
+    let actuals: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            if ptr_idxs.contains(&i) {
+                format!("__wasm_mem + (unsigned)a{i}")
+            } else {
+                format!("a{i}")
+            }
+        })
+        .collect();
+    let formals_s = if formals.is_empty() {
+        "void".to_string()
+    } else {
+        formals.join(", ")
+    };
+    let actuals_s = actuals.join(", ");
+    let bare = name.strip_prefix('_').unwrap_or(name);
+    let ret = if results.is_empty() { "" } else { "return " };
+    out.push_str(&format!(
+        "{ret_ty} {sym}({formals_s}) {{
+    {ret}os_shim_{bare}({actuals_s});
+}}
+
+"
+    ));
+    true
 }

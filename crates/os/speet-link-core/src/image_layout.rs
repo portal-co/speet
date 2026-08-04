@@ -10,9 +10,32 @@ pub enum MemoryModel {
     /// Guest pointer = offset into owned `__wasm_mem` (current thin runtime default).
     #[default]
     OwnedLinear,
+    /// Same address math as [`OwnedLinear`] (`guest_va` == WASM linear offset,
+    /// `host_mem_base` is compile-time 0), but unrecompiled `.text` is **not**
+    /// placed into the mirror at [`GuestImageLayout::text_base`]. That range
+    /// stays unmapped / intercepted so host BridgeSupport never sees original
+    /// machine code; PC math still uses `text_base`. See `docs/future/zero-offset.md`.
+    ZeroOffset,
     /// `physical = guest_virtual + host_mem_base` (see `HostOffsetMapper`).
     HostOffset,
 }
+
+impl MemoryModel {
+    /// Identity guest VA → WASM offset (no `host_mem_base` add).
+    pub fn is_identity_offset(self) -> bool {
+        matches!(self, Self::OwnedLinear | Self::ZeroOffset)
+    }
+
+    /// Unrecompiled `.text` must not be `memory.init`'d into the linear mirror.
+    pub fn text_unmapped(self) -> bool {
+        matches!(self, Self::ZeroOffset)
+    }
+}
+
+/// Soft cap matching the thin runtime's default `__wasm_mem` reservation
+/// (256 × 64 KiB). [`GuestImageLayout::from_loaded_binary`] selects
+/// [`MemoryModel::ZeroOffset`] only when `data_end_max` fits under this.
+pub const ZERO_OFFSET_MAX_DATA_END: u64 = 256 * 65536;
 
 /// One initialized guest data section (`.data`, `.rodata`, GOT-ish regions).
 #[derive(Clone, Debug)]
@@ -102,6 +125,59 @@ impl GuestImageLayout {
             .min()
             .unwrap_or(0)
     }
+
+    /// Exclusive end of the unrecompiled text VA range `[text_base, text_end)`.
+    pub fn text_end(&self) -> u64 {
+        self.text_base.saturating_add(self.text_len as u64)
+    }
+
+    /// True if `va` lies in the unrecompiled text hole (ZeroOffset policy).
+    pub fn va_in_text_hole(&self, va: u64) -> bool {
+        self.memory_model.text_unmapped() && va >= self.text_base && va < self.text_end()
+    }
+
+    /// Highest exclusive VA that data sections need committed in the mirror.
+    pub fn data_end_max(&self) -> u64 {
+        self.data_sections
+            .iter()
+            .map(|s| s.addr.saturating_add(s.bytes.len() as u64))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Use ZeroOffset memory model (text unmapped; identity guest VA offsets).
+    pub fn with_zero_offset(mut self) -> Self {
+        self.memory_model = MemoryModel::ZeroOffset;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_offset_helpers() {
+        let layout = GuestImageLayout {
+            text_base: 0x1000,
+            text_len: 0x40,
+            slot_granularity: 4,
+            data_sections: vec![DataSectionSpec {
+                name: ".rodata".into(),
+                addr: 0x2000,
+                bytes: vec![1, 2, 3, 4],
+            }],
+            relocs: vec![],
+            libraries: vec![],
+            memory_model: MemoryModel::ZeroOffset,
+        };
+        assert!(layout.memory_model.text_unmapped());
+        assert!(layout.memory_model.is_identity_offset());
+        assert!(layout.va_in_text_hole(0x1000));
+        assert!(!layout.va_in_text_hole(0x1040));
+        assert_eq!(layout.data_end_max(), 0x2004);
+        assert_eq!(layout.text_end(), 0x1040);
+    }
 }
 
 #[cfg(feature = "binary-load")]
@@ -176,7 +252,7 @@ mod binary_load {
 
             let _ = section_index; // reserved for future section-name lookup
 
-            Self {
+            let mut layout = Self {
                 text_base: text.addr,
                 text_len: text.data.len(),
                 slot_granularity,
@@ -184,7 +260,13 @@ mod binary_load {
                 relocs,
                 libraries,
                 memory_model: MemoryModel::OwnedLinear,
+            };
+            // Low-VA images: ZeroOffset (text unmapped, identity offsets).
+            // High-VA PIE: keep OwnedLinear until HostOffset packing lands.
+            if layout.data_end_max() <= ZERO_OFFSET_MAX_DATA_END {
+                layout.memory_model = MemoryModel::ZeroOffset;
             }
+            layout
         }
     }
 }
