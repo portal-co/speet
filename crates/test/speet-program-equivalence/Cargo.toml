@@ -10,5 +10,6 @@ description = "Original vs recompiled outcome comparison for C corpus programs"
 binary-io = { path = "../../../../binary-io" }
 speet-corpus-harness = { path = "../speet-corpus-harness" }
 speet-guest-runner = { path = "../speet-guest-runner" }
+speet-recompile = { path = "../../os/speet-recompile" }
 speet-runtime = { path = "../../os/speet-runtime" }
 speet-host-api = { path = "../../os/speet-host-api" }

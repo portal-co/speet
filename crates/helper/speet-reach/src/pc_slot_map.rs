@@ -4,6 +4,7 @@
 //! sorted list of included instruction PCs.  Binary search gives the correct
 //! sequential slot index regardless of instruction width.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use yecta::SlotAssigner;
 
@@ -24,6 +25,11 @@ use crate::{CfgDecoder, ReachableSet};
 pub struct PcSlotMap {
     /// Sorted list of included PCs.  The index is the local slot index.
     sorted_pcs: Vec<u64>,
+    /// Extra guest PCs that share an existing slot (e.g. dyld/`__stubs` PLT
+    /// entries aliasing redirect-shim slots). Direct `bl`/`call` to a stub
+    /// address resolves here; the synthetic shim VA from
+    /// [`with_redirect_shims`] remains the GOT/lazy-pointer target.
+    aliases: BTreeMap<u64, u32>,
 }
 
 impl PcSlotMap {
@@ -51,7 +57,10 @@ impl PcSlotMap {
                 None => break,
             }
         }
-        Self { sorted_pcs }
+        Self {
+            sorted_pcs,
+            aliases: BTreeMap::new(),
+        }
     }
 
     /// Build a `PcSlotMap` from a [`ReachableSet`] — omits unreachable PCs.
@@ -61,7 +70,10 @@ impl PcSlotMap {
     pub fn from_reachable(set: &ReachableSet) -> Self {
         // ReachableSet.pcs is a BTreeSet so iteration is already in sorted order.
         let sorted_pcs = set.pcs.iter().copied().collect();
-        Self { sorted_pcs }
+        Self {
+            sorted_pcs,
+            aliases: BTreeMap::new(),
+        }
     }
 
     /// Total number of instruction slots (= length of the included PC list).
@@ -89,6 +101,27 @@ impl PcSlotMap {
         }
         self
     }
+
+    /// Map guest PLT/stub addresses onto already-allocated redirect-shim slots.
+    ///
+    /// `stub_addrs` must be in the same order as shim allocation in
+    /// [`with_redirect_shims`] / `build_redirect_shims_from_plan` (sorted by
+    /// address). `n_text_slots` is the slot count **before** shims were
+    /// appended — shim `i` lives at local index `n_text_slots + i`.
+    ///
+    /// Aliases do not allocate new WASM functions; they only make
+    /// `slot_for_pc(stub)` succeed for a direct branch into `__stubs` /
+    /// `.plt` that would otherwise fall through to `oob_jump` → `unreachable`.
+    pub fn with_plt_stub_aliases(
+        mut self,
+        stub_addrs: impl IntoIterator<Item = u64>,
+        n_text_slots: u32,
+    ) -> Self {
+        for (i, addr) in stub_addrs.into_iter().enumerate() {
+            self.aliases.insert(addr, n_text_slots + i as u32);
+        }
+        self
+    }
 }
 
 impl SlotAssigner for PcSlotMap {
@@ -97,6 +130,9 @@ impl SlotAssigner for PcSlotMap {
     }
 
     fn slot_for_pc(&self, pc: u64) -> Option<u32> {
+        if let Some(&idx) = self.aliases.get(&pc) {
+            return Some(idx);
+        }
         self.sorted_pcs
             .binary_search(&pc)
             .ok()
@@ -208,5 +244,19 @@ mod tests {
         assert_eq!(map.slot_for_pc(0x1002), Some(1));
         assert_eq!(map.slot_for_pc(0x1006), Some(2));
         // The old stride-2 formula would say (0x1006 - 0x1000) / 2 = 3 — wrong!
+    }
+
+    #[test]
+    fn plt_stub_alias_resolves_to_shim_slot() {
+        let bytes = [0u8; 8];
+        let n_text = 2u32;
+        let halt = 0x1008u64;
+        let stub = halt; // Mach-O `__stubs` often begins at text end
+        let map = PcSlotMap::all_slots(&bytes, 0x1000, &Fixed4Decoder)
+            .with_redirect_shims(halt, 1, 4)
+            .with_plt_stub_aliases([stub], n_text);
+        assert_eq!(map.total_slots(), 3); // 2 text + 1 shim
+        assert_eq!(map.slot_for_pc(stub), Some(2)); // shim local idx
+        assert_eq!(map.slot_for_pc(halt + 4), Some(2)); // synthetic shim VA
     }
 }

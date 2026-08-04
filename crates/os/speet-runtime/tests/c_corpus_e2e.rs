@@ -2,6 +2,9 @@
 //!
 //! Only guest `.text` is recompiled; libc/libSystem symbols are tunnelled at link via
 //! [`speet_host_api::default_host_api`].
+//!
+//! On Apple Silicon, Darwin guests use native aarch64 blitz output (asm-arch
+//! `AArch64Writer`) — no Rosetta.
 
 use binary_io::{BinArch, BinOs};
 use speet_runtime::{default_host_api, load_text_from_object, Runtime};
@@ -35,7 +38,17 @@ fn guest_exists(path: &Path) -> bool {
     false
 }
 
-/// Run the full pipeline; skip (don't fail) when the linker cannot resolve wasm imports yet.
+/// Apple Silicon Darwin path: hard-fail on pipeline errors (native aarch64 output).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run_c_guest_aarch64_macos(rt: &mut Runtime, guest: &Path) {
+    let status = rt
+        .recompile_binary_and_run(guest, BinArch::AArch64, BinOs::MacOs)
+        .unwrap_or_else(|e| panic!("aarch64-macos pipeline {}: {e}", guest.display()));
+    assert_eq!(status.code(), Some(42), "{}", guest.display());
+}
+
+/// Soft-skip when the linker cannot resolve wasm imports yet (non-AS hosts).
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn run_c_guest_or_skip(rt: &mut Runtime, guest: &Path, arch: BinArch, os: BinOs) {
     match rt.recompile_binary_and_run(guest, arch, os) {
         Ok(status) => assert_eq!(status.code(), Some(42)),
@@ -61,6 +74,34 @@ fn c_corpus_aarch64_macho_exit() {
     if !guest_exists(&guest) {
         return;
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    run_c_guest_aarch64_macos(&mut rt, &guest);
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    run_c_guest_or_skip(&mut rt, &guest, BinArch::AArch64, BinOs::MacOs);
+}
+
+/// aarch64 Mach-O `exit42` corpus program — same native blitz path as `exit`.
+#[test]
+fn c_corpus_aarch64_macho_exit42() {
+    let mut rt = Runtime::new(std::sync::Arc::new(default_host_api()));
+    if skip_no_llvm(&rt) {
+        return;
+    }
+    // Prefer the libc-linked Mach-O (exercises dyld stub → redirect shim).
+    // Fall back to the freestanding thin guest (return 42 / halt path).
+    let linked = c_corpus_root().join("aarch64-macos/exit42.linked.macho");
+    let thin = c_corpus_root().join("aarch64-macos/exit42.macho");
+    let guest = if linked.exists() {
+        linked
+    } else if thin.exists() {
+        thin
+    } else {
+        eprintln!("SKIP: missing aarch64-macos/exit42.{{linked.,}}macho");
+        return;
+    };
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    run_c_guest_aarch64_macos(&mut rt, &guest);
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     run_c_guest_or_skip(&mut rt, &guest, BinArch::AArch64, BinOs::MacOs);
 }
 
@@ -79,7 +120,12 @@ fn c_corpus_x86_64_macho_exit() {
         eprintln!("SKIP: x86_64 Mach-O link/spawn on Apple Silicon hosts");
         return;
     }
-    run_c_guest_or_skip(&mut rt, &guest, BinArch::X86_64, BinOs::MacOs);
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        run_c_guest_or_skip(&mut rt, &guest, BinArch::X86_64, BinOs::MacOs);
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let _ = &mut rt;
 }
 
 /// Linux ELF guests (skipped on macOS without a Linux sysroot).
@@ -109,7 +155,12 @@ fn c_corpus_linux_elf_exit() {
 /// Committed Mach-O guests expose non-empty `.text` for recompilation input.
 #[test]
 fn c_corpus_guests_have_text() {
-    for rel in ["aarch64-macos/exit.macho", "x86_64-macos/exit.macho"] {
+    for rel in [
+        "aarch64-macos/exit.macho",
+        "aarch64-macos/exit42.macho",
+        "aarch64-macos/exit42.linked.macho",
+        "x86_64-macos/exit.macho",
+    ] {
         let path = c_corpus_root().join(rel);
         if !path.exists() {
             eprintln!("SKIP: missing {}", path.display());

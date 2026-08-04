@@ -9,8 +9,8 @@ use binary_io::{BinArch, BinOs};
 use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, host_platform, recompile_to_wasm_instrumented_plt_with_layout,
-    external_targets_from_imports, DataSegment,
+    assert_same_platform, external_targets_from_imports, host_platform,
+    recompile_to_wasm_instrumented_plt, DataSegment,
 };
 use speet_link_core::GuestImageLayout;
 use speet_recompile::plt::PltCallPlan;
@@ -72,16 +72,12 @@ pub struct IntegratedNativeRuntime {
 
 impl IntegratedNativeRuntime {
     pub fn new(host: Arc<dyn HostApi>) -> Self {
-        let (mut out_os, mut out_arch) = host_platform();
-        if cfg!(target_os = "macos") {
-            // blitz's aarch64 backend SIGBUSes on real arm64 hardware (16-byte
-            // SP-alignment enforcement vs. its 8-byte SP-based operand-stack
-            // pushes; see speet-recompile/STATUS.md "Known limitation: aarch64
-            // native SP alignment"). x86_64 (native or via Rosetta) is the only
-            // runnable macOS output target until that backend is fixed.
-            out_arch = BinArch::X86_64;
-            out_os = BinOs::MacOs;
-        }
+        // Same-platform host output: aarch64 Mach-O on Apple Silicon (blitz →
+        // asm-arch `AArch64Writer`), x86_64 elsewhere. The old macOS→x86_64
+        // Rosetta override is gone — guest-stack seeding inside `__wasm_mem`
+        // fixed the aarch64 native fault that motivated it (see
+        // speet-recompile/STATUS.md).
+        let (out_os, out_arch) = host_platform();
         Self {
             host,
             toolchain: LlvmToolchain::from_build_env(),
@@ -140,7 +136,8 @@ impl IntegratedNativeRuntime {
 
     fn recompile_wasm(&mut self, path: &Path, guest_arch: BinArch) -> Result<Vec<u8>, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let input_hash = ArtifactCache::hash_input(&bytes);
+        // Suffix invalidates caches from the prior layout/GOT megabinary shape.
+        let input_hash = format!("{}:text-plt", ArtifactCache::hash_input(&bytes));
         if let Some(w) = self.cache.get_wasm(&input_hash) {
             return Ok(w);
         }
@@ -157,16 +154,17 @@ impl IntegratedNativeRuntime {
                     || matches!(s.kind, binary_io::SectionKind::Text)
             })
             .ok_or_else(|| "no .text section".to_string())?;
-        let start = text.addr;
         let targets = external_targets_from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
-        let layout = GuestImageLayout::from_loaded_binary(&bin);
-
+        // Text-only megabinary (same as `Runtime::recompile_binary_and_run`).
+        // Full `GuestImageLayout` data/GOT linking still trips aarch64 blitz
+        // `ARM64_RELOC_PAGE21` on non-ADRP in some Mach-O guests; PLT redirects
+        // use stub→shim slot aliases instead of requiring translated `__stubs`.
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_layout(
+            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt(
                 &text.data,
-                &layout,
+                text.addr,
                 guest_arch,
                 Some(&plt_plan),
                 Some(bin.entry),
@@ -205,7 +203,7 @@ impl IntegratedNativeRuntime {
         guest_arch: BinArch,
     ) -> Result<PathBuf, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let input_hash = ArtifactCache::hash_input(&bytes);
+        let input_hash = format!("{}:text-plt", ArtifactCache::hash_input(&bytes));
         let arch_os = format!(
             "{}-{}",
             arch_label(self.out_arch),
@@ -245,15 +243,11 @@ impl IntegratedNativeRuntime {
         // `sp_param_index`/`lr_param_index` describe the WASM's own
         // parameter layout, which is a property of whichever frontend
         // translated the guest (`guest_arch`) — NOT of `self.out_arch`,
-        // which is only the native encoding/link target and can legitimately
-        // differ from `guest_arch` (e.g. an aarch64 guest recompiled to
-        // x86_64 output via the documented Rosetta workaround for
-        // wasm-blitz's aarch64 SP-alignment bug; see `IntegratedNativeRuntime::
-        // new`'s doc comment). Using `self.out_arch` here silently assumed
-        // guest_arch == out_arch always, which held for every same-arch test
-        // this pipeline had been exercised with but breaks for any genuinely
-        // cross-arch guest/output pairing (see `link.rs`'s `link_guest_integrated`
-        // doc comment, which already warns about exactly this mistake).
+        // which is only the native encoding/link target and can differ from
+        // `guest_arch` when an embedder overrides `with_output_target` for a
+        // cross-arch pairing (see `link.rs`'s `link_guest_integrated` doc
+        // comment). Default construction keeps guest_arch == out_arch via
+        // `host_platform()`.
         let sp_idx = speet_recompile::drive::sp_param_index(guest_arch);
         let lr_idx = speet_recompile::drive::lr_param_index(guest_arch);
         // Halt-sentinel layout is derived inside the guest-function catalog.
@@ -280,7 +274,7 @@ impl IntegratedNativeRuntime {
         );
         let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
         let halt_local = catalog.halt_entry().local_func_idx;
-        let data_segments = data_segments_from_layout(&GuestImageLayout::from_loaded_binary(&bin));
+        let data_segments: &[DataSegment] = &[];
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -294,7 +288,7 @@ impl IntegratedNativeRuntime {
             entry_local,
             halt_local,
             None,
-            &data_segments,
+            data_segments,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;
@@ -339,6 +333,7 @@ impl NativeRuntime for IntegratedNativeRuntime {
 }
 
 /// Extract initialized data sections from a [`GuestImageLayout`].
+#[allow(dead_code)] // retained for the layout/GOT megabinary path once aarch64 data relocs are green
 fn data_segments_from_layout(layout: &GuestImageLayout) -> Vec<DataSegment> {
     layout
         .data_sections

@@ -63,8 +63,13 @@ Environment:
 
 ## Thin runtime (libc tunnel)
 
-Only guest `.text` is recompiled; libc bodies are tunnelled at link.
+Only guest `.text` is recompiled; libc bodies are tunnelled at link. On Apple Silicon,
+`c_corpus_e2e` / `c_program_equiv_e2e` use native aarch64 blitz output (asm-arch
+`AArch64Writer`) — no Rosetta. Direct `bl` into dyld `__stubs` maps onto redirect
+shim slots (PLT stub aliases); `c_program_equiv_e2e` only requires same-platform
+manifest rows.
 
 ```bash
 cargo test -p speet-runtime --test c_corpus_e2e
+cargo test -p speet-runtime --test c_program_equiv_e2e
 ```

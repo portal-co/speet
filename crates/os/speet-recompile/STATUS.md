@@ -30,16 +30,21 @@ Tracks the build-out of the recompiler described in
   Defines `__wasm_mem`/`__wasm_mem_pages`/`__wasm_memory_grow`, weak `__speet_data_init`,
   and a C `main` that bootstraps linear memory and calls `__guest_entry`.
 
-## Backend pipeline — RUNNABLE end-to-end (x86_64)
+## Backend pipeline — RUNNABLE end-to-end (host-native)
 
 `speet-recompile::drive::compile_wasm_to_object` lowers a WASM module through
-wasm-blitz's SysV codegen into one asm-arch binary writer, surfaces external relocations
-via `into_parts_with_relocs`, and emits an ELF/Mach-O `.o` via `binary-io`, exporting the
-entry as the C-callable `__guest_entry`. The integration test `tests/backend_e2e.rs`
-recompiles a WASM `() -> i64` returning 42 into an **x86_64 Mach-O object**, links it with a
-C shim (`main` → `__guest_entry`) via `clang`, runs it (Rosetta on Apple silicon), and
-asserts **exit code 42**. This validates blitz codegen + binary-io object writing + the #2
-C-ABI bridge + link/run together.
+wasm-blitz's SysV/AAPCS64 codegen into one asm-arch binary writer, surfaces external
+relocations via `into_parts_with_relocs`, and emits an ELF/Mach-O `.o` via `binary-io`,
+exporting the entry as the C-callable `__guest_entry`.
+
+**Primary Darwin execute path (Apple Silicon):** `tests/backend_e2e.rs` `*_aarch64_native`
+cases and thin-runtime C corpus / integrated obtain recompile to an **aarch64 Mach-O**
+object (blitz-aarch64 → asm-arch `AArch64Writer`), link with `clang -arch arm64`, and run
+natively — **no Rosetta**. `IntegratedNativeRuntime::new` defaults to `host_platform()`
+(aarch64 + macOS on arm64 hosts).
+
+**Optional x86_64 / Rosetta lane:** older `#[ignore]` execute tests still target x86_64
+Mach-O for Rosetta or native x86 hosts; leave them ignored unless Rosetta is healthy.
 
 ### Fixed: guest-stack/linear-memory address-space mismatch (was mis-diagnosed as "aarch64 SP alignment")
 This was previously documented as an 8-byte-push SP-alignment fault. Direct `lldb`
@@ -54,9 +59,8 @@ with the address wrapped to 32 bits). Any SP value exceeding 32 bits — routine
 truncated by that wrap, producing an ASLR-dependent wild address (ASLR-disabled runs under
 `lldb` always passed; real runs failed ~50-70% of the time). Fixed by moving the guest
 stack inside `__wasm_mem` itself (seeded as a small offset near its top, not a raw
-pointer) in `speet-rt::entry_bridge`. Native aarch64 output is no longer categorically
-broken; `IntegratedNativeRuntime::new`'s macOS x86_64-output override (see below/its own
-doc comment) can in principle be revisited, though it wasn't removed as part of this fix.
+pointer) in `speet-rt::entry_bridge`. The former macOS→x86_64 Rosetta override in
+`IntegratedNativeRuntime::new` has been removed; host-native aarch64 is the default.
 
 ## Frontend pipeline — guest machine code → WASM (verified)
 
@@ -105,13 +109,12 @@ it, but Mach-O (implicit addend) does not. The driver now zeroes the relocated
 field bytes for Mach-O so the linker resolves a clean `S - next_ip` (the lea now
 correctly resolves to `_env__exit`).
 
-### Runtime verification blocked by a wedged Rosetta
-On this Apple-silicon VM, the x86_64 output runs under Rosetta 2. During debugging,
-`kill -9`'d translated processes wedged the Rosetta daemon — *any* x86_64 binary
-(even `int main(){return 42;}`) now hangs. A reboot (or `oahd` restart, which needs
-elevated permission) clears it. The run-based tests are therefore `#[ignore]`d;
-re-enable them on an x86 host or after a Rosetta reset. The marshalling + relocation
-fixes are verified by disassembly and the link-only `pipeline_reaches_linked_binary`.
+### Optional Rosetta x86_64 execute tests (`#[ignore]`)
+Primary verification on Apple Silicon uses native aarch64 output (see above). The
+remaining x86_64-via-Rosetta execute tests stay `#[ignore]` — useful on an x86 host or
+after a Rosetta reset, but not required for Darwin C corpus / thin-runtime CI. Marshalling
++ relocation for that lane were historically verified by disassembly and the link-only
+`pipeline_reaches_linked_binary`.
 
 ### Remaining (true tail-call)
 `ReturnCall` is lowered as `call`+`return`, which grows the native stack per guest

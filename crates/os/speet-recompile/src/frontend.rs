@@ -573,18 +573,35 @@ fn bind_memory_after_traps_aarch64<E>(
     rc.bind_memory_layout(rctx);
 }
 
-fn build_pc_slot_map(arch: BinArch, text: &[u8], start_addr: u64, n_shims: u32) -> PcSlotMap {
+
+fn build_pc_slot_map(
+    arch: BinArch,
+    text: &[u8],
+    start_addr: u64,
+    plt_plan: Option<&PltCallPlan>,
+) -> PcSlotMap {
+    let n_shims = redirect_shim_count(plt_plan);
     let halt = halt_addr(start_addr, text.len());
     let gran = slot_granularity(arch);
-    match arch {
+    let map = match arch {
         BinArch::X86_64 => {
             let dec = speet_x86_64::cfg::X86CfgDecoder;
-            PcSlotMap::all_slots(text, start_addr, &dec).with_redirect_shims(halt, n_shims, gran)
+            PcSlotMap::all_slots(text, start_addr, &dec)
         }
-        BinArch::AArch64 => PcSlotMap::all_slots(text, start_addr, &Fixed4CfgDecoder)
-            .with_redirect_shims(halt, n_shims, gran),
+        BinArch::AArch64 => PcSlotMap::all_slots(text, start_addr, &Fixed4CfgDecoder),
+    };
+    let n_text = map.len() as u32;
+    let mut map = map.with_redirect_shims(halt, n_shims, gran);
+    if let Some(plan) = plt_plan {
+        // Same address order as `build_redirect_shims_from_plan`.
+        let mut stub_addrs: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        stub_addrs.extend(plan.wasm_import_by_addr.keys().map(|(_, a)| *a));
+        stub_addrs.extend(plan.native_shim_by_addr.keys().map(|(_, a)| *a));
+        map = map.with_plt_stub_aliases(stub_addrs, n_text);
     }
+    map
 }
+
 
 /// Like [`translate`], but redirects PLT/external calls per `plt_plan` and,
 /// when `entry_addr` is given, exports the function at that guest address
@@ -614,8 +631,6 @@ pub fn translate_with_plt(
     );
     let mut ctx = ();
 
-    let n_shims = redirect_shim_count(plt_plan);
-
     let (params, unsupported) = match choice {
         RecompilerChoice::Native(arch) => match arch {
             BinArch::X86_64 => {
@@ -624,7 +639,7 @@ pub fn translate_with_plt(
                     BinArch::X86_64,
                     text,
                     start_addr,
-                    n_shims,
+                    plt_plan,
                 ));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);
@@ -646,7 +661,7 @@ pub fn translate_with_plt(
                     BinArch::AArch64,
                     text,
                     start_addr,
-                    n_shims,
+                    plt_plan,
                 ));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);

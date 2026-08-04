@@ -8,11 +8,9 @@
 
 #![cfg(target_os = "macos")]
 //
-// Note: we target x86_64 here (run via Rosetta on Apple silicon). The aarch64
-// path currently faults on real hardware: blitz's aarch64 backend uses the
-// hardware SP as the WASM operand stack with 8-byte pushes, which violates the
-// arm64 16-byte SP-alignment check enforced on macOS (but not by Unicorn). See
-// STATUS.md.
+// Primary execute path on Apple Silicon: `*_aarch64_native` tests (blitz →
+// asm-arch `AArch64Writer` → clang -arch arm64 → native spawn). x86_64-via-Rosetta
+// execute tests remain `#[ignore]` as an optional secondary lane. See STATUS.md.
 
 use binary_io::{BinArch, BinOs};
 use portal_solutions_blitz_common::wasm_encoder::{

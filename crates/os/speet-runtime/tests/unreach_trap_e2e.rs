@@ -10,20 +10,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 fn host_link_target() -> (BinArch, BinOs) {
-    if cfg!(target_os = "macos") {
-        // blitz aarch64 backend faults on real arm64 SP alignment; x86_64 via Rosetta is the
-        // runnable macOS path (see speet-recompile/STATUS.md).
-        (BinArch::X86_64, BinOs::MacOs)
-    } else {
-        (
-            if cfg!(target_arch = "aarch64") {
-                BinArch::AArch64
-            } else {
-                BinArch::X86_64
-            },
-            BinOs::Linux,
-        )
-    }
+    // Same-platform host output (aarch64 Mach-O on Apple Silicon; no Rosetta).
+    let (os, arch) = speet_recompile::frontend::host_platform();
+    (arch, os)
 }
 
 #[test]

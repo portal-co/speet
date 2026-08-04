@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use binary_io::{BinArch, BinOs};
 use speet_corpus_harness::{
     digest::sha256_hex, expectation_for_triple, expected::load_expected, manifest::Artifact,
 };
@@ -29,11 +28,9 @@ pub fn assert_original_matches_recompiled(
 
     let (original, path) = planner.run_guest(&linked, guest_arch, guest_os, &[])?;
 
-    let out_arch = guest_arch
-        .to_bin_arch()
-        .unwrap_or(host_bin_arch()?);
-    let out_os = guest_os.to_bin_os();
-    let recompiled = run_recompiled(rt, &linked, out_arch, out_os)?;
+    // Guest must match host (assert_same_platform); blitz/link output is always
+    // the host triple — aarch64 Mach-O on Apple Silicon, not Rosetta x86_64.
+    let recompiled = run_recompiled(rt, &linked)?;
 
     compare_outcomes(corpus_root, artifact, &original, &recompiled)?;
     eprintln!(
@@ -46,14 +43,14 @@ pub fn assert_original_matches_recompiled(
 fn run_recompiled(
     rt: &mut IntegratedNativeRuntime,
     linked: &Path,
-    arch: BinArch,
-    os: BinOs,
 ) -> Result<RunOutcome, String> {
+    let (out_os, out_arch) = speet_recompile::frontend::host_platform();
+    rt.out_arch = out_arch;
+    rt.out_os = out_os;
     let exe = rt
         .obtain_executable(linked)
         .map_err(|e| e.to_string())?;
     let status = rt.spawn(&exe, &[], None).map_err(|e| e.to_string())?;
-    let _ = (arch, os);
     Ok(RunOutcome {
         exit_code: status.code().unwrap_or(-1),
         stdout: Vec::new(),
@@ -111,14 +108,6 @@ fn compare_outcomes(
     }
 
     Ok(())
-}
-
-fn host_bin_arch() -> Result<BinArch, String> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok(BinArch::X86_64),
-        "aarch64" => Ok(BinArch::AArch64),
-        other => Err(format!("unsupported host arch for recompiled run: {other}")),
-    }
 }
 
 pub fn default_runtime() -> IntegratedNativeRuntime {
