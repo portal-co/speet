@@ -500,20 +500,32 @@ fn compile_aarch64<'a>(
     }
 
     let (text, labels, relocs) = out.into_parts_with_relocs();
-    let mapped: Vec<_> = relocs
-        .into_iter()
-        .map(|r| {
-            let kind = match r.kind {
-                AsmRelocKind::A64Call26 => RelocKind::A64Call26,
-                AsmRelocKind::A64Jump26 => RelocKind::A64Jump26,
-                AsmRelocKind::A64AdrPrel21 => RelocKind::A64AdrPrel21,
-                AsmRelocKind::A64AdrpPage21 => RelocKind::A64AdrpPage21,
-                AsmRelocKind::A64AddAbsLo12 => RelocKind::A64AddAbsLo12,
-                AsmRelocKind::A64CondBr19 => RelocKind::A64Jump26, // unreached for externals
-            };
-            (r.byte_offset, r.label.label_sym(), kind, r.addend)
-        })
-        .collect();
+    let mut mapped = Vec::with_capacity(relocs.len());
+    for r in relocs {
+        let kind = match r.kind {
+            AsmRelocKind::A64Call26 => RelocKind::A64Call26,
+            AsmRelocKind::A64Jump26 => RelocKind::A64Jump26,
+            // asm-arch `A64AdrPrel21` is plain ADR. Mach-O has no ADR reloc
+            // (binary-io historically aliased the name to PAGE21, which made
+            // `ld` reject "PAGE21 on non-ADRP"). External addresses must be
+            // materialized with ADRP+ADD via blitz `load_label_addr`.
+            AsmRelocKind::A64AdrPrel21 => {
+                let sym = match r.label.label_sym() {
+                    LabelSym::External(n) => n,
+                    LabelSym::Internal(n) => n,
+                };
+                return Err(format!(
+                    "unresolved ADR reloc at text+{:#x} for {sym} — use ADRP+ADD \
+                     (blitz load_label_addr) for external/ambient symbols on aarch64",
+                    r.byte_offset,
+                ));
+            }
+            AsmRelocKind::A64AdrpPage21 => RelocKind::A64AdrpPage21,
+            AsmRelocKind::A64AddAbsLo12 => RelocKind::A64AddAbsLo12,
+            AsmRelocKind::A64CondBr19 => RelocKind::A64Jump26, // unreached for externals
+        };
+        mapped.push((r.byte_offset, r.label.label_sym(), kind, r.addend));
+    }
     finish_object(arch, os, text, labels, mapped, n_imports, func_imports)
 }
 

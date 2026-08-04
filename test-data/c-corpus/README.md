@@ -65,9 +65,10 @@ Environment:
 
 Only guest `.text` is recompiled; libc bodies are tunnelled at link. On Apple Silicon,
 `c_corpus_e2e` / `c_program_equiv_e2e` use native aarch64 blitz output (asm-arch
-`AArch64Writer`) — no Rosetta. Direct `bl` into dyld `__stubs` maps onto redirect
-shim slots (PLT stub aliases); `c_program_equiv_e2e` only requires same-platform
-manifest rows.
+`AArch64Writer`) — no Rosetta. Integrated obtain uses full guest image layout
+(data segments + GOT); external addresses use ADRP+ADD. Direct `bl` into dyld
+`__stubs` maps onto redirect shim slots; `c_program_equiv_e2e` only requires
+same-platform manifest rows.
 
 ```bash
 cargo test -p speet-runtime --test c_corpus_e2e

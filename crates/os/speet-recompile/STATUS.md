@@ -62,6 +62,16 @@ stack inside `__wasm_mem` itself (seeded as a small offset near its top, not a r
 pointer) in `speet-rt::entry_bridge`. The former macOS→x86_64 Rosetta override in
 `IntegratedNativeRuntime::new` has been removed; host-native aarch64 is the default.
 
+### Fixed: Mach-O `ARM64_RELOC_PAGE21` on non-ADRP (`memory.init` data segments)
+
+Integrated obtain with full [`GuestImageLayout`] emits `memory.init` helpers that
+reference `__wasm_data_seg_*` / `__wasm_memory_init_copy`. Those used plain `ADR`;
+asm-arch surfaced them as `A64AdrPrel21`, and `binary-io` historically aliased that
+name to Mach-O `PAGE21` (ADRP-only). `ld` then failed with
+`ARM64_RELOC_PAGE21 relocation on non-ADRP instruction`. Fixed in blitz-aarch64 by
+using `load_label_addr` (ADRP+ADD) for external symbols on that path; `drive.rs`
+now errors clearly if an unresolved ADR reloc still appears.
+
 ## Frontend pipeline — guest machine code → WASM (verified)
 
 `speet-recompile::frontend::{translate, assemble_module, recompile_to_wasm}` wrap the speet

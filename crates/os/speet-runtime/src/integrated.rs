@@ -10,7 +10,7 @@ use speet_host_api::{HostApi, ImportManifest};
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
     assert_same_platform, external_targets_from_imports, host_platform,
-    recompile_to_wasm_instrumented_plt, DataSegment,
+    recompile_to_wasm_instrumented_plt_with_layout, DataSegment,
 };
 use speet_link_core::GuestImageLayout;
 use speet_recompile::plt::PltCallPlan;
@@ -136,8 +136,8 @@ impl IntegratedNativeRuntime {
 
     fn recompile_wasm(&mut self, path: &Path, guest_arch: BinArch) -> Result<Vec<u8>, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        // Suffix invalidates caches from the prior layout/GOT megabinary shape.
-        let input_hash = format!("{}:text-plt", ArtifactCache::hash_input(&bytes));
+        // Suffix invalidates caches from the prior text-only megabinary shape.
+        let input_hash = format!("{}:layout-plt", ArtifactCache::hash_input(&bytes));
         if let Some(w) = self.cache.get_wasm(&input_hash) {
             return Ok(w);
         }
@@ -157,14 +157,11 @@ impl IntegratedNativeRuntime {
         let targets = external_targets_from_imports(&bin.imports);
         let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
         let manifest = self.manifest();
-        // Text-only megabinary (same as `Runtime::recompile_binary_and_run`).
-        // Full `GuestImageLayout` data/GOT linking still trips aarch64 blitz
-        // `ARM64_RELOC_PAGE21` on non-ADRP in some Mach-O guests; PLT redirects
-        // use stub→shim slot aliases instead of requiring translated `__stubs`.
+        let layout = GuestImageLayout::from_loaded_binary(&bin);
         let (wasm, _unsupported) = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt(
+            BinArch::X86_64 | BinArch::AArch64 => recompile_to_wasm_instrumented_plt_with_layout(
                 &text.data,
-                text.addr,
+                &layout,
                 guest_arch,
                 Some(&plt_plan),
                 Some(bin.entry),
@@ -203,7 +200,7 @@ impl IntegratedNativeRuntime {
         guest_arch: BinArch,
     ) -> Result<PathBuf, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let input_hash = format!("{}:text-plt", ArtifactCache::hash_input(&bytes));
+        let input_hash = format!("{}:layout-plt", ArtifactCache::hash_input(&bytes));
         let arch_os = format!(
             "{}-{}",
             arch_label(self.out_arch),
@@ -274,7 +271,7 @@ impl IntegratedNativeRuntime {
         );
         let entry_local = speet_recompile::drive::entry_local_func_idx(&wasm);
         let halt_local = catalog.halt_entry().local_func_idx;
-        let data_segments: &[DataSegment] = &[];
+        let data_segments = data_segments_from_layout(&GuestImageLayout::from_loaded_binary(&bin));
         link_guest_integrated(
             tc,
             host.as_ref(),
@@ -288,7 +285,7 @@ impl IntegratedNativeRuntime {
             entry_local,
             halt_local,
             None,
-            data_segments,
+            &data_segments,
             &out_dir.join(format!("{cache_key}.work")),
             &exe,
         )?;
@@ -333,7 +330,6 @@ impl NativeRuntime for IntegratedNativeRuntime {
 }
 
 /// Extract initialized data sections from a [`GuestImageLayout`].
-#[allow(dead_code)] // retained for the layout/GOT megabinary path once aarch64 data relocs are green
 fn data_segments_from_layout(layout: &GuestImageLayout) -> Vec<DataSegment> {
     layout
         .data_sections
