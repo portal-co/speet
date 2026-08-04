@@ -1,6 +1,6 @@
 # Architecture Recompilers Component Guide
 
-**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`, `crates/managed/speet-dex`  
+**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-arm`, `crates/native/speet-x86`, `crates/native/speet-powerpc`, `crates/managed/speet-dex`  
 **Design doc:** [recompiler-guide.md](../recompiler-guide.md)  
 **Status:** [goals/arch.md](../../goals/arch.md) — **main four** (aarch64, riscv, x86_64, mips) are implemented; **powerpc** is not started (stub only; should gain main-four parity once started). DEX is managed bytecode, tracked separately.
 

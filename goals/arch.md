@@ -21,12 +21,28 @@ These native frontends are the supported ISA set. They share the register-file W
 
 **speet-powerpc** is a stub crate (`crates/native/speet-powerpc/src/lib.rs`) with no translation logic. Once started, it should aim for the same surface as the main four: register-file ABI `(regs) -> (regs)`, speculative Flag/Exception, thin-runtime bind/stub/plt, and trap hooks. (wasm-blitz `blitz-ppc64` is a separate WIP backend and does not imply speet frontend progress.)
 
+## 32-bit expansion
+
+RV32 guest **input** is already covered by `speet-riscv` (`Xlen::Rv32`). The following expand both **input** (speet frontends) and **output** (asm-arch writers + wasm-blitz ILP32 backends + `BinArch`):
+
+| Target | Speet input | asm-arch | blitz | BinArch |
+|--------|-------------|----------|-------|---------|
+| **riscv32** | Done (`speet-riscv`) | `asm-riscv32` | `blitz-riscv32` | `RiscV32` |
+| **arm32** (AArch32 ARMv7-A) | Done thin (`speet-arm`, A32 primary; Thumb stub) | `asm-arm` (A32 emit) | `blitz-arm` | `Arm` |
+| **x86-32** (i686) | Done thin (`speet-x86`) | `asm-x86` | `blitz-i686` | `X86` |
+
+WASM value slots stay **8 bytes** on ILP32 hosts; host pointers use 4 bytes. Thin-runtime execute on 32-bit hosts is Linux-only when toolchains exist.
+
+**Phase 4 smoke:** `speet-arm` / `speet-x86` wired through `BinArch::{Arm,X86}` in `speet-recompile::frontend`; FlagSpec e2e (`arm_flag_smoke` / `x86_flag_smoke`) + crate unit tests translate handcrafted integer/control sequences. Thumb-2 decode and full ILP32 thin-runtime parity remain follow-ups.
+
 ---
 
 ## In progress
 
 - [ ] **speet-x86_64** — packed/vector SIMD (non-scalar XMM lanes) still `unreachable`; scalar SSE FP is done. Map remaining SSE/AVX to WASM SIMD where possible.
 - [ ] **speet-dex** — bring to feature parity with `speet-riscv`; structured control flow means slot granularity can be larger than 2 bytes. (Managed bytecode — separate from the main four.)
+- [ ] **speet-arm** — expand beyond A32 smoke (Thumb-2 decode, fuller DP/LDR/STR, thin-runtime PLT parity).
+- [ ] **speet-x86** — expand beyond i686 smoke (flags/Jcc, fuller addressing, thin-runtime PLT parity).
 
 ## Planned
 
@@ -39,3 +55,6 @@ These native frontends are the supported ISA set. They share the register-file W
 - [x] speet-aarch64 — register file + branches; speculative Flag/Exception; SMULH/UMULH; thin-runtime PLT/layout
 - [x] speet-mips — MIPS32/64; delay slots; weak-memory; speculative Flag/Exception; thin-runtime bind/stub/plt
 - [x] speet-x86_64 — integer + scalar SSE FP; speculative Flag/Exception; thin-runtime PLT/layout
+- [x] speet-arm — thin A32 frontend + FlagSpec smoke (`BinArch::Arm`)
+- [x] speet-x86 — thin i686 frontend + FlagSpec smoke (`BinArch::X86`)
+- [x] `BinArch::RiscV32` frontend path via `speet-riscv` (`Xlen::Rv32`)

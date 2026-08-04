@@ -44,7 +44,7 @@ Shared input: **merged-with-mock** canonical multi-memory module (post-shimming 
 |------|--------|-----------|
 | **A** | wasmi/wasmtime | Reference sandbox execution |
 | **B-wasm** | wasm-blitz **source** backends (`blitz-c` / `blitz-js` via `speet_recompile::drive_source`) plus native object compile-check | Same megabinary as A; C/JS/native compiler paths |
-| **B-native** | wasm-blitz native `.o` + speet-rt | Import bridge + `__wasm_mem_N` |
+| **B-native** | wasm-blitz native `.o` + speet-rt | Import bridge + `__wasm_mem_N`. May emit **ILP32 ELF** (`BinArch::{RiscV32,Arm,X86}` / `blitz-riscv32`/`blitz-arm`/`blitz-i686`) as well as LP64; WASM slots stay 8 bytes, host pointers 4. |
 
 When changing emission or link:
 

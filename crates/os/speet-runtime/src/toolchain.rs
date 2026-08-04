@@ -46,6 +46,13 @@ pub fn llvm_target(arch: binary_io::BinArch, os: binary_io::BinOs) -> &'static s
         // Host-RV thin link is not wired; triple kept for completeness.
         (binary_io::BinArch::RiscV64, binary_io::BinOs::Linux) => "riscv64-unknown-linux-gnu",
         (binary_io::BinArch::RiscV64, binary_io::BinOs::MacOs) => "riscv64-apple-darwin",
+        (binary_io::BinArch::RiscV32, binary_io::BinOs::Linux) => "riscv32-unknown-linux-gnu",
+        (binary_io::BinArch::Arm, binary_io::BinOs::Linux) => "arm-linux-gnueabihf",
+        (binary_io::BinArch::X86, binary_io::BinOs::Linux) => "i686-unknown-linux-gnu",
+        // ILP32 Mach-O is unsupported; stub triples satisfy exhaustiveness.
+        (binary_io::BinArch::RiscV32, binary_io::BinOs::MacOs) => "riscv32-apple-darwin",
+        (binary_io::BinArch::Arm, binary_io::BinOs::MacOs) => "armv7-apple-darwin",
+        (binary_io::BinArch::X86, binary_io::BinOs::MacOs) => "i386-apple-darwin",
     }
 }
 
@@ -55,6 +62,9 @@ pub fn clang_arch_flag(arch: binary_io::BinArch) -> &'static str {
         binary_io::BinArch::X86_64 => "x86_64",
         binary_io::BinArch::AArch64 => "arm64",
         binary_io::BinArch::RiscV64 => "riscv64",
+        binary_io::BinArch::RiscV32 => "riscv32",
+        binary_io::BinArch::Arm => "armv7",
+        binary_io::BinArch::X86 => "i386",
     }
 }
 

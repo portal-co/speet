@@ -4059,3 +4059,29 @@ fn decode_operators_near(wasm: &[u8], from: usize, to: usize) {
         }
     }
 }
+
+// ── Phase 4: AArch32 / i686 FlagSpec smoke (handcrafted bytes) ────────────────
+
+/// A32: `mov r0, #1; bx lr` — translate + validate under FlagSpec.
+#[test]
+fn arm_flag_smoke() {
+    let mut text = Vec::new();
+    text.extend_from_slice(&0xe3a0_0001u32.to_le_bytes()); // mov r0, #1
+    text.extend_from_slice(&0xe12f_ff1eu32.to_le_bytes()); // bx lr
+    let (wasm, unsupported) =
+        build_single_config(&text, 0x1000, Arch::Arm, EscapeConfig::FlagSpec);
+    report_unsupported(&unsupported, "arm_flag_smoke");
+    assert!(!wasm.is_empty());
+    wasmparser::validate(&wasm).expect("arm FlagSpec WASM invalid");
+}
+
+/// i686: `mov eax, 1; ret` — translate + validate under FlagSpec.
+#[test]
+fn x86_flag_smoke() {
+    let text = [0xb8u8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+    let (wasm, unsupported) =
+        build_single_config(&text, 0x1000, Arch::X86_32, EscapeConfig::FlagSpec);
+    report_unsupported(&unsupported, "x86_flag_smoke");
+    assert!(!wasm.is_empty());
+    wasmparser::validate(&wasm).expect("x86 FlagSpec WASM invalid");
+}

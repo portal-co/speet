@@ -15,10 +15,13 @@ pub enum GuestPcRef {
 impl GuestPcRef {
     pub fn for_arch(arch: binary_io::BinArch) -> Self {
         match arch {
-            binary_io::BinArch::X86_64 => GuestPcRef::LocalI64(16),
+            binary_io::BinArch::X86_64 | binary_io::BinArch::X86 => GuestPcRef::LocalI64(16),
             binary_io::BinArch::AArch64 => GuestPcRef::ParamI64(31),
-            // RV64: PC is param 64 (after x0–x31 + f0–f31).
+            // AArch32: PC is r15 in a flat r0–r15 file (Phase 4 frontend).
+            binary_io::BinArch::Arm => GuestPcRef::ParamI64(15),
+            // RV64: PC is param 64 (after x0–x31 + f0–f31). RV32 integer-only: param 32.
             binary_io::BinArch::RiscV64 => GuestPcRef::ParamI64(64),
+            binary_io::BinArch::RiscV32 => GuestPcRef::ParamI64(32),
         }
     }
 

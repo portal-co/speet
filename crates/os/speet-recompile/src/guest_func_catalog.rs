@@ -147,9 +147,9 @@ impl GuestFuncCatalog {
 
 fn slot_granularity(arch: BinArch) -> u64 {
     match arch {
-        BinArch::X86_64 => 1,
-        BinArch::AArch64 => 4,
-        BinArch::RiscV64 => 2,
+        BinArch::X86_64 | BinArch::X86 => 1,
+        BinArch::AArch64 | BinArch::Arm => 4,
+        BinArch::RiscV64 | BinArch::RiscV32 => 2,
     }
 }
 

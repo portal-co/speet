@@ -161,7 +161,11 @@ pub fn sp_param_index(arch: BinArch) -> u32 {
     match arch {
         BinArch::AArch64 => speet_aarch64::AArch64Recompiler::<(), ()>::SP_PARAM_INDEX,
         BinArch::X86_64 => speet_x86_64::X86Recompiler::<(), ()>::SP_PARAM_INDEX,
-        BinArch::RiscV64 => speet_riscv::RV64_SP_PARAM_INDEX,
+        BinArch::RiscV64 | BinArch::RiscV32 => speet_riscv::RV64_SP_PARAM_INDEX,
+        // AArch32: SP is r13 in a flat r0–r15 register-file ABI (Phase 4 frontend).
+        BinArch::Arm => 13,
+        // i686: ESP occupies the same param slot index as x86_64's RSP.
+        BinArch::X86 => speet_x86_64::X86Recompiler::<(), ()>::SP_PARAM_INDEX,
     }
 }
 
@@ -173,8 +177,10 @@ pub fn sp_param_index(arch: BinArch) -> u32 {
 pub fn lr_param_index(arch: BinArch) -> Option<u32> {
     match arch {
         BinArch::AArch64 => Some(speet_aarch64::AArch64Recompiler::<(), ()>::LR_PARAM_INDEX),
-        BinArch::RiscV64 => Some(speet_riscv::RV64_RA_PARAM_INDEX),
-        BinArch::X86_64 => None,
+        BinArch::RiscV64 | BinArch::RiscV32 => Some(speet_riscv::RV64_RA_PARAM_INDEX),
+        // AArch32: LR is r14.
+        BinArch::Arm => Some(14),
+        BinArch::X86_64 | BinArch::X86 => None,
     }
 }
 
@@ -263,6 +269,15 @@ pub fn compile_wasm_to_object(
         BinArch::RiscV64 => Err(
             "host-riscv object emission is not wired (thin runtime hosts x86_64/aarch64)".into(),
         ),
+        BinArch::RiscV32 => compile_riscv32(
+            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+        ),
+        BinArch::Arm => compile_arm(
+            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+        ),
+        BinArch::X86 => compile_x86(
+            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+        ),
     }
 }
 
@@ -278,6 +293,9 @@ fn finish_object<L>(
 where
     L: LabelName,
 {
+    if matches!(arch, BinArch::RiscV32 | BinArch::Arm | BinArch::X86) && os == BinOs::MacOs {
+        return Err("ILP32 Mach-O object emission is unsupported (Linux ELF only)".into());
+    }
     let mangle = |name: String| match os {
         BinOs::MacOs => format!("_{name}"),
         BinOs::Linux => name,
@@ -314,12 +332,15 @@ where
     // external symbol; otherwise at the `__wasm_func_{i-n_imports}` local symbol.
     let n_internal = func_offsets.iter().map(|(k, _)| *k + 1).max().unwrap_or(0);
     let n_slots = n_imports + n_internal;
-    let abs64 = match arch {
-        BinArch::X86_64 => RelocKind::X86Abs64,
-        BinArch::AArch64 => RelocKind::A64Abs64,
+    let (abs_kind, ptr_size) = match arch {
+        BinArch::X86_64 => (RelocKind::X86Abs64, 8u64),
+        BinArch::AArch64 => (RelocKind::A64Abs64, 8u64),
         BinArch::RiscV64 => {
             return Err("RiscV64 abs64 reloc not modeled in binary-io yet".into());
         }
+        BinArch::X86 => (RelocKind::X86Abs32, 4u64),
+        BinArch::Arm => (RelocKind::ArmAbs32, 4u64),
+        BinArch::RiscV32 => (RelocKind::RiscVAbs32, 4u64),
     };
     let mut table_relocs = Vec::with_capacity(n_slots as usize);
     for i in 0..n_slots {
@@ -329,12 +350,17 @@ where
         } else {
             format!("__wasm_func_{}", i - n_imports)
         };
-        table_relocs.push(DataReloc { off: (i as u64) * 8, symbol, kind: abs64, addend: 0 });
+        table_relocs.push(DataReloc {
+            off: (i as u64) * ptr_size,
+            symbol,
+            kind: abs_kind,
+            addend: 0,
+        });
     }
     let data = vec![DataBlob {
         name: "__wasm_table".to_string(),
-        bytes: vec![0u8; n_slots as usize * 8],
-        align: 8,
+        bytes: vec![0u8; n_slots as usize * ptr_size as usize],
+        align: ptr_size,
         // Writable so the absolute function-pointer relocations are permitted:
         // macOS rejects text-relocations in a read-only section (they would need
         // load-time fixups dyld only applies to writable data).
@@ -621,4 +647,292 @@ fn compile_x86_64<'a>(
         })
         .collect();
     finish_object(arch, os, text, labels, mapped, n_imports, func_imports)
+}
+
+fn compile_riscv32<'a>(
+    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    func_imports: &[(&str, &str)],
+    n_imports: u32,
+    arch: BinArch,
+    os: BinOs,
+    entry_func_idx: u32,
+    data_init_func_idx: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    use portal_solutions_asm_riscv32::out::rv_asm_backend::RvAsmWriter;
+    use portal_solutions_asm_riscv32::out::Writer as _;
+    use portal_solutions_blitz_riscv32::{sysv, RiscV32Arch, RiscvLabel};
+
+    impl LabelName for RiscvLabel {
+        fn label_sym(&self) -> LabelSym {
+            match self {
+                RiscvLabel::External { name } => LabelSym::External(name.clone()),
+                RiscvLabel::Ambient { name } => LabelSym::External(format!("__ambient_{name}")),
+                other => LabelSym::Internal(format!("{other:?}")),
+            }
+        }
+        fn func_index(&self) -> Option<u32> {
+            match self {
+                RiscvLabel::Func { r#fn } => Some(*r#fn),
+                RiscvLabel::Indexed { idx } if *idx & (1 << 28) != 0 => {
+                    Some((*idx & !(1 << 28)) as u32)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    let mut out = RvAsmWriter::<RiscvLabel>::new();
+    let mut ctx = ();
+    let archc = RiscV32Arch::default();
+    let mut state = sysv::SysVState::default();
+    state.mem_base = sysv::MemBase::WasmMemSymbol;
+    state.call_abi = sysv::CallAbi::AllStack;
+    state.n_imports = n_imports;
+    let mut reencoder = RoundtripReencoder;
+
+    for op in ops {
+        let op = op.map_err(|e| format!("mach op: {e:?}"))?;
+        if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
+            if *id == entry_func_idx {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    RiscvLabel::External {
+                        name: GUEST_ENTRY.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+            if data_init_func_idx == Some(*id) {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    RiscvLabel::External {
+                        name: crate::frontend::DATA_INIT_EXPORT_NAME.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+        }
+        sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
+            &mut out,
+            &mut ctx,
+            archc,
+            &mut state,
+            func_imports,
+            &op,
+            &mut reencoder,
+            0,
+        )
+        .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
+    }
+
+    let (text, labels) = out.into_parts();
+    finish_object(arch, os, text, labels, Vec::new(), n_imports, func_imports)
+}
+
+fn compile_arm<'a>(
+    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    func_imports: &[(&str, &str)],
+    n_imports: u32,
+    arch: BinArch,
+    os: BinOs,
+    entry_func_idx: u32,
+    data_init_func_idx: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    use portal_solutions_asm_arm::out::bin::ArmWriter;
+    use portal_solutions_asm_arm::out::Writer as _;
+    use portal_solutions_blitz_arm::{sysv, ArmArch, ArmLabel};
+
+    impl LabelName for ArmLabel {
+        fn label_sym(&self) -> LabelSym {
+            match self {
+                ArmLabel::External { name } => LabelSym::External(name.clone()),
+                ArmLabel::Ambient { name } => LabelSym::External(format!("__ambient_{name}")),
+                other => LabelSym::Internal(format!("{other:?}")),
+            }
+        }
+        fn func_index(&self) -> Option<u32> {
+            match self {
+                ArmLabel::Func { r#fn } => Some(*r#fn),
+                _ => None,
+            }
+        }
+    }
+
+    let mut out = ArmWriter::<ArmLabel>::new();
+    let mut ctx = ();
+    let archc = ArmArch::default();
+    let mut state = sysv::SysVState::default();
+    let mut reencoder = RoundtripReencoder;
+
+    for op in ops {
+        let op = op.map_err(|e| format!("mach op: {e:?}"))?;
+        if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
+            if *id == entry_func_idx {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    ArmLabel::External {
+                        name: GUEST_ENTRY.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+            if data_init_func_idx == Some(*id) {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    ArmLabel::External {
+                        name: crate::frontend::DATA_INIT_EXPORT_NAME.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+        }
+        sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
+            &mut out,
+            &mut ctx,
+            archc,
+            &mut state,
+            func_imports,
+            &op,
+            &mut reencoder,
+            0,
+        )
+        .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
+    }
+
+    let (text, labels) = out.into_parts();
+    finish_object(arch, os, text, labels, Vec::new(), n_imports, func_imports)
+}
+
+fn compile_x86<'a>(
+    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    func_imports: &[(&str, &str)],
+    n_imports: u32,
+    arch: BinArch,
+    os: BinOs,
+    entry_func_idx: u32,
+    data_init_func_idx: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    use portal_solutions_asm_x86::out::iced::IcedWriter;
+    use portal_solutions_asm_x86::out::Writer as _;
+    use portal_solutions_blitz_i686::{sysv, I686Label, X86Arch};
+
+    impl LabelName for I686Label {
+        fn label_sym(&self) -> LabelSym {
+            match self {
+                I686Label::External { name } => LabelSym::External(name.clone()),
+                I686Label::Ambient { name } => LabelSym::External(format!("__ambient_{name}")),
+                other => LabelSym::Internal(format!("{other:?}")),
+            }
+        }
+        fn func_index(&self) -> Option<u32> {
+            match self {
+                I686Label::Func { r#fn } => Some(*r#fn),
+                _ => None,
+            }
+        }
+    }
+
+    let mut out = IcedWriter::<I686Label>::new(0);
+    let mut ctx = ();
+    let archc = X86Arch::default();
+    let mut state = sysv::SysVState::default();
+    let mut reencoder = RoundtripReencoder;
+
+    for op in ops {
+        let op = op.map_err(|e| format!("mach op: {e:?}"))?;
+        if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
+            if *id == entry_func_idx {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    I686Label::External {
+                        name: GUEST_ENTRY.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+            if data_init_func_idx == Some(*id) {
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    I686Label::External {
+                        name: crate::frontend::DATA_INIT_EXPORT_NAME.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
+            }
+        }
+        sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
+            &mut out,
+            &mut ctx,
+            archc,
+            &mut state,
+            func_imports,
+            &op,
+            &mut reencoder,
+            0,
+        )
+        .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
+    }
+
+    let (text, labels) = out.into_parts();
+    finish_object(arch, os, text, labels, Vec::new(), n_imports, func_imports)
+}
+
+/// Minimal WASM module used by the ILP32 emission smoke test:
+/// `(module (func (export "_start") (nop)))`.
+fn tiny_empty_wasm() -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+        TypeSection,
+    };
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+    let mut exports = ExportSection::new();
+    exports.export("_start", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut codes = CodeSection::new();
+    // Empty body (just `end`) — thin ILP32 naive backends do not implement `nop`.
+    let mut f = Function::new([]);
+    f.instruction(&Instruction::End);
+    codes.function(&f);
+    module.section(&codes);
+    module.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ilp32_compile_wasm_to_object_emits_elf() {
+        let wasm = tiny_empty_wasm();
+        let mut ok = 0u32;
+        for arch in [BinArch::RiscV32, BinArch::Arm, BinArch::X86] {
+            let bytes = match compile_wasm_to_object(&wasm, arch, BinOs::Linux) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Soft-skip when a thin backend/dep is not yet wired enough.
+                    eprintln!("soft-skip {arch:?}: {e}");
+                    continue;
+                }
+            };
+            assert!(
+                bytes.len() > 4 && &bytes[0..4] == b"\x7fELF",
+                "{arch:?}: expected ELF magic, got {} bytes",
+                bytes.len()
+            );
+            ok += 1;
+        }
+        assert_eq!(ok, 3, "expected ELF emission for RiscV32, Arm, and X86");
+    }
 }

@@ -12,10 +12,12 @@ members = [
     "crates/helper/speet-log",
     # Native architecture crates
     "crates/native/speet-x86_64",
+    "crates/native/speet-x86",
     "crates/native/speet-riscv",
     "crates/native/speet-mips",
     "crates/native/speet-powerpc",
     "crates/native/speet-aarch64",
+    "crates/native/speet-arm",
     # Managed architecture crates
     "crates/managed/speet-dex",
     "crates/managed/dex-bytecode",

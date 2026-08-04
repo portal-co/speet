@@ -195,10 +195,10 @@ mod binary_load {
                 .expect("LoadedBinary must have a .text section");
 
             let slot_granularity = match bin.arch {
-                binary_io::BinArch::X86_64 => 1,
-                binary_io::BinArch::AArch64 => 4,
+                binary_io::BinArch::X86_64 | binary_io::BinArch::X86 => 1,
+                binary_io::BinArch::AArch64 | binary_io::BinArch::Arm => 4,
                 // RVC: instructions may start on 2-byte boundaries.
-                binary_io::BinArch::RiscV64 => 2,
+                binary_io::BinArch::RiscV64 | binary_io::BinArch::RiscV32 => 2,
             };
 
             let data_sections: Vec<DataSectionSpec> = bin

@@ -171,7 +171,7 @@ impl Runtime {
             let plt_plan = PltCallPlan::from_targets(&targets, self.host.as_ref());
             let manifest = self.host.import_manifest();
             let wasm = match bin.arch {
-                BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 => {
+                BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 | BinArch::RiscV32 => {
                     let (w, unsupported) = recompile_to_wasm_instrumented_plt(
                         &text.data,
                         start,
@@ -184,6 +184,12 @@ impl Runtime {
                         eprintln!("recompile unsupported: {:?}", unsupported);
                     }
                     w
+                }
+                BinArch::Arm | BinArch::X86 => {
+                    return Err(format!(
+                        "ILP32 guest recompile not wired for {:?}",
+                        bin.arch
+                    ));
                 }
             };
             validate_wasm(&wasm)?;
@@ -198,12 +204,17 @@ impl Runtime {
         let (text, start) = load_text_from_object(path)?;
         let guest_arch = guest_arch_from_object_path(path)?;
         let wasm = match guest_arch {
-            BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 => {
+            BinArch::X86_64 | BinArch::AArch64 | BinArch::RiscV64 | BinArch::RiscV32 => {
                 let (w, unsupported) = recompile_to_wasm(&text, start, guest_arch);
                 if !unsupported.is_empty() {
                     eprintln!("recompile unsupported: {:?}", unsupported);
                 }
                 w
+            }
+            BinArch::Arm | BinArch::X86 => {
+                return Err(format!(
+                    "ILP32 guest recompile not wired for {guest_arch:?}"
+                ));
             }
         };
         validate_wasm(&wasm)?;
@@ -322,6 +333,9 @@ fn arch_label(a: BinArch) -> &'static str {
         BinArch::X86_64 => "x86_64",
         BinArch::AArch64 => "aarch64",
         BinArch::RiscV64 => "riscv64",
+        BinArch::RiscV32 => "riscv32",
+        BinArch::Arm => "arm",
+        BinArch::X86 => "i686",
     }
 }
 
@@ -340,8 +354,18 @@ fn guest_arch_from_object_path(path: &Path) -> Result<BinArch, String> {
     if s.contains("x86_64") {
         return Ok(BinArch::X86_64);
     }
+    if s.contains("riscv32") {
+        return Ok(BinArch::RiscV32);
+    }
     if s.contains("riscv64") || s.contains("riscv") {
         return Ok(BinArch::RiscV64);
+    }
+    if s.contains("i686") || s.contains("i386") {
+        return Ok(BinArch::X86);
+    }
+    // Prefer aarch64/arm64 above; bare "arm" means AArch32.
+    if s.contains("/arm/") || s.contains("armv7") || s.contains("armhf") {
+        return Ok(BinArch::Arm);
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let obj = object::File::parse(&*bytes).map_err(|e| e.to_string())?;
@@ -349,6 +373,9 @@ fn guest_arch_from_object_path(path: &Path) -> Result<BinArch, String> {
         object::Architecture::Aarch64 => Ok(BinArch::AArch64),
         object::Architecture::X86_64 => Ok(BinArch::X86_64),
         object::Architecture::Riscv64 => Ok(BinArch::RiscV64),
+        object::Architecture::Riscv32 => Ok(BinArch::RiscV32),
+        object::Architecture::Arm => Ok(BinArch::Arm),
+        object::Architecture::I386 => Ok(BinArch::X86),
         other => Err(format!("unsupported guest arch in {}: {other:?}", path.display())),
     }
 }

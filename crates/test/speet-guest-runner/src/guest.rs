@@ -26,7 +26,7 @@ impl GuestArch {
             Self::X86_64 => Some(BinArch::X86_64),
             Self::AArch64 => Some(BinArch::AArch64),
             Self::Riscv64 => Some(BinArch::RiscV64),
-            Self::Riscv32 => None,
+            Self::Riscv32 => Some(BinArch::RiscV32),
         }
     }
 

@@ -1,0 +1,24 @@
+[package]
+name = "speet-arm"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+wasm-encoder.workspace = true
+wax-core.workspace = true
+yecta = { path = "../../helper/yecta" }
+speet-traps = { path = "../../helper/speet-traps" }
+speet-memory = { path = "../../helper/speet-memory" }
+speet-link-core = { path = "../../os/speet-link-core" }
+speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
+speet-abi-stubs = { path = "../../os/speet-abi-stubs" }
+speet-host-api = { path = "../../os/speet-host-api" }
+speet-reach = { path = "../../helper/speet-reach" }
+binary-io = { path = "../../../../binary-io" }
+
+[dev-dependencies]
+yecta = { path = "../../helper/yecta" }
+speet-link-core = { path = "../../os/speet-link-core" }
+wasm-encoder.workspace = true

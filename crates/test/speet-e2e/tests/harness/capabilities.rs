@@ -36,7 +36,10 @@ pub enum FixtureClass {
 }
 
 pub fn arch_supports_speculative(arch: Arch) -> bool {
-    matches!(arch, Arch::Rv32 | Arch::Rv64 | Arch::X86_64 | Arch::AArch64 | Arch::Mips)
+    matches!(
+        arch,
+        Arch::Rv32 | Arch::Rv64 | Arch::X86_64 | Arch::X86_32 | Arch::AArch64 | Arch::Arm | Arch::Mips
+    )
 }
 
 /// Whether `(arch, path, config)` is a legal matrix cell.

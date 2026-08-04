@@ -580,9 +580,9 @@ pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice, manifes
 /// `_start` at the wrong function.
 fn slot_granularity(arch: BinArch) -> u64 {
     match arch {
-        BinArch::X86_64 => 1,
-        BinArch::AArch64 => 4,
-        BinArch::RiscV64 => 2,
+        BinArch::X86_64 | BinArch::X86 => 1,
+        BinArch::AArch64 | BinArch::Arm => 4,
+        BinArch::RiscV64 | BinArch::RiscV32 => 2,
     }
 }
 
@@ -605,6 +605,20 @@ fn bind_memory_after_traps<E>(
 
 fn bind_memory_after_traps_aarch64<E>(
     rc: &mut speet_aarch64::AArch64Recompiler<(), E>,
+    rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>,
+) {
+    rc.bind_memory_layout(rctx);
+}
+
+fn bind_memory_after_traps_arm<E>(
+    rc: &mut speet_arm::ArmRecompiler<(), E>,
+    rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>,
+) {
+    rc.bind_memory_layout(rctx);
+}
+
+fn bind_memory_after_traps_x86_32<E>(
+    rc: &mut speet_x86::X86_32Recompiler<(), E>,
     rctx: &ReactorAdapter<'_, (), E, Function, LocalPool>,
 ) {
     rc.bind_memory_layout(rctx);
@@ -633,6 +647,20 @@ fn build_pc_slot_map(
             let dec = speet_riscv::cfg::RiscVCfgDecoder {
                 xlen: rv_asm::Xlen::Rv64,
             };
+            PcSlotMap::all_slots(text, start_addr, &dec)
+        }
+        BinArch::RiscV32 => {
+            let dec = speet_riscv::cfg::RiscVCfgDecoder {
+                xlen: rv_asm::Xlen::Rv32,
+            };
+            PcSlotMap::all_slots(text, start_addr, &dec)
+        }
+        BinArch::Arm => {
+            let dec = speet_arm::cfg::ArmCfgDecoder;
+            PcSlotMap::all_slots(text, start_addr, &dec)
+        }
+        BinArch::X86 => {
+            let dec = speet_x86::cfg::X86_32CfgDecoder;
             PcSlotMap::all_slots(text, start_addr, &dec)
         }
     };
@@ -750,6 +778,78 @@ pub fn translate_with_plt(
                 )
                 .expect("translate_bytes");
                 (params, Vec::new())
+            }
+            BinArch::RiscV32 => {
+                use rv_asm::Xlen;
+                let mut rc =
+                    speet_riscv::RiscVRecompiler::<(), Infallible, Function>::new_with_full_config(
+                        start_addr, false, true, false,
+                    );
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::RiscV32,
+                    text,
+                    start_addr,
+                    plt_plan,
+                ));
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
+                }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
+                rc.setup_traps(&mut rctx, &mut ctx);
+                rc.bind_memory_layout(&rctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(
+                    &mut ctx,
+                    &mut rctx,
+                    text,
+                    start_addr as u32,
+                    Xlen::Rv32,
+                    &mut |a| Function::new(a.collect::<Vec<_>>()),
+                )
+                .expect("translate_bytes");
+                (params, Vec::new())
+            }
+            BinArch::Arm => {
+                let mut rc = speet_arm::ArmRecompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::Arm,
+                    text,
+                    start_addr,
+                    plt_plan,
+                ));
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
+                }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
+                rc.setup_traps(&mut rctx, &mut ctx);
+                bind_memory_after_traps_arm(&mut rc, &rctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .expect("translate_bytes");
+                (params, rc.unsupported_insns().iter().cloned().collect())
+            }
+            BinArch::X86 => {
+                let mut rc = speet_x86::X86_32Recompiler::<(), Infallible>::new_with_base_eip(start_addr);
+                rc.set_slot_assigner(build_pc_slot_map(
+                    BinArch::X86,
+                    text,
+                    start_addr,
+                    plt_plan,
+                ));
+                if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
+                    rc.set_stub_for_pc_import_idx(idx);
+                }
+                rc.set_memory_access(memory_access_for_model::<(), Infallible>(memory_model));
+                rc.setup_traps(&mut rctx, &mut ctx);
+                bind_memory_after_traps_x86_32(&mut rc, &rctx);
+                let params = collect_params(&rctx);
+                rc.translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+                    Function::new(a.collect::<Vec<_>>())
+                })
+                .expect("translate_bytes");
+                (params, rc.unsupported_insns().iter().cloned().collect())
             }
         },
         RecompilerChoice::Plugin(plugin) => {

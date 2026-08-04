@@ -1,6 +1,6 @@
 # asm-arch ↔ speet Instruction Sync Guide
 
-**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`
+**Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv` (RV32), `crates/native/speet-arm`, `crates/native/speet-x86`
 **External dependency:** `asm-arch` (sibling workspace at `/Users/g/Code-local/portal-hot/asm-arch`)
 **Design doc:** [recompiler-guide.md](../recompiler-guide.md)
 
@@ -184,6 +184,45 @@ x86's raw-bits model (previous section); see [^floatdp] for the consequence.
     `ZF_LOCAL` flag local as scratch space during the swap — a pre-existing bug independent of
     this sync (not introduced or fixed by it). Flagged here so the next person auditing flag
     correctness doesn't have to rediscover it.
+
+### ILP32 pairs (Phase 1–4 thin surface)
+
+These pairs are first-class for the sync invariant. Emitter crates are thinner than their
+64-bit twins; the bar is “every `WriterCore` method the ILP32 asm crate exposes has a speet
+decode arm,” not parity with aarch64/x86_64 matrices above.
+
+#### riscv32 (`asm-riscv32` ↔ `speet-riscv` with `Xlen::Rv32`)
+
+| `WriterCore` method | Guest / notes | Status |
+|---|---|---|
+| `mv` / `add` / `addi` / `li` | RV32I integer | ✅ (via `speet-riscv`) |
+| `lw` / `sw` / `lb`/`sb`/`lh`/`sh` | loads/stores | ✅ |
+| `ld` / `sd` | soft 8-byte WASM slots (two words / low-word) | ⚠ emitter soft-expands; guest RV32 has no `ld`/`sd` |
+| `jal` / `jalr` / `call` / `ret` | control + Flag on jal/ret | ✅ |
+| branches (`beq`/…) | via `Writer` label helpers | ✅ |
+
+#### arm32 (`asm-arm` ↔ `speet-arm`)
+
+| `WriterCore` method | Guest / notes | Status |
+|---|---|---|
+| `mov` / `mov_imm` / `add` / `sub` | A32 DP | ✅ (thin) |
+| `and` / `orr` / `eor` / `cmp` | A32 DP | ✅ / expand |
+| `ldr` / `str` | imm offset | ✅ (thin) |
+| `b` / `bl` / `bx` / `ret` | Flag on BL / BX lr | ✅ |
+| Thumb-2 emit | out of scope for asm-arm (A32 emit only) | N/A emitter; speet Thumb decode stubbed |
+
+#### x86-32 (`asm-x86` ↔ `speet-x86`)
+
+| `WriterCore` method | Guest / notes | Status |
+|---|---|---|
+| `mov` / `add` / `sub` / `and` / `or` / `xor` | i686 integer | ✅ (thin) |
+| `push` / `pop` / `leave` | stack | ✅ |
+| `lea` / `cmp` | address / flags | ✅ / Jcc expand |
+| `call` / `jmp` / `ret` | Flag on call/ret | ✅ |
+
+Drift detection for ILP32: grep `WriterCore` methods in
+`asm-arch/crates/asm-{riscv32,arm,x86}/src/out.rs` and match against
+`speet-{riscv,arm,x86}` decode paths (RV32 shares `speet-riscv`).
 
 ## 4. Verification bar for sync work
 

@@ -38,11 +38,11 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
-## 4. Architecture recompilers (`speet-aarch64`, `speet-riscv`, `speet-x86_64`, `speet-mips`, `speet-powerpc`, `speet-dex`)
+## 4. Architecture recompilers (`speet-aarch64`, `speet-riscv`, `speet-x86_64`, `speet-mips`, `speet-arm`, `speet-x86`, `speet-powerpc`, `speet-dex`)
 
 **Guide:** [docs/guides/arch-recompilers.md](docs/guides/arch-recompilers.md)
 
-- Main four implemented frontends: aarch64, riscv, x86_64, mips. PowerPC is a stub — once started, aim for main-four parity (see [goals/arch.md](goals/arch.md)).
+- Main four implemented frontends: aarch64, riscv, x86_64, mips. **32-bit set** (thin): `speet-arm` (AArch32), `speet-x86` (i686), plus RV32 via `speet-riscv` (`Xlen::Rv32` / `BinArch::RiscV32`). PowerPC is a stub — once started, aim for main-four parity (see [goals/arch.md](goals/arch.md)).
 - Do not remove `ctx: &mut Context` from `setup_traps` or any recompiler API — custom targets require it.
 - Do not remove `TrapConfig` stubs — they are load-bearing placeholders for pending integration.
 
@@ -59,15 +59,16 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
-## 6. asm-arch ↔ speet instruction sync (`speet-x86_64`, `speet-aarch64`)
+## 6. asm-arch ↔ speet instruction sync (`speet-x86_64`, `speet-aarch64`, `speet-riscv`/`asm-riscv32`, `speet-arm`/`asm-arm`, `speet-x86`/`asm-x86`)
 
 **Guide:** [docs/guides/asm-arch-instruction-sync.md](docs/guides/asm-arch-instruction-sync.md)
 
 - speet's frontends must be able to decode every instruction family asm-arch's `WriterCore`
   emitter trait can produce — that's the invariant this sync maintains, not general ISA
-  completeness.
+  completeness. Includes the ILP32 pairs: `asm-riscv32`↔`speet-riscv` (RV32), `asm-arm`↔`speet-arm`,
+  `asm-x86`↔`speet-x86`.
 - Do not assume a `WriterCore` method name matches its real encoding — verify against the
-  binary writer impl (`iced.rs`/`bin.rs`) before concluding something is a gap.
+  binary writer impl (`iced.rs`/`bin.rs`/`rv_asm_backend.rs`) before concluding something is a gap.
 - Do not assume one disarm64 enum variant = one instruction form — some merge multiple
   width/precision combinations, distinguished only by raw instruction bits.
 
@@ -122,6 +123,7 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 - Do not hardcode `text_base` loading in arch frontends — the embedder supplies a user-specified [`Snippet`](crates/helper/yecta/src/lib.rs) via [`RuntimeLayoutParams`](crates/os/speet-link-core/src/layout_params.rs).
 - Do not `memory.init` unrecompiled `.text` into the host mirror under [`MemoryModel::ZeroOffset`](crates/os/speet-link-core/src/image_layout.rs) — that range stays unmapped / `mprotect`'d so host BridgeSupport never sees original machine code.
 - Dual-lane guest OS: RV64 Linux → [`speet-linux-wasi`](docs/speet-linux-wasi.md); aarch64 Darwin/BSD → [`speet-darwin-wasi`](docs/speet-darwin-wasi.md). Lane A is wasmi + preview1; Lane B-native is thin runtime (`cfg(macos)`). Keep syscall numbers in `os-*-wasi`, not hand-matched in the recompiler.
+- Lane B-native may also target **ILP32 ELF** hosts (`BinArch::{RiscV32,Arm,X86}` via `blitz-riscv32` / `blitz-arm` / `blitz-i686`); WASM value slots stay 8 bytes, host pointers are 4. Thin-runtime execute on 32-bit is Linux-only when the clang triple exists — soft-skip missing toolchains.
 
 ---
 

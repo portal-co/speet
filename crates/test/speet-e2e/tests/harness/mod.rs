@@ -55,11 +55,13 @@ use speet_link_core::{linker::LinkerPlugin, unit::{BinaryUnit, FuncType}};
 use speet_memory::{AddressWidth, DirectMemory, IntWidth, MemoryAccess};
 use speet_module_builder::MegabinaryBuilder;
 use speet_aarch64::AArch64Recompiler;
+use speet_arm::ArmRecompiler;
 use speet_mips::MipsRecompiler;
 use speet_riscv::{HintCallback, HintInfo, RiscVRecompiler};
 use speet_traps::{JumpInfo, JumpKind, JumpTrap, LocalDeclarator, LocalLayout, LocalSlot, TrapAction, TrapContext};
 use speet_traps::cond::{ConditionInfo, ConditionTrap};
 use speet_wasm::{GuestMemoryConfig, IndexOffsets, WasmFrontend};
+use speet_x86::X86_32Recompiler;
 use speet_x86_64::X86Recompiler;
 use wasm_encoder::{
     BlockType, Catch, CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection,
@@ -93,7 +95,7 @@ pub const HINT_CALL:   i32 = 0xCA12_u32 as i32;
 // ── Arch enum ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Arch { Rv32, Rv64, X86_64, AArch64, Mips }
+pub enum Arch { Rv32, Rv64, X86_64, X86_32, AArch64, Arm, Mips }
 
 // ── Harness state ─────────────────────────────────────────────────────────────
 
@@ -647,6 +649,94 @@ pub fn translate_mips_for_config(
     Translated { fns: rctx.drain_fns(), params, unsupported: vec![] }
 }
 
+pub fn translate_arm(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+    speculative: bool,
+) -> Translated {
+    translate_arm_for_config(
+        text,
+        start_addr,
+        base_func_offset,
+        type_idx,
+        EscapeConfig::from_eh_spec(eh, speculative),
+    )
+}
+
+pub fn translate_arm_for_config(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    config: EscapeConfig,
+) -> Translated {
+    let mut recompiler = ArmRecompiler::<(), Infallible>::new_with_base_pc(start_addr);
+    recompiler.set_speculative_calls(config.speculative());
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx_config(&mut reactor, base_func_offset, type_idx, config);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_rv_params(&rctx);
+    recompiler
+        .translate_bytes(&mut ctx, &mut rctx, text, start_addr, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        })
+        .expect("translate_bytes failed");
+    let unsupported: Vec<String> = recompiler.unsupported_insns().iter().cloned().collect();
+    Translated {
+        fns: rctx.drain_fns(),
+        params,
+        unsupported,
+    }
+}
+
+pub fn translate_x86_32(
+    text: &[u8],
+    eip: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    eh: Eh,
+    speculative: bool,
+) -> Translated {
+    translate_x86_32_for_config(
+        text,
+        eip,
+        base_func_offset,
+        type_idx,
+        EscapeConfig::from_eh_spec(eh, speculative),
+    )
+}
+
+pub fn translate_x86_32_for_config(
+    text: &[u8],
+    eip: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    config: EscapeConfig,
+) -> Translated {
+    let mut recompiler = X86_32Recompiler::<(), Infallible>::new_with_base_eip(eip);
+    recompiler.set_speculative_calls(config.speculative());
+    let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+    let mut rctx = make_rctx_config(&mut reactor, base_func_offset, type_idx, config);
+    let mut ctx = ();
+    recompiler.setup_traps(&mut rctx, &mut ctx);
+    let params = collect_rv_params(&rctx);
+    recompiler
+        .translate_bytes(&mut ctx, &mut rctx, text, eip, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        })
+        .expect("translate_bytes failed");
+    let unsupported: Vec<String> = recompiler.unsupported_insns().iter().cloned().collect();
+    Translated {
+        fns: rctx.drain_fns(),
+        params,
+        unsupported,
+    }
+}
+
 pub fn translate(
     text: &[u8],
     start_addr: u64,
@@ -660,7 +750,9 @@ pub fn translate(
         Arch::Rv32    => translate_rv(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, eh, speculative),
         Arch::Rv64    => translate_rv(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, eh, speculative),
         Arch::X86_64  => translate_x86(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::X86_32  => translate_x86_32(text, start_addr, base_func_offset, type_idx, eh, speculative),
         Arch::AArch64 => translate_aarch64(text, start_addr, base_func_offset, type_idx, eh, speculative),
+        Arch::Arm     => translate_arm(text, start_addr, base_func_offset, type_idx, eh, speculative),
         Arch::Mips    => translate_mips(text, start_addr, base_func_offset, type_idx, eh, speculative),
     }
 }
@@ -816,6 +908,20 @@ fn dry_run_params(arch: Arch, addr: u64) -> Vec<ValType> {
             recompiler.setup_traps(&mut rctx, &mut ());
             collect_rv_params(&rctx)
         }
+        Arch::Arm => {
+            let mut recompiler = ArmRecompiler::<(), Infallible>::new_with_base_pc(addr);
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
+            recompiler.setup_traps(&mut rctx, &mut ());
+            collect_rv_params(&rctx)
+        }
+        Arch::X86_32 => {
+            let mut recompiler = X86_32Recompiler::<(), Infallible>::new_with_base_eip(addr);
+            let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
+            let mut rctx = make_rctx(&mut reactor, 0, TypeIdx(0), Eh::None);
+            recompiler.setup_traps(&mut rctx, &mut ());
+            collect_rv_params(&rctx)
+        }
     }
 }
 
@@ -850,7 +956,9 @@ pub fn translate_for_config(
         Arch::Rv32 => translate_rv_for_config(text, start_addr as u32, Xlen::Rv32, base_func_offset, type_idx, config),
         Arch::Rv64 => translate_rv_for_config(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, config),
         Arch::X86_64 => translate_x86_for_config(text, start_addr, base_func_offset, type_idx, config),
+        Arch::X86_32 => translate_x86_32_for_config(text, start_addr, base_func_offset, type_idx, config),
         Arch::AArch64 => translate_aarch64_for_config(text, start_addr, base_func_offset, type_idx, config),
+        Arch::Arm => translate_arm_for_config(text, start_addr, base_func_offset, type_idx, config),
         Arch::Mips => translate_mips_for_config(text, start_addr, base_func_offset, type_idx, config),
     }
 }
@@ -923,7 +1031,7 @@ pub fn build_single_with_trap_config(
         Arch::Rv64 => translate_rv_with_trap_config(
             text, start_addr as u32, Xlen::Rv64, n_imports(), TypeIdx(0), config,
         ),
-        Arch::X86_64 | Arch::AArch64 | Arch::Mips => {
+        Arch::X86_64 | Arch::X86_32 | Arch::AArch64 | Arch::Arm | Arch::Mips => {
             let t = translate_for_config(text, start_addr, arch, n_imports(), TypeIdx(0), config);
             let unsupported = t.unsupported.clone();
             let slice = BinarySlice {

@@ -17,15 +17,23 @@ speet-rt = { path = "../speet-rt" }
 # the workspace's git+patch asm-arch.
 portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64" }
 portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x86-64" }
+portal-solutions-blitz-riscv32 = { path = "../../../../wasm-blitz/crates/blitz-riscv32" }
+portal-solutions-blitz-arm = { path = "../../../../wasm-blitz/crates/blitz-arm" }
+portal-solutions-blitz-i686 = { path = "../../../../wasm-blitz/crates/blitz-i686" }
 portal-solutions-blitz-c = { path = "../../../../wasm-blitz/crates/blitz-c" }
 portal-solutions-blitz-js = { path = "../../../../wasm-blitz/crates/blitz-js" }
 portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
 portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
 portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"] }
+portal-solutions-asm-riscv32 = { path = "../../../../asm-arch/crates/asm-riscv32", features = ["rv-asm-backend"] }
+portal-solutions-asm-arm = { path = "../../../../asm-arch/crates/asm-arm", features = ["bin-backend"] }
+portal-solutions-asm-x86 = { path = "../../../../asm-arch/crates/asm-x86", features = ["iced"] }
 
 # speet frontend (native machine code -> WASM)
 speet-x86_64 = { path = "../../native/speet-x86_64" }
+speet-x86 = { path = "../../native/speet-x86" }
 speet-aarch64 = { path = "../../native/speet-aarch64" }
+speet-arm = { path = "../../native/speet-arm" }
 speet-riscv = { path = "../../native/speet-riscv", features = ["logging"] }
 speet-syscall = { path = "../speet-syscall" }
 speet-host-syscall = { path = "../speet-host-syscall" }
