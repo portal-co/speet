@@ -17,6 +17,8 @@ speet-rt = { path = "../speet-rt" }
 # the workspace's git+patch asm-arch.
 portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64" }
 portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x86-64" }
+portal-solutions-blitz-c = { path = "../../../../wasm-blitz/crates/blitz-c" }
+portal-solutions-blitz-js = { path = "../../../../wasm-blitz/crates/blitz-js" }
 portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
 portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
 portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"] }

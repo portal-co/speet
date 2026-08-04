@@ -14,6 +14,7 @@
 pub mod backend;
 pub mod data_link;
 pub mod drive;
+pub mod drive_source;
 pub mod frontend;
 pub mod guest_func_catalog;
 pub mod instrument;

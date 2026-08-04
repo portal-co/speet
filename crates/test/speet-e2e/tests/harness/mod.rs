@@ -237,6 +237,8 @@ fn is_known_native_gap(msg: &str) -> bool {
     msg.contains("unimplemented WASM instruction")
         || msg.contains("not implemented")
         || msg.contains("not yet implemented") // todo!()/unimplemented!()
+        || msg.contains("unimplemented WASM instruction in blitz-c")
+        || msg.contains("unimplemented WASM instruction in blitz-js")
         // FlagSpec's trailing i32 result widens the register-file arity past
         // wasm-blitz's current regalloc capacity on some modules.
         || msg.contains("regalloc::pop_local")
@@ -282,6 +284,39 @@ pub fn native_compile_check(wasm: &[u8], context: &str) {
                     eprintln!("  [native unsupported {label} in {context}]: {msg}");
                 } else {
                     panic!("native {label} compile crashed ({context}): {msg}");
+                }
+            }
+        }
+    }
+    // B-wasm source backends (blitz-c / blitz-js) — same megabinary.
+    source_backend_compile_check(wasm, context);
+}
+
+/// Compile-check via blitz-c and blitz-js (PathKind::BlitzC / BlitzJs).
+pub fn source_backend_compile_check(wasm: &[u8], context: &str) {
+    for (label, compile) in [
+        (
+            "blitz-c",
+            speet_recompile::drive_source::compile_wasm_to_c as fn(&[u8]) -> Result<String, String>,
+        ),
+        (
+            "blitz-js",
+            speet_recompile::drive_source::compile_wasm_to_js as fn(&[u8]) -> Result<String, String>,
+        ),
+    ] {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(wasm)));
+        match res {
+            Ok(Ok(src)) => {
+                assert!(!src.is_empty(), "{label} produced empty source ({context})");
+                eprintln!("  ✓ {label}: {} chars", src.len());
+            }
+            Ok(Err(e)) => eprintln!("  [source gap {label} in {context}]: {e}"),
+            Err(panic) => {
+                let msg = panic_message(panic);
+                if is_known_native_gap(&msg) {
+                    eprintln!("  [source unsupported {label} in {context}]: {msg}");
+                } else {
+                    panic!("{label} compile crashed ({context}): {msg}");
                 }
             }
         }

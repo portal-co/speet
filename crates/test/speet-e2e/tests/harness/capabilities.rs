@@ -8,8 +8,12 @@ use super::Arch;
 pub enum PathKind {
     /// Backend A: wasmi (wasmtime fallback for exception opcodes).
     Wasmi,
-    /// Backend B-wasm: wasm-blitz compile-check.
+    /// Backend B-wasm: wasm-blitz native object compile-check.
     Blitz,
+    /// Backend B-wasm: blitz-c source compile-check.
+    BlitzC,
+    /// Backend B-wasm: blitz-js source compile-check.
+    BlitzJs,
     /// Backend B-native: thin runtime link+spawn (macOS + LLVM).
     ThinNative,
     /// Lane A: linux-wasi → wasmi preview1.
@@ -41,12 +45,14 @@ pub fn cell_supported(arch: Arch, path: PathKind, config: EscapeConfig, class: F
         return false;
     }
     match (path, class) {
-        (PathKind::Wasmi | PathKind::Blitz, FixtureClass::GenericE2e | FixtureClass::WasmFixture) => {
-            true
-        }
-        (PathKind::Wasmi | PathKind::Blitz, FixtureClass::LinuxEcall | FixtureClass::DarwinSvc) => {
-            false
-        }
+        (
+            PathKind::Wasmi | PathKind::Blitz | PathKind::BlitzC | PathKind::BlitzJs,
+            FixtureClass::GenericE2e | FixtureClass::WasmFixture,
+        ) => true,
+        (
+            PathKind::Wasmi | PathKind::Blitz | PathKind::BlitzC | PathKind::BlitzJs,
+            FixtureClass::LinuxEcall | FixtureClass::DarwinSvc,
+        ) => false,
         (PathKind::LinuxWasi, FixtureClass::LinuxEcall) => {
             // Exception TagSection not yet declared in WASI megabinary assemble;
             // FlagSpec + Jump are fully wired.

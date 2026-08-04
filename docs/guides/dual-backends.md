@@ -43,8 +43,8 @@ Shared input: **merged-with-mock** canonical multi-memory module (post-shimming 
 | Lane | Runner | Validates |
 |------|--------|-----------|
 | **A** | wasmi/wasmtime | Reference sandbox execution |
-| **B-wasm** | wasm-blitz as WASM compiler (not wasmi) | Same module as A; compiler path |
-| **B-native** | wasm-blitz native + blitz extensions | Import bridge + `__wasm_mem_N` |
+| **B-wasm** | wasm-blitz **source** backends (`blitz-c` / `blitz-js` via `speet_recompile::drive_source`) plus native object compile-check | Same megabinary as A; C/JS/native compiler paths |
+| **B-native** | wasm-blitz native `.o` + speet-rt | Import bridge + `__wasm_mem_N` |
 
 When changing emission or link:
 
@@ -67,7 +67,8 @@ Note: A-OS (`WasmFrontend` + `FuncSchedule`) is **not** a parity lane — covere
 Generator: [`crates/test/speet-e2e/generate_tests.py`](../../crates/test/speet-e2e/generate_tests.py)  
 Filter: [`harness/capabilities.rs`](../../crates/test/speet-e2e/tests/harness/capabilities.rs)  
 Configs: `EscapeConfig::{None, Exception, ExceptionSpec, FlagSpec}`  
-Paths: wasmi (A), blitz (B-wasm), thin_native (B-native), linux_wasi (A), darwin_wasi (A)
+Paths: wasmi (A), blitz / BlitzC / BlitzJs (B-wasm — native object + C/JS source), thin_native (B-native), linux_wasi (A), darwin_wasi (A).
+`native_compile_check` also runs `source_backend_compile_check` (blitz-c + blitz-js).
 
 Capability filter (no invalid cartesian): speculative configs for RV/x86/aarch64; darwin-wasi / linux-wasi / thin_native support Jump + FlagSpec until TagSection is wired for ExceptionSpec. Hand-written WASI/dual_lane files are thin wrappers over `harness/env_*`; regenerate `e2e.rs` after editing the generator.
 
