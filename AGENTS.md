@@ -38,10 +38,11 @@ See [docs/guides/README.md](docs/guides/README.md) for how guides work and what 
 
 ---
 
-## 4. Architecture recompilers (`speet-x86_64`, `speet-riscv`, `speet-mips`, `speet-dex`)
+## 4. Architecture recompilers (`speet-aarch64`, `speet-riscv`, `speet-x86_64`, `speet-mips`, `speet-powerpc`, `speet-dex`)
 
 **Guide:** [docs/guides/arch-recompilers.md](docs/guides/arch-recompilers.md)
 
+- Main four implemented frontends: aarch64, riscv, x86_64, mips. PowerPC is a stub — once started, aim for main-four parity (see [goals/arch.md](goals/arch.md)).
 - Do not remove `ctx: &mut Context` from `setup_traps` or any recompiler API — custom targets require it.
 - Do not remove `TrapConfig` stubs — they are load-bearing placeholders for pending integration.
 

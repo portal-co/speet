@@ -15,6 +15,8 @@ speet-ordering = {path = "../../helper/speet-ordering"}
 speet-traps = {path = "../../helper/speet-traps"}
 speet-reach = {path = "../../helper/speet-reach"}
 speet-link-core = {path = "../../os/speet-link-core"}
+speet-host-api = { path = "../../os/speet-host-api" }
+speet-plugin-api = { path = "../../plugin/speet-plugin-api" }
 
 [dev-dependencies]
 object = "0.36"

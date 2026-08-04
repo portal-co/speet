@@ -558,24 +558,39 @@ pub fn translate_aarch64_for_config(
     Translated { fns: rctx.drain_fns(), params, unsupported }
 }
 
-/// MIPS has no speculative-call/escape-tag support and no `unsupported_insns()`
-/// tracking (unrecognized opcodes fall through to a bare `Unreachable` with no
-/// name recorded) — the parameter exists only so `translate`'s dispatch
-/// signature stays uniform across architectures; it's ignored here, and the
-/// returned `unsupported` is always empty.
+/// MIPS has no `unsupported_insns()` tracking (unrecognized opcodes fall
+/// through to a bare `Unreachable` with no name recorded) — the returned
+/// `unsupported` is always empty.
 pub fn translate_mips(
     text: &[u8],
     start_addr: u64,
     base_func_offset: u32,
     type_idx: TypeIdx,
     eh: Eh,
-    _speculative: bool,
+    speculative: bool,
+) -> Translated {
+    translate_mips_for_config(
+        text,
+        start_addr,
+        base_func_offset,
+        type_idx,
+        EscapeConfig::from_eh_spec(eh, speculative),
+    )
+}
+
+pub fn translate_mips_for_config(
+    text: &[u8],
+    start_addr: u64,
+    base_func_offset: u32,
+    type_idx: TypeIdx,
+    config: EscapeConfig,
 ) -> Translated {
     let mut recompiler: MipsRecompiler<'_, '_, (), Infallible, Function> =
         MipsRecompiler::new_with_base_pc(start_addr as u32);
     recompiler.set_memory64(true);
+    recompiler.set_speculative_calls(config.speculative());
     let mut reactor: Reactor<(), Infallible, Function, LocalPool> = Reactor::default();
-    let mut rctx = make_rctx(&mut reactor, base_func_offset, type_idx, eh);
+    let mut rctx = make_rctx_config(&mut reactor, base_func_offset, type_idx, config);
     let mut ctx = ();
     recompiler.setup_traps(&mut rctx, &mut ctx);
     let params = collect_rv_params(&rctx);
@@ -801,7 +816,7 @@ pub fn translate_for_config(
         Arch::Rv64 => translate_rv_for_config(text, start_addr as u32, Xlen::Rv64, base_func_offset, type_idx, config),
         Arch::X86_64 => translate_x86_for_config(text, start_addr, base_func_offset, type_idx, config),
         Arch::AArch64 => translate_aarch64_for_config(text, start_addr, base_func_offset, type_idx, config),
-        Arch::Mips => translate_mips(text, start_addr, base_func_offset, type_idx, Eh::None, false),
+        Arch::Mips => translate_mips_for_config(text, start_addr, base_func_offset, type_idx, config),
     }
 }
 

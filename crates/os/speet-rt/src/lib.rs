@@ -10,11 +10,13 @@
 
 mod bridge;
 mod entry_bridge;
+mod exn;
 mod guest_stubs;
 mod data_segments;
 mod memory;
 
 pub use bridge::{generate_shim, SpeetBridgeRegistry};
+pub use exn::generate_exn_tu;
 pub use memory::generate_memory_tu;
 
 pub use entry_bridge::{entry_bridge_c, entry_bridge_c_with_text_hole, entry_bridge_direct_c};

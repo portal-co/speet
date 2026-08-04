@@ -6,8 +6,8 @@ use speet_host_api::HostApi;
 use speet_recompile::frontend::DataSegment;
 use speet_rt::{
     entry_bridge_c_with_text_hole, entry_bridge_direct_c, entry_stub_symbol,
-    generate_data_segments_c, generate_guest_stubs_c, generate_memory_tu, generate_shim,
-    DataSegmentBytes, GuestStubEntry,
+    generate_data_segments_c, generate_exn_tu, generate_guest_stubs_c, generate_memory_tu,
+    generate_shim, DataSegmentBytes, GuestStubEntry,
 };
 use std::path::{Path, PathBuf};
 
@@ -94,6 +94,14 @@ pub fn link_guest_integrated(
     let mem_path = work_dir.join("mem.o");
     compile_c(tc, &generate_memory_tu(), &mem_path, arch, os)?;
 
+    // Software EH stack + `__wasm_exn_propagate`: see `speet_rt::generate_exn_tu`
+    // doc for why cross-function WASM exception propagation needs this instead
+    // of a per-ISA CTX-chain walk. Always linked, like `mem.o` above — every
+    // NaiveAbi native backend's `try_table`/`throw` codegen references these
+    // symbols unconditionally, whether or not the guest actually throws.
+    let exn_path = work_dir.join("exn.o");
+    compile_c(tc, &generate_exn_tu(), &exn_path, arch, os)?;
+
     let abi_pad_args: u32 = match arch {
         BinArch::X86_64 => 6,
         BinArch::AArch64 | BinArch::RiscV64 => 0,
@@ -132,6 +140,7 @@ pub fn link_guest_integrated(
     let mut owned_objs: Vec<std::path::PathBuf> = vec![
         guest_path.clone(),
         mem_path.clone(),
+        exn_path.clone(),
         shim_path.clone(),
         bridge_path.clone(),
     ];

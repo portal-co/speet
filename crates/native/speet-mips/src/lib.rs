@@ -24,7 +24,9 @@
 //! - Locals 0-31: General-purpose registers $0-$31
 //! - Locals 32-33: HI/LO registers for multiplication/division results
 //! - Local 34: Program counter (PC)
-//! - Locals 35+: Temporary variables for complex operations
+//! - Local 35: Expected return address for speculative JAL/JALR/JR
+//!   (`CallEscape::{Flag,Exception}`)
+//! - Locals 36+: Temporary variables for complex operations
 //!
 //! ## Usage
 //!
@@ -144,6 +146,37 @@ impl<Context, E> wax_core::build::InstructionSource<Context, E> for TableIndexSn
         sink.instruction(ctx, &WasmInstruction::I64Const(self.base_func_offset as i64))?;
         sink.instruction(ctx, &WasmInstruction::I64Add)?;
         Ok(())
+    }
+}
+
+/// Computes the expected return address for a speculative JAL/JALR call —
+/// a fixup snippet written into `expected_ra_slot` at the call site (see
+/// `docs/guides/yecta.md`'s speculative-call section and `speet-riscv`'s
+/// `direct.rs` for the reference pattern).
+///
+/// Always emits an `i32` constant: MIPS PCs are 32-bit regardless of
+/// `enable_mips64` (mirrors `pc_slot`, which stays `i32` in both modes).
+struct ExpectedRaSnippet {
+    return_addr: u32,
+}
+
+impl<Context, E> wax_core::build::InstructionSource<Context, E> for ExpectedRaSnippet {
+    fn emit_instruction(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &WasmInstruction::I32Const(self.return_addr as i32))
+    }
+}
+
+impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for ExpectedRaSnippet {
+    fn emit(
+        &self,
+        ctx: &mut Context,
+        sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+    ) -> Result<(), E> {
+        sink.instruction(ctx, &WasmInstruction::I32Const(self.return_addr as i32))
     }
 }
 
@@ -289,6 +322,9 @@ pub struct MipsRecompiler<
     hi_lo_slot: LocalSlot,
     /// Slot for the PC register.
     pc_slot: LocalSlot,
+    /// Hidden expected-RA for speculative JAL/JALR/JR (`CallEscape::{Flag,Exception}`).
+    /// Always `i32` (MIPS PCs are 32-bit regardless of `enable_mips64`).
+    expected_ra_slot: LocalSlot,
     /// Slot for per-function GPR-type temp locals (num_temps of them).
     temps_slot: LocalSlot,
     /// Slot for the single load-address scratch local.
@@ -299,6 +335,11 @@ pub struct MipsRecompiler<
     pool_i64_slot: LocalSlot,
     /// Optional slot assigner: controls which guest PCs receive function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
+    /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
+    stub_for_pc_import_idx: Option<u32>,
+    /// When true, ABI JAL/JALR (link to `$ra`) and `JR $ra` use native-stack
+    /// speculative lowering (`CallEscape::{Flag,Exception}`).
+    enable_speculative_calls: bool,
 }
 
 impl<'cb, 'ctx, Context, E, F> MipsRecompiler<'cb, 'ctx, Context, E, F>
@@ -329,11 +370,14 @@ where
             gpr_slot: LocalSlot::default(),
             hi_lo_slot: LocalSlot::default(),
             pc_slot: LocalSlot::default(),
+            expected_ra_slot: LocalSlot::default(),
             temps_slot: LocalSlot::default(),
             addr_scratch_slot: LocalSlot::default(),
             pool_i32_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
             slot_assigner: None,
+            stub_for_pc_import_idx: None,
+            enable_speculative_calls: false,
         }
     }
 
@@ -469,10 +513,67 @@ where
         self.atomic_opts
     }
 
+    // ── Speculative calls ────────────────────────────────────────────────
+
+    /// Enable ABI JAL/JALR/JR speculative native-stack lowering
+    /// (`CallEscape::{Flag,Exception}`).
+    pub fn set_speculative_calls(&mut self, enable: bool) {
+        self.enable_speculative_calls = enable;
+    }
+
+    /// Whether speculative call optimization is enabled.
+    pub fn is_speculative_calls_enabled(&self) -> bool {
+        self.enable_speculative_calls
+    }
+
+    /// Set the speculative-call escape policy on the reactor.
+    pub fn set_escape<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &mut self,
+        rctx: &mut RC,
+        escape: yecta::CallEscape,
+    ) {
+        rctx.set_escape(escape);
+    }
+
+    /// Set exception-tag escape (convenience for [`yecta::CallEscape::Exception`]).
+    pub fn set_escape_tag<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &mut self,
+        rctx: &mut RC,
+        tag: Option<EscapeTag>,
+    ) {
+        rctx.set_escape_tag(tag);
+    }
+
+    /// Current escape tag, if any.
+    pub fn get_escape_tag<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self,
+        rctx: &RC,
+    ) -> Option<EscapeTag> {
+        rctx.escape_tag()
+    }
+
+    /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
+    pub fn set_stub_for_pc_import_idx(&mut self, idx: u32) {
+        self.stub_for_pc_import_idx = Some(idx);
+    }
+
+    /// Bind layout-param slots into the installed memory mapper (HostOffset path).
+    pub fn bind_memory_layout<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &mut self,
+        rctx: &RC,
+    ) {
+        if let (Some(ma), Some(params)) = (
+            self.memory_access.as_deref_mut(),
+            rctx.runtime_layout_params(),
+        ) {
+            ma.bind_layout_slots(rctx.layout(), &params.slots);
+        }
+    }
+
     // ── Trap hooks ───────────────────────────────────────────────────────
 
-    /// MIPS base parameter count: 32 GPRs + HI + LO + PC = 35.
-    pub const BASE_PARAMS: u32 = 35;
+    /// MIPS base parameter count: 32 GPRs + HI + LO + PC + expected_RA = 36.
+    pub const BASE_PARAMS: u32 = 36;
 
     /// Install an instruction trap.
     ///
@@ -506,6 +607,7 @@ where
         self.gpr_slot   = rctx.layout_mut().append(32, gpr_type); // $0–$31
         self.hi_lo_slot = rctx.layout_mut().append(2,  gpr_type); // HI, LO
         self.pc_slot    = rctx.layout_mut().append(1,  ValType::I32); // PC
+        self.expected_ra_slot = rctx.layout_mut().append(1, ValType::I32); // speculative expected RA
         rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
@@ -648,7 +750,7 @@ where
     ///
     /// Follows immediately after the `num_temps` GPR-type temp locals.
     /// `translate_instruction` always passes `num_temps = 8`, so this is
-    /// local 35 + 8 = 43.  Always `i32`.
+    /// local 36 + 8 = 44.  Always `i32`.
     fn load_addr_scratch_local(&self, layout: &yecta::LocalLayout) -> u32 {
         layout.base(self.addr_scratch_slot)
     }
@@ -748,6 +850,14 @@ where
         &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
     ) -> Result<(), E> {
         let instrs = rctx.layout().emit_set(self.pc_slot, 0);
+        Self::feed_instrs(ctx, rctx, tail_idx, instrs)
+    }
+
+    /// Push the expected-RA slot onto the WASM stack.
+    pub(crate) fn emit_expected_ra_get<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let instrs = rctx.layout().emit_get(self.expected_ra_slot, 0);
         Self::feed_instrs(ctx, rctx, tail_idx, instrs)
     }
 
@@ -1872,9 +1982,47 @@ where
             InstrId::cpu_jal => {
                 let target = (instruction.get_instr_index() as u32) << 2;
                 let target_pc = (pc & 0xF0000000) | target;
-
-                // Save return address in $ra ($31)
                 let return_addr = pc + 8; // JAL has a delay slot
+
+                // JAL always links to $ra (no destination-register field).
+                let use_speculative =
+                    self.enable_speculative_calls && rctx.escape().is_native_stack();
+
+                if use_speculative {
+                    // Speculative call lowering: emit a native WASM call.
+                    // See SPECULATIVE_CALLS.md and set_speculative_calls() docs.
+                    let escape = rctx.escape();
+                    let Some(target_func) = self.pc_to_func_idx(target_pc) else {
+                        rctx.oob_jump(ctx, tail_idx, target_pc as u64, rctx.locals_mark().total_locals)?;
+                        return Ok(());
+                    };
+
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, GprO32::ra)?;
+
+                    let expected_ra_snippet = ExpectedRaSnippet { return_addr };
+
+                    let params = match escape {
+                        yecta::CallEscape::Exception(tag) => yecta::JumpCallParams::call(
+                            target_func,
+                            rctx.locals_mark().total_locals,
+                            tag,
+                            rctx.pool(),
+                        ),
+                        yecta::CallEscape::Flag => yecta::JumpCallParams::call_flag(
+                            target_func,
+                            rctx.locals_mark().total_locals,
+                            rctx.pool(),
+                        ),
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
+                    .with_fixup(rctx.layout().local(self.expected_ra_slot, 0), &expected_ra_snippet);
+
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
+                    return Ok(());
+                }
+
+                // Non-speculative path: original jump-based implementation.
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
                 self.emit_gpr_set(ctx, rctx, tail_idx, GprO32::ra)?;
 
@@ -1898,7 +2046,9 @@ where
                 rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(scratch))?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Drop)?;
 
-                // JR $ra = return; other JR = indirect jump
+                // JR $ra = return; other JR = indirect jump. Compute the kind
+                // once and fire the trap exactly once, regardless of which
+                // path below actually handles the jump.
                 let jr_kind = if rs == GprO32::ra {
                     JumpKind::Return
                 } else {
@@ -1911,6 +2061,53 @@ where
                     return Ok(());
                 }
 
+                // ABI-compliant return: check ra vs expected_ra when
+                // speculative calls are enabled with a native-stack escape.
+                let is_abi_return = self.enable_speculative_calls
+                    && rs == GprO32::ra
+                    && rctx.escape().is_native_stack();
+
+                if is_abi_return {
+                    let escape = rctx.escape();
+
+                    // Load ra (current return address) and compare against
+                    // expected_ra. Both are i32 — see ExpectedRaSnippet.
+                    self.emit_gpr_get(ctx, rctx, tail_idx, GprO32::ra)?;
+                    self.emit_expected_ra_get(ctx, rctx, tail_idx)?;
+                    if self.enable_mips64 {
+                        // gpr_slot is i64 under MIPS64; wrap to i32 to
+                        // compare against the (always-i32) expected_ra.
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::I32Eq)?;
+
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::If(wasm_encoder::BlockType::Empty))?;
+                    match escape {
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, false)?;
+                        }
+                        yecta::CallEscape::Exception(_) | yecta::CallEscape::Jump => {
+                            // (register_file) -> (register_file)
+                            for p in 0..rctx.locals_mark().total_locals {
+                                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(p))?;
+                            }
+                            rctx.feed(ctx, tail_idx, &WasmInstruction::Return)?;
+                        }
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::Else)?;
+                    match escape {
+                        yecta::CallEscape::Exception(tag) => {
+                            rctx.ret(ctx, tail_idx, rctx.locals_mark().total_locals, tag)?;
+                        }
+                        yecta::CallEscape::Flag => {
+                            rctx.ret_flag(ctx, tail_idx, rctx.locals_mark().total_locals, true)?;
+                        }
+                        yecta::CallEscape::Jump => unreachable!(),
+                    }
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::End)?;
+                    return Ok(());
+                }
+
                 let snippet = TableIndexSnippet::from_constant_base(
                     self.gpr_to_local(rs, rctx.layout()),
                     self.base_pc,
@@ -1918,16 +2115,58 @@ where
                 );
                 let params =
                     yecta::JumpCallParams::indirect_jump(&snippet, rctx.locals_mark().total_locals, rctx.pool());
-                rctx.ji_with_params(ctx, tail_idx, params)?
-;                return Ok(());
+                rctx.ji_with_params(ctx, tail_idx, params)?;
+                return Ok(());
             }
 
             InstrId::cpu_jalr => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let rd: GprO32 = instruction.get_rd_o32();
-
-                // Save return address
                 let return_addr = pc + 8; // JALR has a delay slot
+
+                // ABI-compliant call: link register is $ra, and speculative
+                // calls with a native-stack escape are enabled.
+                let use_speculative = self.enable_speculative_calls
+                    && rd == GprO32::ra
+                    && rctx.escape().is_native_stack();
+
+                if use_speculative {
+                    // Speculative call lowering for indirect calls: since
+                    // JALR is indirect, dispatch through the pool table (see
+                    // SPECULATIVE_CALLS.md and the JAL handler above).
+                    let escape = rctx.escape();
+
+                    rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
+                    self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
+
+                    let expected_ra_snippet = ExpectedRaSnippet { return_addr };
+                    let target_snippet = TableIndexSnippet::from_constant_base(
+                        self.gpr_to_local(rs, rctx.layout()),
+                        self.base_pc,
+                        rctx.base_func_offset(),
+                    );
+
+                    let mut fixups = alloc::collections::BTreeMap::new();
+                    fixups.insert(
+                        rctx.layout().local(self.expected_ra_slot, 0),
+                        &expected_ra_snippet as &(dyn yecta::Snippet<Context, E> + '_),
+                    );
+
+                    let params = yecta::JumpCallParams {
+                        params: rctx.locals_mark().total_locals,
+                        fixups,
+                        target: yecta::Target::Dynamic { idx: &target_snippet },
+                        call: escape,
+                        pool: rctx.pool(),
+                        condition: None,
+                        condition_hook: None,
+                    };
+
+                    rctx.ji_with_params(ctx, tail_idx, params)?;
+                    return Ok(());
+                }
+
+                // Non-speculative path: original implementation.
                 if rd != GprO32::zero {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
                     self.emit_gpr_set(ctx, rctx, tail_idx, rd)?;
@@ -2293,17 +2532,23 @@ where
         rctx: &mut (dyn ReactorContext<Context, E, FnType = F> + '_),
         entry_points: Vec<(alloc::string::String, u32)>,
     ) -> BinaryUnit<F> {
-        use wasm_encoder::ValType;
-        // All MIPS params are i32 (32-bit register file + PC).
-        let total_params = rctx.locals_mark().total_locals;
-        let param_types: alloc::vec::Vec<ValType> =
-            (0..total_params).map(|_| ValType::I32).collect();
-        // MIPS has no speculative-call/escape-tag support (no bare `Return`
-        // pushing a register file to satisfy non-empty results) — keep the
-        // original `-> ()` shape rather than widening it without anything to
-        // verify it against (widening this unconditionally regressed AArch64
-        // for the same reason; see speet-e2e harness's assemble_module).
-        let func_type = FuncType::from_val_types(&param_types, &[]);
+        // Read the exact per-param types back from the layout rather than
+        // assuming a uniform width: GPRs/HI/LO are i32 or i64 depending on
+        // `enable_mips64`, but PC and expected_RA are always i32 (see the
+        // module doc's local-variable layout and `setup_traps`).
+        let mark = rctx.locals_mark();
+        let param_types: alloc::vec::Vec<ValType> = rctx
+            .layout()
+            .iter_before(&mark)
+            .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
+            .collect();
+        // Register-file ABI: (register_file) -> (register_file) — results
+        // mirror params. Required by speculative calls' Block/TryTable/Catch
+        // and the ABI-compliant `Return`/`ret_flag` paths (see
+        // `docs/guides/yecta.md`). Harmless when speculative calls are
+        // disabled: `return_call` is a diverging control transfer, so the
+        // validator never checks the declared results against it.
+        let func_type = FuncType::from_val_types(&param_types, &param_types);
 
         let base = rctx.base_func_offset();
         let fns = rctx.drain_fns();
@@ -2316,5 +2561,51 @@ where
             data_segments: alloc::vec![],
             data_init_fn: None,
         }
+    }
+}
+
+/// Calling convention for a compile-time PLT redirect of `symbol` on MIPS
+/// o32/n64.
+///
+/// Built manually rather than through `speet_abi_stubs::plt_calling_convention`
+/// — that function's `import_to_calling_convention` matches exhaustively on
+/// `binary_io::BinArch`, which has no MIPS variant; adding one would cascade
+/// through every such `match arch` (none of which have a MIPS arm), and the
+/// checked-in stub tables it also consults only cover x86_64/aarch64 anyway,
+/// so this loses nothing relative to that fallback. Replicates
+/// `hook_calling_convention_from_manifest`'s manifest-driven fallback
+/// directly against [`speet_host_api::ImportManifest`].
+///
+/// `$a0`–`$a3` are GPR `$4`–`$7` in both the o32 and n64 ABIs, and GPRs map
+/// 1:1 onto WASM locals 0–31 (see `setup_traps`), so `a0` is always WASM
+/// local 4 regardless of `enable_mips64`.
+pub fn plt_calling_convention(symbol: &str) -> speet_plugin_api::external_target::CallingConvention {
+    use speet_host_api::{ImportManifest, WasmValType};
+    type CallingConvention = speet_plugin_api::external_target::CallingConvention;
+
+    let manifest = ImportManifest::integrated_native();
+    let Some((_, import_name)) = manifest.resolve_intercept(symbol) else {
+        return CallingConvention::default();
+    };
+    let Some(imp) = manifest.func_imports.iter().find(|i| i.name == import_name) else {
+        return CallingConvention::default();
+    };
+
+    let arg_locals = (4..4 + imp.params.len() as u32).collect();
+    let arg_wrap_i32 = imp
+        .params
+        .iter()
+        .map(|t| matches!(t, WasmValType::I32))
+        .collect();
+    let (result_local, result_extend_i32) = match imp.results.first() {
+        None => (None, false),
+        Some(WasmValType::I32) => (Some(0), true),
+        Some(_) => (Some(0), false),
+    };
+    CallingConvention {
+        arg_locals,
+        arg_wrap_i32,
+        result_local,
+        result_extend_i32,
     }
 }

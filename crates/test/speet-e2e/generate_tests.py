@@ -47,7 +47,7 @@ ESCAPE_CONFIGS = [
 ]
 
 SPECULATIVE_SUFS = {"eh_spec", "flag_spec"}
-ARCH_SUPPORTS_SPEC = {"Arch::Rv32", "Arch::Rv64", "Arch::X86_64", "Arch::AArch64"}
+ARCH_SUPPORTS_SPEC = {"Arch::Rv32", "Arch::Rv64", "Arch::X86_64", "Arch::AArch64", "Arch::Mips"}
 
 
 def configs_for_arch(arch: str):

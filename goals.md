@@ -10,7 +10,7 @@ AI agents: add subgoals to the relevant file in `goals/` as you work.
 | Area | File | Status |
 |------|------|--------|
 | **Active work** | [goals/active.md](goals/active.md) | Parallel API interior mutability; trap integration; new docs; plugin API dylib mode + `ArchPluginRecompiler` |
-| **Architecture frontends** | [goals/arch.md](goals/arch.md) | x86_64 FP/SIMD; aarch64; WASM-GC (urgent); powerpc stub |
+| **Architecture frontends** | [goals/arch.md](goals/arch.md) | Main four implemented (aarch64/riscv/x86/mips); MIPS Flag/thin + x86 SIMD in progress; powerpc not started; WASM-GC urgent |
 | **OS emulation & container megabinary** | [goals/os.md](goals/os.md) | Phase 0 target: ls/cat/echo megabinary demo |
 | **Security** | [goals/security.md](goals/security.md) | No-JIT; signed megabinary; ROP/CFI traps; syscall whitelisting |
 | **Large binary & performance** | [goals/perf.md](goals/perf.md) | Parallel recompilation (blocked); DCE; large binary e2e |

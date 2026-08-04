@@ -136,11 +136,12 @@ Traits (`Ctx`, `OS`) for the boundary between generated WASM and a host OS emula
 | Component | Status |
 |-----------|--------|
 | yecta (reactor) | Functional, tested |
-| speet-riscv | Most complete; RV32IMAFD + RV64 + Zicsr stubs |
-| speet-x86_64 | Integer subset functional; FP/SIMD stubbed |
-| speet-mips | Basic integer and load/store coverage |
-| speet-powerpc | Stub — no translation logic |
-| speet-dex | In progress |
+| speet-aarch64 | Main four — speculative Flag/Exception; thin-runtime PLT/layout |
+| speet-riscv | Main four — RV32/RV64 + RVC; speculative Flag/Exception; thin-runtime |
+| speet-x86_64 | Main four — integer + scalar SSE; packed SIMD still open |
+| speet-mips | Main four — speculative Flag/Exception; thin-runtime bind/stub/plt |
+| speet-powerpc | Not started — stub only; aim for main-four parity once started |
+| speet-dex | In progress (managed; separate from main four) |
 | dex-bytecode | Standalone parser, `no_std` |
 | speet-wasm | WASM-to-WASM remapping functional |
 | speet-link | Multi-binary linker infrastructure in place |

@@ -1,7 +1,8 @@
 # Architecture Recompilers Component Guide
 
 **Crates:** `crates/native/speet-x86_64`, `crates/native/speet-aarch64`, `crates/native/speet-riscv`, `crates/native/speet-mips`, `crates/native/speet-powerpc`, `crates/managed/speet-dex`  
-**Design doc:** [recompiler-guide.md](../recompiler-guide.md)
+**Design doc:** [recompiler-guide.md](../recompiler-guide.md)  
+**Status:** [goals/arch.md](../../goals/arch.md) — **main four** (aarch64, riscv, x86_64, mips) are implemented; **powerpc** is not started (stub only; should gain main-four parity once started). DEX is managed bytecode, tracked separately.
 
 ---
 
@@ -56,9 +57,9 @@ The `TrapConfig` field and `setup_traps` call sites are present in all architect
 
 **Code:** `crates/native/speet-mips/src/`
 
-MIPS uses the same weak-memory ordering as RISC-V (see §4 above). MIPS has delay slots — the instruction after a branch always executes before the branch takes effect. The recompiler handles this by emitting the delay-slot instruction inline before the `return_call`.
+MIPS uses the same weak-memory ordering as RISC-V (see §4 above). Branch/jump targets use `pc+8` (skipping the architectural delay slot); the delay-slot instruction is a separate decode slot when reachable — do not invent a second emission of that instruction at the branch site.
 
-**Do not** skip delay-slot emission or move the `return_call` before the delay-slot instruction.
+**Speculative / thin-runtime:** `CallEscape::Flag` (+ Exception) on ABI `jal`/`jalr`/`jr $ra`; `bind_memory_layout` / stub_for_pc / `plt_calling_convention` match the other main-four frontends.
 
 ---
 
@@ -86,6 +87,6 @@ DEX is a register-based managed bytecode. Unlike native ISAs, DEX has structured
 
 ---
 
-## 8. speet-powerpc — PowerPC (stub)
+## 8. speet-powerpc — PowerPC (not started)
 
-`crates/native/speet-powerpc/src/lib.rs` is a stub crate with no translation logic. It is a name reservation for future implementation. See [goals/arch.md](../../goals/arch.md).
+`crates/native/speet-powerpc/src/lib.rs` is a stub with no translation logic. Once started, target the same surface as the main four (register-file ABI, speculative Flag/Exception, thin-runtime bind/stub/plt, trap hooks). See [goals/arch.md](../../goals/arch.md).

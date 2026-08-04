@@ -56,6 +56,16 @@ void speet_protect_text_hole(uint64_t text_base, uint64_t text_len) {
     (void)text_len;
 #endif
 }
+
+/* Bulk-memory helpers for wasm-blitz MemoryCopy / MemoryFill lowering.
+ * Overlap-safe copy uses memmove (WASM memory.copy semantics). */
+#include <string.h>
+void __wasm_memory_copy(uint32_t dest_off, uint32_t src_off, uint32_t len) {
+    memmove(__wasm_mem + dest_off, __wasm_mem + src_off, len);
+}
+void __wasm_memory_fill(uint32_t dest_off, uint32_t val, uint32_t len) {
+    memset(__wasm_mem + dest_off, (int)(uint8_t)val, len);
+}
 "#,
     )
 }
