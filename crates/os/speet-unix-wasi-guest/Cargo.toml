@@ -7,3 +7,6 @@ description = "Shared Unix→WASI handlers compiled to WASM (pre-shimming host-m
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+os-unix-emulation = { git = "https://github.com/portal-co/os-emulation.git", branch = "main", default-features = false }

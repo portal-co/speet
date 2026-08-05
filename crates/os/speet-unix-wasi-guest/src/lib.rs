@@ -9,9 +9,9 @@
 #![no_std]
 
 use core::panic::PanicInfo;
-
-/// Shared with [`os_unix_wasi::IOVEC_SCRATCH_OFFSET`].
-const IOVEC_SCRATCH: i32 = 0x200;
+use os_unix_emulation::{
+    wasi_close, wasi_exit, wasi_read, wasi_write, WasiHostMemory, WasiPreview1,
+};
 
 #[link(wasm_import_module = "__speet_host_mem")]
 extern "C" {
@@ -27,69 +27,78 @@ extern "C" {
     fn proc_exit(code: i32) -> !;
 }
 
-#[inline]
-fn wasi_result(ret: i32, success_offset: i32) -> i64 {
-    if ret != 0 {
-        return -(ret as i64);
+struct SpeetHostMemory;
+
+impl WasiHostMemory for SpeetHostMemory {
+    fn store_i32(&mut self, offset: u32, value: i32) {
+        // SAFETY: the embedding supplies this import before any handler runs.
+        unsafe { store_i32(offset as i32, value) }
     }
-    // SAFETY: host-mem imports are provided by the embedder.
-    unsafe { load_i32(success_offset) as i64 }
+
+    fn load_i32(&mut self, offset: u32) -> i32 {
+        // SAFETY: the embedding supplies this import before any handler runs.
+        unsafe { load_i32(offset as i32) }
+    }
 }
 
-#[inline]
-fn marshal_iovec(a1: i64, a2: i64) {
-    // SAFETY: host-mem imports are provided by the embedder before any handler runs.
-    unsafe {
-        store_i32(IOVEC_SCRATCH, a1 as i32);
-        store_i32(IOVEC_SCRATCH + 4, a2 as i32);
+struct SpeetWasi;
+
+impl WasiPreview1 for SpeetWasi {
+    fn fd_write(&mut self, fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32 {
+        // SAFETY: imported from the canonical WASI preview1 host.
+        unsafe { fd_write(fd, iovs, iovs_len, nwritten) }
+    }
+
+    fn fd_read(&mut self, fd: i32, iovs: i32, iovs_len: i32, nread: i32) -> i32 {
+        // SAFETY: imported from the canonical WASI preview1 host.
+        unsafe { fd_read(fd, iovs, iovs_len, nread) }
+    }
+
+    fn fd_close(&mut self, fd: i32) -> i32 {
+        // SAFETY: imported from the canonical WASI preview1 host.
+        unsafe { fd_close(fd) }
+    }
+
+    fn proc_exit(&mut self, code: i32) -> ! {
+        // SAFETY: imported from the canonical WASI preview1 host and never returns.
+        unsafe { proc_exit(code) }
     }
 }
 
 /// Unix `read(2)` → `wasi_snapshot_preview1::fd_read`.
 #[no_mangle]
 pub extern "C" fn handler_read(a0: i64, a1: i64, a2: i64) -> i64 {
-    marshal_iovec(a1, a2);
-    let ret = unsafe {
-        fd_read(
-            a0 as i32,
-            IOVEC_SCRATCH,
-            1,
-            IOVEC_SCRATCH + 8,
-        )
-    };
-    wasi_result(ret, IOVEC_SCRATCH + 8)
+    wasi_read(
+        &mut SpeetWasi,
+        &mut SpeetHostMemory,
+        a0 as u64,
+        a1 as u64,
+        a2 as u64,
+    )
 }
 
 /// Unix `write(2)` → `wasi_snapshot_preview1::fd_write`.
 #[no_mangle]
 pub extern "C" fn handler_write(a0: i64, a1: i64, a2: i64) -> i64 {
-    marshal_iovec(a1, a2);
-    let ret = unsafe {
-        fd_write(
-            a0 as i32,
-            IOVEC_SCRATCH,
-            1,
-            IOVEC_SCRATCH + 8,
-        )
-    };
-    wasi_result(ret, IOVEC_SCRATCH + 8)
+    wasi_write(
+        &mut SpeetWasi,
+        &mut SpeetHostMemory,
+        a0 as u64,
+        a1 as u64,
+        a2 as u64,
+    )
 }
 
 /// Unix `close(2)` → `wasi_snapshot_preview1::fd_close`.
 #[no_mangle]
 pub extern "C" fn handler_close(a0: i64) -> i64 {
-    let ret = unsafe { fd_close(a0 as i32) };
-    if ret != 0 {
-        -(ret as i64)
-    } else {
-        0
-    }
+    wasi_close(&mut SpeetWasi, a0 as u64)
 }
 
 /// Unix `exit(2)` → `wasi_snapshot_preview1::proc_exit`.
 #[no_mangle]
 pub extern "C" fn handler_exit(a0: i64) -> ! {
-    unsafe { proc_exit(a0 as i32) }
+    wasi_exit(&mut SpeetWasi, a0 as u64)
 }
 
 #[panic_handler]
