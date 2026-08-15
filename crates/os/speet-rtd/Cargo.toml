@@ -25,10 +25,11 @@ os-jit-core = { path = "../../../../os-emulation/crates/daemon/os-jit-core", opt
 speet-dynamic-jit = { path = "../speet-dynamic-jit", optional = true }
 speet-native-jit = { path = "../speet-native-jit", optional = true }
 vane-riscv = { path = "../../../../vane/crates/vane-riscv", optional = true }
+vane-aarch64 = { path = "../../../../vane/crates/vane-aarch64", optional = true }
 
 [features]
 default = []
-jit = ["dep:os-jit-core", "dep:speet-dynamic-jit", "dep:speet-native-jit", "dep:vane-riscv", "os-daemon/jit"]
+jit = ["dep:os-jit-core", "dep:speet-dynamic-jit", "dep:speet-native-jit", "dep:vane-riscv", "dep:vane-aarch64", "os-daemon/jit"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 os-rewrite-macho = { path = "../../../../os-emulation/crates/daemon/os-rewrite-macho" }

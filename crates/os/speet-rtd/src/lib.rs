@@ -41,6 +41,7 @@ impl Daemon {
         #[cfg(feature = "jit")]
         {
             inner.register_jit_backend(Box::new(vane_jit::VaneWasmJitBackend));
+            inner.register_jit_backend(Box::new(vane_jit::VaneWasmAarch64JitBackend));
             inner.register_jit_backend(Box::new(vane_jit::VaneBlitzJitBackend));
         }
         Self(inner)

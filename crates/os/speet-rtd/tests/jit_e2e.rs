@@ -41,6 +41,40 @@ fn vane_wasm_backend_rejects_empty_guest_bytes() {
 }
 
 #[test]
+fn vane_wasm_aarch64_backend_compiles_a_real_instruction() {
+    let daemon = Daemon::new();
+    let frame = encode_request(&Request::Compile {
+        guest_pc: 0x1000,
+        guest_bytes: 0xD65F_03C0u32.to_le_bytes().to_vec(), // `ret` (x30)
+        num_regs: 73,
+        backend: "vane-wasm-aarch64".into(),
+    });
+    let resp = decode_response(&daemon.handle_frame(&frame)).unwrap();
+    match resp {
+        Response::Compiled { artifact: JitArtifactWire::Wasm(bytes), backend } => {
+            assert_eq!(backend, "vane-wasm-aarch64");
+            assert_eq!(&bytes[0..4], b"\0asm", "should be a well-formed WASM module");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
+fn vane_wasm_aarch64_backend_rejects_wrong_num_regs() {
+    let daemon = Daemon::new();
+    let frame = encode_request(&Request::Compile {
+        guest_pc: 0x1000,
+        guest_bytes: 0xD65F_03C0u32.to_le_bytes().to_vec(),
+        num_regs: 32, // AArch64's full architectural state is 73, not caller-adjustable
+        backend: "vane-wasm-aarch64".into(),
+    });
+    match decode_response(&daemon.handle_frame(&frame)).unwrap() {
+        Response::Error { message } => assert!(message.contains("73")),
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[test]
 fn vane_blitz_backend_is_registered_but_reports_unsupported() {
     let daemon = Daemon::new();
     let frame = encode_request(&Request::Compile {
