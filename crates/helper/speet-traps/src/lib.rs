@@ -126,6 +126,7 @@ extern crate alloc;
 pub mod cond;
 pub mod config;
 pub mod context;
+pub mod debug_seam;
 pub mod hardening;
 pub mod impls;
 pub mod insn;
@@ -138,6 +139,7 @@ pub mod value_trace;
 pub use cond::{ConditionHookWrapper, ConditionInfo, ConditionTrap};
 pub use config::TrapConfig;
 pub use context::TrapContext;
+pub use debug_seam::UnknownTargetTrap;
 pub use hardening::RopDetectTrap;
 pub use impls::{ChainedTrap, NullTrap};
 pub use insn::{
