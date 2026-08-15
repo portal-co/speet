@@ -408,22 +408,33 @@ fn corpus_riscv_arith_table_indirect() {
     assert_eq!(run_table_indirect(&fixture), expected_main_return("arith"));
 }
 
-/// `frame.c`'s array initializer (`volatile int buf[4] = {a,b,c,d}`) hits
-/// `c.addw a3, a3, a1` at guest pc 0xC0 -- and `vane-riscv`'s frontend
-/// (`vane/crates/vane-riscv/src/template/riscv.rs`) has **no handling at
-/// all** for the RV64I "W-suffixed" 32-bit ALU family (`addw`/`subw`/
-/// `sllw`/`srlw`/`sraw`/`addiw`/`slliw`/`srliw`/`sraiw`, compressed or not)
-/// -- confirmed by grepping the frontend for every spelling of "addw" and
-/// finding zero matches, and by hand-decoding the exact trapping
-/// instruction. This is a real, load-bearing gap this corpus harness
-/// found: any RV64 program doing plain `int` arithmetic can hit it, since
-/// the W-suffixed forms are how RV64 compilers express correctly-sign-
-/// extended 32-bit ops. Fixing it is frontend work, not a test-harness
-/// concern -- left `#[ignore]`d with this exact citation so it stays
-/// discoverable (and trivially un-ignorable once fixed) rather than either
-/// silently skipped or blocking the rest of this harness.
+/// `frame.c`'s array initializer (`volatile int buf[4] = {a,b,c,d}`) used
+/// to hit `c.addw a3, a3, a1` at guest pc 0xC0 and trap -- that exact gap
+/// is now fixed (see `rv_compressed_w_alu` in `vane-riscv/src/template/
+/// riscv.rs`: the upstream `rv-asm` 0.2.1 decoder crate unconditionally
+/// rejects the RV64C-only `C.ADDW`/`C.SUBW` encodings as a decode error,
+/// so vane hand-decodes just those two forms before falling through to
+/// the real decoder). A second, independent vane-riscv bug was found and
+/// fixed alongside it: `Inst::Jalr`'s codegen wrote the return address
+/// into `dest` *before* reading `base` for the target computation, which
+/// is wrong per spec whenever `dest == base` (the `jalr ra, 0(ra)` idiom
+/// this binary's call to `sink()` uses).
+///
+/// Past both fixes, this specific fixture still doesn't execute
+/// correctly: the `auipc ra, 0` / `jalr ra, 0(ra)` pair at the call site
+/// has **zero** in both the auipc's upper-immediate and the jalr's
+/// lower-immediate (confirmed by hand-decoding the raw instruction
+/// words), which computes a jump target of the auipc's own PC -- not
+/// `sink()`'s address. This isn't a vane bug: `speet-riscv`'s own,
+/// independent, pre-existing AOT-compiler corpus suite
+/// (`speet-riscv/tests/rv_c_corpus_tests.rs::rv_c_corpus_frame64` and
+/// `rv_c_corpus_frame32`) traps on this exact fixture too, with no vane
+/// or dynamic-JIT code involved at all -- so `frame.text.elf`'s RV64/RV32
+/// fixtures appear to have an unresolved-relocation (or similar
+/// toolchain/fixture-generation) problem that predates and is unrelated
+/// to this corpus harness. Left `#[ignore]`d pending that separate fix.
 #[test]
-#[ignore = "vane-riscv frontend has no RV64 W-suffix ALU support (e.g. c.addw) -- frame.c hits this at guest pc 0xC0; see this test's doc comment"]
+#[ignore = "frame.text.elf's RV64 fixture has an unresolved auipc/jalr call site (target computes to the auipc's own PC) -- speet-riscv's independent AOT corpus suite traps on the same fixture, confirming this is a pre-existing fixture/toolchain issue, not a vane-riscv bug; see this test's doc comment"]
 fn corpus_riscv_frame_table_indirect() {
     let fixture = rv64_fixture("frame");
     assert_eq!(run_table_indirect(&fixture), expected_main_return("frame"));
@@ -571,7 +582,7 @@ fn corpus_riscv_arith_function_ref() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
-#[ignore = "vane-riscv frontend has no RV64 W-suffix ALU support (e.g. c.addw) -- frame.c hits this at guest pc 0xC0; see corpus_riscv_frame_table_indirect's doc comment"]
+#[ignore = "frame.text.elf's RV64 fixture has an unresolved auipc/jalr call site -- see corpus_riscv_frame_table_indirect's doc comment"]
 fn corpus_riscv_frame_function_ref() {
     let fixture = rv64_fixture("frame");
     assert_eq!(run_function_ref(&fixture), expected_main_return("frame"));
