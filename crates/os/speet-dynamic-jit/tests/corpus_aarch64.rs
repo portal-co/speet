@@ -368,30 +368,18 @@ fn corpus_aarch64_arith_table_indirect() {
 
 /// `frame.c` ("stack-frame pressure: many spills and prologue/epilogue
 /// patterns" -- 12 locals + a 6-element array, far more than `arith`/
-/// `pairs`) hits a genuine wasm "out of bounds memory access" trap after
-/// one successful dynamic-JIT compile+link+retry cycle. The *next* miss's
-/// reported target_pc is `0xd65f03c01b007c20` -- which is not a plausible
-/// address at all: its high 32 bits, `0xd65f03c0`, are exactly the raw
-/// `ret` instruction encoding (see `corpus_riscv.rs`'s AArch64-adjacent
-/// sibling test's `HALT_PC` convention notes), and the low 32 bits also
-/// decode as a plausible instruction word -- i.e. this looks like a 64-bit
-/// load read two adjacent **instruction words** out of `.text` (which
-/// starts at guest VA 0) instead of its intended source. Dumping the
-/// compiled trace confirms the value flows through `scratch_a`
-/// (`render_stack_to_wasm`'s TailCall staging local) into the final
-/// `ReturnCall`'s target-pc argument -- so *something* upstream computed a
-/// wrong address (most plausibly an SP-relative or ret-address
-/// computation that doesn't generalize correctly to a larger stack frame)
-/// and it round-tripped through an otherwise-correctly-structured TailCall
-/// sequence. This is evidence, not a full root cause -- worth flagging as
-/// higher-priority than a missing-instruction gap, since `scratch_a`
-/// staging is shared `vane-arch::template::render_stack_to_wasm` code, not
-/// AArch64-specific, so the same class of bug could in principle affect
-/// any ISA under similar conditions (many nested `CheckCode` guards from a
-/// trace with many guest instructions). Left `#[ignore]`d rather than
-/// silently skipped or "fixed" by guessing at a root cause.
+/// `pairs`) exercises a real dynamic-JIT compile+link+retry cycle followed
+/// by a `cmp` inside a loop (`sink()`'s bounds check). That combination
+/// used to corrupt SP: `emit_addsub_imm` (`vane-aarch64/src/template/
+/// aarch64.rs`) passed the same `allow_sp` flag to both the Rn (base) and
+/// Rd (destination) register of ADD/SUB-immediate instructions, but for
+/// the flag-setting forms (`ADDS`/`SUBS`, which `cmp`/`cmn` compile to)
+/// Rd=31 means XZR (discard), not SP -- unlike the non-flag ADD/SUB forms
+/// where Rd=31 legitimately means SP. `cmp x9, #0x18` inside the loop was
+/// silently routing its discarded comparison result into the SP state
+/// slot. Fixed by hardcoding `allow_sp=false` for Rd in the flag-setting
+/// branch (matching the pattern `emit_addsub_ext` already used correctly).
 #[test]
-#[ignore = "genuine bug: a later dynamic-JIT compile's target_pc decodes as raw .text instruction bytes (0xd65f03c01b007c20), not a valid address -- see this test's doc comment for the evidence trail"]
 fn corpus_aarch64_frame_table_indirect() {
     let fixture = aarch64_fixture("frame");
     assert_eq!(run_table_indirect(&fixture), expected_main_return("frame"));
@@ -540,7 +528,6 @@ fn corpus_aarch64_arith_function_ref() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
-#[ignore = "genuine bug: a later dynamic-JIT compile's target_pc decodes as raw .text instruction bytes (0xd65f03c01b007c20), not a valid address -- see corpus_aarch64_frame_table_indirect's doc comment for the evidence trail"]
 fn corpus_aarch64_frame_function_ref() {
     let fixture = aarch64_fixture("frame");
     assert_eq!(run_function_ref(&fixture), expected_main_return("frame"));
@@ -552,3 +539,4 @@ fn corpus_aarch64_pairs_function_ref() {
     let fixture = aarch64_fixture("pairs");
     assert_eq!(run_function_ref(&fixture), expected_main_return("pairs"));
 }
+
