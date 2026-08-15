@@ -1,0 +1,34 @@
+[package]
+name = "speet-dynamic-jit"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+# Phase 2a of the dynamic-JIT plan: in-process linking of a vane-compiled
+# WASM function into a speet-interp `emit_jit_lookup_stub` dynamic dispatch
+# table, executed against a reference `wasmi` engine. This crate targets the
+# reference engine directly rather than a production "vkernel" host process,
+# since no such container-megabinary runtime exists in this codebase yet --
+# see the crate-root doc comment.
+[dependencies]
+speet-link-core = { path = "../speet-link-core" }
+speet-interp = { path = "../../helper/speet-interp" }
+vane-riscv = { path = "../../../../vane/crates/vane-riscv" }
+vane-arch = { path = "../../../../vane/crates/vane-arch" }
+# Pinned to vane's exact versions (not speet's workspace-pinned 0.240.0):
+# this crate consumes vane_arch::JitOpcode's wasmparser::Operator directly,
+# and Cargo treats differently-versioned copies of the "same" crate as
+# distinct types.
+wasm-encoder = { version = "0.239.0", default-features = false, features = ["wasmparser"] }
+wasmparser = { version = "0.239.0", default-features = false }
+wasmi = "1"
+
+[dev-dependencies]
+# The test builds the *speet*-side module (using speet-interp/speet-link-core,
+# pinned to speet's workspace wasm-encoder 0.240.0) around the raw WASM bytes
+# `compile_pc` returns — those two wasm-encoder versions never need to
+# interoperate as typed values, only as opaque `Vec<u8>`, so this alias is
+# just for the test's own module-building code, distinct from the library's
+# 0.239.0 (which must match vane's `Operator`/`JitOpcode` types exactly).
+wasm-encoder-240 = { package = "wasm-encoder", version = "0.240.0", default-features = false, features = ["wasmparser"] }
