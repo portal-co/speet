@@ -24,6 +24,8 @@
 //!    dynamic dispatch table + side-table memory (matching
 //!    `speet_link_core::JitConfig`'s layout).
 
+pub mod cache;
+
 use speet_link_core::JitConfig;
 use vane_arch::{JitOpcode, WasmAbiConfig, WasmJitCtx};
 use vane_riscv::template::{Flags, Labels, Params, TemplateJit};
@@ -231,4 +233,52 @@ fn find_empty_dyn_slot<T>(
         }
     }
     Err(LinkError::TableFull)
+}
+
+/// Evict `pc`'s entry from the dynamic dispatch side table, if present.
+///
+/// This is the host-side eviction logic `abi.jit_invalidate_func_idx`
+/// (see [`vane_arch::WasmAbiConfig`]) should be wired to: a JIT'd
+/// function's `CheckCode` lowering calls it on a self-modifying-code
+/// mismatch, before tail-calling back into the lookup stub for the same
+/// `pc` — without eviction, the stub's dynamic-table scan would just find
+/// the same now-stale entry again and loop. Only clears the side-table
+/// row (`table_slot = -1`, `speet_interp::emit_jit_lookup_stub`'s "empty"
+/// sentinel); does not need to touch the WASM `Table` itself, since a
+/// cleared row is simply never looked up again.
+///
+/// Returns `true` if an entry for `pc` was found and evicted. Exposed as a
+/// plain function (rather than a pre-built `wasmi` closure) so callers can
+/// wire it into `Linker::func_wrap` however fits their own `Store` data
+/// type — see `evict_dyn_entry` in this crate's `smc_invalidation` test for
+/// the `Caller`-based wiring shape.
+pub fn invalidate_dyn_entry(
+    ctx: impl wasmi::AsContextMut,
+    jit: &JitConfig,
+    dyn_table_mem: &wasmi::Memory,
+    pc: u64,
+) -> bool {
+    let mut ctx = ctx;
+    let cap = jit.dyn_table_capacity;
+    let off_base = jit.dyn_table_mem_offset as usize;
+    let mut found_off = None;
+    {
+        let data = dyn_table_mem.data(&ctx);
+        for i in 0..cap {
+            let off = off_base + (i as usize) * 12;
+            let entry_pc = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            let table_slot = i32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap());
+            if table_slot != -1 && entry_pc == pc {
+                found_off = Some(off);
+                break;
+            }
+        }
+    }
+    match found_off {
+        Some(off) => {
+            let _ = dyn_table_mem.write(&mut ctx, off + 8, &(-1i32).to_le_bytes());
+            true
+        }
+        None => false,
+    }
 }

@@ -119,6 +119,24 @@ Hash is BLAKE3 or SHA-256. Any change to a binary → new hash → full megabina
 AI agents generating code cannot execute it: the script's hash won't be in the signed manifest.
 Violations → immediate process termination + structured audit log.
 
+**Scope note (dynamic-JIT plan, Phase 5):** this policy is about denying
+*guest-authored* runtime codegen — the `mmap`/`mprotect` denial above blocks a
+guest program (or an AI agent acting through one) from writing and running new
+code that was never in the signed manifest. It is a distinct concern from
+`speet`'s own optional, lazy compilation of code that *is* already part of the
+vetted, signed megabinary but wasn't reached by static CFG analysis at build
+time (see `speet-interp::emit_jit_lookup_stub`'s dynamic dispatch tier) — that
+mechanism compiles bytes the signed image already contains, not
+guest-generated ones, and only activates when a caller explicitly opts an
+`OobConfig` into it (`jit: Some(..)`; the default is `None`).
+Verified structurally, not just by convention: `JitConfig` is referenced
+nowhere in the megabinary/container build path (`speet-linker`,
+`speet-module-builder`, `speet-schedule`) — only by the opt-in JIT crates
+(`speet-dynamic-jit`, `speet-native-jit`, `speet-rtd`'s `jit` feature) and
+their direct dependencies. The container build simply never links code that
+could construct a non-`None` `JitConfig`, so this policy holds at the
+Cargo-graph level, not only by the `jit: None` default.
+
 ---
 
 ## Pipeline CLI (Target)
