@@ -408,33 +408,38 @@ fn corpus_riscv_arith_table_indirect() {
     assert_eq!(run_table_indirect(&fixture), expected_main_return("arith"));
 }
 
-/// `frame.c`'s array initializer (`volatile int buf[4] = {a,b,c,d}`) used
-/// to hit `c.addw a3, a3, a1` at guest pc 0xC0 and trap -- that exact gap
-/// is now fixed (see `rv_compressed_w_alu` in `vane-riscv/src/template/
-/// riscv.rs`: the upstream `rv-asm` 0.2.1 decoder crate unconditionally
-/// rejects the RV64C-only `C.ADDW`/`C.SUBW` encodings as a decode error,
-/// so vane hand-decodes just those two forms before falling through to
-/// the real decoder). A second, independent vane-riscv bug was found and
-/// fixed alongside it: `Inst::Jalr`'s codegen wrote the return address
-/// into `dest` *before* reading `base` for the target computation, which
-/// is wrong per spec whenever `dest == base` (the `jalr ra, 0(ra)` idiom
-/// this binary's call to `sink()` uses).
+/// `frame.c` exercised three real, independent bugs, found and fixed in
+/// this order:
 ///
-/// Past both fixes, this specific fixture still doesn't execute
-/// correctly: the `auipc ra, 0` / `jalr ra, 0(ra)` pair at the call site
-/// has **zero** in both the auipc's upper-immediate and the jalr's
-/// lower-immediate (confirmed by hand-decoding the raw instruction
-/// words), which computes a jump target of the auipc's own PC -- not
-/// `sink()`'s address. This isn't a vane bug: `speet-riscv`'s own,
-/// independent, pre-existing AOT-compiler corpus suite
-/// (`speet-riscv/tests/rv_c_corpus_tests.rs::rv_c_corpus_frame64` and
-/// `rv_c_corpus_frame32`) traps on this exact fixture too, with no vane
-/// or dynamic-JIT code involved at all -- so `frame.text.elf`'s RV64/RV32
-/// fixtures appear to have an unresolved-relocation (or similar
-/// toolchain/fixture-generation) problem that predates and is unrelated
-/// to this corpus harness. Left `#[ignore]`d pending that separate fix.
+/// 1. `frame.c`'s array initializer hit `c.addw a3, a3, a1` at guest pc
+///    0xC0 and trapped: the upstream `rv-asm` 0.2.1 decoder crate
+///    unconditionally rejected the RV64C-only `C.ADDW`/`C.SUBW`
+///    encodings as a decode error. Fixed upstream, in `rv-utils`
+///    (patched in via `.cargo/config.toml`'s
+///    `[patch.'https://github.com/portal-co/rv-utils.git']`).
+/// 2. `sink()`'s call site (`jalr ra, 0(ra)`) computed a jump target of
+///    its own `auipc`'s PC instead of `sink()`'s address. Root cause was
+///    two-fold: (a) `compile_corpus.sh`'s `build_text` extracted `.text`
+///    from an *unlinked* relocatable object, so the `R_RISCV_CALL_PLT`
+///    relocation on this call site was never resolved before
+///    `objcopy --strip-all` discarded it along with the relocation
+///    section entirely -- fixed by linking (at a fixed zero base,
+///    matching this whole corpus's "`.text` starts at guest VA 0"
+///    convention) before extracting `.text`; (b) `vane-riscv`'s
+///    `Inst::Jalr` codegen wrote the return address into `dest` *before*
+///    reading `base`, which is wrong per spec whenever `dest == base`
+///    (exactly this `jalr ra, 0(ra)` idiom) -- fixed by computing the
+///    target first.
+/// 3. Past both of those, `sink()`'s loop (`bne`) and its `jal` call
+///    site from `main` both landed on the wrong PC: every branch/jump
+///    handler in `vane-riscv` multiplied `rv-asm`'s already
+///    byte-scaled B-type/J-type immediates by 2 again, silently
+///    doubling every nonzero branch/jump offset. Undetected until now
+///    because `arith.c` (the only other corpus program) has no branches
+///    or calls left after constant folding. Fixed by removing the
+///    erroneous `* 2` from every branch/`Jal` site (load/store offsets
+///    and `Jalr`'s I-type immediate were already correct, unscaled).
 #[test]
-#[ignore = "frame.text.elf's RV64 fixture has an unresolved auipc/jalr call site (target computes to the auipc's own PC) -- speet-riscv's independent AOT corpus suite traps on the same fixture, confirming this is a pre-existing fixture/toolchain issue, not a vane-riscv bug; see this test's doc comment"]
 fn corpus_riscv_frame_table_indirect() {
     let fixture = rv64_fixture("frame");
     assert_eq!(run_table_indirect(&fixture), expected_main_return("frame"));
@@ -582,7 +587,6 @@ fn corpus_riscv_arith_function_ref() {
 
 #[cfg(feature = "wasmtime")]
 #[test]
-#[ignore = "frame.text.elf's RV64 fixture has an unresolved auipc/jalr call site -- see corpus_riscv_frame_table_indirect's doc comment"]
 fn corpus_riscv_frame_function_ref() {
     let fixture = rv64_fixture("frame");
     assert_eq!(run_function_ref(&fixture), expected_main_return("frame"));
