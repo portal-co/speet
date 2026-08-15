@@ -59,7 +59,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use speet_link_core::{EntityIndexSpace, IndexSlot, JitConfig, OobConfig};
+use speet_link_core::{DispatchMode, EntityIndexSpace, IndexSlot, JitConfig, OobConfig};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 
@@ -462,6 +462,12 @@ pub fn jit_lookup_stub_extra_locals() -> [(u32, ValType); 6] {
 ///
 /// Requires the caller to have declared [`jit_lookup_stub_extra_locals`] in
 /// addition to [`emit_lookup_stub`]'s usual five locals.
+///
+/// `dyn_funcref_table_idx` is the absolute WASM table index of
+/// `jit`'s typed-funcref sibling table (see
+/// [`JitConfig::dyn_funcref_table_idx`]); required to be `Some` when
+/// `jit.dispatch_mode` is [`DispatchMode::FunctionRef`], ignored (and may be
+/// `None`) otherwise.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_jit_lookup_stub<Context, E>(
     sink: &mut dyn InstructionSink<Context, E>,
@@ -472,6 +478,7 @@ pub fn emit_jit_lookup_stub<Context, E>(
     type_idx: u32,
     table_idx: u32,
     dyn_table_idx: u32,
+    dyn_funcref_table_idx: Option<u32>,
     data_mem_idx: u32,
     n_entries: u32,
 ) -> Result<(), E> {
@@ -613,13 +620,15 @@ pub fn emit_jit_lookup_stub<Context, E>(
     sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
     sink.instruction(ctx, &Instruction::I64Eq)?;
     sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
-    for p in 0..n_params {
-        sink.instruction(ctx, &Instruction::LocalGet(p))?;
-    }
-    sink.instruction(ctx, &Instruction::LocalGet(scan_val))?;
-    sink.instruction(
+    emit_dispatch_tail(
+        sink,
         ctx,
-        &Instruction::ReturnCallIndirect { type_index: type_idx, table_index: dyn_table_idx },
+        jit,
+        params,
+        type_idx,
+        dyn_table_idx,
+        dyn_funcref_table_idx,
+        scan_val,
     )?;
     sink.instruction(ctx, &Instruction::End)?; // end pc-match if
     sink.instruction(ctx, &Instruction::End)?; // end occupied if
@@ -773,6 +782,52 @@ pub fn emit_jit_lookup_stub<Context, E>(
     sink.instruction(ctx, &Instruction::End) // end function
 }
 
+/// Emit the dynamic dispatch table's hit-path dispatch tail: push every
+/// `params` local (the callee's arguments — arch regs + `target_pc`), then
+/// reach the compiled function named by `value_local` (an i32 table
+/// index/slot, already loaded from the side table) according to
+/// `jit.dispatch_mode`.
+///
+/// `DispatchMode::TableIndirect` emits exactly what this call site emitted
+/// before `DispatchMode` existed — `LocalGet(value_local)` then
+/// `ReturnCallIndirect { type_index, table_index: dyn_table_idx }` — byte-
+/// for-byte, so it remains the regression gate for every other change in
+/// this file. `DispatchMode::FunctionRef` instead does
+/// `LocalGet(value_local)`, `TableGet(dyn_funcref_table_idx)` (pushing the
+/// `(ref null $regfn)` stored at that slot), then `ReturnCallRef(type_idx)`
+/// — `dyn_funcref_table_idx` must be `Some` in that case.
+#[allow(clippy::too_many_arguments)]
+fn emit_dispatch_tail<Context, E>(
+    sink: &mut dyn InstructionSink<Context, E>,
+    ctx: &mut Context,
+    jit: &JitConfig,
+    params: &[ValType],
+    type_idx: u32,
+    dyn_table_idx: u32,
+    dyn_funcref_table_idx: Option<u32>,
+    value_local: u32,
+) -> Result<(), E> {
+    let n_params = params.len() as u32;
+    for p in 0..n_params {
+        sink.instruction(ctx, &Instruction::LocalGet(p))?;
+    }
+    sink.instruction(ctx, &Instruction::LocalGet(value_local))?;
+    match jit.dispatch_mode {
+        DispatchMode::TableIndirect => {
+            sink.instruction(
+                ctx,
+                &Instruction::ReturnCallIndirect { type_index: type_idx, table_index: dyn_table_idx },
+            )
+        }
+        DispatchMode::FunctionRef => {
+            let funcref_table_idx = dyn_funcref_table_idx
+                .expect("dyn_funcref_table_idx must be Some when jit.dispatch_mode is FunctionRef");
+            sink.instruction(ctx, &Instruction::TableGet(funcref_table_idx))?;
+            sink.instruction(ctx, &Instruction::ReturnCallRef(type_idx))
+        }
+    }
+}
+
 /// Emit `if count_local >= jit.hit_threshold { call
 /// jit.jit_request_func_idx(local.get tpc_local) }`, a no-op if
 /// `jit.jit_request_func_idx` is `None` or `jit.hit_threshold` is `0`.
@@ -813,13 +868,15 @@ pub fn emit_lookup_stub_dispatch<Context, E>(
     type_idx: u32,
     table_idx: u32,
     dyn_table_idx: u32,
+    dyn_funcref_table_idx: Option<u32>,
     data_mem_idx: u32,
     n_entries: u32,
 ) -> Result<(), E> {
     match &oob.jit {
         None => emit_lookup_stub(sink, ctx, oob, params, type_idx, table_idx, data_mem_idx, n_entries),
         Some(jit) => emit_jit_lookup_stub(
-            sink, ctx, oob, jit, params, type_idx, table_idx, dyn_table_idx, data_mem_idx, n_entries,
+            sink, ctx, oob, jit, params, type_idx, table_idx, dyn_table_idx, dyn_funcref_table_idx,
+            data_mem_idx, n_entries,
         ),
     }
 }

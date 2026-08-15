@@ -107,12 +107,50 @@ impl OobConfig {
 /// practice. The lookup stub always falls through to `oob.interp_func_idx`
 /// regardless of table state or JIT-request outcome, so a slow or absent JIT
 /// backend can never stall or break execution.
+/// Which WASM mechanism the dynamic dispatch table's hit path uses to reach
+/// a compiled function: the original untyped-table-plus-`return_call_indirect`
+/// path, or a typed-funcref-table-plus-`return_call_ref` path (the [WASM
+/// typed function references proposal]). Both are fully supported, selected
+/// per [`JitConfig`] — `FunctionRef` is not a replacement for
+/// `TableIndirect`, and choosing it does not change `TableIndirect`'s
+/// emitted bytecode in any way.
+///
+/// `wasmi` (this codebase's reference/test-oracle engine) has no
+/// function-references support, so only `TableIndirect`-mode output can run
+/// there; `FunctionRef`-mode output requires `wasmtime` (see
+/// `speet-dynamic-jit`'s wasmtime-gated linking path).
+///
+/// [WASM typed function references proposal]: https://github.com/WebAssembly/function-references
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DispatchMode {
+    #[default]
+    TableIndirect,
+    FunctionRef,
+}
+
 #[derive(Clone, Debug)]
 pub struct JitConfig {
     /// Pre-declared, runtime-mutable WASM table slot for JIT-compiled
     /// functions — distinct from [`OobConfig::dispatch_table_slot`], which
     /// stays AOT-immutable.
     pub dyn_dispatch_table_slot: IndexSlot,
+
+    /// Which mechanism [`emit_jit_lookup_stub`](crate)'s (actually
+    /// `speet_interp::emit_jit_lookup_stub`'s) dynamic-table hit path uses.
+    /// Default [`DispatchMode::TableIndirect`] reproduces today's behavior
+    /// byte-for-byte.
+    pub dispatch_mode: DispatchMode,
+
+    /// Pre-declared, runtime-mutable **typed funcref** WASM table slot,
+    /// populated in lockstep with `dyn_dispatch_table_slot` (same slot
+    /// index, same occupancy) but holding `(ref null $regfn)` values instead
+    /// of untyped `funcref`s, for `DispatchMode::FunctionRef`'s
+    /// `table.get`+`return_call_ref` dispatch tail. `None` when
+    /// `dispatch_mode` is `TableIndirect` — no second table is registered,
+    /// so `TableIndirect`'s entity numbering (and thus its compiled
+    /// bytecode) is completely unaffected by `FunctionRef` support existing
+    /// in the codebase at all.
+    pub dyn_funcref_table_slot: Option<IndexSlot>,
 
     /// WASM memory index holding the dynamic dispatch side table.
     pub dyn_table_mem_idx: u32,
@@ -141,16 +179,28 @@ pub struct JitConfig {
 }
 
 impl JitConfig {
-    /// Register the dynamic dispatch table in Phase 1.
+    /// Register the dynamic dispatch table (and, for
+    /// `DispatchMode::FunctionRef`, its typed-funcref sibling table) in
+    /// Phase 1.
     ///
     /// Returns a partially-initialised `JitConfig` with all memory/capacity/
     /// threshold fields zeroed and no JIT-request import configured; callers
     /// must fill those in once the corresponding memories and import are
-    /// resolved.
-    pub fn register(entity_space: &mut EntityIndexSpace) -> Self {
+    /// resolved. Passing `DispatchMode::TableIndirect` registers exactly one
+    /// table, identical to this function's behavior before `DispatchMode`
+    /// existed — `FunctionRef`'s extra table registration only happens when
+    /// explicitly requested, so it can never perturb `TableIndirect`
+    /// callers' entity numbering.
+    pub fn register(entity_space: &mut EntityIndexSpace, dispatch_mode: DispatchMode) -> Self {
         let dyn_dispatch_table_slot = entity_space.tables.append(1);
+        let dyn_funcref_table_slot = match dispatch_mode {
+            DispatchMode::TableIndirect => None,
+            DispatchMode::FunctionRef => Some(entity_space.tables.append(1)),
+        };
         Self {
             dyn_dispatch_table_slot,
+            dispatch_mode,
+            dyn_funcref_table_slot,
             dyn_table_mem_idx: 0,
             dyn_table_mem_offset: 0,
             dyn_table_capacity: 0,
@@ -165,5 +215,11 @@ impl JitConfig {
     /// Absolute WASM table index of the dynamic dispatch table.
     pub fn dyn_table_idx(&self, entity_space: &EntityIndexSpace) -> u32 {
         entity_space.tables.base(self.dyn_dispatch_table_slot)
+    }
+
+    /// Absolute WASM table index of the typed-funcref sibling table, if
+    /// `dispatch_mode` is `FunctionRef`.
+    pub fn dyn_funcref_table_idx(&self, entity_space: &EntityIndexSpace) -> Option<u32> {
+        self.dyn_funcref_table_slot.map(|slot| entity_space.tables.base(slot))
     }
 }

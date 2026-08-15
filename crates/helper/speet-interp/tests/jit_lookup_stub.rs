@@ -16,7 +16,7 @@
 use speet_interp::{
     emit_jit_lookup_stub, emit_lookup_stub, emit_lookup_stub_dispatch, jit_lookup_stub_extra_locals,
 };
-use speet_link_core::{IndexSlot, JitConfig, OobConfig};
+use speet_link_core::{DispatchMode, IndexSlot, JitConfig, OobConfig};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType, ExportKind,
     ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
@@ -57,7 +57,7 @@ fn none_reproduces_emit_lookup_stub_byte_for_byte() {
         (1, ValType::I64),
         (1, ValType::I32),
     ]);
-    emit_lookup_stub_dispatch::<(), E>(&mut via_dispatch, &mut (), &oob, &params, 0, 0, 0, 0, 1)
+    emit_lookup_stub_dispatch::<(), E>(&mut via_dispatch, &mut (), &oob, &params, 0, 0, 0, None, 0, 1)
         .unwrap();
 
     assert_eq!(direct, via_dispatch);
@@ -142,6 +142,8 @@ fn build_module(hit_threshold: u32) -> Built {
 
     let jit = JitConfig {
         dyn_dispatch_table_slot: IndexSlot(0),
+        dispatch_mode: DispatchMode::TableIndirect,
+        dyn_funcref_table_slot: None,
         dyn_table_mem_idx: 1,
         dyn_table_mem_offset: 0,
         dyn_table_capacity: 4,
@@ -178,6 +180,7 @@ fn build_module(hit_threshold: u32) -> Built {
         /* type_idx */ 0,
         /* table_idx */ 0,
         /* dyn_table_idx */ 1,
+        /* dyn_funcref_table_idx */ None,
         /* data_mem_idx */ 0,
         /* n_entries */ 1,
     )

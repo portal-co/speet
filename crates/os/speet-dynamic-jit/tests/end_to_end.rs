@@ -7,7 +7,7 @@
 
 use speet_dynamic_jit::{compile_pc, link_jit_function};
 use speet_interp::emit_jit_lookup_stub;
-use speet_link_core::{IndexSlot, JitConfig, OobConfig};
+use speet_link_core::{DispatchMode, IndexSlot, JitConfig, OobConfig};
 use vane_riscv::Mem;
 // Aliased to speet's own wasm-encoder version (0.240.0), matching
 // speet-interp/speet-link-core — distinct from the crate's library
@@ -110,6 +110,7 @@ fn build_main_module(jit: &JitConfig, guest_pc: u64, guest_bytes: &[u8]) -> Vec<
         /* type_idx */ 0,
         /* static table_idx */ 0,
         /* dyn table_idx */ 1,
+        /* dyn_funcref_table_idx */ None,
         /* data_mem_idx (static) */ 0,
         /* n_entries */ 0,
     )
@@ -145,6 +146,8 @@ fn build_main_module(jit: &JitConfig, guest_pc: u64, guest_bytes: &[u8]) -> Vec<
 fn oob_miss_then_dynamic_jit_compile_reaches_and_executes_real_vane_output() {
     let jit_config = JitConfig {
         dyn_dispatch_table_slot: IndexSlot(0),
+        dispatch_mode: DispatchMode::TableIndirect,
+        dyn_funcref_table_slot: None,
         dyn_table_mem_idx: 1,
         dyn_table_mem_offset: 0,
         dyn_table_capacity: 4,

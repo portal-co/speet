@@ -6,7 +6,7 @@
 
 use speet_dynamic_jit::{compile_pc, invalidate_dyn_entry, link_jit_function};
 use speet_interp::emit_jit_lookup_stub;
-use speet_link_core::{IndexSlot, JitConfig, OobConfig};
+use speet_link_core::{DispatchMode, IndexSlot, JitConfig, OobConfig};
 use vane_riscv::Mem;
 use wasm_encoder_240 as wasm_encoder;
 use wasm_encoder::{
@@ -89,7 +89,7 @@ fn build_main_module(jit: &JitConfig, guest_pc: u64, guest_bytes: &[u8]) -> Vec<
         Function::new(locals)
     };
     emit_jit_lookup_stub::<(), core::convert::Infallible>(
-        &mut lookup_fn, &mut (), &oob, jit, &regfn_params(), 0, 0, 1, 0, 0,
+        &mut lookup_fn, &mut (), &oob, jit, &regfn_params(), 0, 0, 1, None, 0, 0,
     )
     .unwrap();
 
@@ -122,6 +122,8 @@ fn build_main_module(jit: &JitConfig, guest_pc: u64, guest_bytes: &[u8]) -> Vec<
 fn check_code_mismatch_evicts_stale_dynamic_entry_and_falls_through_cleanly() {
     let jit_config = JitConfig {
         dyn_dispatch_table_slot: IndexSlot(0),
+        dispatch_mode: DispatchMode::TableIndirect,
+        dyn_funcref_table_slot: None,
         dyn_table_mem_idx: 1,
         dyn_table_mem_offset: 0,
         dyn_table_capacity: 4,
