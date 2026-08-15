@@ -33,4 +33,34 @@
     <arg type="^*"/>
     <retval type="i"/>
   </function>
+  <function name="strcpy">
+    <arg type="^v"/>
+    <arg type="*"/>
+    <retval type="^v"/>
+  </function>
+  <function name="strcat">
+    <arg type="^v"/>
+    <arg type="*"/>
+    <retval type="^v"/>
+  </function>
+  <function name="strncpy">
+    <arg type="^v"/>
+    <arg type="*"/>
+    <arg type="Q"/>
+    <retval type="^v"/>
+  </function>
+  <function name="strncat">
+    <arg type="^v"/>
+    <arg type="*"/>
+    <arg type="Q"/>
+    <retval type="^v"/>
+  </function>
+  <function name="malloc">
+    <arg type="Q"/>
+    <retval type="^v"/>
+  </function>
+  <function name="free">
+    <arg type="^v"/>
+    <retval type="v"/>
+  </function>
 </signatures>

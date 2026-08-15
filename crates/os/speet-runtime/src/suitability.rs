@@ -43,6 +43,43 @@ fn fn_ptr_free_allowlist() -> HashSet<&'static str> {
     .collect()
 }
 
+/// Additional pointer-taking (but never function-pointer-taking) symbols
+/// admitted only under [`MemoryModel::ZeroOffset`] — Phase 6 of the
+/// aarch64-jit-parity/shared-memory/debug-seam plan.
+///
+/// Unlike [`fn_ptr_free_allowlist`]'s members, which need hand-written
+/// `speet_rt::shim` glue (or an `os-abi-stubs` redirect) to stay safe under
+/// *every* memory model, none of these have any translation glue at all:
+/// under `ZeroOffset`, a guest pointer's raw numeric value is already valid
+/// as a host address into the shared zero-offset memory region (see
+/// `os_page::backends::SharedLinearHost`), so passing it straight through
+/// to the real host libc implementation is safe by construction. Only
+/// *function*-pointer arguments still need Phase 2's `CallRef`/`RefFunc`
+/// machinery — none of these symbols take one.
+///
+/// Deliberately disjoint from `os-abi-stubs`' `STUB_SYMBOLS` (which are
+/// already safe under *any* model via their generated redirect code, so
+/// this list would never actually be reached for them — see
+/// `analyze_imports_with_model`'s `has_wired_impl` check, which runs
+/// unconditionally before this one). This list is for symbols with no
+/// stub/glue of any kind, only the structural zero-offset guarantee.
+fn zero_offset_pointer_allowlist() -> HashSet<&'static str> {
+    [
+        "strcmp",
+        "_strcmp",
+        "strncmp",
+        "_strncmp",
+        "memcmp",
+        "_memcmp",
+        "calloc",
+        "_calloc",
+        "realloc",
+        "_realloc",
+    ]
+    .into_iter()
+    .collect()
+}
+
 /// Normalize Mach-O underscore prefixes for allowlist lookup.
 fn bare_import_name(name: &str) -> &str {
     name.strip_prefix('_').unwrap_or(name)
@@ -115,6 +152,12 @@ pub fn analyze_imports_with_model(
                     || speet_abi_stubs::zero_offset_data_pointer_safe(imp.name.as_str()))
             {
                 continue;
+            }
+            if zero {
+                let extra = zero_offset_pointer_allowlist();
+                if extra.contains(lookup) || extra.contains(bare) || extra.contains(imp.name.as_str()) {
+                    continue;
+                }
             }
             fn_ptr_deps.push(imp.name.clone());
         }
@@ -215,5 +258,42 @@ mod tests {
             analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
         assert!(unresolved.is_empty());
         assert!(fn_ptr.is_empty());
+    }
+
+    /// Phase 6: `strcmp` has no `os-abi-stubs` entry and no `speet_rt::shim`
+    /// glue -- it's admitted purely because it's on the new
+    /// `zero_offset_pointer_allowlist`, and only under `ZeroOffset`.
+    #[test]
+    fn zero_offset_admits_plain_pointer_taking_symbol_with_no_stub_at_all() {
+        let host = TunneledHostApi::for_host();
+        let bin = empty_bin(vec![ImportSym {
+            name: "strcmp".into(),
+            plt_addr: Some(0x1000),
+        }]);
+
+        // Under the default (OwnedLinear) model, a raw guest pointer isn't
+        // trustworthy as a host address, so this is correctly rejected.
+        let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
+        assert!(unresolved.is_empty(), "strcmp should still resolve against the host ambient table");
+        assert_eq!(fn_ptr, vec!["strcmp"], "strcmp must be rejected under OwnedLinear -- no glue exists for it");
+
+        // Under ZeroOffset, the guest pointer's numeric value is already a
+        // valid host address, so strcmp becomes suitable with zero
+        // translation glue.
+        let (unresolved, fn_ptr) = analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
+        assert!(unresolved.is_empty());
+        assert!(fn_ptr.is_empty(), "strcmp should be admitted under ZeroOffset via zero_offset_pointer_allowlist");
+    }
+
+    #[test]
+    fn zero_offset_pointer_allowlist_does_not_leak_into_owned_linear() {
+        let host = TunneledHostApi::for_host();
+        for sym in ["strncmp", "memcmp", "calloc", "realloc"] {
+            let bin = empty_bin(vec![ImportSym { name: sym.into(), plt_addr: Some(0x1000) }]);
+            let (_, fn_ptr) = analyze_imports(&host, &bin);
+            assert_eq!(fn_ptr, vec![sym.to_string()], "{sym} must stay rejected under OwnedLinear");
+            let (_, fn_ptr) = analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
+            assert!(fn_ptr.is_empty(), "{sym} must be admitted under ZeroOffset");
+        }
     }
 }
