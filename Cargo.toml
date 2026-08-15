@@ -44,6 +44,7 @@ members = [
     "crates/os/speet-runtime",
     "crates/os/speet-rtd",
     "crates/os/speet-dynamic-jit",
+    "crates/os/speet-native-jit",
     # Plugin API (external/proprietary arch, memory, table, object-model, target plugins)
     "crates/plugin/speet-plugin-api",
     "crates/plugin/speet-plugin-adapter",

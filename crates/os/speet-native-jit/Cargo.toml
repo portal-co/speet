@@ -1,0 +1,19 @@
+[package]
+name = "speet-native-jit"
+version = "0.1.0"
+edition = "2024"
+description.workspace = true
+license-file.workspace = true
+
+# Phase 2b of the dynamic-JIT plan: in-process native (SysV ABI) compilation
+# of a WASM function via wasm-blitz's own codegen call chain (the same one
+# speet-recompile uses for AOT thin-runtime builds), producing raw machine
+# code bytes executed directly via a function pointer -- no object file, no
+# external linker (clang/lld) -- the "effectively-native-to-native JIT" path.
+[dependencies]
+portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64" }
+portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
+portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
+wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }
+wasmparser = "0.240.0"
+libc = "0.2"
