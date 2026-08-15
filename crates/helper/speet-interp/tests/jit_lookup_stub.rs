@@ -1,6 +1,6 @@
 //! Integration tests for the JIT-aware lookup stub (Phase 1 of the dynamic-JIT plan).
 //!
-//! Two things are verified:
+//! Three things are verified:
 //!
 //! 1. `emit_lookup_stub_dispatch` with `oob.jit: None` reproduces
 //!    `emit_lookup_stub`'s output byte-for-byte (a pure encoding comparison,
@@ -9,6 +9,9 @@
 //!    interpreter fallback with fire-and-forget JIT request) behaves
 //!    correctly, by assembling a real WASM module and executing it in
 //!    `wasmi`.
+//! 3. `emit_lookup_stub` itself produces valid, executable WASM (a
+//!    regression test — see that function's doc comment for the bug this
+//!    guards against).
 
 use speet_interp::{
     emit_jit_lookup_stub, emit_lookup_stub, emit_lookup_stub_dispatch, jit_lookup_stub_extra_locals,
@@ -287,4 +290,100 @@ fn zero_threshold_never_requests_jit() {
         assert_eq!(r, 1 + 999);
     }
     assert!(store.data().jit_requests.is_empty(), "hit_threshold=0 must disable JIT requests");
+}
+
+// ── Test 3: `emit_lookup_stub` itself produces valid, executable WASM ──────
+//
+// Regression test for the bug this file's module doc used to work around:
+// the binary-search loop's `BrIf(1)` break wasn't wrapped in a `Block`, so
+// it targeted the function's own implicit (non-empty) result frame instead
+// of "after the loop" and failed WASM validation whenever `params`/results
+// were non-empty -- i.e. always, per `OobConfig`'s own calling convention.
+// `none_reproduces_emit_lookup_stub_byte_for_byte` above only ever compared
+// `emit_lookup_stub`'s output against itself (via `emit_lookup_stub_dispatch`
+// with `jit: None`), so it could not have caught this: both sides were
+// wrong in the same way. This test instead builds a real module and
+// validates + executes it.
+
+fn build_static_only_module() -> Vec<u8> {
+    let oob = base_oob(2, None);
+    let params = [ValType::I64, ValType::I64];
+
+    let mut types = TypeSection::new();
+    types.ty().function(params, [ValType::I64]);
+
+    let mut functions = FunctionSection::new();
+    functions.function(0); // func 0: identity
+    functions.function(0); // func 1: lookup_stub (under test)
+    functions.function(0); // func 2: interp
+
+    let mut tables = TableSection::new();
+    tables.table(TableType { element_type: RefType::FUNCREF, minimum: 1, maximum: Some(1), table64: false, shared: false });
+
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType { minimum: 1, maximum: None, memory64: false, shared: false, page_size_log2: None });
+
+    let mut exports = ExportSection::new();
+    exports.export("lookup_stub", ExportKind::Func, 1);
+
+    let mut elements = ElementSection::new();
+    elements.active(Some(0), &ConstExpr::i32_const(0), Elements::Functions(std::borrow::Cow::Borrowed(&[0])));
+
+    let mut data = DataSection::new();
+    let mut static_table = Vec::new();
+    static_table.extend_from_slice(&100u64.to_le_bytes());
+    static_table.extend_from_slice(&0u32.to_le_bytes());
+    data.active(0, &ConstExpr::i32_const(0), static_table);
+
+    let mut identity_fn = Function::new([]);
+    identity_fn.instruction(&Instruction::LocalGet(0));
+    identity_fn.instruction(&Instruction::End);
+
+    let mut lookup_fn = Function::new([
+        (1, ValType::I32), (1, ValType::I32), (1, ValType::I32), (1, ValType::I64), (1, ValType::I32),
+    ]);
+    let params_slice = [ValType::I64, ValType::I64];
+    emit_lookup_stub::<(), E>(&mut lookup_fn, &mut (), &oob, &params_slice, 0, 0, 0, 1).unwrap();
+
+    let mut interp_fn = Function::new([]);
+    interp_fn.instruction(&Instruction::LocalGet(0));
+    interp_fn.instruction(&Instruction::I64Const(999));
+    interp_fn.instruction(&Instruction::I64Add);
+    interp_fn.instruction(&Instruction::End);
+
+    let mut code = CodeSection::new();
+    code.function(&identity_fn);
+    code.function(&lookup_fn);
+    code.function(&interp_fn);
+
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&functions)
+        .section(&tables)
+        .section(&memories)
+        .section(&exports)
+        .section(&elements)
+        .section(&code)
+        .section(&data);
+    module.finish()
+}
+
+#[test]
+fn emit_lookup_stub_output_validates_and_executes() {
+    let wasm = build_static_only_module();
+
+    let mut config = wasmi::Config::default();
+    config.wasm_tail_call(true);
+    let engine = wasmi::Engine::new(&config);
+    let mut store = wasmi::Store::new(&engine, ());
+    let linker: wasmi::Linker<()> = wasmi::Linker::new(&engine);
+    let module = wasmi::Module::new(&engine, &wasm[..]).expect("emit_lookup_stub output must be valid WASM");
+    let instance = linker.instantiate_and_start(&mut store, &module).expect("should instantiate");
+    let func = instance
+        .get_typed_func::<(i64, i64), i64>(&store, "lookup_stub")
+        .expect("lookup_stub export should exist with the expected type");
+
+    assert_eq!(func.call(&mut store, (7, 100)).unwrap(), 7, "static hit should dispatch to the identity function");
+    assert_eq!(func.call(&mut store, (7, 999)).unwrap(), 7 + 999, "miss should fall through to the interpreter");
 }

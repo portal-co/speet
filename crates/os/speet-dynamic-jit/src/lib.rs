@@ -135,24 +135,16 @@ pub fn compile_pc(mem: &Mem, pc: u64, num_regs: u32) -> Vec<u8> {
 
     let mut f = Function::new([(1, ValType::I64), (1, ValType::I64)]); // scratch_a, scratch_b
     let mut reencoder = RoundtripReencoder;
+    // `jit.Riscv(&ctx)` (in vane-riscv) already appends the trailing
+    // `unreachable` its output needs to validate — `rv_emit` wraps every
+    // trace in an outer loop terminating via a nested `TailCall`, and WASM
+    // doesn't propagate "unreachable" across a loop boundary, so without it
+    // the function's implicit final return would go unsatisfied despite
+    // being genuinely dead code. See `RiscvWasmJit::Riscv`'s doc comment.
     for JitOpcode::Operator { op } in ops {
         let instr = instruction(&mut reencoder, op).expect("reencode should not fail");
         f.instruction(&instr);
     }
-    // `rv_emit` wraps every trace in an outer `StackOp::LoopBegin`/`LoopEnd`
-    // for its label/branch-target bookkeeping (see vane-riscv's `rv_emit`
-    // doc comment), and every finite trace terminates via a `TailCall`
-    // nested inside that loop, not by falling off the end. WASM validation
-    // does *not* propagate "unreachable" across a block/loop boundary —
-    // exiting a loop's `end` always resets reachability to whatever it was
-    // on entry, regardless of whether every path inside diverged — so the
-    // function's own implicit final return is left unsatisfied even though
-    // it is genuinely never reached at runtime. A trailing `unreachable`,
-    // unnested at the function's true top level, is the standard WASM idiom
-    // for exactly this "provably dead, but the validator can't see it"
-    // situation, and satisfies validation regardless of whether this
-    // particular trace happened to need it.
-    f.instruction(&Instruction::Unreachable);
     f.instruction(&Instruction::End);
 
     let mut code = CodeSection::new();

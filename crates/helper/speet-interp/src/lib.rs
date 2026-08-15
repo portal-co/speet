@@ -300,6 +300,18 @@ impl OobInterp {
 /// tail-calls the matching compiled function via `return_call_indirect`, or
 /// falls through to the interpreter (`oob.interp_func_idx`) when no entry
 /// matches.
+///
+/// The binary-search loop is wrapped in an explicit `Block` so its
+/// `BrIf(1)` break targets the block's `Empty` end rather than the
+/// function's own implicit, result-typed return frame — WASM validation
+/// does not treat "unreachable" as propagating across a loop boundary, so
+/// without this wrapper a `br`/`br_if` escaping the loop is validated
+/// against the *function's* declared results, not "whatever comes after
+/// the loop". Confirmed with a minimal `wat2wasm` repro: a bare `loop`
+/// (no wrapping block) containing only a `br_if 1` inside a function with
+/// non-empty results fails with "type mismatch in br_if, expected \[i64\]
+/// but got \[\]" even though the branch is meant to simply exit the loop
+/// and fall through to more code, not return from the function.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_lookup_stub<Context, E>(
     sink: &mut dyn InstructionSink<Context, E>,
@@ -325,6 +337,9 @@ pub fn emit_lookup_stub<Context, E>(
     sink.instruction(ctx, &Instruction::I32Const(n_entries as i32))?;
     sink.instruction(ctx, &Instruction::LocalSet(hi))?;
 
+    // Block wraps the loop so `BrIf(1)` below has a valid, correctly-typed
+    // break target — see this function's doc comment.
+    sink.instruction(ctx, &Instruction::Block(BlockType::Empty))?;
     // loop { ... }
     sink.instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
 
@@ -394,6 +409,7 @@ pub fn emit_lookup_stub<Context, E>(
 
     sink.instruction(ctx, &Instruction::Br(0))?; // continue loop
     sink.instruction(ctx, &Instruction::End)?; // end loop
+    sink.instruction(ctx, &Instruction::End)?; // end block
 
     // Not found: tail-call interpreter
     for p in 0..n_params {
@@ -481,13 +497,10 @@ pub fn emit_jit_lookup_stub<Context, E>(
     sink.instruction(ctx, &Instruction::I32Const(n_entries as i32))?;
     sink.instruction(ctx, &Instruction::LocalSet(hi))?;
 
-    // Wrapped in an explicit `Block` (unlike `emit_lookup_stub`'s bare loop) so
+    // Wrapped in an explicit `Block`, same as `emit_lookup_stub`'s loop, so
     // the `BrIf(1)` break below targets this block's `Empty` end rather than
-    // the function's own implicit result-typed frame — branching to the
-    // latter would require the function's non-empty result types on the
-    // stack, which a plain loop-break does not provide. Without this wrapper
-    // the module fails validation with e.g. "type mismatch in br_if, expected
-    // [i64] but got []".
+    // the function's own implicit result-typed frame — see
+    // `emit_lookup_stub`'s doc comment for why that distinction matters.
     sink.instruction(ctx, &Instruction::Block(BlockType::Empty))?;
     sink.instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
 
