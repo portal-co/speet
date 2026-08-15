@@ -23,6 +23,7 @@ wasmtime = ["dep:wasmtime"]
 speet-link-core = { path = "../speet-link-core" }
 speet-interp = { path = "../../helper/speet-interp" }
 vane-riscv = { path = "../../../../vane/crates/vane-riscv" }
+vane-aarch64 = { path = "../../../../vane/crates/vane-aarch64" }
 vane-arch = { path = "../../../../vane/crates/vane-arch" }
 # Pinned to vane's exact versions (not speet's workspace-pinned 0.240.0):
 # this crate consumes vane_arch::JitOpcode's wasmparser::Operator directly,

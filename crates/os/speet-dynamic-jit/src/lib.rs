@@ -103,8 +103,76 @@ pub fn compile_pc(mem: &Mem, pc: u64, num_regs: u32) -> Vec<u8> {
     };
     let jit = TemplateJit { pc, labels: Labels::default(), depth: 0, params };
 
+    // `jit.Riscv(&ctx)` (in vane-riscv) already appends the trailing
+    // `unreachable` its output needs to validate — `rv_emit` wraps every
+    // trace in an outer loop terminating via a nested `TailCall`, and WASM
+    // doesn't propagate "unreachable" across a loop boundary, so without it
+    // the function's implicit final return would go unsatisfied despite
+    // being genuinely dead code. See `RiscvWasmJit::Riscv`'s doc comment.
     let ops: Vec<JitOpcode<'_>> = jit.Riscv(&ctx).collect();
+    build_module(ops, num_regs)
+}
 
+/// AArch64 sibling of [`compile_pc`], driving vane's real AArch64 frontend
+/// (`vane_aarch64::TemplateJit`/`Aarch64WasmJit`) instead of RISC-V's.
+///
+/// Unlike [`compile_pc`], `num_regs` isn't a caller choice: AArch64's
+/// frontend addresses its entire register file (x0–x30, NZCV, V0–V31 — 73
+/// slots total) through named `StackOp::LoadState`/`StoreState`, not
+/// `LoadReg`/`StoreReg`, and `WasmAbiConfig::state_slots`' indices must fall
+/// within `reg_base..reg_base + num_regs` for that state to survive
+/// `return_call`/`return_call_indirect` tail-call boundaries (see
+/// `WasmAbiConfig::state_slots`'s doc comment) — so `num_regs` is pinned to
+/// the full 73-slot layout `vane_aarch64::AARCH64_STATE_SLOTS` describes,
+/// not a caller-adjustable trace-size knob the way RISC-V's is.
+pub fn compile_pc_aarch64(mem: &Mem, pc: u64) -> Vec<u8> {
+    use vane_aarch64::{AARCH64_STATE_SLOTS, Aarch64WasmJit};
+
+    let abi = WasmAbiConfig {
+        reg_base: 0,
+        num_regs: AARCH64_NUM_REGS,
+        target_pc_local: AARCH64_NUM_REGS,
+        scratch_a: AARCH64_NUM_REGS + 1,
+        scratch_b: AARCH64_NUM_REGS + 2,
+        mem_idx: 0,
+        ecall_func_idx: ECALL_FUNC_IDX,
+        jit_invalidate_func_idx: JIT_INVALIDATE_FUNC_IDX,
+        lookup_stub_func_idx: LOOKUP_STUB_FUNC_IDX,
+        state_slots: &AARCH64_STATE_SLOTS,
+    };
+    let ctx = StaticAbiCtx(abi);
+
+    let flate = vane_arch::DebugFlate {};
+    let params = Params {
+        react: mem,
+        trial: &|_pc| Heat::New,
+        flate: &flate,
+        root: pc,
+        flags: Flags::default(),
+    };
+    let jit = TemplateJit { pc, labels: Labels::default(), depth: 0, params };
+
+    // `jit.Aarch64(&ctx)` (in vane-aarch64) already appends the trailing
+    // `unreachable`, same reasoning as `compile_pc`'s RISC-V path — see
+    // `Aarch64WasmJit::Aarch64`'s doc comment.
+    let ops: Vec<JitOpcode<'_>> = jit.Aarch64(&ctx).collect();
+    build_module(ops, AARCH64_NUM_REGS)
+}
+
+/// Total AArch64 architectural state slots — see [`compile_pc_aarch64`]'s
+/// doc comment for why this is fixed, not a parameter.
+const AARCH64_NUM_REGS: u32 = 73;
+
+/// Shared module assembly for [`compile_pc`]/[`compile_pc_aarch64`]: wraps
+/// `ops` (already-rendered WASM operators for the JIT'd function's body)
+/// into a standalone module with one exported function ([`JIT_EXPORT_NAME`])
+/// of the shared `regfn` type, matching `num_regs` architectural registers.
+///
+/// The module imports three functions from `"env"` at indices
+/// [`ECALL_FUNC_IDX`]/[`JIT_INVALIDATE_FUNC_IDX`]/[`LOOKUP_STUB_FUNC_IDX`] —
+/// [`link_jit_function`]'s caller is responsible for having registered
+/// matching definitions on the `Linker` it instantiates this module with.
+fn build_module(ops: Vec<JitOpcode<'_>>, num_regs: u32) -> Vec<u8> {
     let mut types = TypeSection::new();
     types.ty().function(regfn_params(num_regs), regfn_results(num_regs)); // type 0: regfn
     types.ty().function(vec![ValType::I64; num_regs as usize], vec![ValType::I64; num_regs as usize]); // type 1: ecall (num_regs -> num_regs)
@@ -138,12 +206,6 @@ pub fn compile_pc(mem: &Mem, pc: u64, num_regs: u32) -> Vec<u8> {
 
     let mut f = Function::new([(1, ValType::I64), (1, ValType::I64)]); // scratch_a, scratch_b
     let mut reencoder = RoundtripReencoder;
-    // `jit.Riscv(&ctx)` (in vane-riscv) already appends the trailing
-    // `unreachable` its output needs to validate — `rv_emit` wraps every
-    // trace in an outer loop terminating via a nested `TailCall`, and WASM
-    // doesn't propagate "unreachable" across a loop boundary, so without it
-    // the function's implicit final return would go unsatisfied despite
-    // being genuinely dead code. See `RiscvWasmJit::Riscv`'s doc comment.
     for JitOpcode::Operator { op } in ops {
         let instr = instruction(&mut reencoder, op).expect("reencode should not fail");
         f.instruction(&instr);
