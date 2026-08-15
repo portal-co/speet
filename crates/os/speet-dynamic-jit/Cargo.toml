@@ -11,6 +11,14 @@ license-file.workspace = true
 # reference engine directly rather than a production "vkernel" host process,
 # since no such container-megabinary runtime exists in this codebase yet --
 # see the crate-root doc comment.
+[features]
+# Gates the FunctionRef-mode linking path (speet_link_core::DispatchMode::
+# FunctionRef): wasmi has zero function-references support, so that path
+# needs a second execution engine. Off by default -- the wasmi/TableIndirect
+# path (this crate's original, still-primary mechanism) has no wasmtime
+# dependency at all.
+wasmtime = ["dep:wasmtime"]
+
 [dependencies]
 speet-link-core = { path = "../speet-link-core" }
 speet-interp = { path = "../../helper/speet-interp" }
@@ -23,6 +31,11 @@ vane-arch = { path = "../../../../vane/crates/vane-arch" }
 wasm-encoder = { version = "0.239.0", default-features = false, features = ["wasmparser"] }
 wasmparser = { version = "0.239.0", default-features = false }
 wasmi = "1"
+# Pinned to match speet-e2e's existing wasmtime dependency (avoids two major
+# versions of wasmtime in one workspace). Default features on: this crate
+# needs Config::wasm_function_references, gated behind wasmtime's own "gc"
+# Cargo feature, which is in wasmtime's default feature set.
+wasmtime = { version = "45.0.2", optional = true }
 
 [dev-dependencies]
 # The test builds the *speet*-side module (using speet-interp/speet-link-core,

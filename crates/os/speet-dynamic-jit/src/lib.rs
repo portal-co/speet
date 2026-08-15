@@ -25,6 +25,8 @@
 //!    `speet_link_core::JitConfig`'s layout).
 
 pub mod cache;
+#[cfg(feature = "wasmtime")]
+pub mod wasmtime_link;
 
 use speet_link_core::JitConfig;
 use vane_arch::{JitOpcode, WasmAbiConfig, WasmJitCtx};
@@ -156,10 +158,13 @@ pub fn compile_pc(mem: &Mem, pc: u64, num_regs: u32) -> Vec<u8> {
     module.finish()
 }
 
-/// Errors from [`link_jit_function`].
+/// Errors from [`link_jit_function`] (and, under the `wasmtime` feature,
+/// [`wasmtime_link::link_jit_function_funcref`]).
 #[derive(Debug)]
 pub enum LinkError {
     Instantiate(wasmi::Error),
+    #[cfg(feature = "wasmtime")]
+    InstantiateWasmtime(wasmtime::Error),
     MissingExport,
     TableFull,
 }
@@ -168,6 +173,8 @@ impl core::fmt::Display for LinkError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             LinkError::Instantiate(e) => write!(f, "failed to instantiate JIT module: {e}"),
+            #[cfg(feature = "wasmtime")]
+            LinkError::InstantiateWasmtime(e) => write!(f, "failed to instantiate JIT module: {e}"),
             LinkError::MissingExport => write!(f, "JIT module has no `{JIT_EXPORT_NAME}` export"),
             LinkError::TableFull => write!(f, "dynamic dispatch table is full"),
         }
