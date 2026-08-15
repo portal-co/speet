@@ -8,6 +8,8 @@
 //! registry alongside this one.
 
 mod simple_rewrite;
+#[cfg(feature = "jit")]
+mod vane_jit;
 
 use os_daemon::Daemon as GenericDaemon;
 use speet_host_api::integrated_host_api;
@@ -36,6 +38,11 @@ impl Daemon {
         let mut inner = GenericDaemon::new();
         inner.register(Box::new(rt));
         maybe_register_simple_rewrite(&mut inner);
+        #[cfg(feature = "jit")]
+        {
+            inner.register_jit_backend(Box::new(vane_jit::VaneWasmJitBackend));
+            inner.register_jit_backend(Box::new(vane_jit::VaneBlitzJitBackend));
+        }
         Self(inner)
     }
 

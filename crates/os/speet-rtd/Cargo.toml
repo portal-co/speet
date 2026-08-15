@@ -15,9 +15,30 @@ os-daemon = { path = "../../../../os-emulation/crates/daemon/os-daemon" }
 os-transform-core = { path = "../../../../os-emulation/crates/daemon/os-transform-core" }
 tempfile = "3"
 
+# Phase 4 of the dynamic-JIT plan: daemon-side JIT backends. Feature-gated
+# and off by default (unlike every other dependency here) for two reasons:
+# it requires nightly Rust (transitively, from vane-arch's
+# #![feature(gen_blocks)]), and container-megabinary's documented No-JIT
+# policy is enforced by never linking these crates in, not just by
+# convention -- see os-jit-core's and os-daemon's crate docs.
+os-jit-core = { path = "../../../../os-emulation/crates/daemon/os-jit-core", optional = true }
+speet-dynamic-jit = { path = "../speet-dynamic-jit", optional = true }
+speet-native-jit = { path = "../speet-native-jit", optional = true }
+vane-riscv = { path = "../../../../vane/crates/vane-riscv", optional = true }
+
+[features]
+default = []
+jit = ["dep:os-jit-core", "dep:speet-dynamic-jit", "dep:speet-native-jit", "dep:vane-riscv", "os-daemon/jit"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 os-rewrite-macho = { path = "../../../../os-emulation/crates/daemon/os-rewrite-macho" }
 os-codesign-macho = { path = "../../../../os-emulation/crates/daemon/os-codesign-macho" }
+# Pre-existing gap, unrelated to the JIT work above: simple_rewrite_shim_path()
+# calls os_interposer::lib_path() unconditionally (not behind a target cfg),
+# but this dependency was only ever declared for the Linux/BSD block below --
+# `cargo build -p speet-rtd` has been failing to compile on macOS before this
+# change. Mirroring the Linux/BSD entry here to unblock the build.
+os-interposer = { path = "../../../../os-emulation/crates/shim/os-interposer" }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
 os-rewrite-elf = { path = "../../../../os-emulation/crates/daemon/os-rewrite-elf" }
