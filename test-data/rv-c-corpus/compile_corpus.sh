@@ -34,8 +34,27 @@ LLVM_LINK="$(find_tool llvm-link \
   /opt/homebrew/opt/llvm@20/bin/llvm-link \
   /usr/local/opt/llvm/bin/llvm-link)"
 
+# A cross-target ELF linker (rustup ships one for its own use -- lld isn't
+# per-target, so the host-triple copy links riscv32/riscv64 ELF just fine).
+# Needed by build_text below to resolve PC-relative call relocations
+# (R_RISCV_CALL_PLT etc) before extracting .text -- see that function's
+# comment for why unlinked .o files produce corrupt call targets.
+LLD_DIR=""
+if command -v rustc >/dev/null 2>&1; then
+  _sysroot="$(rustc --print sysroot 2>/dev/null || true)"
+  if [ -n "$_sysroot" ]; then
+    _host_triple="$(rustc -vV 2>/dev/null | awk '/^host:/ {print $2}')"
+    _cand="$_sysroot/lib/rustlib/$_host_triple/bin/gcc-ld"
+    [ -x "$_cand/ld.lld" ] && LLD_DIR="$_cand"
+  fi
+fi
+
 if [ -z "$CLANG" ] || [ -z "$OBJCOPY" ] || [ -z "$NM" ] || [ -z "$LLVM_LINK" ]; then
   echo "error: need clang, llvm-objcopy, llvm-nm, llvm-link" >&2
+  exit 1
+fi
+if [ -z "$LLD_DIR" ]; then
+  echo "error: need a cross-target ld.lld (checked rustup's \$(rustc --print sysroot)/lib/rustlib/<host>/bin/gcc-ld/ld.lld)" >&2
   exit 1
 fi
 
@@ -84,8 +103,32 @@ build_text() {
   "$LLVM_LINK" -o "$merged" "${bcs[@]}"
   local reloc="$tmp/${program}.o"
   "$CLANG" --target="$triple" -c $CFLAGS_FREESTANDING "$merged" -o "$reloc"
-  write_entry "$reloc" "$base"
-  "$OBJCOPY" --strip-all --only-section=.text "$reloc" "${base}.text.elf"
+  # `-c`-only compilation leaves PC-relative call/branch sites (e.g. a local
+  # function call's `auipc ra,0 / jalr ra,0(ra)`) as unresolved relocations
+  # (R_RISCV_CALL_PLT etc) with zeroed placeholder immediates -- the
+  # assembler can't know the callee's final address without linking. The
+  # old code fed this straight to `objcopy --strip-all`, which discards the
+  # relocation section along with everything else, permanently losing the
+  # information needed to compute the real call target: the emitted bytes
+  # decode as a jump to the auipc's own PC instead of the callee. Link at a
+  # fixed, zero base (matching this whole corpus's "`.text` starts at guest
+  # VA 0" convention) so the linker resolves every relocation -- and often
+  # relaxes auipc+jalr pairs back down to a single `jal` -- before `.text`
+  # is extracted.
+  # `-static` avoids a PT_DYNAMIC segment (.dynsym/.dynamic/etc, which the
+  # default freestanding link otherwise emits despite nothing actually
+  # being dynamically linked); `-Wl,-n` (nmagic) disables page-alignment
+  # padding between segments, which otherwise inflates `.text`'s declared
+  # size out to the next 4 KiB boundary and pulls the following sections'
+  # bytes into the `--only-section=.text` extraction below. Together they
+  # keep `.text.elf` exactly as tight as the code actually is.
+  local linked="$tmp/${program}.linked.o"
+  "$CLANG" --target="$triple" $CFLAGS_FREESTANDING -static \
+      -B"$LLD_DIR" -fuse-ld=lld \
+      -Wl,-Ttext=0x0 -Wl,--image-base=0 -Wl,--no-dynamic-linker -Wl,-e,main -Wl,-n \
+      "$reloc" -o "$linked"
+  write_entry "$linked" "$base"
+  "$OBJCOPY" --strip-all --only-section=.text "$linked" "${base}.text.elf"
 }
 
 build_linked() {
