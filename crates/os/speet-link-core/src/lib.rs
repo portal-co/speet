@@ -50,7 +50,7 @@ pub use layout_params::{
     default_runtime_layout_params,
 };
 pub use linker::LinkerPlugin;
-pub use oob::OobConfig;
+pub use oob::{JitConfig, OobConfig};
 pub use recompiler::Recompile;
 pub use shim::{MemWidth, ParamSource, Place, SavePair, ShimSpec, emit_shim};
 pub use unit::{BinaryUnit, DataSegment, FuncType};

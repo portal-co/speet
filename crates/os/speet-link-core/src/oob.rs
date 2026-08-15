@@ -47,6 +47,11 @@ pub struct OobConfig {
     /// The element section populates this table with compiled function indices
     /// keyed by their PC offset, enabling `return_call_indirect` dispatch.
     pub dispatch_table_slot: IndexSlot,
+
+    /// Optional dynamic-JIT dispatch tier, layered on top of the static
+    /// binary search above. `None` (the default) reproduces today's
+    /// interpreter-only OOB behaviour exactly. See [`JitConfig`].
+    pub jit: Option<JitConfig>,
 }
 
 impl OobConfig {
@@ -60,6 +65,7 @@ impl OobConfig {
             lookup_stub_func_idx: 0,
             interp_func_idx: 0,
             dispatch_table_slot,
+            jit: None,
         }
     }
 
@@ -73,5 +79,91 @@ impl OobConfig {
     /// Absolute WASM table index of the dispatch table.
     pub fn table_idx(&self, entity_space: &EntityIndexSpace) -> u32 {
         entity_space.tables.base(self.dispatch_table_slot)
+    }
+}
+
+/// Dynamic-JIT dispatch tier configuration, layered between `OobConfig`'s
+/// static binary search and the interpreter fallback.
+///
+/// Two host-populated, fixed-capacity side tables live in guest-accessible
+/// WASM memory and are scanned linearly by the JIT-aware lookup stub (see
+/// `speet_interp::emit_jit_lookup_stub`):
+///
+/// * **Dynamic dispatch table** (`dyn_table_*`): `(guest_pc: i64, table_slot:
+///   i32)` entries, 12 bytes each, `table_slot == -1` marks an empty slot.
+///   Populated by a JIT backend once it compiles and links a function for a
+///   PC; a hit `return_call_indirect`s into `dyn_dispatch_table_slot`, the
+///   runtime-mutable sibling of [`OobConfig::dispatch_table_slot`].
+/// * **Hit-count table** (`hit_table_*`): `(guest_pc: i64, count: i32)`
+///   entries, 12 bytes each, `count == 0` marks an empty slot (so
+///   zero-initialised memory needs no explicit setup, unlike the dynamic
+///   table, which must be pre-filled with `table_slot = -1` sentinels).
+///   Incremented on every OOB miss of both the static and dynamic tables;
+///   crossing `hit_threshold` fires a fire-and-forget call to
+///   `jit_request_func_idx`.
+///
+/// Both tables use bounded **linear** scans rather than hashing — a known
+/// scalability tradeoff, adequate for the modest hot-PC-set sizes expected in
+/// practice. The lookup stub always falls through to `oob.interp_func_idx`
+/// regardless of table state or JIT-request outcome, so a slow or absent JIT
+/// backend can never stall or break execution.
+#[derive(Clone, Debug)]
+pub struct JitConfig {
+    /// Pre-declared, runtime-mutable WASM table slot for JIT-compiled
+    /// functions — distinct from [`OobConfig::dispatch_table_slot`], which
+    /// stays AOT-immutable.
+    pub dyn_dispatch_table_slot: IndexSlot,
+
+    /// WASM memory index holding the dynamic dispatch side table.
+    pub dyn_table_mem_idx: u32,
+    /// Byte offset of the dynamic dispatch side table within its memory.
+    pub dyn_table_mem_offset: u64,
+    /// Number of 12-byte entries reserved in the dynamic dispatch side table.
+    pub dyn_table_capacity: u32,
+
+    /// WASM memory index holding the hit-count side table.
+    pub hit_table_mem_idx: u32,
+    /// Byte offset of the hit-count side table within its memory.
+    pub hit_table_mem_offset: u64,
+    /// Number of 12-byte entries reserved in the hit-count side table.
+    pub hit_table_capacity: u32,
+
+    /// Hit-count threshold at which a fire-and-forget JIT compile request is
+    /// issued for a PC. `0` effectively disables JIT requests (the dynamic
+    /// table can still be consulted/externally seeded, but the stub never
+    /// asks for new compiles).
+    pub hit_threshold: u32,
+
+    /// Host import function index called (fire-and-forget, `(pc: i64)`) when
+    /// a PC's hit count reaches `hit_threshold`. `None` disables JIT requests
+    /// even if `hit_threshold` is nonzero.
+    pub jit_request_func_idx: Option<u32>,
+}
+
+impl JitConfig {
+    /// Register the dynamic dispatch table in Phase 1.
+    ///
+    /// Returns a partially-initialised `JitConfig` with all memory/capacity/
+    /// threshold fields zeroed and no JIT-request import configured; callers
+    /// must fill those in once the corresponding memories and import are
+    /// resolved.
+    pub fn register(entity_space: &mut EntityIndexSpace) -> Self {
+        let dyn_dispatch_table_slot = entity_space.tables.append(1);
+        Self {
+            dyn_dispatch_table_slot,
+            dyn_table_mem_idx: 0,
+            dyn_table_mem_offset: 0,
+            dyn_table_capacity: 0,
+            hit_table_mem_idx: 0,
+            hit_table_mem_offset: 0,
+            hit_table_capacity: 0,
+            hit_threshold: 0,
+            jit_request_func_idx: None,
+        }
+    }
+
+    /// Absolute WASM table index of the dynamic dispatch table.
+    pub fn dyn_table_idx(&self, entity_space: &EntityIndexSpace) -> u32 {
+        entity_space.tables.base(self.dyn_dispatch_table_slot)
     }
 }

@@ -59,7 +59,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use speet_link_core::{EntityIndexSpace, IndexSlot, OobConfig};
+use speet_link_core::{EntityIndexSpace, IndexSlot, JitConfig, OobConfig};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 use wax_core::build::InstructionSink;
 
@@ -402,6 +402,413 @@ pub fn emit_lookup_stub<Context, E>(
     sink.instruction(ctx, &Instruction::ReturnCall(oob.interp_func_idx))?;
 
     sink.instruction(ctx, &Instruction::End) // end function
+}
+
+// ── emit_jit_lookup_stub ──────────────────────────────────────────────────────
+
+/// Extra WASM local declarations (beyond `params`) required by
+/// [`emit_jit_lookup_stub`], in the order it expects them.
+///
+/// Callers building a `wasm_encoder::Function` for the JIT-aware lookup stub
+/// must append these after `params.len()` — i.e. the function's own locals
+/// start at index `params.len()` exactly as with [`emit_lookup_stub`], just
+/// with six extra slots at the end (indices `params.len()+5 ..
+/// params.len()+11`) beyond the five [`emit_lookup_stub`] already needs.
+pub fn jit_lookup_stub_extra_locals() -> [(u32, ValType); 6] {
+    [
+        (1, ValType::I32), // scan_i
+        (1, ValType::I32), // scan_off
+        (1, ValType::I64), // scan_pc
+        (1, ValType::I32), // scan_val (table_slot / count)
+        (1, ValType::I32), // hit_found_flag
+        (1, ValType::I32), // hit_empty_off
+    ]
+}
+
+/// Emit the JIT-aware lookup stub body into `sink`.
+///
+/// Extends [`emit_lookup_stub`]'s static binary search with two additional,
+/// dynamically-populated tiers (see [`JitConfig`] for the on-disk/in-memory
+/// table layouts), tried in order on a static-table miss:
+///
+/// 1. **Dynamic dispatch table** — a bounded linear scan of
+///    `jit.dyn_table_capacity` `(pc, table_slot)` entries. A hit
+///    `return_call_indirect`s into `dyn_table_idx` (the runtime-mutable
+///    sibling of the static `table_idx`).
+/// 2. **Hit-count table** — a bounded linear scan of `jit.hit_table_capacity`
+///    `(pc, count)` entries. The current PC's count is incremented (or
+///    inserted with count 1, if room remains) on every miss of both tables
+///    above. Crossing `jit.hit_threshold` fires a fire-and-forget call to
+///    `jit.jit_request_func_idx`.
+///
+/// In every case the stub falls through to `oob.interp_func_idx` — a slow or
+/// absent JIT backend can never stall or break execution.
+///
+/// Requires the caller to have declared [`jit_lookup_stub_extra_locals`] in
+/// addition to [`emit_lookup_stub`]'s usual five locals.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_jit_lookup_stub<Context, E>(
+    sink: &mut dyn InstructionSink<Context, E>,
+    ctx: &mut Context,
+    oob: &OobConfig,
+    jit: &JitConfig,
+    params: &[ValType],
+    type_idx: u32,
+    table_idx: u32,
+    dyn_table_idx: u32,
+    data_mem_idx: u32,
+    n_entries: u32,
+) -> Result<(), E> {
+    let n_params = params.len() as u32;
+    let tpc_local = n_params - 1;
+    let lo = n_params;
+    let hi = n_params + 1;
+    let mid = n_params + 2;
+    let mid_pc = n_params + 3;
+    let byte_off = n_params + 4;
+    let scan_i = n_params + 5;
+    let scan_off = n_params + 6;
+    let scan_pc = n_params + 7;
+    let scan_val = n_params + 8;
+    let hit_found_flag = n_params + 9;
+    let hit_empty_off = n_params + 10;
+
+    // ── Phase A: static binary search (identical logic to emit_lookup_stub,
+    // except the "not found" path falls into Phase B instead of the
+    // interpreter directly). ──
+    sink.instruction(ctx, &Instruction::I32Const(0))?;
+    sink.instruction(ctx, &Instruction::LocalSet(lo))?;
+    sink.instruction(ctx, &Instruction::I32Const(n_entries as i32))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hi))?;
+
+    // Wrapped in an explicit `Block` (unlike `emit_lookup_stub`'s bare loop) so
+    // the `BrIf(1)` break below targets this block's `Empty` end rather than
+    // the function's own implicit result-typed frame — branching to the
+    // latter would require the function's non-empty result types on the
+    // stack, which a plain loop-break does not provide. Without this wrapper
+    // the module fails validation with e.g. "type mismatch in br_if, expected
+    // [i64] but got []".
+    sink.instruction(ctx, &Instruction::Block(BlockType::Empty))?;
+    sink.instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(lo))?;
+    sink.instruction(ctx, &Instruction::LocalGet(hi))?;
+    sink.instruction(ctx, &Instruction::I32GeU)?;
+    sink.instruction(ctx, &Instruction::BrIf(1))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(lo))?;
+    sink.instruction(ctx, &Instruction::LocalGet(hi))?;
+    sink.instruction(ctx, &Instruction::I32Add)?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::I32ShrU)?;
+    sink.instruction(ctx, &Instruction::LocalSet(mid))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(mid))?;
+    sink.instruction(ctx, &Instruction::I32Const(12))?;
+    sink.instruction(ctx, &Instruction::I32Mul)?;
+    sink.instruction(ctx, &Instruction::LocalSet(byte_off))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(byte_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I64Load(MemArg { offset: 0, align: 0, memory_index: data_mem_idx }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalSet(mid_pc))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(mid_pc))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(ctx, &Instruction::I64Eq)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    for p in 0..n_params {
+        sink.instruction(ctx, &Instruction::LocalGet(p))?;
+    }
+    sink.instruction(ctx, &Instruction::LocalGet(byte_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Load(MemArg { offset: 8, align: 0, memory_index: data_mem_idx }),
+    )?;
+    sink.instruction(
+        ctx,
+        &Instruction::ReturnCallIndirect { type_index: type_idx, table_index: table_idx },
+    )?;
+    sink.instruction(ctx, &Instruction::End)?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(mid_pc))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(ctx, &Instruction::I64LtU)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    sink.instruction(ctx, &Instruction::LocalGet(mid))?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::I32Add)?;
+    sink.instruction(ctx, &Instruction::LocalSet(lo))?;
+    sink.instruction(ctx, &Instruction::Else)?;
+    sink.instruction(ctx, &Instruction::LocalGet(mid))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hi))?;
+    sink.instruction(ctx, &Instruction::End)?;
+
+    sink.instruction(ctx, &Instruction::Br(0))?;
+    sink.instruction(ctx, &Instruction::End)?; // end static-search loop
+    sink.instruction(ctx, &Instruction::End)?; // end static-search block
+
+    // ── Phase B: dynamic dispatch table (bounded linear scan). ──
+    sink.instruction(ctx, &Instruction::I32Const(0))?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_i))?;
+
+    sink.instruction(ctx, &Instruction::Block(BlockType::Empty))?; // see Phase A's comment on why this wraps the loop
+    sink.instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(jit.dyn_table_capacity as i32))?;
+    sink.instruction(ctx, &Instruction::I32GeU)?;
+    sink.instruction(ctx, &Instruction::BrIf(1))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(12))?;
+    sink.instruction(ctx, &Instruction::I32Mul)?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_off))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Load(MemArg {
+            offset: jit.dyn_table_mem_offset + 8,
+            align: 0,
+            memory_index: jit.dyn_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_val))?;
+
+    // if table_slot != -1 (occupied)
+    sink.instruction(ctx, &Instruction::LocalGet(scan_val))?;
+    sink.instruction(ctx, &Instruction::I32Const(-1))?;
+    sink.instruction(ctx, &Instruction::I32Ne)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I64Load(MemArg {
+            offset: jit.dyn_table_mem_offset,
+            align: 0,
+            memory_index: jit.dyn_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_pc))?;
+
+    // if scan_pc == target_pc: dispatch
+    sink.instruction(ctx, &Instruction::LocalGet(scan_pc))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(ctx, &Instruction::I64Eq)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    for p in 0..n_params {
+        sink.instruction(ctx, &Instruction::LocalGet(p))?;
+    }
+    sink.instruction(ctx, &Instruction::LocalGet(scan_val))?;
+    sink.instruction(
+        ctx,
+        &Instruction::ReturnCallIndirect { type_index: type_idx, table_index: dyn_table_idx },
+    )?;
+    sink.instruction(ctx, &Instruction::End)?; // end pc-match if
+    sink.instruction(ctx, &Instruction::End)?; // end occupied if
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::I32Add)?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_i))?;
+    sink.instruction(ctx, &Instruction::Br(0))?;
+    sink.instruction(ctx, &Instruction::End)?; // end dynamic-scan loop
+    sink.instruction(ctx, &Instruction::End)?; // end dynamic-scan block
+
+    // ── Phase C: hit-count table (bounded linear scan; insert-or-increment). ──
+    sink.instruction(ctx, &Instruction::I32Const(0))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hit_found_flag))?;
+    sink.instruction(ctx, &Instruction::I32Const(-1))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::I32Const(0))?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_i))?;
+
+    sink.instruction(ctx, &Instruction::Block(BlockType::Empty))?; // see Phase A's comment on why this wraps the loop
+    sink.instruction(ctx, &Instruction::Loop(BlockType::Empty))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(jit.hit_table_capacity as i32))?;
+    sink.instruction(ctx, &Instruction::I32GeU)?;
+    sink.instruction(ctx, &Instruction::BrIf(1))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(12))?;
+    sink.instruction(ctx, &Instruction::I32Mul)?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_off))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Load(MemArg {
+            offset: jit.hit_table_mem_offset + 8,
+            align: 0,
+            memory_index: jit.hit_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_val))?;
+
+    // if count == 0 (empty slot) { remember first empty offset } else { check for pc match }
+    sink.instruction(ctx, &Instruction::LocalGet(scan_val))?;
+    sink.instruction(ctx, &Instruction::I32Eqz)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::I32Const(-1))?;
+    sink.instruction(ctx, &Instruction::I32Eq)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::End)?; // end "remember first empty"
+
+    sink.instruction(ctx, &Instruction::Else)?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I64Load(MemArg {
+            offset: jit.hit_table_mem_offset,
+            align: 0,
+            memory_index: jit.hit_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_pc))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_pc))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(ctx, &Instruction::I64Eq)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    // count += 1; store back
+    sink.instruction(ctx, &Instruction::LocalGet(scan_off))?;
+    sink.instruction(ctx, &Instruction::LocalGet(scan_val))?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::I32Add)?;
+    sink.instruction(ctx, &Instruction::LocalTee(scan_val))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Store(MemArg {
+            offset: jit.hit_table_mem_offset + 8,
+            align: 0,
+            memory_index: jit.hit_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::LocalSet(hit_found_flag))?;
+    emit_maybe_request_jit(sink, ctx, jit, scan_val, tpc_local)?;
+    sink.instruction(ctx, &Instruction::End)?; // end pc-match if
+    sink.instruction(ctx, &Instruction::End)?; // end empty/occupied if-else
+
+    // if hit_found_flag: break out of the scan loop now. At this point the
+    // only enclosing structures (both ifs above already closed) are the Loop
+    // and its wrapping Block, so br 1 targets the Block — same as the
+    // capacity check above.
+    sink.instruction(ctx, &Instruction::LocalGet(hit_found_flag))?;
+    sink.instruction(ctx, &Instruction::BrIf(1))?;
+
+    sink.instruction(ctx, &Instruction::LocalGet(scan_i))?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::I32Add)?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_i))?;
+    sink.instruction(ctx, &Instruction::Br(0))?;
+    sink.instruction(ctx, &Instruction::End)?; // end hit-scan loop
+    sink.instruction(ctx, &Instruction::End)?; // end hit-scan block
+
+    // Not found and not already handled: insert at first empty slot, if any.
+    sink.instruction(ctx, &Instruction::LocalGet(hit_found_flag))?;
+    sink.instruction(ctx, &Instruction::I32Eqz)?;
+    sink.instruction(ctx, &Instruction::LocalGet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::I32Const(-1))?;
+    sink.instruction(ctx, &Instruction::I32Ne)?;
+    sink.instruction(ctx, &Instruction::I32And)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    sink.instruction(ctx, &Instruction::LocalGet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I64Store(MemArg {
+            offset: jit.hit_table_mem_offset,
+            align: 0,
+            memory_index: jit.hit_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::LocalGet(hit_empty_off))?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(
+        ctx,
+        &Instruction::I32Store(MemArg {
+            offset: jit.hit_table_mem_offset + 8,
+            align: 0,
+            memory_index: jit.hit_table_mem_idx,
+        }),
+    )?;
+    sink.instruction(ctx, &Instruction::I32Const(1))?;
+    sink.instruction(ctx, &Instruction::LocalSet(scan_val))?; // count is exactly 1 on fresh insert
+    emit_maybe_request_jit(sink, ctx, jit, scan_val, tpc_local)?;
+    sink.instruction(ctx, &Instruction::End)?; // end "insert" if
+    // (else: both tables full — degrade gracefully, never request JIT for this PC.)
+
+    // ── Phase D: tail-call interpreter (same as emit_lookup_stub's not-found
+    // path). ──
+    for p in 0..n_params {
+        sink.instruction(ctx, &Instruction::LocalGet(p))?;
+    }
+    sink.instruction(ctx, &Instruction::ReturnCall(oob.interp_func_idx))?;
+
+    sink.instruction(ctx, &Instruction::End) // end function
+}
+
+/// Emit `if count_local >= jit.hit_threshold { call
+/// jit.jit_request_func_idx(local.get tpc_local) }`, a no-op if
+/// `jit.jit_request_func_idx` is `None` or `jit.hit_threshold` is `0`.
+///
+/// `count_local` must already hold the just-updated count as an i32;
+/// `tpc_local` must be the local index holding `target_pc: i64`.
+fn emit_maybe_request_jit<Context, E>(
+    sink: &mut dyn InstructionSink<Context, E>,
+    ctx: &mut Context,
+    jit: &JitConfig,
+    count_local: u32,
+    tpc_local: u32,
+) -> Result<(), E> {
+    let (Some(request_func_idx), true) = (jit.jit_request_func_idx, jit.hit_threshold > 0) else {
+        return Ok(());
+    };
+    sink.instruction(ctx, &Instruction::LocalGet(count_local))?;
+    sink.instruction(ctx, &Instruction::I32Const(jit.hit_threshold as i32))?;
+    sink.instruction(ctx, &Instruction::I32GeU)?;
+    sink.instruction(ctx, &Instruction::If(BlockType::Empty))?;
+    sink.instruction(ctx, &Instruction::LocalGet(tpc_local))?;
+    sink.instruction(ctx, &Instruction::Call(request_func_idx))?;
+    sink.instruction(ctx, &Instruction::End)
+}
+
+/// Emit the lookup stub, dispatching to [`emit_jit_lookup_stub`] when
+/// `oob.jit` is `Some`, or to [`emit_lookup_stub`] (unmodified) when `None`.
+///
+/// This is the single call site that guarantees `oob.jit: None` reproduces
+/// today's interpreter-only OOB behaviour byte-for-byte: the `None` arm calls
+/// [`emit_lookup_stub`] directly, unchanged from before the JIT seam existed.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_lookup_stub_dispatch<Context, E>(
+    sink: &mut dyn InstructionSink<Context, E>,
+    ctx: &mut Context,
+    oob: &OobConfig,
+    params: &[ValType],
+    type_idx: u32,
+    table_idx: u32,
+    dyn_table_idx: u32,
+    data_mem_idx: u32,
+    n_entries: u32,
+) -> Result<(), E> {
+    match &oob.jit {
+        None => emit_lookup_stub(sink, ctx, oob, params, type_idx, table_idx, data_mem_idx, n_entries),
+        Some(jit) => emit_jit_lookup_stub(
+            sink, ctx, oob, jit, params, type_idx, table_idx, dyn_table_idx, data_mem_idx, n_entries,
+        ),
+    }
 }
 
 // ── emit_interp_stub ──────────────────────────────────────────────────────────
