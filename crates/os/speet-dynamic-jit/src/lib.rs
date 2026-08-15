@@ -87,6 +87,7 @@ pub fn compile_pc(mem: &Mem, pc: u64, num_regs: u32) -> Vec<u8> {
         ecall_func_idx: ECALL_FUNC_IDX,
         jit_invalidate_func_idx: JIT_INVALIDATE_FUNC_IDX,
         lookup_stub_func_idx: LOOKUP_STUB_FUNC_IDX,
+        state_slots: &[], // RISC-V has no named state; all GPRs are LoadReg/StoreReg
     };
     let ctx = StaticAbiCtx(abi);
 
