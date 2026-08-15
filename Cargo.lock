@@ -1197,6 +1197,9 @@ dependencies = [
 [[package]]
 name = "os-page"
 version = "0.1.0"
+dependencies = [
+ "spin 0.10.1",
+]
 
 [[package]]
 name = "os-page-codegen"
@@ -1347,7 +1350,7 @@ version = "0.1.0"
 dependencies = [
  "portal-pc-asm-common",
  "portal-solutions-asm-regalloc",
- "rv-asm 0.2.1",
+ "rv-asm",
  "typeid",
 ]
 
@@ -1709,12 +1712,6 @@ name = "rv-asm"
 version = "0.2.1"
 
 [[package]]
-name = "rv-asm"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5713b6e431d860b0c0a95e410df4a859c3579db2b6e98470ae9e69658da59a38"
-
-[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1994,6 +1991,7 @@ dependencies = [
 name = "speet-dynamic-jit"
 version = "0.1.0"
 dependencies = [
+ "object 0.36.7",
  "speet-interp",
  "speet-link-core",
  "vane-aarch64",
@@ -2013,7 +2011,7 @@ dependencies = [
  "binary-io",
  "object 0.36.7",
  "rabbitizer",
- "rv-asm 0.2.1",
+ "rv-asm",
  "serde",
  "serde_json",
  "speet-aarch64",
@@ -2117,7 +2115,7 @@ dependencies = [
  "os-linux-wasi",
  "os-syscall-emit",
  "rabbitizer",
- "rv-asm 0.2.1",
+ "rv-asm",
  "speet-aarch64",
  "speet-host-api",
  "speet-host-mem-shim",
@@ -2343,7 +2341,7 @@ dependencies = [
  "portal-solutions-blitz-js",
  "portal-solutions-blitz-riscv32",
  "portal-solutions-blitz-x86-64",
- "rv-asm 0.2.1",
+ "rv-asm",
  "speet-aarch64",
  "speet-abi-stubs",
  "speet-arm",
@@ -2376,7 +2374,7 @@ dependencies = [
  "binary-io",
  "log",
  "object 0.36.7",
- "rv-asm 0.2.1",
+ "rv-asm",
  "speet-abi-stubs",
  "speet-corpus-harness",
  "speet-host-api",
@@ -2883,7 +2881,7 @@ name = "vane-riscv"
 version = "0.1.0"
 dependencies = [
  "paste",
- "rv-asm 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rv-asm",
  "vane-arch",
  "wasmparser 0.239.0",
 ]
@@ -3590,138 +3588,6 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-asm-jvm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-native"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-wax"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-cfg"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ll-common"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-tac"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-util"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"
-
-[[patch.unused]]
-name = "wax-tags"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcomp-ir-plugin-host"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcomp-plugin-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-arena"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-cps-c-backend"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-e2e-tests"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-edu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-fast-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-lower"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-mini-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-c-interp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dreamcompiler-minibc-interp"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "ast-traits"
 version = "0.1.0"
 
@@ -3790,32 +3656,80 @@ name = "type-onion"
 version = "0.2.3"
 
 [[patch.unused]]
-name = "portal-progress"
+name = "wax-tags"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-progress-core"
+name = "pit-gen"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-progress-lazy-transform"
+name = "pit-lang-generic"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-progress-protocol"
+name = "pit-rust-generic"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-progress-tui"
+name = "dreamcomp-ir-plugin-host"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-progress-web"
+name = "dreamcomp-plugin-common"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
+name = "dreamcompiler-arena"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-cps-c-backend"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-e2e-tests"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-edu"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-fast-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-lower"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-mini-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-c-interp"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dreamcompiler-minibc-interp"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-pc-waffle"
@@ -3870,10 +3784,6 @@ name = "ephemera"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "vaffle"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "volar-c-backend"
 version = "0.1.0"
 
@@ -3898,23 +3808,7 @@ name = "volar-dyn"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-common"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "volar-ir-lir-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-passes"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-lir"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3926,10 +3820,6 @@ name = "volar-primitives"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-provenance"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "volar-spec"
 version = "0.1.0"
 
@@ -3938,23 +3828,71 @@ name = "volar-spec-dyn"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-vaffle-target"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "volar-weaver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-gen"
+name = "vaffle"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-lang-generic"
+name = "volar-fuzz"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-rust-generic"
+name = "volar-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-config"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-opt"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-passes"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-text"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-virt"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-saved"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-test-corpus"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-text"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-provenance"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-side"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-vaffle-target"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3984,3 +3922,99 @@ version = "0.0.6"
 [[patch.unused]]
 name = "px-wsdom-macros-decl"
 version = "0.0.6"
+
+[[patch.unused]]
+name = "portal-solutions-swibb"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-solutions-sdk"
+version = "0.0.2"
+
+[[patch.unused]]
+name = "portal-progress"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-progress-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-progress-lazy-transform"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-progress-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-progress-tui"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-progress-web"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-native"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "os-target-wax"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "pit-core"
+version = "0.5.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-solutions-asm-jvm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-semantics"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64-shim"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jsc-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-generator"
+version = "0.8.0-pre.10"
+
+[[patch.unused]]
+name = "portal-jsc-simpl-js"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-cfg"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ll-common"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-opt-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-tac"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-util"
+version = "0.8.0-pre.11"
