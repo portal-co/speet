@@ -46,3 +46,6 @@ wasmtime = { version = "45.0.2", optional = true }
 # just for the test's own module-building code, distinct from the library's
 # 0.239.0 (which must match vane's `Operator`/`JitOpcode` types exactly).
 wasm-encoder-240 = { package = "wasm-encoder", version = "0.240.0", default-features = false, features = ["wasmparser"] }
+# For the corpus-scale hybrid tests: parses real `.text.elf` fixtures.
+# Version matches speet-corpus-harness's own pin.
+object = "0.36"
