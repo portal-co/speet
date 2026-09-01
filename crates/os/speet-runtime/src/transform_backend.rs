@@ -9,6 +9,7 @@ use crate::integrated::{
 };
 use os_transform_core::{BackendId, ObtainError, RunAs, Suitability, TransformBackend};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// `Suitability.reasons` is a flat `Vec<String>` (see `os-transform-core`),
 /// so the two typed dependency buckets are tagged rather than dropped.
@@ -22,6 +23,41 @@ fn to_generic_suitability(r: &SuitabilityReport) -> Suitability {
     Suitability {
         suitable: r.suitable,
         reasons,
+    }
+}
+
+/// `TransformBackend` over a shared [`IntegratedNativeRuntime`] so the
+/// daemon can keep a handle for `LastReport` / hot-reload while the generic
+/// registry still owns a backend object.
+#[derive(Clone)]
+pub struct SharedIntegratedRuntime {
+    pub inner: Arc<Mutex<IntegratedNativeRuntime>>,
+}
+
+impl SharedIntegratedRuntime {
+    pub fn new(inner: Arc<Mutex<IntegratedNativeRuntime>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl TransformBackend for SharedIntegratedRuntime {
+    fn id(&self) -> BackendId {
+        BackendId::INTEGRATED_RECOMPILE
+    }
+
+    fn analyze(&self, path: &Path) -> Result<Suitability, String> {
+        NativeRuntime::analyze(&*self.inner.lock().unwrap(), path)
+            .map(|r| to_generic_suitability(&r))
+    }
+
+    fn obtain(&mut self, path: &Path) -> Result<RunAs, ObtainError> {
+        match self.inner.lock().unwrap().obtain_executable(path) {
+            Ok(exe) => Ok(RunAs::Exec(exe)),
+            Err(LocalObtainError::Unsuitable(r)) => {
+                Err(ObtainError::Unsuitable(to_generic_suitability(&r)))
+            }
+            Err(LocalObtainError::RecompileFailed(e)) => Err(ObtainError::TransformFailed(e)),
+        }
     }
 }
 

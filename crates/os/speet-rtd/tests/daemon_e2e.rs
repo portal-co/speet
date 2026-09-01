@@ -1,7 +1,9 @@
 //! Daemon IPC and cache tests.
 
 use speet_rtd::{bind_socket, Daemon};
-use speet_runtime::rtd_protocol::{decode_response, encode_request, read_frame, write_frame, Request};
+use speet_runtime::rtd_protocol::{
+    decode_response, encode_request, read_frame, write_frame, Request,
+};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use tempfile::tempdir;
@@ -14,7 +16,11 @@ use tempfile::tempdir;
 fn linked_exit42() -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/c-corpus");
     let p = root.join("aarch64-macos/exit42.linked.macho");
-    assert!(p.is_file(), "missing checked-in corpus fixture: {}", p.display());
+    assert!(
+        p.is_file(),
+        "missing checked-in corpus fixture: {}",
+        p.display()
+    );
     p
 }
 

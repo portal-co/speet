@@ -147,3 +147,15 @@ The `logging` feature on `speet-riscv` enables the `rlog!` macro (delegates to `
 captured automatically once the subscriber is installed.
 
 These variables have no effect when unset and do not change program correctness.
+
+---
+
+## 11. Recompiler debug MCP (`speet-rtd` `mcp` / `hot-recompiler`)
+
+**Guide:** [docs/guides/recompiler-debug-mcp.md](docs/guides/recompiler-debug-mcp.md)
+**Skill:** [`.agents/skills/speet-recompiler-debug`](.agents/skills/speet-recompiler-debug/SKILL.md)
+
+- Do not add a Translate/`ArchOp` variant or bump plugin `PROTOCOL_VERSION` for the debug loop — bulk translate is a separate guest ABI (`speet-recompiler-guest`).
+- Do not add serde to `speet-plugin-api`.
+- Do not add a `reload_*` tool or in-memory `grant_extern` overlay — rebuild the watched wasm, then rerun; `ensure_fresh` hashes the artifact.
+- Do not treat `unsupported_insns` as a correctness proof (same rule as §9).

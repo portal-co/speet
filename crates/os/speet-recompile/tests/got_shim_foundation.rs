@@ -64,14 +64,7 @@ fn runtime_layout_params_declare_local_slots() {
 
 #[test]
 fn catalog_includes_redirect_shim_entries() {
-    let catalog = GuestFuncCatalog::from_layout(
-        0x1000,
-        BinArch::AArch64,
-        3,
-        2,
-        0x20,
-        1,
-    );
+    let catalog = GuestFuncCatalog::from_layout(0x1000, BinArch::AArch64, 3, 2, 0x20, 1);
     assert_eq!(catalog.entries.len(), 4); // 2 translated + 1 shim + halt
     assert_eq!(catalog.n_redirect_shims, 1);
     assert_eq!(catalog.halt_entry().guest_pc, halt_addr(0x1000, 0x20));
@@ -84,7 +77,8 @@ fn plt_plan_native_shim_addr_map() {
     let plan = PltCallPlan::from_targets(&targets, &NativeWriteHost);
     assert!(plan.wasm_import_by_addr.is_empty());
     assert_eq!(
-        plan.native_shim_by_addr.get(&(LibraryId::MAIN_IMAGE, 0x5000)),
+        plan.native_shim_by_addr
+            .get(&(LibraryId::MAIN_IMAGE, 0x5000)),
         Some(&"write".to_string())
     );
 }
@@ -94,9 +88,8 @@ fn redirect_shims_emitted_for_wasm_import_hooks() {
     let manifest = ImportManifest::integrated_native();
     let mut targets = ExternalTargetTable::new();
     targets.insert(LibraryId::MAIN_IMAGE, 0x3000, "execve");
-    let host = RedirectingHostApi::integrated(
-        TunneledHostApi::for_host().with_manifest(manifest.clone()),
-    );
+    let host =
+        RedirectingHostApi::integrated(TunneledHostApi::for_host().with_manifest(manifest.clone()));
     let plan = PltCallPlan::from_targets(&targets, &host);
     let (shims, by_sym) = build_redirect_shims_from_plan(&plan, BinArch::AArch64, &manifest, 34);
     assert_eq!(shims.len(), 1);
@@ -109,8 +102,7 @@ fn redirect_shims_emitted_for_native_shim_hooks() {
     let mut targets = ExternalTargetTable::new();
     targets.insert(LibraryId::MAIN_IMAGE, 0x5000, "write");
     let plan = PltCallPlan::from_targets(&targets, &NativeWriteHost);
-    let (shims, by_sym) =
-        build_redirect_shims_from_plan(&plan, BinArch::AArch64, &manifest, 34);
+    let (shims, by_sym) = build_redirect_shims_from_plan(&plan, BinArch::AArch64, &manifest, 34);
     assert_eq!(shims.len(), 1);
     assert!(by_sym.contains_key("write"));
 }

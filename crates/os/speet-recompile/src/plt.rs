@@ -70,9 +70,11 @@ impl PltCallPlan {
     ) -> Option<u32> {
         let bare = core_symbol.strip_prefix('_').unwrap_or(core_symbol);
         for imp in &manifest.func_imports {
-            if imp.intercepts.iter().any(|s| {
-                s.strip_prefix('_').unwrap_or(s.as_str()) == bare
-            }) {
+            if imp
+                .intercepts
+                .iter()
+                .any(|s| s.strip_prefix('_').unwrap_or(s.as_str()) == bare)
+            {
                 return manifest.index_of(&imp.module, &imp.name);
             }
         }
@@ -108,7 +110,9 @@ impl PltCallPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speet_host_api::{HostApi, ImportManifest, PltRedirect, RedirectingHostApi, TunneledHostApi};
+    use speet_host_api::{
+        HostApi, ImportManifest, PltRedirect, RedirectingHostApi, TunneledHostApi,
+    };
     use tunnel::{DylibRef, HostAbi, TunnelResolution};
 
     #[test]
@@ -140,10 +144,7 @@ mod tests {
             fn import_manifest(&self) -> ImportManifest {
                 ImportManifest::native_syscall()
             }
-            fn resolve_ambient(
-                &self,
-                guest_name: &str,
-            ) -> Option<TunnelResolution> {
+            fn resolve_ambient(&self, guest_name: &str) -> Option<TunnelResolution> {
                 if guest_name == "write" || guest_name == "_write" {
                     Some(TunnelResolution {
                         host_symbol: "write".into(),

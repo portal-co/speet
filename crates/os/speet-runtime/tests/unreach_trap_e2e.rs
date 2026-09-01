@@ -78,9 +78,7 @@ fn unreach_trap_logs_guest_pc() {
     )
     .expect("link");
 
-    let output = Command::new(&exe)
-        .output()
-        .expect("spawn");
+    let output = Command::new(&exe).output().expect("spawn");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("speet: unsupported instruction at guest pc=0x1000"),

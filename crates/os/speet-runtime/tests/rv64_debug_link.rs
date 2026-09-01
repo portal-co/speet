@@ -2,14 +2,20 @@ use binary_io::{BinArch, BinOs};
 use speet_runtime::{default_host_api, Runtime};
 use std::sync::Arc;
 
-const EXIT_42: &[u8] = &[0x13,0x05,0xA0,0x02,0x93,0x08,0xD0,0x05,0x73,0x00,0x00,0x00];
+const EXIT_42: &[u8] = &[
+    0x13, 0x05, 0xA0, 0x02, 0x93, 0x08, 0xD0, 0x05, 0x73, 0x00, 0x00, 0x00,
+];
 
 #[test]
 fn debug_keep_exe() {
     let mut rt = Runtime::new(Arc::new(default_host_api()));
-    if !rt.llvm_available() { return; }
+    if !rt.llvm_available() {
+        return;
+    }
     let wasm = rt.recompile_rv64_text(EXIT_42, 0x1000);
-    let obj = rt.compile_to_object(&wasm, BinArch::AArch64, BinOs::MacOs).unwrap();
+    let obj = rt
+        .compile_to_object(&wasm, BinArch::AArch64, BinOs::MacOs)
+        .unwrap();
     let dir = std::path::PathBuf::from("/tmp/speet_rv64_keep");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -23,7 +29,8 @@ fn debug_keep_exe() {
         BinArch::AArch64,
         BinOs::MacOs,
         &exe,
-    ).unwrap();
+    )
+    .unwrap();
     eprintln!("exe at {}", exe.display());
     let out = std::process::Command::new(&exe).output().unwrap();
     eprintln!("status={:?} code={:?}", out.status, out.status.code());

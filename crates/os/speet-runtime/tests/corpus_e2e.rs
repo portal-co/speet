@@ -87,7 +87,11 @@ fn corpus_guests_have_text() {
         "aarch64-macos/exit_42.macho",
     ] {
         let path = root.join(rel);
-        assert!(path.exists(), "missing committed corpus blob: {}", path.display());
+        assert!(
+            path.exists(),
+            "missing committed corpus blob: {}",
+            path.display()
+        );
         let (text, _) = load_text_from_object(&path).expect("load text");
         assert!(!text.is_empty(), "empty .text in {}", path.display());
     }

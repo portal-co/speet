@@ -115,14 +115,7 @@ pub fn compile_c(
     os: binary_io::BinOs,
 ) -> Result<(), String> {
     std::fs::write(out_obj.with_extension("c"), src).map_err(|e| e.to_string())?;
-    compile_c_path(
-        tc,
-        &out_obj.with_extension("c"),
-        out_obj,
-        arch,
-        os,
-        &[],
-    )
+    compile_c_path(tc, &out_obj.with_extension("c"), out_obj, arch, os, &[])
 }
 
 /// Link object files into an executable.

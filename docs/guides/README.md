@@ -37,6 +37,7 @@ Guides are alignment signals, not hard stops. They work like Claude Code's conte
 | [plugin-api.md](plugin-api.md) | `speet-plugin-api`, `speet-plugin-adapter`, `speet-plugin-host*` | Do not let plugin traits gain `Context`/`E`/`F` generics; do not bypass `PluginTransport`; do not add serde/bincode/rkyv; do not grant host-entity imports outside the manifest-declared allowlist |
 | [thin-runtime-genericity.md](thin-runtime-genericity.md) | `speet-recompile`, `speet-host-api`, `speet-plugin-api`, future `speet-abi-spec`/`speet-abi-codegen` | Do not hand-count a WASM import index; do not intercept external calls by instruction shape instead of PC; do not treat `unsupported_ops` as a correctness proof |
 | [dual-backends.md](dual-backends.md) | Backend A vs B, ZeroOffset / HostOffset / WASM-runtime OS, Linux-WASI / Darwin-WASI dual-lane | Do not conflate Backend A with Backend B; do not treat `speet-wasm` as Backend B; dual-lane WASI (wasmi) vs thin-runtime native for shared corpus slices; ZeroOffset text stays unmapped |
+| [recompiler-debug-mcp.md](recompiler-debug-mcp.md) | `speet-rtd` `mcp`/`hot-recompiler`, `speet-plugin-guest`, `speet-recompiler-guest`, `speet-stubs-guest` | Do not stretch `ArchOp` for bulk translate; do not add serde to plugin-api; do not add a reload RPC or `grant_extern` overlay |
 
 ---
 

@@ -3,10 +3,10 @@
 use binary_io::{BinArch, BinOs};
 use speet_corpus_harness::load_manifest;
 use speet_corpus_harness::manifest::Artifact;
+use speet_guest_runner::PathPlanner;
 use speet_program_equivalence::{
     assert_original_matches_recompiled, corpus_roots, default_runtime, linked_exists,
 };
-use speet_guest_runner::PathPlanner;
 use speet_recompile::frontend::host_platform;
 
 fn artifact_matches_host(art: &Artifact) -> bool {
@@ -58,9 +58,8 @@ fn c_program_equiv_manifest_entries() {
                 );
                 continue;
             }
-            assert_original_matches_recompiled(&root, art, &planner, &mut rt).unwrap_or_else(
-                |e| panic!("equiv {} {}: {e}", art.program, art.triple),
-            );
+            assert_original_matches_recompiled(&root, art, &planner, &mut rt)
+                .unwrap_or_else(|e| panic!("equiv {} {}: {e}", art.program, art.triple));
             tested += 1;
         }
     }

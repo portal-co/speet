@@ -52,6 +52,9 @@ members = [
     "crates/plugin/speet-plugin-host-inproc",
     "crates/plugin/speet-plugin-host-wasm",
     "crates/plugin/speet-plugin-host-subprocess",
+    "crates/plugin/speet-plugin-guest",
+    "crates/os/speet-recompiler-guest",
+    "crates/os/speet-stubs-guest",
     # End-to-end integration tests
     "crates/test/speet-e2e",
     "crates/test/speet-corpus-harness",
@@ -82,7 +85,7 @@ wasm-encoder = { version = "0.240.0", default-features = false, features = [
 ] }
 
 wax-core = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", branch = "main" }
-wax-meta = { version = "0.1.0", git = "https://github.com/portal-co/wax.git", branch = "main" }
+wax-meta = { version = "0.1.0", git = "https://github.com/portal-co/portal-container.git", branch = "main" }
 
 portal-solutions-asm-semantics = { version = "0.1.0", git = "https://github.com/portal-co/asm-arch.git" }
 asim-core = { version = "0.1.0", git = "https://github.com/portal-co/asim.git", branch = "main" }

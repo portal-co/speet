@@ -1,0 +1,15 @@
+[package]
+name = "speet-recompiler-guest"
+version = "0.1.0"
+edition = "2021"
+description = "wasm32 guest wrapping native arch frontends + in-guest yecta."
+license-file.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+speet-plugin-guest = { path = "../../plugin/speet-plugin-guest" }
+speet-plugin-api = { workspace = true }
+speet-recompile = { path = "../speet-recompile", default-features = false }
+binary-io = { path = "../../../../binary-io" }

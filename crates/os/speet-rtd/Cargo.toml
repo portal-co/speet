@@ -8,10 +8,15 @@ description = "Thin-runtime recompile daemon with artifact cache."
 name = "speet-rtd"
 path = "src/main.rs"
 
+[[bin]]
+name = "speet-rtdctl"
+path = "src/bin/speet-rtdctl.rs"
+
 [dependencies]
 speet-runtime = { path = "../speet-runtime" }
 speet-host-api = { path = "../speet-host-api" }
 os-daemon = { path = "../../../../os-emulation/crates/daemon/os-daemon" }
+os-daemon-protocol = { path = "../../../../os-emulation/crates/daemon/os-daemon-protocol" }
 os-transform-core = { path = "../../../../os-emulation/crates/daemon/os-transform-core" }
 tempfile = "3"
 
@@ -27,9 +32,33 @@ speet-native-jit = { path = "../speet-native-jit", optional = true }
 vane-riscv = { path = "../../../../vane/crates/vane-riscv", optional = true }
 vane-aarch64 = { path = "../../../../vane/crates/vane-aarch64", optional = true }
 
+# `mcp`: thin-mcp JSON-RPC over stdio. Off by default (same pattern as `jit`).
+thin-mcp = { path = "../../../../thin-mcp/crates/thin-mcp", optional = true }
+async-trait = { version = "0.1", optional = true }
+serde_json = { version = "1", optional = true }
+
+# `hot-recompiler`: wasmi-load recompiler.wasm + stubs.wasm. Off by default.
+speet-plugin-api = { workspace = true, optional = true }
+speet-plugin-host = { workspace = true, optional = true }
+speet-plugin-host-wasm = { path = "../../plugin/speet-plugin-host-wasm", optional = true }
+speet-recompiler-guest = { path = "../speet-recompiler-guest", optional = true }
+speet-recompile = { path = "../speet-recompile", optional = true }
+speet-link-core = { path = "../speet-link-core", optional = true }
+binary-io = { path = "../../../../binary-io", optional = true }
+
 [features]
 default = []
 jit = ["dep:os-jit-core", "dep:speet-dynamic-jit", "dep:speet-native-jit", "dep:vane-riscv", "dep:vane-aarch64", "os-daemon/jit"]
+mcp = ["dep:thin-mcp", "dep:async-trait", "dep:serde_json"]
+hot-recompiler = [
+    "dep:speet-plugin-api",
+    "dep:speet-plugin-host",
+    "dep:speet-plugin-host-wasm",
+    "dep:speet-recompiler-guest",
+    "dep:speet-recompile",
+    "dep:speet-link-core",
+    "dep:binary-io",
+]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 os-rewrite-macho = { path = "../../../../os-emulation/crates/daemon/os-rewrite-macho" }
@@ -47,3 +76,9 @@ os-interposer = { path = "../../../../os-emulation/crates/shim/os-interposer" }
 
 [dev-dependencies]
 tempfile = "3"
+wasm-encoder = { workspace = true }
+wasmparser = { version = "0.240.0", features = ["validate"] }
+speet-plugin-api = { workspace = true }
+speet-plugin-host-wasm = { path = "../../plugin/speet-plugin-host-wasm" }
+speet-recompiler-guest = { path = "../speet-recompiler-guest" }
+serde_json = "1"

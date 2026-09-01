@@ -8,26 +8,25 @@ description = "Full-binary recompiler driver: load host binary -> speet (WASM) -
 binary-io = { path = "../../../../binary-io" }
 tunnel = { path = "../../../../tunnel" }
 speet-host-api = { path = "../speet-host-api" }
-speet-host-mem-shim = { path = "../speet-host-mem-shim" }
+speet-host-mem-shim = { path = "../speet-host-mem-shim", optional = true }
 speet-abi-stubs = { path = "../speet-abi-stubs" }
-speet-rt = { path = "../speet-rt" }
+speet-rt = { path = "../speet-rt", optional = true }
 
-# wasm-blitz backends (local path: carries the MemBase + SysV stack-param fixes
-# not yet on the published git repo). Their transitive asm-arch deps unify with
-# the workspace's git+patch asm-arch.
-portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64" }
-portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x86-64" }
-portal-solutions-blitz-riscv32 = { path = "../../../../wasm-blitz/crates/blitz-riscv32" }
-portal-solutions-blitz-arm = { path = "../../../../wasm-blitz/crates/blitz-arm" }
-portal-solutions-blitz-i686 = { path = "../../../../wasm-blitz/crates/blitz-i686" }
-portal-solutions-blitz-c = { path = "../../../../wasm-blitz/crates/blitz-c" }
-portal-solutions-blitz-js = { path = "../../../../wasm-blitz/crates/blitz-js" }
-portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"] }
-portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"] }
-portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"] }
-portal-solutions-asm-riscv32 = { path = "../../../../asm-arch/crates/asm-riscv32", features = ["rv-asm-backend"] }
-portal-solutions-asm-arm = { path = "../../../../asm-arch/crates/asm-arm", features = ["bin-backend"] }
-portal-solutions-asm-x86 = { path = "../../../../asm-arch/crates/asm-x86", features = ["iced"] }
+# wasm-blitz backends — optional so `speet-recompiler-guest` can compile the
+# frontend to wasm32 without pulling native codegen.
+portal-solutions-blitz-aarch64 = { path = "../../../../wasm-blitz/crates/blitz-aarch64", optional = true }
+portal-solutions-blitz-x86-64 = { path = "../../../../wasm-blitz/crates/blitz-x86-64", optional = true }
+portal-solutions-blitz-riscv32 = { path = "../../../../wasm-blitz/crates/blitz-riscv32", optional = true }
+portal-solutions-blitz-arm = { path = "../../../../wasm-blitz/crates/blitz-arm", optional = true }
+portal-solutions-blitz-i686 = { path = "../../../../wasm-blitz/crates/blitz-i686", optional = true }
+portal-solutions-blitz-c = { path = "../../../../wasm-blitz/crates/blitz-c", optional = true }
+portal-solutions-blitz-js = { path = "../../../../wasm-blitz/crates/blitz-js", optional = true }
+portal-solutions-blitz-common = { path = "../../../../wasm-blitz/crates/blitz-common", features = ["asm"], optional = true }
+portal-solutions-asm-aarch64 = { path = "../../../../asm-arch/crates/asm-aarch64", features = ["bin-backend"], optional = true }
+portal-solutions-asm-x86-64 = { path = "../../../../asm-arch/crates/asm-x86-64", features = ["iced"], optional = true }
+portal-solutions-asm-riscv32 = { path = "../../../../asm-arch/crates/asm-riscv32", features = ["rv-asm-backend"], optional = true }
+portal-solutions-asm-arm = { path = "../../../../asm-arch/crates/asm-arm", features = ["bin-backend"], optional = true }
+portal-solutions-asm-x86 = { path = "../../../../asm-arch/crates/asm-x86", features = ["iced"], optional = true }
 
 # speet frontend (native machine code -> WASM)
 speet-x86_64 = { path = "../../native/speet-x86_64" }
@@ -48,6 +47,26 @@ yecta = { path = "../../helper/yecta" }
 rv-asm = { version = "*", git = "https://github.com/portal-co/rv-utils.git" }
 wasm-encoder = { version = "0.240.0", features = ["wasmparser"] }
 wasmparser = "0.240.0"
+
+[features]
+default = ["native-backend"]
+native-backend = [
+    "dep:speet-host-mem-shim",
+    "dep:speet-rt",
+    "dep:portal-solutions-blitz-aarch64",
+    "dep:portal-solutions-blitz-x86-64",
+    "dep:portal-solutions-blitz-riscv32",
+    "dep:portal-solutions-blitz-arm",
+    "dep:portal-solutions-blitz-i686",
+    "dep:portal-solutions-blitz-c",
+    "dep:portal-solutions-blitz-js",
+    "dep:portal-solutions-blitz-common",
+    "dep:portal-solutions-asm-aarch64",
+    "dep:portal-solutions-asm-x86-64",
+    "dep:portal-solutions-asm-riscv32",
+    "dep:portal-solutions-asm-arm",
+    "dep:portal-solutions-asm-x86",
+]
 
 [dev-dependencies]
 speet-runtime = { path = "../speet-runtime" }

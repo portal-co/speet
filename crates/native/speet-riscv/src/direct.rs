@@ -892,6 +892,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 Ok(result) => result,
                 Err(_) => {
                     rlog!("translate_bytes: junk slot at pc={:#x}, emitting unreachable", pc);
+                    self.unsupported_insns
+                        .insert(alloc::format!("undef:{:08x}", inst_word));
                     if let Ok(tail_idx) = self.init_function(ctx, rctx, pc, 1, 0, 0, f) {
                         let _ = rctx.feed(ctx, tail_idx, &Instruction::Unreachable);
                     }
@@ -3064,6 +3066,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // FCLASS returns a 10-bit mask indicating the class of the floating-point number
                 // (positive/negative infinity, normal, subnormal, zero, NaN, etc.)
                 // This requires complex bit pattern analysis not yet implemented
+                self.unsupported_insns
+                    .insert(alloc::format!("{:?}", inst));
                 rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
             }
 
@@ -3072,6 +3076,8 @@ impl<'cb, 'ctx, Context, E, F: InstructionSink<Context, E>>
                 // This should ideally never be reached if all instruction variants are handled.
                 // If it is reached, it indicates an instruction type that was added to rv-asm
                 // but not yet implemented in this recompiler.
+                self.unsupported_insns
+                    .insert(alloc::format!("{:?}", inst));
                 rctx.feed(ctx, tail_idx, &Instruction::Unreachable)?;
                 return Ok(()); // Don't fallthrough for unimplemented instructions
             }

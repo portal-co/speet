@@ -303,6 +303,10 @@ pub struct RiscVRecompiler<
     /// Total number of WASM function slots in the translated binary.
     /// Set by `translate_bytes` after a pre-scan; used to clamp OOB slot indices to `None`.
     total_func_count: Option<u32>,
+    /// Mnemonics (or `undef:XXXXXXXX` decode failures) that fell through to
+    /// `Unreachable` during the most recent `translate_bytes` call. Coverage
+    /// signal only — see `docs/guides/thin-runtime-genericity.md`.
+    unsupported_insns: alloc::collections::BTreeSet<alloc::string::String>,
 }
 
 impl<'cb, 'ctx, Context, E, F> RiscVRecompiler<'cb, 'ctx, Context, E, F>
@@ -348,7 +352,19 @@ where
             expected_ra_slot: LocalSlot::default(),
             slot_assigner: None,
             total_func_count: None,
+            unsupported_insns: alloc::collections::BTreeSet::new(),
         }
+    }
+
+    /// Instruction names that had no translation and fell back to
+    /// `unreachable` during the most recent `translate_bytes` call.
+    pub fn unsupported_insns(&self) -> &alloc::collections::BTreeSet<alloc::string::String> {
+        &self.unsupported_insns
+    }
+
+    /// Clear the unsupported-instruction tracking set.
+    pub fn clear_unsupported(&mut self) {
+        self.unsupported_insns.clear();
     }
 
     /// Create a new RISC-V recompiler instance with all configuration options including base function offset

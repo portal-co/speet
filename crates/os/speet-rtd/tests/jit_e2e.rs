@@ -4,7 +4,9 @@
 #![cfg(feature = "jit")]
 
 use speet_rtd::Daemon;
-use speet_runtime::rtd_protocol::{decode_response, encode_request, JitArtifactWire, Request, Response};
+use speet_runtime::rtd_protocol::{
+    decode_response, encode_request, JitArtifactWire, Request, Response,
+};
 
 #[test]
 fn vane_wasm_backend_compiles_a_real_instruction() {
@@ -17,9 +19,16 @@ fn vane_wasm_backend_compiles_a_real_instruction() {
     });
     let resp = decode_response(&daemon.handle_frame(&frame)).unwrap();
     match resp {
-        Response::Compiled { artifact: JitArtifactWire::Wasm(bytes), backend } => {
+        Response::Compiled {
+            artifact: JitArtifactWire::Wasm(bytes),
+            backend,
+        } => {
             assert_eq!(backend, "vane-wasm");
-            assert_eq!(&bytes[0..4], b"\0asm", "should be a well-formed WASM module");
+            assert_eq!(
+                &bytes[0..4],
+                b"\0asm",
+                "should be a well-formed WASM module"
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -51,9 +60,16 @@ fn vane_wasm_aarch64_backend_compiles_a_real_instruction() {
     });
     let resp = decode_response(&daemon.handle_frame(&frame)).unwrap();
     match resp {
-        Response::Compiled { artifact: JitArtifactWire::Wasm(bytes), backend } => {
+        Response::Compiled {
+            artifact: JitArtifactWire::Wasm(bytes),
+            backend,
+        } => {
             assert_eq!(backend, "vane-wasm-aarch64");
-            assert_eq!(&bytes[0..4], b"\0asm", "should be a well-formed WASM module");
+            assert_eq!(
+                &bytes[0..4],
+                b"\0asm",
+                "should be a well-formed WASM module"
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }

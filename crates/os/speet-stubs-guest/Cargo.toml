@@ -1,0 +1,13 @@
+[package]
+name = "speet-stubs-guest"
+version = "0.1.0"
+edition = "2021"
+description = "wasm32 TargetPlugin exposing the ABI stub wired-symbol table."
+license-file.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+speet-plugin-api = { workspace = true }
+speet-plugin-guest = { path = "../../plugin/speet-plugin-guest" }

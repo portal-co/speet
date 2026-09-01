@@ -30,5 +30,7 @@ speet-guest-runner = { path = "../../test/speet-guest-runner" }
 speet-corpus-harness = { path = "../../test/speet-corpus-harness" }
 speet-recompile = { path = "../speet-recompile" }
 speet-host-api = { path = "../speet-host-api" }
+binary-io = { path = "../../../../binary-io" }
+speet-link-core = { path = "../speet-link-core", features = ["binary-load"] }
 
 [build-dependencies]

@@ -1,9 +1,9 @@
 //! Relocation-aware data linking and GOT patching for [`GuestImageLayout`].
 
-use std::collections::BTreeMap;
-use std::vec::Vec;
 use speet_link_core::image_layout::{GuestImageLayout, RelocKindTag};
 use speet_plugin_api::external_target::LibraryId;
+use std::collections::BTreeMap;
+use std::vec::Vec;
 
 use crate::frontend::DataSegment;
 use crate::plt::PltCallPlan;
@@ -75,7 +75,9 @@ fn resolve_reloc_value(
         if let Some(plan) = plt_plan {
             for entry in plan.targets.iter() {
                 if entry.label == *sym {
-                    if let Some(&idx) = plan.wasm_import_by_addr.get(&(entry.library, entry.address))
+                    if let Some(&idx) = plan
+                        .wasm_import_by_addr
+                        .get(&(entry.library, entry.address))
                     {
                         let _ = idx;
                         if let Some(&shim_i) = shim_index_by_symbol.get(sym) {

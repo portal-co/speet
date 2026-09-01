@@ -47,11 +47,23 @@ pub fn host_platform() -> (BinOs, BinArch) {
 /// Assert the loaded binary matches the host platform (v1 constraint).
 pub fn assert_same_platform(bin: &LoadedBinary) -> Result<(), String> {
     let (os, arch) = host_platform();
-    if !matches!((&bin.os, os), (BinOs::Linux, BinOs::Linux) | (BinOs::MacOs, BinOs::MacOs)) {
-        return Err(format!("input OS {:?} != host {:?} (v1 is same-platform)", bin.os, os));
+    if !matches!(
+        (&bin.os, os),
+        (BinOs::Linux, BinOs::Linux) | (BinOs::MacOs, BinOs::MacOs)
+    ) {
+        return Err(format!(
+            "input OS {:?} != host {:?} (v1 is same-platform)",
+            bin.os, os
+        ));
     }
-    if !matches!((&bin.arch, arch), (BinArch::X86_64, BinArch::X86_64) | (BinArch::AArch64, BinArch::AArch64)) {
-        return Err(format!("input arch {:?} != host {:?} (v1 is same-platform)", bin.arch, arch));
+    if !matches!(
+        (&bin.arch, arch),
+        (BinArch::X86_64, BinArch::X86_64) | (BinArch::AArch64, BinArch::AArch64)
+    ) {
+        return Err(format!(
+            "input arch {:?} != host {:?} (v1 is same-platform)",
+            bin.arch, arch
+        ));
     }
     Ok(())
 }
@@ -61,15 +73,17 @@ pub fn assert_same_platform(bin: &LoadedBinary) -> Result<(), String> {
 use crate::plt::PltCallPlan;
 use core::convert::Infallible;
 use speet_host_api::{ImportManifest, WasmValType};
-use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
-use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext, RuntimeLayoutParams, TextBaseSource};
 use speet_link_core::image_layout::MemoryModel;
+use speet_link_core::layout::{EntityIndexSpace, IndexSlot};
+use speet_link_core::{
+    BaseContext, ReactorAdapter, ReactorContext, RuntimeLayoutParams, TextBaseSource,
+};
 use speet_memory::memory_access_for_model;
 use speet_reach::PcSlotMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection, Elements, EntityType,
-    ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
-    MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
+    ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction,
+    MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
 };
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
@@ -109,8 +123,12 @@ pub fn assemble_translated_module(
 ) -> Vec<u8> {
     let total = fns.len() as u32;
     let n_params = register_file_params.len() as u32;
-    let (types, imports, space, func_slot) =
-        build_import_section(manifest, register_file_params, total, yecta::CallEscape::Jump);
+    let (types, imports, space, func_slot) = build_import_section(
+        manifest,
+        register_file_params,
+        total,
+        yecta::CallEscape::Jump,
+    );
     finish_module(
         types,
         imports,
@@ -253,8 +271,10 @@ pub fn build_redirect_shims_from_plan(
     let mut shims = Vec::new();
     let mut by_symbol = std::collections::BTreeMap::new();
     let table = plt_plan.to_hook_table(arch, manifest);
-    let mut ordered: std::collections::BTreeSet<(speet_plugin_api::external_target::LibraryId, u64)> =
-        plt_plan.wasm_import_by_addr.keys().copied().collect();
+    let mut ordered: std::collections::BTreeSet<(
+        speet_plugin_api::external_target::LibraryId,
+        u64,
+    )> = plt_plan.wasm_import_by_addr.keys().copied().collect();
     ordered.extend(plt_plan.native_shim_by_addr.keys().copied());
     for (shim_i, &(library, addr)) in ordered.iter().enumerate() {
         let label = plt_plan
@@ -503,7 +523,12 @@ fn make_rctx<'r, E>(
     base_func_offset: u32,
     text_base: TextBaseSource,
 ) -> ReactorAdapter<'r, (), E, Function, LocalPool> {
-    make_rctx_with_escape(reactor, base_func_offset, text_base, yecta::CallEscape::Jump)
+    make_rctx_with_escape(
+        reactor,
+        base_func_offset,
+        text_base,
+        yecta::CallEscape::Jump,
+    )
 }
 
 fn make_rctx_with_escape<'r, E>(
@@ -515,10 +540,19 @@ fn make_rctx_with_escape<'r, E>(
     let mut rctx = ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: RuntimeLayoutParams::with_text_base_source(text_base),
-        pool: yecta::Pool { handler: &REACTOR_TABLE, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &REACTOR_TABLE,
+            ty: TypeIdx(0),
+        },
         escape,
     };
     rctx.set_base_func_offset(base_func_offset);
@@ -567,8 +601,21 @@ pub enum RecompilerChoice {
 /// (the WASM index the first translated function lands at), so a mismatch
 /// here silently makes every internal `call`/`return_call` target the wrong
 /// function. See `docs/guides/thin-runtime-genericity.md` principle 1.
-pub fn translate(text: &[u8], start_addr: u64, choice: RecompilerChoice, manifest: &ImportManifest) -> Translated {
-    translate_with_plt(text, start_addr, choice, None, None, manifest, MemoryModel::OwnedLinear)
+pub fn translate(
+    text: &[u8],
+    start_addr: u64,
+    choice: RecompilerChoice,
+    manifest: &ImportManifest,
+) -> Translated {
+    translate_with_plt(
+        text,
+        start_addr,
+        choice,
+        None,
+        None,
+        manifest,
+        MemoryModel::OwnedLinear,
+    )
 }
 
 /// Guest-address-offset → relative function-slot-index granularity (bytes
@@ -623,7 +670,6 @@ fn bind_memory_after_traps_x86_32<E>(
 ) {
     rc.bind_memory_layout(rctx);
 }
-
 
 fn build_pc_slot_map(
     arch: BinArch,
@@ -728,8 +774,9 @@ pub fn translate_with_plt(
                 (params, rc.unsupported_insns().iter().cloned().collect())
             }
             BinArch::AArch64 => {
-                let mut rc =
-                    speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                let mut rc = speet_aarch64::AArch64Recompiler::<(), Infallible>::new_with_base_pc(
+                    start_addr,
+                );
                 rc.set_slot_assigner(build_pc_slot_map(
                     BinArch::AArch64,
                     text,
@@ -777,7 +824,7 @@ pub fn translate_with_plt(
                     &mut |a| Function::new(a.collect::<Vec<_>>()),
                 )
                 .expect("translate_bytes");
-                (params, Vec::new())
+                (params, rc.unsupported_insns().iter().cloned().collect())
             }
             BinArch::RiscV32 => {
                 use rv_asm::Xlen;
@@ -807,16 +854,12 @@ pub fn translate_with_plt(
                     &mut |a| Function::new(a.collect::<Vec<_>>()),
                 )
                 .expect("translate_bytes");
-                (params, Vec::new())
+                (params, rc.unsupported_insns().iter().cloned().collect())
             }
             BinArch::Arm => {
-                let mut rc = speet_arm::ArmRecompiler::<(), Infallible>::new_with_base_pc(start_addr);
-                rc.set_slot_assigner(build_pc_slot_map(
-                    BinArch::Arm,
-                    text,
-                    start_addr,
-                    plt_plan,
-                ));
+                let mut rc =
+                    speet_arm::ArmRecompiler::<(), Infallible>::new_with_base_pc(start_addr);
+                rc.set_slot_assigner(build_pc_slot_map(BinArch::Arm, text, start_addr, plt_plan));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);
                 }
@@ -831,13 +874,9 @@ pub fn translate_with_plt(
                 (params, rc.unsupported_insns().iter().cloned().collect())
             }
             BinArch::X86 => {
-                let mut rc = speet_x86::X86_32Recompiler::<(), Infallible>::new_with_base_eip(start_addr);
-                rc.set_slot_assigner(build_pc_slot_map(
-                    BinArch::X86,
-                    text,
-                    start_addr,
-                    plt_plan,
-                ));
+                let mut rc =
+                    speet_x86::X86_32Recompiler::<(), Infallible>::new_with_base_eip(start_addr);
+                rc.set_slot_assigner(build_pc_slot_map(BinArch::X86, text, start_addr, plt_plan));
                 if let Some(idx) = manifest.index_of("env", "__speet_stub_for_pc") {
                     rc.set_stub_for_pc_import_idx(idx);
                 }
@@ -861,8 +900,12 @@ pub fn translate_with_plt(
             // impl) instead of reusing `reactor`/`rctx` above. `Function`
             // itself doesn't depend on `E`, so the two paths' outputs still
             // unify into the same `Translated`.
-            let mut plugin_reactor: Reactor<(), speet_plugin_api::error::PluginError, Function, LocalPool> =
-                Reactor::default();
+            let mut plugin_reactor: Reactor<
+                (),
+                speet_plugin_api::error::PluginError,
+                Function,
+                LocalPool,
+            > = Reactor::default();
             let mut plugin_rctx = make_rctx(
                 &mut plugin_reactor,
                 n_imports,
@@ -876,15 +919,29 @@ pub fn translate_with_plt(
             >::new(std::sync::Arc::from(plugin));
             rc.setup_traps(&mut plugin_rctx, &mut plugin_ctx);
             let params = collect_params(&plugin_rctx);
-            rc.translate_bytes(&mut plugin_ctx, &mut plugin_rctx, text, start_addr, &mut |a| {
-                Function::new(a.collect::<Vec<_>>())
-            })
+            rc.translate_bytes(
+                &mut plugin_ctx,
+                &mut plugin_rctx,
+                text,
+                start_addr,
+                &mut |a| Function::new(a.collect::<Vec<_>>()),
+            )
             .expect("ArchPlugin::step");
-            return Translated { fns: plugin_rctx.drain_fns(), params, unsupported: Vec::new(), entry_func_idx: 0 };
+            return Translated {
+                fns: plugin_rctx.drain_fns(),
+                params,
+                unsupported: Vec::new(),
+                entry_func_idx: 0,
+            };
         }
     };
 
-    Translated { fns: rctx.drain_fns(), params, unsupported, entry_func_idx }
+    Translated {
+        fns: rctx.drain_fns(),
+        params,
+        unsupported,
+        entry_func_idx,
+    }
 }
 
 /// Assemble with runtime unreachable logging (integrated thin runtime).
@@ -892,7 +949,11 @@ pub fn translate_with_plt(
 /// used to generate the C link shim (`speet_rt::generate_shim_integrated`)
 /// and to resolve indices in [`crate::plt::PltCallPlan`] — see
 /// `docs/guides/thin-runtime-genericity.md` principle 1.
-pub fn assemble_module_instrumented(t: &Translated, arch: BinArch, manifest: &ImportManifest) -> Vec<u8> {
+pub fn assemble_module_instrumented(
+    t: &Translated,
+    arch: BinArch,
+    manifest: &ImportManifest,
+) -> Vec<u8> {
     assemble_module_instrumented_with_data(t, arch, manifest, &[], None)
 }
 
@@ -939,7 +1000,14 @@ pub fn recompile_to_wasm_instrumented(
     start_addr: u64,
     arch: BinArch,
 ) -> (Vec<u8>, Vec<String>) {
-    recompile_to_wasm_instrumented_plt(text, start_addr, arch, None, None, &ImportManifest::integrated_native())
+    recompile_to_wasm_instrumented_plt(
+        text,
+        start_addr,
+        arch,
+        None,
+        None,
+        &ImportManifest::integrated_native(),
+    )
 }
 
 /// Like [`recompile_to_wasm_instrumented`], but the caller supplies the
@@ -957,7 +1025,15 @@ pub fn recompile_to_wasm_instrumented_plt(
     entry_addr: Option<u64>,
     manifest: &ImportManifest,
 ) -> (Vec<u8>, Vec<String>) {
-    recompile_to_wasm_instrumented_plt_with_data(text, start_addr, arch, plt_plan, entry_addr, manifest, &[])
+    recompile_to_wasm_instrumented_plt_with_data(
+        text,
+        start_addr,
+        arch,
+        plt_plan,
+        entry_addr,
+        manifest,
+        &[],
+    )
 }
 
 /// Like [`recompile_to_wasm_instrumented_plt`], but also emits
@@ -1047,7 +1123,18 @@ pub fn assemble_module(t: &Translated, manifest: &ImportManifest) -> Vec<u8> {
     let n_params = t.params.len() as u32;
     let (types, imports, space, func_slot) =
         build_import_section(manifest, t.params.clone(), total, yecta::CallEscape::Jump);
-    finish_module(types, imports, &space, func_slot, &t.fns, &[], true, t.entry_func_idx, n_params, &[])
+    finish_module(
+        types,
+        imports,
+        &space,
+        func_slot,
+        &t.fns,
+        &[],
+        true,
+        t.entry_func_idx,
+        n_params,
+        &[],
+    )
 }
 
 /// Recompile a `.text` blob of guest machine code to a complete WASM module.
@@ -1066,8 +1153,12 @@ pub fn recompile_to_wasm(text: &[u8], start_addr: u64, arch: BinArch) -> (Vec<u8
 pub fn native_syscall_imports() -> speet_host_syscall::NativeSyscallImports {
     let m = ImportManifest::rv64_syscall();
     speet_host_syscall::NativeSyscallImports {
-        exit: m.index_of("env", "exit").expect("rv64_syscall manifest declares env.exit"),
-        write: m.index_of("env", "write").expect("rv64_syscall manifest declares env.write"),
+        exit: m
+            .index_of("env", "exit")
+            .expect("rv64_syscall manifest declares env.exit"),
+        write: m
+            .index_of("env", "write")
+            .expect("rv64_syscall manifest declares env.write"),
     }
 }
 
@@ -1144,12 +1235,22 @@ pub fn translate_rv64_with_layout(
     recompiler.set_ecall_callback(&mut dispatcher);
 
     recompiler
-        .translate_bytes(&mut ctx, &mut rctx, text, start_addr as u32, Xlen::Rv64, &mut |a| {
-            Function::new(a.collect::<Vec<_>>())
-        })
+        .translate_bytes(
+            &mut ctx,
+            &mut rctx,
+            text,
+            start_addr as u32,
+            Xlen::Rv64,
+            &mut |a| Function::new(a.collect::<Vec<_>>()),
+        )
         .expect("translate_bytes");
 
-    Translated { fns: rctx.drain_fns(), params, unsupported: vec![], entry_func_idx: 0 }
+    Translated {
+        fns: rctx.drain_fns(),
+        params,
+        unsupported: vec![],
+        entry_func_idx: 0,
+    }
 }
 
 /// Assemble an RV64 translation with the native syscall imports
@@ -1260,9 +1361,16 @@ mod tests {
 
     #[test]
     fn recompiler_choice_plugin_produces_one_function() {
-        let plugin: Box<dyn ArchPlugin> = Box::new(ToyArch { step: Mutex::new(0) });
+        let plugin: Box<dyn ArchPlugin> = Box::new(ToyArch {
+            step: Mutex::new(0),
+        });
         let manifest = ImportManifest::native_syscall();
-        let t = translate(&[0u8; 1], 0x1000, RecompilerChoice::Plugin(plugin), &manifest);
+        let t = translate(
+            &[0u8; 1],
+            0x1000,
+            RecompilerChoice::Plugin(plugin),
+            &manifest,
+        );
         assert_eq!(t.fns.len(), 1);
         // ToyArch emits one i64 param; layout params (text_base, host_mem_base) append after traps setup.
         assert!(t.params.len() >= 1);
@@ -1275,5 +1383,14 @@ mod tests {
         expected.instruction(&Instruction::Unreachable);
         expected.instruction(&Instruction::End);
         assert_eq!(t.fns[0], expected);
+    }
+
+    #[test]
+    fn riscv_undef_insn_is_tracked() {
+        let (_wasm, unsupported) = recompile_to_wasm(&[0xff, 0xff], 0x1000, BinArch::RiscV64);
+        assert!(
+            unsupported.iter().any(|s| s.starts_with("undef:")),
+            "RISC-V decode-fail must land in unsupported_insns, got {unsupported:?}"
+        );
     }
 }

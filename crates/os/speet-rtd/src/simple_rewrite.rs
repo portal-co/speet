@@ -91,8 +91,8 @@ fn set_executable_perms(path: &Path) -> std::io::Result<()> {
 mod macho_impl {
     use super::*;
     use os_codesign_macho::{
-        read_original_entitlements, sign_rewritten_executable, sign_shim, verify_signed, EntitlementPolicy,
-        SigningIdentity,
+        read_original_entitlements, sign_rewritten_executable, sign_shim, verify_signed,
+        EntitlementPolicy, SigningIdentity,
     };
     use os_rewrite_macho::{rewrite_macho, MachORewriteInput};
 
@@ -103,7 +103,12 @@ mod macho_impl {
         }
     }
 
-    fn cache_key(original_hash: &str, shim_hash: &str, identity: &SigningIdentity, ent: &EntitlementPolicy) -> String {
+    fn cache_key(
+        original_hash: &str,
+        shim_hash: &str,
+        identity: &SigningIdentity,
+        ent: &EntitlementPolicy,
+    ) -> String {
         format!(
             "{original_hash}:{shim_hash}:{}:{ent:?}:{REWRITE_FORMAT_VERSION}",
             identity_key(identity)
@@ -133,15 +138,20 @@ mod macho_impl {
         }
 
         fn obtain(&mut self, path: &Path) -> Result<RunAs, ObtainError> {
-            let original = std::fs::read(path)
-                .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+            let original =
+                std::fs::read(path).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
             let shim_bytes = std::fs::read(&self.config.shim_path)
                 .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
             let original_hash = speet_runtime::ArtifactCache::hash_input(&original);
             let shim_hash = speet_runtime::ArtifactCache::hash_input(&shim_bytes);
             let orig_entitlements = read_original_entitlements(path).unwrap_or_default();
 
-            let key = cache_key(&original_hash, &shim_hash, &self.config.identity, &orig_entitlements);
+            let key = cache_key(
+                &original_hash,
+                &shim_hash,
+                &self.config.identity,
+                &orig_entitlements,
+            );
             if let Some(cached) = self.cache.get(&key) {
                 if verify_signed(&cached) {
                     return Ok(RunAs::Exec(cached));
@@ -169,11 +179,17 @@ mod macho_impl {
                 .map_err(|e| ObtainError::TransformFailed(format!("stage shim: {e}")))?;
             std::fs::write(&program_path, &rewritten)
                 .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
-            set_executable_perms(&shim_out).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
-            set_executable_perms(&program_path).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
-
-            let shim_info = sign_shim(&shim_out, &self.config.identity, self.config.keychain.as_deref())
+            set_executable_perms(&shim_out)
                 .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+            set_executable_perms(&program_path)
+                .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+
+            let shim_info = sign_shim(
+                &shim_out,
+                &self.config.identity,
+                self.config.keychain.as_deref(),
+            )
+            .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
             sign_rewritten_executable(
                 &program_path,
                 &shim_info,
@@ -191,7 +207,12 @@ mod macho_impl {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 mod elf_impl {
     use super::*;
     use os_rewrite_elf::{rewrite_elf, ElfRewriteInput};
@@ -224,8 +245,8 @@ mod elf_impl {
         }
 
         fn obtain(&mut self, path: &Path) -> Result<RunAs, ObtainError> {
-            let original = std::fs::read(path)
-                .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+            let original =
+                std::fs::read(path).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
             let shim_bytes = std::fs::read(&self.config.shim_path)
                 .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
             let original_hash = speet_runtime::ArtifactCache::hash_input(&original);
@@ -258,8 +279,10 @@ mod elf_impl {
                 .map_err(|e| ObtainError::TransformFailed(format!("stage shim: {e}")))?;
             std::fs::write(&program_path, &rewritten)
                 .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
-            set_executable_perms(&shim_out).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
-            set_executable_perms(&program_path).map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+            set_executable_perms(&shim_out)
+                .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
+            set_executable_perms(&program_path)
+                .map_err(|e| ObtainError::TransformFailed(e.to_string()))?;
 
             self.cache.put(key, program_path.clone());
             Ok(RunAs::Exec(program_path))
@@ -282,14 +305,18 @@ impl TransformBackend for SimpleRewriteBackend {
     fn analyze(&self, _path: &Path) -> Result<Suitability, String> {
         Ok(Suitability {
             suitable: false,
-            reasons: vec!["simple-rewrite is only implemented for macOS, Linux, and BSD".to_string()],
+            reasons: vec![
+                "simple-rewrite is only implemented for macOS, Linux, and BSD".to_string(),
+            ],
         })
     }
 
     fn obtain(&mut self, _path: &Path) -> Result<RunAs, ObtainError> {
         Err(ObtainError::Unsuitable(Suitability {
             suitable: false,
-            reasons: vec!["simple-rewrite is only implemented for macOS, Linux, and BSD".to_string()],
+            reasons: vec![
+                "simple-rewrite is only implemented for macOS, Linux, and BSD".to_string(),
+            ],
         }))
     }
 }
@@ -301,7 +328,11 @@ mod tests {
 
     fn build_shim(dir: &Path) -> PathBuf {
         let c_src = dir.join("shim.c");
-        std::fs::write(&c_src, "__attribute__((constructor)) static void i(void) {}\n").unwrap();
+        std::fs::write(
+            &c_src,
+            "__attribute__((constructor)) static void i(void) {}\n",
+        )
+        .unwrap();
         let dylib = dir.join("shim.dylib");
         let status = Command::new("cc")
             .args(["-dynamiclib", "-O2", "-o"])
@@ -340,15 +371,29 @@ mod tests {
         });
 
         let suitability = backend.analyze(&guest).expect("analyze should not error");
-        assert!(suitability.suitable, "expected suitable: {:?}", suitability.reasons);
+        assert!(
+            suitability.suitable,
+            "expected suitable: {:?}",
+            suitability.reasons
+        );
 
         let RunAs::Exec(exe) = backend.obtain(&guest).expect("obtain should succeed");
-        assert!(os_codesign_macho::verify_signed(&exe), "rewritten executable must be validly signed");
+        assert!(
+            os_codesign_macho::verify_signed(&exe),
+            "rewritten executable must be validly signed"
+        );
 
-        let status = Command::new(&exe).status().expect("run rewritten executable");
+        let status = Command::new(&exe)
+            .status()
+            .expect("run rewritten executable");
         assert_eq!(status.code(), Some(42));
 
-        let RunAs::Exec(exe2) = backend.obtain(&guest).expect("second obtain should succeed");
-        assert_eq!(exe, exe2, "second obtain should be a cache hit returning the same path");
+        let RunAs::Exec(exe2) = backend
+            .obtain(&guest)
+            .expect("second obtain should succeed");
+        assert_eq!(
+            exe, exe2,
+            "second obtain should be a cache hit returning the same path"
+        );
     }
 }

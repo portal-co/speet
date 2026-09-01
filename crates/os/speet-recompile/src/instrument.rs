@@ -64,13 +64,21 @@ pub fn instrument_unreachable_logging(
     }
 }
 
-fn patch_function_body_bytes(raw: &[u8], pc_ref: GuestPcRef, import_idx: u32) -> Result<Function, String> {
+fn patch_function_body_bytes(
+    raw: &[u8],
+    pc_ref: GuestPcRef,
+    import_idx: u32,
+) -> Result<Function, String> {
     let reader = wasmparser::BinaryReader::new(raw, 0);
     let body = FunctionBody::new(reader);
     patch_function_body(body, pc_ref, import_idx)
 }
 
-fn patch_function_body(body: FunctionBody<'_>, pc_ref: GuestPcRef, import_idx: u32) -> Result<Function, String> {
+fn patch_function_body(
+    body: FunctionBody<'_>,
+    pc_ref: GuestPcRef,
+    import_idx: u32,
+) -> Result<Function, String> {
     let locals_reader = body.get_locals_reader().map_err(|e| e.to_string())?;
     let mut locals = Vec::new();
     let mut lr = locals_reader;
@@ -90,8 +98,9 @@ fn patch_function_body(body: FunctionBody<'_>, pc_ref: GuestPcRef, import_idx: u
                 out.instruction(&Instruction::Unreachable);
             }
             other => {
-                let instr: Instruction<'_> =
-                    other.try_into().map_err(|_| "reencode operator failed".to_string())?;
+                let instr: Instruction<'_> = other
+                    .try_into()
+                    .map_err(|_| "reencode operator failed".to_string())?;
                 out.instruction(&instr);
             }
         }
@@ -123,18 +132,28 @@ mod tests {
         f.instruction(&Instruction::Unreachable);
         f.instruction(&Instruction::End);
 
-        instrument_unreachable_logging(core::slice::from_mut(&mut f), GuestPcRef::LocalI64(16), Some(3));
+        instrument_unreachable_logging(
+            core::slice::from_mut(&mut f),
+            GuestPcRef::LocalI64(16),
+            Some(3),
+        );
 
         let raw = f.clone().into_raw_body();
         let reader = wasmparser::BinaryReader::new(&raw, 0);
         let body = FunctionBody::new(reader);
         let mut ops = body.get_operators_reader().unwrap();
-        assert!(matches!(ops.read().unwrap(), Operator::I32Const { value: 0x1000 }));
+        assert!(matches!(
+            ops.read().unwrap(),
+            Operator::I32Const { value: 0x1000 }
+        ));
         assert!(matches!(
             ops.read().unwrap(),
             Operator::LocalSet { local_index: 16 }
         ));
-        assert!(matches!(ops.read().unwrap(), Operator::LocalGet { local_index: 16 }));
+        assert!(matches!(
+            ops.read().unwrap(),
+            Operator::LocalGet { local_index: 16 }
+        ));
         assert!(matches!(ops.read().unwrap(), Operator::I32WrapI64));
         assert!(matches!(
             ops.read().unwrap(),
@@ -150,7 +169,11 @@ mod tests {
         f.instruction(&Instruction::End);
         let before = f.clone().into_raw_body();
 
-        instrument_unreachable_logging(core::slice::from_mut(&mut f), GuestPcRef::LocalI64(16), None);
+        instrument_unreachable_logging(
+            core::slice::from_mut(&mut f),
+            GuestPcRef::LocalI64(16),
+            None,
+        );
 
         assert_eq!(f.into_raw_body(), before);
     }

@@ -221,10 +221,7 @@ fn compile_c_with_shim_include(
 fn generate_shim_integrated(manifest: &speet_host_api::ImportManifest) -> String {
     let mut src = generate_shim(manifest);
     if src.contains("int main(void)") {
-        src = src.replace(
-            "int main(void) {",
-            "int main(int argc, char **argv) {",
-        );
+        src = src.replace("int main(void) {", "int main(int argc, char **argv) {");
         src = src.replace(
             "    speet_rt_bootstrap();\n    __guest_entry();",
             "    speet_rt_bootstrap();\n    __speet_start(argc, argv);",

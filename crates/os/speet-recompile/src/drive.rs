@@ -104,7 +104,9 @@ pub fn has_data_init_export(wasm: &[u8]) -> bool {
     for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
         if let wasmparser::Payload::ExportSection(reader) = payload {
             for exp in reader.into_iter().flatten() {
-                if exp.name == DATA_INIT_EXPORT_NAME && matches!(exp.kind, wasmparser::ExternalKind::Func) {
+                if exp.name == DATA_INIT_EXPORT_NAME
+                    && matches!(exp.kind, wasmparser::ExternalKind::Func)
+                {
                     return true;
                 }
             }
@@ -213,13 +215,14 @@ enum LabelSym {
 /// Exports `__guest_entry` at the start of the code (WASM func 0). External and
 /// ambient labels become undefined-symbol relocations. Memory accesses use the
 /// `__wasm_mem` base (provided by `speet-rt`).
-pub fn compile_wasm_to_object(
-    wasm: &[u8],
-    arch: BinArch,
-    os: BinOs,
-) -> Result<Vec<u8>, String> {
+pub fn compile_wasm_to_object(wasm: &[u8], arch: BinArch, os: BinOs) -> Result<Vec<u8>, String> {
     let _portal_log = speet_log::LlmtrimLogger::from_env();
-    _portal_log.log_event("INFO", "drive", "compile_wasm_to_object start", &[("arch", &format!("{arch:?}"))]);    
+    _portal_log.log_event(
+        "INFO",
+        "drive",
+        "compile_wasm_to_object start",
+        &[("arch", &format!("{arch:?}"))],
+    );
     let (sigs, fsigs) = parse_sigs(wasm);
     let bodies = function_bodies(wasm);
     let imports = function_imports(wasm);
@@ -233,12 +236,15 @@ pub fn compile_wasm_to_object(
     // Same idea for the optional data-init function (see
     // `data_init_export_func_idx`): `None` when the guest has no data
     // segments, so `finish_module` never emitted the export.
-    let data_init_func_idx = data_init_export_func_idx(wasm).map(|i| i.saturating_sub(import_count));
+    let data_init_func_idx =
+        data_init_export_func_idx(wasm).map(|i| i.saturating_sub(import_count));
     let raw_ops =
         mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs, import_count);
     let ops = dce_pass!(raw_ops);
-    let import_refs: Vec<(&str, &str)> =
-        imports.iter().map(|(m, n)| (m.as_str(), n.as_str())).collect();
+    let import_refs: Vec<(&str, &str)> = imports
+        .iter()
+        .map(|(m, n)| (m.as_str(), n.as_str()))
+        .collect();
 
     // Per-WASM-function-index param/result counts (imports first, then internal),
     // used by the backend to marshal call arguments.
@@ -256,27 +262,71 @@ pub fn compile_wasm_to_object(
     let sig_params: Vec<u32> = sigs.iter().map(|t| t.params().len() as u32).collect();
     let sig_results: Vec<u32> = sigs.iter().map(|t| t.results().len() as u32).collect();
 
-    _portal_log.log_event("INFO", "drive", "dispatch to backend", &[("arch", &format!("{arch:?}"), ), ("n_funcs", &bodies.len().to_string())]);
+    _portal_log.log_event(
+        "INFO",
+        "drive",
+        "dispatch to backend",
+        &[
+            ("arch", &format!("{arch:?}")),
+            ("n_funcs", &bodies.len().to_string()),
+        ],
+    );
     match arch {
         BinArch::AArch64 => compile_aarch64(
-            ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os, entry_func_idx, data_init_func_idx,
+            ops,
+            &import_refs,
+            import_count,
+            &call_params,
+            &call_results,
+            &sig_params,
+            &sig_results,
+            arch,
+            os,
+            entry_func_idx,
+            data_init_func_idx,
         ),
         BinArch::X86_64 => compile_x86_64(
-            ops, &import_refs, import_count, &call_params, &call_results, &sig_params,
-            &sig_results, arch, os, entry_func_idx, data_init_func_idx,
+            ops,
+            &import_refs,
+            import_count,
+            &call_params,
+            &call_results,
+            &sig_params,
+            &sig_results,
+            arch,
+            os,
+            entry_func_idx,
+            data_init_func_idx,
         ),
         BinArch::RiscV64 => Err(
             "host-riscv object emission is not wired (thin runtime hosts x86_64/aarch64)".into(),
         ),
         BinArch::RiscV32 => compile_riscv32(
-            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+            ops,
+            &import_refs,
+            import_count,
+            arch,
+            os,
+            entry_func_idx,
+            data_init_func_idx,
         ),
         BinArch::Arm => compile_arm(
-            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+            ops,
+            &import_refs,
+            import_count,
+            arch,
+            os,
+            entry_func_idx,
+            data_init_func_idx,
         ),
         BinArch::X86 => compile_x86(
-            ops, &import_refs, import_count, arch, os, entry_func_idx, data_init_func_idx,
+            ops,
+            &import_refs,
+            import_count,
+            arch,
+            os,
+            entry_func_idx,
+            data_init_func_idx,
         ),
     }
 }
@@ -450,7 +500,12 @@ trait LabelName {
 }
 
 fn compile_aarch64<'a>(
-    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    ops: impl IntoIterator<
+        Item = Result<
+            portal_solutions_blitz_common::MachOperator<'a, ()>,
+            wasmparser::BinaryReaderError,
+        >,
+    >,
     func_imports: &[(&str, &str)],
     n_imports: u32,
     call_params: &[u32],
@@ -462,7 +517,7 @@ fn compile_aarch64<'a>(
     entry_func_idx: u32,
     data_init_func_idx: Option<u32>,
 ) -> Result<Vec<u8>, String> {
-    use portal_solutions_asm_aarch64::out::bin::{AsmRelocKind, AArch64Writer};
+    use portal_solutions_asm_aarch64::out::bin::{AArch64Writer, AsmRelocKind};
     use portal_solutions_asm_aarch64::out::Writer as _;
     use portal_solutions_blitz_aarch64::{sysv, AArch64Arch, AArch64Label};
 
@@ -515,20 +570,35 @@ fn compile_aarch64<'a>(
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
         if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
             if *id == entry_func_idx {
-                out.set_label(&mut ctx, archc, AArch64Label::External { name: GUEST_ENTRY.into() })
-                    .map_err(|e| format!("set_label: {e:?}"))?;
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    AArch64Label::External {
+                        name: GUEST_ENTRY.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
             }
             if data_init_func_idx == Some(*id) {
                 out.set_label(
                     &mut ctx,
                     archc,
-                    AArch64Label::External { name: crate::frontend::DATA_INIT_EXPORT_NAME.into() },
+                    AArch64Label::External {
+                        name: crate::frontend::DATA_INIT_EXPORT_NAME.into(),
+                    },
                 )
                 .map_err(|e| format!("set_label: {e:?}"))?;
             }
         }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
-            &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
+            &mut out,
+            &mut ctx,
+            archc,
+            &mut state,
+            func_imports,
+            &op,
+            &mut reencoder,
+            0,
         )
         .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
     }
@@ -564,7 +634,12 @@ fn compile_aarch64<'a>(
 }
 
 fn compile_x86_64<'a>(
-    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    ops: impl IntoIterator<
+        Item = Result<
+            portal_solutions_blitz_common::MachOperator<'a, ()>,
+            wasmparser::BinaryReaderError,
+        >,
+    >,
     func_imports: &[(&str, &str)],
     n_imports: u32,
     call_params: &[u32],
@@ -617,20 +692,35 @@ fn compile_x86_64<'a>(
         let op = op.map_err(|e| format!("mach op: {e:?}"))?;
         if let portal_solutions_blitz_common::MachOperator::StartFn { id, .. } = &op {
             if *id == entry_func_idx {
-                out.set_label(&mut ctx, archc, X64Label::External { name: GUEST_ENTRY.into() })
-                    .map_err(|e| format!("set_label: {e:?}"))?;
+                out.set_label(
+                    &mut ctx,
+                    archc,
+                    X64Label::External {
+                        name: GUEST_ENTRY.into(),
+                    },
+                )
+                .map_err(|e| format!("set_label: {e:?}"))?;
             }
             if data_init_func_idx == Some(*id) {
                 out.set_label(
                     &mut ctx,
                     archc,
-                    X64Label::External { name: crate::frontend::DATA_INIT_EXPORT_NAME.into() },
+                    X64Label::External {
+                        name: crate::frontend::DATA_INIT_EXPORT_NAME.into(),
+                    },
                 )
                 .map_err(|e| format!("set_label: {e:?}"))?;
             }
         }
         sysv::SysVWriterExt::sysv_handle_op::<_, HandleOpError<_>>(
-            &mut out, &mut ctx, archc, &mut state, func_imports, &op, &mut reencoder, 0,
+            &mut out,
+            &mut ctx,
+            archc,
+            &mut state,
+            func_imports,
+            &op,
+            &mut reencoder,
+            0,
         )
         .map_err(|e| format!("sysv_handle_op: {e:?}"))?;
     }
@@ -650,7 +740,12 @@ fn compile_x86_64<'a>(
 }
 
 fn compile_riscv32<'a>(
-    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    ops: impl IntoIterator<
+        Item = Result<
+            portal_solutions_blitz_common::MachOperator<'a, ()>,
+            wasmparser::BinaryReaderError,
+        >,
+    >,
     func_imports: &[(&str, &str)],
     n_imports: u32,
     arch: BinArch,
@@ -732,7 +827,12 @@ fn compile_riscv32<'a>(
 }
 
 fn compile_arm<'a>(
-    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    ops: impl IntoIterator<
+        Item = Result<
+            portal_solutions_blitz_common::MachOperator<'a, ()>,
+            wasmparser::BinaryReaderError,
+        >,
+    >,
     func_imports: &[(&str, &str)],
     n_imports: u32,
     arch: BinArch,
@@ -808,7 +908,12 @@ fn compile_arm<'a>(
 }
 
 fn compile_x86<'a>(
-    ops: impl IntoIterator<Item = Result<portal_solutions_blitz_common::MachOperator<'a, ()>, wasmparser::BinaryReaderError>>,
+    ops: impl IntoIterator<
+        Item = Result<
+            portal_solutions_blitz_common::MachOperator<'a, ()>,
+            wasmparser::BinaryReaderError,
+        >,
+    >,
     func_imports: &[(&str, &str)],
     n_imports: u32,
     arch: BinArch,

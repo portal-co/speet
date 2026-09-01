@@ -73,7 +73,10 @@ pub fn obtain_remote(path: &Path, backend: &str) -> Result<ObtainResponse, Strin
 
 #[derive(Debug, Clone)]
 pub enum ObtainResponse {
-    Ready { exe_path: PathBuf, cache_hit: bool },
+    Ready {
+        exe_path: PathBuf,
+        cache_hit: bool,
+    },
     /// Free-form reasons the backend gave for rejecting the input. The wire
     /// protocol no longer splits these into typed `unresolved_deps`/
     /// `fn_ptr_deps` buckets (see `os-transform-core::Suitability`); nothing
@@ -104,7 +107,11 @@ fn parse_analyze_response(
 
 fn parse_obtain_response(resp: Response) -> Result<ObtainResponse, String> {
     match resp {
-        Response::Ready { exe_path, cache_hit, .. } => Ok(ObtainResponse::Ready {
+        Response::Ready {
+            exe_path,
+            cache_hit,
+            ..
+        } => Ok(ObtainResponse::Ready {
             exe_path: PathBuf::from(exe_path),
             cache_hit,
         }),
@@ -118,5 +125,9 @@ fn parse_obtain_response(resp: Response) -> Result<ObtainResponse, String> {
 /// generic `os-daemon-protocol` wire format, requesting speet's own
 /// `"integrated"` AOT-recompile backend specifically.
 pub fn generate_execve_hook_c() -> String {
-    os_daemon_hook::generate_execve_hook_c("__speet_execve_hook", INTEGRATED_BACKEND, "SPEET_RTD_SOCK")
+    os_daemon_hook::generate_execve_hook_c(
+        "__speet_execve_hook",
+        INTEGRATED_BACKEND,
+        "SPEET_RTD_SOCK",
+    )
 }

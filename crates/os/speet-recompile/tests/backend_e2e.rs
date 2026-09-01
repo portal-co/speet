@@ -179,9 +179,18 @@ fn fp_cmp_aarch64_native() {
     )
     .unwrap();
     let link = Command::new("clang")
-        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+        .args(["-arch", "arm64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let run = Command::new(&exe_path).status().expect("run");
     assert_eq!(run.code(), Some(2), "FP comparisons should evaluate to 2");
     let _ = std::fs::remove_dir_all(&dir);
@@ -209,9 +218,18 @@ fn fp_arith_aarch64_native() {
     )
     .unwrap();
     let link = Command::new("clang")
-        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+        .args(["-arch", "arm64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let run = Command::new(&exe_path).status().expect("run");
     assert_eq!(run.code(), Some(11), "FP expression should evaluate to 11");
     let _ = std::fs::remove_dir_all(&dir);
@@ -248,13 +266,20 @@ fn call_indirect_module(which: i32) -> Vec<u8> {
     exports.export("f0", ExportKind::Func, 0);
     module.section(&exports);
     let mut elems = ElementSection::new();
-    elems.active(Some(0), &ConstExpr::i32_const(0), Elements::Functions((&[0u32, 1, 2, 3][..]).into()));
+    elems.active(
+        Some(0),
+        &ConstExpr::i32_const(0),
+        Elements::Functions((&[0u32, 1, 2, 3][..]).into()),
+    );
     module.section(&elems);
     let mut code = CodeSection::new();
     let mut f0 = Function::new([]);
     f0.instruction(&Instruction::I32Const(5)); // arg
     f0.instruction(&Instruction::I32Const(which)); // table index (= func index)
-    f0.instruction(&Instruction::CallIndirect { type_index: 0, table_index: 0 });
+    f0.instruction(&Instruction::CallIndirect {
+        type_index: 0,
+        table_index: 0,
+    });
     f0.instruction(&Instruction::Return);
     f0.instruction(&Instruction::End);
     code.function(&f0);
@@ -296,11 +321,24 @@ fn call_indirect_dispatch_aarch64_native() {
     )
     .unwrap();
     let link = Command::new("clang")
-        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+        .args(["-arch", "arm64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let run = Command::new(&exe_path).status().expect("run");
-    assert_eq!(run.code(), Some(25), "call_indirect index 2 should run f2(5)=25");
+    assert_eq!(
+        run.code(),
+        Some(25),
+        "call_indirect index 2 should run f2(5)=25"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -327,12 +365,25 @@ fn allstack_return_call_marshalling() {
     )
     .unwrap();
     let link = Command::new("clang")
-        .args(["-arch", "x86_64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+        .args(["-arch", "x86_64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let run = Command::new(&exe_path).status().expect("run");
     eprintln!("status={run:?}");
-    assert_eq!(run.code(), Some(42), "return_call marshalling should deliver arg → exit(42)");
+    assert_eq!(
+        run.code(),
+        Some(42),
+        "return_call marshalling should deliver arg → exit(42)"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -360,11 +411,24 @@ fn allstack_return_call_marshalling_aarch64_native() {
     )
     .unwrap();
     let link = Command::new("clang")
-        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
+        .args(["-arch", "arm64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let run = Command::new(&exe_path).status().expect("run");
-    assert_eq!(run.code(), Some(42), "return_call marshalling should deliver arg → exit(42)");
+    assert_eq!(
+        run.code(),
+        Some(42),
+        "return_call marshalling should deliver arg → exit(42)"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -372,8 +436,8 @@ fn allstack_return_call_marshalling_aarch64_native() {
 #[ignore = "executes x86_64 via Rosetta (run on an x86 host or after Rosetta reset)"]
 fn recompiled_const_function_sets_exit_code() {
     let wasm = const_return_module(42);
-    let obj = compile_wasm_to_object(&wasm, BinArch::X86_64, BinOs::MacOs)
-        .expect("compile to object");
+    let obj =
+        compile_wasm_to_object(&wasm, BinArch::X86_64, BinOs::MacOs).expect("compile to object");
 
     let dir = std::env::temp_dir().join(format!("speet_be_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -402,8 +466,14 @@ fn recompiled_const_function_sets_exit_code() {
         String::from_utf8_lossy(&link.stderr)
     );
 
-    let run = Command::new(&exe_path).status().expect("run recompiled binary");
-    assert_eq!(run.code(), Some(42), "recompiled guest should exit with its return value");
+    let run = Command::new(&exe_path)
+        .status()
+        .expect("run recompiled binary");
+    assert_eq!(
+        run.code(),
+        Some(42),
+        "recompiled guest should exit with its return value"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -433,10 +503,25 @@ fn recompiled_const_function_aarch64_native() {
     .unwrap();
 
     let link = Command::new("clang")
-        .args(["-arch", "arm64"]).arg(&shim_path).arg(&obj_path).arg("-o").arg(&exe_path)
-        .output().expect("run clang");
-    assert!(link.status.success(), "link:\n{}", String::from_utf8_lossy(&link.stderr));
-    let run = Command::new(&exe_path).status().expect("run recompiled binary");
-    assert_eq!(run.code(), Some(42), "recompiled aarch64 guest should exit with its return value");
+        .args(["-arch", "arm64"])
+        .arg(&shim_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("run clang");
+    assert!(
+        link.status.success(),
+        "link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe_path)
+        .status()
+        .expect("run recompiled binary");
+    assert_eq!(
+        run.code(),
+        Some(42),
+        "recompiled aarch64 guest should exit with its return value"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

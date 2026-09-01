@@ -65,16 +65,8 @@ fn fn_ptr_free_allowlist() -> HashSet<&'static str> {
 /// stub/glue of any kind, only the structural zero-offset guarantee.
 fn zero_offset_pointer_allowlist() -> HashSet<&'static str> {
     [
-        "strcmp",
-        "_strcmp",
-        "strncmp",
-        "_strncmp",
-        "memcmp",
-        "_memcmp",
-        "calloc",
-        "_calloc",
-        "realloc",
-        "_realloc",
+        "strcmp", "_strcmp", "strncmp", "_strncmp", "memcmp", "_memcmp", "calloc", "_calloc",
+        "realloc", "_realloc",
     ]
     .into_iter()
     .collect()
@@ -107,12 +99,36 @@ pub fn analyze_imports_with_model(
     bin: &LoadedBinary,
     model: MemoryModel,
 ) -> (Vec<String>, Vec<String>) {
+    analyze_imports_with_model_and_wired(host, bin, model, &[])
+}
+
+fn extra_wires(name: &str, extra: &[String]) -> bool {
+    let bare = bare_import_name(name);
+    extra
+        .iter()
+        .any(|s| s == name || s == bare || bare_import_name(s) == bare)
+}
+
+/// Like [`analyze_imports_with_model`], but treats every name in `extra_wired`
+/// as a hot-plugged stub (`has_wired_impl`) consulted before the statically
+/// linked registry — used by `hot-recompiler` after loading `stubs.wasm`.
+pub fn analyze_imports_with_model_and_wired(
+    host: &dyn HostApi,
+    bin: &LoadedBinary,
+    model: MemoryModel,
+    extra_wired: &[String],
+) -> (Vec<String>, Vec<String>) {
     let allow = fn_ptr_free_allowlist();
     let mut unresolved_deps = Vec::new();
     let mut fn_ptr_deps = Vec::new();
     let zero = model.text_unmapped();
 
-    if zero && bin.sections.iter().any(|s| matches!(s.kind, binary_io::SectionKind::Text)) {
+    if zero
+        && bin
+            .sections
+            .iter()
+            .any(|s| matches!(s.kind, binary_io::SectionKind::Text))
+    {
         let layout = GuestImageLayout::from_loaded_binary(bin);
         if layout.data_end_max() > ZERO_OFFSET_MAX_DATA_END {
             unresolved_deps.push(format!(
@@ -127,6 +143,12 @@ pub fn analyze_imports_with_model(
             continue;
         }
         let bare = bare_import_name(&imp.name);
+        // Hot-plugged stubs.wasm names are consulted first: a symbol the
+        // agent rebuilt into the guest table is treated as wired even when
+        // it is not yet in the statically linked registry or ambient set.
+        if extra_wires(&imp.name, extra_wired) || extra_wires(bare, extra_wired) {
+            continue;
+        }
         if host.resolve_ambient(bare).is_none() && host.resolve_ambient(&imp.name).is_none() {
             unresolved_deps.push(imp.name.clone());
             continue;
@@ -137,7 +159,10 @@ pub fn analyze_imports_with_model(
             imp.name.as_str()
         };
         if !allow.contains(lookup) && !allow.contains(bare) && !allow.contains(imp.name.as_str()) {
-            if speet_abi_stubs::has_wired_impl(lookup)
+            if extra_wires(lookup, extra_wired)
+                || extra_wires(bare, extra_wired)
+                || extra_wires(&imp.name, extra_wired)
+                || speet_abi_stubs::has_wired_impl(lookup)
                 || speet_abi_stubs::has_wired_impl(bare)
                 || speet_abi_stubs::has_wired_impl(imp.name.as_str())
                 || os_shim_core::has_core_impl(lookup)
@@ -155,7 +180,10 @@ pub fn analyze_imports_with_model(
             }
             if zero {
                 let extra = zero_offset_pointer_allowlist();
-                if extra.contains(lookup) || extra.contains(bare) || extra.contains(imp.name.as_str()) {
+                if extra.contains(lookup)
+                    || extra.contains(bare)
+                    || extra.contains(imp.name.as_str())
+                {
                     continue;
                 }
             }
@@ -245,6 +273,23 @@ mod tests {
     }
 
     #[test]
+    fn extra_wired_symbol_is_not_unresolved() {
+        let host = TunneledHostApi::for_host();
+        let bin = empty_bin(vec![ImportSym {
+            name: "not_a_real_symbol".into(),
+            plt_addr: None,
+        }]);
+        let (unresolved, fn_ptr) = analyze_imports_with_model_and_wired(
+            &host,
+            &bin,
+            MemoryModel::OwnedLinear,
+            &["not_a_real_symbol".into()],
+        );
+        assert!(unresolved.is_empty(), "{unresolved:?}");
+        assert!(fn_ptr.is_empty(), "{fn_ptr:?}");
+    }
+
+    #[test]
     fn zero_offset_admits_data_pointer_stub_metadata() {
         assert!(speet_abi_stubs::zero_offset_data_pointer_safe("write"));
         assert!(speet_abi_stubs::zero_offset_data_pointer_safe("exit"));
@@ -254,8 +299,7 @@ mod tests {
             name: "write".into(),
             plt_addr: Some(0x1000),
         }]);
-        let (unresolved, fn_ptr) =
-            analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
+        let (unresolved, fn_ptr) = analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
         assert!(unresolved.is_empty());
         assert!(fn_ptr.is_empty());
     }
@@ -274,24 +318,41 @@ mod tests {
         // Under the default (OwnedLinear) model, a raw guest pointer isn't
         // trustworthy as a host address, so this is correctly rejected.
         let (unresolved, fn_ptr) = analyze_imports(&host, &bin);
-        assert!(unresolved.is_empty(), "strcmp should still resolve against the host ambient table");
-        assert_eq!(fn_ptr, vec!["strcmp"], "strcmp must be rejected under OwnedLinear -- no glue exists for it");
+        assert!(
+            unresolved.is_empty(),
+            "strcmp should still resolve against the host ambient table"
+        );
+        assert_eq!(
+            fn_ptr,
+            vec!["strcmp"],
+            "strcmp must be rejected under OwnedLinear -- no glue exists for it"
+        );
 
         // Under ZeroOffset, the guest pointer's numeric value is already a
         // valid host address, so strcmp becomes suitable with zero
         // translation glue.
         let (unresolved, fn_ptr) = analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
         assert!(unresolved.is_empty());
-        assert!(fn_ptr.is_empty(), "strcmp should be admitted under ZeroOffset via zero_offset_pointer_allowlist");
+        assert!(
+            fn_ptr.is_empty(),
+            "strcmp should be admitted under ZeroOffset via zero_offset_pointer_allowlist"
+        );
     }
 
     #[test]
     fn zero_offset_pointer_allowlist_does_not_leak_into_owned_linear() {
         let host = TunneledHostApi::for_host();
         for sym in ["strncmp", "memcmp", "calloc", "realloc"] {
-            let bin = empty_bin(vec![ImportSym { name: sym.into(), plt_addr: Some(0x1000) }]);
+            let bin = empty_bin(vec![ImportSym {
+                name: sym.into(),
+                plt_addr: Some(0x1000),
+            }]);
             let (_, fn_ptr) = analyze_imports(&host, &bin);
-            assert_eq!(fn_ptr, vec![sym.to_string()], "{sym} must stay rejected under OwnedLinear");
+            assert_eq!(
+                fn_ptr,
+                vec![sym.to_string()],
+                "{sym} must stay rejected under OwnedLinear"
+            );
             let (_, fn_ptr) = analyze_imports_with_model(&host, &bin, MemoryModel::ZeroOffset);
             assert!(fn_ptr.is_empty(), "{sym} must be admitted under ZeroOffset");
         }

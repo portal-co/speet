@@ -8,8 +8,8 @@ use object::Object;
 use speet_host_api::HostApi;
 use speet_recompile::drive::compile_wasm_to_object;
 use speet_recompile::frontend::{
-    assert_same_platform, recompile_rv64_to_wasm, recompile_to_wasm, recompile_to_wasm_instrumented_plt,
-    external_targets_from_imports,
+    assert_same_platform, external_targets_from_imports, recompile_rv64_to_wasm, recompile_to_wasm,
+    recompile_to_wasm_instrumented_plt,
 };
 use speet_recompile::plt::PltCallPlan;
 use std::path::{Path, PathBuf};
@@ -80,7 +80,12 @@ impl Runtime {
         arch: BinArch,
         os: BinOs,
     ) -> Result<Vec<u8>, String> {
-        let key = format!("{}:{}:{}", ArtifactCache::hash_input(wasm), arch_label(arch), os_label(os));
+        let key = format!(
+            "{}:{}:{}",
+            ArtifactCache::hash_input(wasm),
+            arch_label(arch),
+            os_label(os)
+        );
         let input_hash = ArtifactCache::hash_input(wasm);
         let arch_os = format!("{}-{}", arch_label(arch), os_label(os));
         if let Some(o) = self.cache.get_object(&input_hash, &arch_os) {
@@ -231,7 +236,12 @@ impl Runtime {
     }
 
     /// Corpus helper: load `.elf`/`.macho` object, extract `.text`, run RV64 path.
-    pub fn run_corpus_object(&mut self, guest_obj: &Path, arch: BinArch, os: BinOs) -> Result<ExitStatus, String> {
+    pub fn run_corpus_object(
+        &mut self,
+        guest_obj: &Path,
+        arch: BinArch,
+        os: BinOs,
+    ) -> Result<ExitStatus, String> {
         let (text, addr) = load_text_from_object(guest_obj)?;
         self.recompile_rv64_and_run(&text, addr, arch, os)
     }
@@ -254,10 +264,9 @@ impl Runtime {
         arch: BinArch,
         os: BinOs,
     ) -> Result<ExitStatus, String> {
-        let tc = self
-            .toolchain
-            .as_ref()
-            .ok_or_else(|| "LLVM toolchain not available (set CLANG or install LLVM)".to_string())?;
+        let tc = self.toolchain.as_ref().ok_or_else(|| {
+            "LLVM toolchain not available (set CLANG or install LLVM)".to_string()
+        })?;
         // `std::process::id()` alone is shared by every test in this binary — cargo
         // test runs tests in parallel threads within one process, so two guests
         // linking/spawning concurrently would fight over the exact same `guest_exe`
@@ -275,12 +284,19 @@ impl Runtime {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let exe = dir.join("guest_exe");
         link_guest(
-            tc, self.host.as_ref(), guest_obj, arch, os, entry_param_count, sp_param_index,
-            halt_addr, lr_param_index, &dir, &exe,
+            tc,
+            self.host.as_ref(),
+            guest_obj,
+            arch,
+            os,
+            entry_param_count,
+            sp_param_index,
+            halt_addr,
+            lr_param_index,
+            &dir,
+            &exe,
         )?;
-        let status = Command::new(&exe)
-            .status()
-            .map_err(|e| e.to_string())?;
+        let status = Command::new(&exe).status().map_err(|e| e.to_string())?;
         if std::env::var("SPEET_RT_KEEP_TMP").is_err() {
             let _ = std::fs::remove_dir_all(&dir);
         } else {
@@ -312,8 +328,17 @@ impl Runtime {
         let dir = out_exe.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         link_guest(
-            tc, self.host.as_ref(), guest_obj, arch, os, entry_param_count, sp_param_index,
-            halt_addr, lr_param_index, dir, out_exe,
+            tc,
+            self.host.as_ref(),
+            guest_obj,
+            arch,
+            os,
+            entry_param_count,
+            sp_param_index,
+            halt_addr,
+            lr_param_index,
+            dir,
+            out_exe,
         )
     }
 }
@@ -376,6 +401,9 @@ fn guest_arch_from_object_path(path: &Path) -> Result<BinArch, String> {
         object::Architecture::Riscv32 => Ok(BinArch::RiscV32),
         object::Architecture::Arm => Ok(BinArch::Arm),
         object::Architecture::I386 => Ok(BinArch::X86),
-        other => Err(format!("unsupported guest arch in {}: {other:?}", path.display())),
+        other => Err(format!(
+            "unsupported guest arch in {}: {other:?}",
+            path.display()
+        )),
     }
 }

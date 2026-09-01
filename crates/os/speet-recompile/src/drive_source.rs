@@ -10,11 +10,15 @@ use portal_solutions_blitz_common::{
     wasm_encoder::{self, reencode::RoundtripReencoder},
     wasmparser,
 };
-use portal_solutions_blitz_js::{
-    js_emit_imports, js_module_preamble, JsWrite, State as JsState,
-};
+use portal_solutions_blitz_js::{js_emit_imports, js_module_preamble, JsWrite, State as JsState};
 
-fn parse_sigs(wasm: &[u8]) -> (Vec<wasmparser::FuncType>, Vec<wasm_encoder::FuncType>, Vec<u32>) {
+fn parse_sigs(
+    wasm: &[u8],
+) -> (
+    Vec<wasmparser::FuncType>,
+    Vec<wasm_encoder::FuncType>,
+    Vec<u32>,
+) {
     let mut sigs_wp: Vec<wasmparser::FuncType> = Vec::new();
     let mut fsigs: Vec<u32> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(wasm).flatten() {
@@ -94,11 +98,17 @@ pub fn compile_wasm_to_c(wasm: &[u8]) -> Result<String, String> {
     let imports = function_imports(wasm);
     let tags = parse_tags(wasm);
     let import_count = imports.len() as u32;
-    let import_refs: Vec<(&str, &str)> =
-        imports.iter().map(|(m, n)| (m.as_str(), n.as_str())).collect();
+    let import_refs: Vec<(&str, &str)> = imports
+        .iter()
+        .map(|(m, n)| (m.as_str(), n.as_str()))
+        .collect();
 
-    let raw_ops =
-        mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs_wp, import_count);
+    let raw_ops = mach_operators::<(), wasmparser::BinaryReaderError>(
+        &bodies,
+        &fsigs,
+        &sigs_wp,
+        import_count,
+    );
     let ops = dce_pass!(raw_ops);
 
     let mut out = String::new();
@@ -139,11 +149,17 @@ pub fn compile_wasm_to_js_with_options(wasm: &[u8], promise_calls: bool) -> Resu
     let imports = function_imports(wasm);
     let tags = parse_tags(wasm);
     let import_count = imports.len() as u32;
-    let import_refs: Vec<(&str, &str)> =
-        imports.iter().map(|(m, n)| (m.as_str(), n.as_str())).collect();
+    let import_refs: Vec<(&str, &str)> = imports
+        .iter()
+        .map(|(m, n)| (m.as_str(), n.as_str()))
+        .collect();
 
-    let raw_ops =
-        mach_operators::<(), wasmparser::BinaryReaderError>(&bodies, &fsigs, &sigs_wp, import_count);
+    let raw_ops = mach_operators::<(), wasmparser::BinaryReaderError>(
+        &bodies,
+        &fsigs,
+        &sigs_wp,
+        import_count,
+    );
     let ops = dce_pass!(raw_ops);
 
     let mut out = String::new();
