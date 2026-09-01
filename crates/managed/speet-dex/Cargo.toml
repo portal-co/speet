@@ -18,3 +18,7 @@ speet-traps = {path = "../../helper/speet-traps"}
 dex-bytecode = {path = "../dex-bytecode"}
 speet-object = {path = "../speet-object"}
 speet-link-core = {path = "../../os/speet-link-core"}
+
+[dev-dependencies]
+wasmi = "1"
+wasmparser = { workspace = true, features = ["validate"] }

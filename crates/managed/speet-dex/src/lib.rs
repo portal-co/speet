@@ -946,11 +946,14 @@ where
         let scratch_i64 = fed.layout().base(self.scratch_i64_slot);
         let total_params = fed.locals_mark().total_locals;
         let pool = fed.pool();
-        let bfo = fed.base_func_offset();
         let escape_tag = fed.escape_tag();
 
-        let target =
-            |off: i64| -> FuncIdx { FuncIdx(bfo + (flat_idx as i64).wrapping_add(off) as u32) };
+        // `Target::Static { func }` is base-offset-*relative* — the reactor's
+        // own `emit_bare_call`/`emit_call_body` add `base_func_offset` when
+        // emitting the actual `Call`/`ReturnCall` (see `yecta::Reactor`).
+        // Adding it here too would double-count it whenever `base_func_offset`
+        // is nonzero (i.e. whenever DEX functions aren't the module's first).
+        let target = |off: i64| -> FuncIdx { FuncIdx((flat_idx as i64).wrapping_add(off) as u32) };
 
         macro_rules! feed {
             ($insn:expr) => {
@@ -1024,9 +1027,18 @@ where
             | DexInsn::ReturnWide { .. }
             | DexInsn::ReturnObject { .. } => {
                 if let Some(tag) = escape_tag {
-                    fed.ret(ctx, total_params, tag)?;;
+                    fed.ret(ctx, total_params, tag)?;
+                } else if matches!(rctx.escape(), yecta::CallEscape::Flag) {
+                    fed.ret_flag(ctx, total_params, false)?;
                 } else {
-                    feed!(Instruction::Unreachable);
+                    // Plain `CallEscape::Jump`: the exported function type has
+                    // zero results, so a bare `return` (no register payload)
+                    // is the correct terminator. `seal_fn` (not `feed`) is
+                    // required here — it's the self-terminating counterpart to
+                    // `jmp`/`ji`/`ret` that properly closes this reactor slot,
+                    // unlike a plain `feed`, which leaves the slot open.
+                    rctx.flush_bundles(ctx, fed.tail_idx)?;
+                    rctx.seal_fn(ctx, fed.tail_idx, &Instruction::Return)?;
                 }
             }
 
