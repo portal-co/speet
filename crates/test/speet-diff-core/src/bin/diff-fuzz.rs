@@ -52,8 +52,11 @@ fn main() {
             }
             Comparison::Divergence(desc) => {
                 stats.divergences += 1;
+                // Minimize first (plan §6.2): the artifact carries the
+                // minimized case — the smallest case we know still diverges.
+                let minimized = speet_diff_core::minimize(&case);
                 let report = DivergenceReport {
-                    case: CaseRecord::of(&case),
+                    case: CaseRecord::of(&minimized),
                     oracle: OutcomeRecord {
                         regs: oracle.as_ref().map(|o| o.regs).unwrap_or_default(),
                         exit: format!("{:?}", oracle.as_ref().map(|o| o.exit)),
@@ -72,7 +75,12 @@ fn main() {
                 };
                 // The divergence description is the key evidence — embed it.
                 let path = record_divergence("x86_64", &label, &report);
-                eprintln!("DIVERGENCE {label}: {desc}\n  artifact: {}", path.display());
+                eprintln!(
+                    "DIVERGENCE {label}: {desc}\n  minimized: {} bytes (was {})\n  artifact: {}",
+                    minimized.code.len(),
+                    case.code.len(),
+                    path.display()
+                );
             }
         }
     }

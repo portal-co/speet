@@ -14,6 +14,7 @@
 pub mod case;
 pub mod compare;
 pub mod generator;
+pub mod minimize;
 pub mod report;
 pub mod recompiled;
 #[cfg(feature = "oracle")]
@@ -22,6 +23,7 @@ pub mod oracle;
 pub use case::{ExecOutcome, ExitKind, FuzzCase, RegState};
 pub use compare::{compare_outcomes, Comparison};
 pub use generator::{generate_case, SeedRng};
+pub use minimize::minimize;
 pub use report::SkipReason;
 pub use report::{record_divergence, record_skip};
 #[cfg(feature = "oracle")]
