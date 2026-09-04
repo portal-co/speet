@@ -377,7 +377,16 @@ impl<Context, E> X86Recompiler<Context, E> {
         rctx.declare_trap_locals(extra);
         let _cell = rctx.alloc_cell();
         let fn_type = f(&mut rctx.layout().iter_since(&mark).collect::<alloc::vec::Vec<_>>().into_iter());
-        rctx.next_with(ctx, fn_type, inst_len)
+        // The `len` argument is the *slot distance* to the fallthrough
+        // successor (see `yecta::Reactor::next_with`): with no slot assigner
+        // every byte offset is attempted as a slot, so the byte length IS
+        // the slot distance. With a slot assigner (PcSlotMap), only real
+        // instruction starts get slots, so the fallthrough target is always
+        // exactly 1 slot ahead — passing the byte length here desyncs the
+        // lens buckets and severs the fallthrough edge (straight-line runs
+        // seal with `unreachable` instead of merging into the next slot).
+        let slot_distance = if self.slot_assigner.is_some() { 1 } else { inst_len };
+        rctx.next_with(ctx, fn_type, slot_distance)
     }
 
     fn emit_memory_address<F>(

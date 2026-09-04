@@ -293,3 +293,53 @@ Former open questions, with the decisions made:
   debugging/coverage signal). A case skips only if an unsupported instruction is
   actually executed, surfacing as `unreachable` at runtime. Dead unsupported code
   translating cleanly is in scope and compared normally.
+
+## 10. Implementation status (M1 — x86-64, shipped)
+
+`crates/test/speet-diff-core` implements the M1 pipeline: generator → Unicorn
+oracle + speet recompiled run (wasmi Lane A) → skip-classified exact
+comparison → JSON divergence artifacts. Driver: `cargo run -p speet-diff-core
+--bin diff-fuzz -- N [--seed S]`; exit 1 iff divergences.
+
+Deviations from the plan text above, with reasons:
+
+- **Byte-granular slots (no `PcSlotMap` gate) for the fuzz translation.** The
+  x86-64 frontend's indirect-return table math (`ReturnAddressSnippet`) is
+  byte-exact — `(return_addr - base_rip) + base_func_offset` — which only
+  matches the table when every decoded byte offset is a slot. This is also
+  the layout the e2e corpus harness (`translate_x86`) uses. Under a gate
+  (one slot per real instruction start) a clean `ret` to the halt sentinel
+  traps with `undefined element` — the halt slot index ≠ `text_len`.
+  See `recompiled.rs::build_case_module`'s doc comment.
+- **`next_with` slot-distance fix (speet-x86_64/speet-x86).** `init_function`
+  passed the instruction BYTE length as yecta's `len` (slot distance). With
+  no gate those coincide (one slot per byte offset); with a gate they don't,
+  severing every fallthrough edge — straight-line runs sealed with bare
+  `unreachable`. Under a gate the distance is 1; kept byte-length for the
+  no-gate path.
+- **Shingle-hazard filter in the generator.** The no-gate layout decodes at
+  every byte offset; an encoding containing a `ret`-like byte (C3/C2/CB) can
+  decode as a garbage `ret` at a misaligned slot and merge a spurious
+  indirect return into the real instruction stream. The generator rejects
+  encodings containing those bytes.
+- **RO-store detection is post-hoc on the speet side.** wasmi has no
+  per-page protection, so the runner diffs the case's read-only window after
+  the run; a change classifies as `StoreToReadOnly` (skip), matching the
+  oracle's `WRITE_PROT` fault.
+
+### Findings (each reproducible; see the crate README for probes)
+
+1. **Constant folding drops flag side effects** (yecta const-fold optimizer):
+   an ALU op whose operands are all compile-time constants folds to the
+   result and never computes flags — observable whenever the folded op's
+   flags are live in the compared final state. Minimal repro:
+   `mov rax, 3; add rax, 3; ret` → oracle PF=1 (result 6, even parity),
+   recompiled PF=0. Ignored-documentation test:
+   `speet-diff-core/tests/compare.rs::folded_add_drops_pf`.
+2. **x86-64 frontend coverage gaps** (coverage signal, not gates): AND/OR/XOR
+   `reg,[mem]` (ADD/SUB are translated), INC/DEC/NEG. These surface as
+   executed-unsupported skips and in `unsupported_for`.
+
+Both engines agree bit-exactly (registers + flags + memory) on ~40% of
+random cases; the rest are split between scope-filter skips (executed-
+unsupported, traps, RO stores, oracle faults) and the divergences above.

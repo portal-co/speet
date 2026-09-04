@@ -60,6 +60,8 @@ members = [
     "crates/test/speet-corpus-harness",
     "crates/test/speet-guest-runner",
     "crates/test/speet-program-equivalence",
+    # Comparison (differential) fuzzing — docs/comparison-fuzzing-plan.md
+    "crates/test/speet-diff-core",
 ]
 resolver = "3"
 
