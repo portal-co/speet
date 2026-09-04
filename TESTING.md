@@ -42,6 +42,7 @@ Currently sparse; add to it as new test infrastructure is needed.
 ## What to test
 
 - Instruction correctness: for each architecture frontend, compile a small test binary and compare WASM output against expected values.
+- Comparison fuzzing: differential testing of random instructions against Unicorn — see [docs/comparison-fuzzing-plan.md](docs/comparison-fuzzing-plan.md) (planned; scope: RX memory, unsupported instructions/traps/RO-writes ignored).
 - Reachability: verify `speet-reach` marks the right slots as reachable given a known CFG.
 - Linker two-pass: verify `FuncSchedule` panics on count mismatch and produces correct indices.
 - Trap state survival: verify `RopDetectTrap` counter survives across `return_call` chains.
