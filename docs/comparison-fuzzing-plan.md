@@ -343,3 +343,23 @@ Deviations from the plan text above, with reasons:
 Both engines agree bit-exactly (registers + flags + memory) on ~40% of
 random cases; the rest are split between scope-filter skips (executed-
 unsupported, traps, RO stores, oracle faults) and the divergences above.
+
+### M2/M3 addenda
+
+- **M2 shipped**: instruction-level minimizer + replay corpus. Artifacts carry
+  a `description` (facet list) and `expectation: divergence|fixed`;
+  `tests/replay_corpus.rs` replays every checked-in artifact.
+- **M3 shipped (proptest leg)**: `tests/proptest_harness.rs` runs 32 random
+  seeds per invocation (`PROPTEST_CASES` to crank), tolerating only facets
+  already documented by checked-in artifacts (`flags`, plus the register-
+  clobber classes below); any NEW facet class fails and is minimized +
+  checked in via `diff-fuzz --seed S`. proptest regressions persist under
+  `crates/test/speet-diff-core/proptest-regressions/`. The libfuzzer leg
+  remains future work (needs `cargo-fuzz` + nightly).
+- **New finding — sub-register writes clobber the full GPR** (speet-x86_64):
+  8-bit (`41 8A C1` = `mov al, r9b`) and 16-bit (`66 41 8B FF` = `mov di, r15w`)
+  register-destination writes replace the entire 64-bit register instead of
+  merging into the low bytes. REX-prefixed `r8b..r15b` take the subreg-merge
+  path and are unaffected; the legacy AL/CL/... and AX/CX... destinations
+  clobber. Artifacts: `seed-6cf2cbd9012400aa` (8-bit), `seed-a77806c5a1515715`
+  (16-bit chain), plus shift-count flag drops (`48 C1 FE 14` etc.).

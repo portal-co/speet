@@ -63,6 +63,8 @@ impl RunStats {
 /// A recorded divergence: the full case + both outcomes' key state.
 #[derive(Debug, Clone, Serialize)]
 pub struct DivergenceReport {
+    /// Human-readable divergence facets (compare_outcomes' description).
+    pub description: String,
     pub case: CaseRecord,
     pub oracle: OutcomeRecord,
     pub recompiled: OutcomeRecord,

@@ -56,6 +56,7 @@ fn main() {
                 // minimized case — the smallest case we know still diverges.
                 let minimized = speet_diff_core::minimize(&case);
                 let report = DivergenceReport {
+                    description: desc.clone(),
                     case: CaseRecord::of(&minimized),
                     oracle: OutcomeRecord {
                         regs: oracle.as_ref().map(|o| o.regs).unwrap_or_default(),

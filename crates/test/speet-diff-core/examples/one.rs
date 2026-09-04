@@ -5,4 +5,9 @@ fn main() {
     let r = speet_diff_core::run_recompiled(&case);
     let c = speet_diff_core::compare_outcomes(&case, o.as_ref().ok(), r.as_ref());
     println!("seed {s}: {c:?}");
+    if matches!(c, speet_diff_core::Comparison::Divergence(_)) {
+        let m = speet_diff_core::minimize(&case);
+        println!("minimized code: {}", m.code.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        println!("regs g7-g15: {:?}", &m.regs.gprs[7..]);
+    }
 }
