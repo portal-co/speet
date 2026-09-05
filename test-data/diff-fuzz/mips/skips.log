@@ -30,13 +30,14 @@ seed-0c2f590e5eacc805	StepBudgetExceeded
 seed-850d3ff45bd6b859	Trapped
 seed-2344b9addb21346e	StepBudgetExceeded
 seed-c17c33675a6bb083	OracleFault
-seed-5fb3ad20d9b62c98	Trapped
+seed-5fb3ad20d9b62c98	UnsupportedExecuted
 seed-fdeb26da5900a8ad	StepBudgetExceeded
 seed-9c22a093d84b24c2	UnsupportedExecuted
-seed-3a5a1a4d5795a0d7	OracleFault
+seed-3a5a1a4d5795a0d7	UnsupportedExecuted
 seed-d8919406d6e01cec	Trapped
 seed-b338013354bf912b	OracleFault
 seed-ca4d61d2d133fd94	Trapped
+seed-6884db8c507e79a9	UnsupportedExecuted
 seed-06bc5545cfc8f5be	Trapped
 seed-432b48b8ce5dede8	OracleFault
 seed-1dd1b5e54c3d6227	Trapped

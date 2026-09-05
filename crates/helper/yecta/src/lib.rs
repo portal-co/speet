@@ -2914,6 +2914,11 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             e.opt.flush(ctx, &mut e.function, &mut e.inst_count)?;
         }
         for &FuncIdx(idx) in &reachable {
+            if lock[idx as usize].sealed {
+                // Already terminated by an earlier seal; appending another
+                // terminator/`End` would write past the body's final `End`.
+                continue;
+            }
             // Close any still-open hoisted call region before closing pending
             // `if` frames — per the close-before-`Else` rule, a region still
             // open here is always the innermost active scope.
@@ -4144,6 +4149,12 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         let reachable = self.transitive_preds_of(tail_idx).clone();
         for &FuncIdx(idx) in &reachable {
             let mut func = self.lock_entry(idx as usize,false);
+            if func.sealed {
+                // Already terminated by an earlier seal (e.g. a nested group's
+                // `jmp`); writing another terminator + `End` would append
+                // operators past the function body's final `End`.
+                continue;
+            }
             // Close any still-open hoisted call region before closing pending
             // `if` frames — per the close-before-`Else` rule, a region still
             // open here is always the innermost active scope.

@@ -1,6 +1,6 @@
 # MIPS recompiler: delay slots, big-endian memory, store-path correctness
 
-**Status: MS-1/MS-2 shipped (delay slots live), MS-3+ open** — supersedes the open MIPS findings in
+**Status: MS-1/MS-2 shipped (delay slots live); scratch pre-declaration + yecta seal guards shipped; MS-3 blocked on a yecta const-fold unsoundness** — supersedes the open MIPS findings in
 [comparison-fuzzing-plan.md](comparison-fuzzing-plan.md) (findings #6, #7 and
 the endianness sub-finding of #4).
 **Crates affected:** `yecta`, `speet-mips`, `speet-ordering`,
@@ -432,22 +432,40 @@ runs.
   arch unchanged. Remaining MIPS divergence classes: big-endian data
   memory (§3) and one validate class (below).
 
-### New MS-3 blocker (diagnosed, unfixed): per-slot layout locals vs
-### stable param forwarding
+### MS-3 blocker RESOLVED: pre-declared scratch (shipped)
 
-`MipsRecompiler::init_function` rewinds the layout to `locals_mark` and
-appends each slot's scratch locals (temps, addr scratch, pools, swap
-temps). Merged functions absorb every later slot's appends into their
-signature (type[0] grew to 76 params), but the return_call/jmp/ji
-forwarding paths pass `rctx.locals_mark().total_locals` — the count at
-setup time (38). A merged group whose body ends in a `jmp` (e.g. SW +
-JR $ra) seals with a 38-value `return_call` against a 76-param type:
-`validate: type mismatch: expected i64, found i32`. Wasmi previously
-masked this class (the M5-era skip rates); the fetcher-on sweep exposes
-it. Fix direction: declare the per-slot scratch set once (setup_traps,
-x86/riscv-style) instead of per-slot rewind-and-reappend, or forward the
-tail entry's real signature params. This gates BE-swap enablement (§3.2
-debug step 2 will hit the same class).
+`setup_traps` now pre-declares the full per-slot scratch set (temps,
+addr scratch, pools, swap temps) before the params mark — the
+x86-64-style fixed register file — and `init_function` only rewinds,
+declares trap locals, reseeds the pool, and opens the slot. The shared
+function signature is stable from the first slot, so `jmp`/`ji`
+forwarding (`locals_mark().total_locals`) always matches the sealed
+group. Two yecta hardening fixes shipped with it:
+
+- `seal_to`/`seal_for_split` now skip already-sealed entries (an entry
+  reachable from two seal events used to get a second terminator +
+  `End`, appending operators past its function body's final `End`).
+- The WASI link path's caller-side layout reset moved into
+  `setup_traps` itself (matching x86-64's rebuild-the-layout comment).
+
+### NEW MS-3 blocker (diagnosed, unfixed): yecta const-fold rewrite of
+### known-const store sequences is stack-unsound
+
+With the swaps wired (`big_endian_memory = true`), BE diff-fuzz regresses
+to 6 pass / 90 divergences, all `validate: type mismatch: expected i64,
+found i32`. Minimal repro: `SW $zero, off($t0)` + `JR $ra` — the stored
+value (`$zero` = 0) is const-known, so `local.set 57` (swap tmp) becomes
+a virtual store and the swap term chain gets rewritten by the fold
+pipeline into a sequence whose operand order does not match its stack
+effect (verified by op-stream diffing: `(v & 0xFF) << 24` reappears as
+`[const 0xFF000000][local.get 57]...` with one operand short). A
+`rotl 0` laundering pass before the store does not prevent the rewrite.
+Fix direction: make the ConstFold fold path materialize-then-emit the
+original term sequence when a fold spans a `local.get` of a virtual
+local (or add a no-fold escape on the sink), then re-enable
+`big_endian_memory = true`. All swap helpers were also rewritten to the
+`local.set` + re-read form (the old `tee`-based forms leaked the tee'd
+original and desynced the stack — the M5-era validate failures).
 
 ## 5. Testing and acceptance
 

@@ -904,11 +904,28 @@ where
         rctx: &mut RC,
         _ctx: &mut Context,
     ) -> u32 {
+        // Fixed register indices, so rebuild the layout like x86-64: prior
+        // emit closures on the same reactor (e.g. the embedded WASI guest)
+        // may otherwise shift every param index.
+        *rctx.layout_mut() = yecta::LocalLayout::empty();
         let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
         self.gpr_slot   = rctx.layout_mut().append(32, gpr_type); // $0–$31
         self.hi_lo_slot = rctx.layout_mut().append(2,  gpr_type); // HI, LO
         self.pc_slot    = rctx.layout_mut().append(1,  ValType::I32); // PC
         self.expected_ra_slot = rctx.layout_mut().append(1, ValType::I32); // speculative expected RA
+        // Per-slot scratch, PRE-DECLARED (x86-64 style): every slot declares
+        // the identical set, so the shared function type is stable from the
+        // first slot and `jmp`/`ji` forwarding (`locals_mark().total_locals`)
+        // always matches the sealed group's signature. The former
+        // init_function rewind-and-reappend made the type grow per slot,
+        // under-forwarding merged groups (validate type-mismatch class).
+        self.temps_slot = rctx.layout_mut().append(Self::N_TEMPS, gpr_type);
+        self.addr_scratch_slot = rctx.layout_mut().append(1, self.addr_val_type());
+        self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
+        self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
+        // Dedicated byte-swap scratch (never touched by the lazy-store pool).
+        self.swap_tmp_slot = rctx.layout_mut().append(1, ValType::I32);
+        self.swap_tmp_i64_slot = rctx.layout_mut().append(1, ValType::I64);
         rctx.declare_trap_params(&mut ());
         let mark = rctx.layout().mark();
         rctx.set_locals_mark(mark);
@@ -1010,14 +1027,23 @@ where
     ) -> Result<(), E2> {
         // t = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
         let t = sink.layout().base(self.swap_tmp_slot);
-        sink.feed(ctx, &WasmInstruction::LocalTee(t))?;
+        // Launder the value through `rotl 0` (identity): the const-fold
+        // optimizer tracks a known-const stored local virtually and rewrites
+        // the following byte-extraction terms into an imbalanced sequence
+        // when the stored value folds to a constant (e.g. SW of $zero).
+        // `rotl` is not in the fold vocabulary, so the local lands unknown.
+        sink.feed(ctx, &WasmInstruction::I32Const(0))?;
+        sink.feed(ctx, &WasmInstruction::I32Rotl)?;
+        sink.feed(ctx, &WasmInstruction::LocalSet(t))?;
         sink.feed(ctx, &WasmInstruction::I32Const(0xFF))?;
+        sink.feed(ctx, &WasmInstruction::I32And)?;
         sink.feed(ctx, &WasmInstruction::I32Const(8))?;
         sink.feed(ctx, &WasmInstruction::I32Shl)?;
         sink.feed(ctx, &WasmInstruction::LocalGet(t))?;
         sink.feed(ctx, &WasmInstruction::I32Const(8))?;
         sink.feed(ctx, &WasmInstruction::I32ShrU)?;
         sink.feed(ctx, &WasmInstruction::I32Const(0xFF))?;
+        sink.feed(ctx, &WasmInstruction::I32And)?;
         sink.feed(ctx, &WasmInstruction::I32Or)?;
         Ok(())
     }
@@ -1028,7 +1054,11 @@ where
     ) -> Result<(), E2> {
         // r = ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF)
         let t0 = sink.layout().base(self.swap_tmp_slot);
-        sink.feed(ctx, &WasmInstruction::LocalTee(t0))?;
+        // Launder via `rotl 0` — see swap16 note.
+        sink.feed(ctx, &WasmInstruction::I32Const(0))?;
+        sink.feed(ctx, &WasmInstruction::I32Rotl)?;
+        sink.feed(ctx, &WasmInstruction::LocalSet(t0))?;
+        sink.feed(ctx, &WasmInstruction::LocalGet(t0))?;
         sink.feed(ctx, &WasmInstruction::I32Const(0xFF))?;
         sink.feed(ctx, &WasmInstruction::I32Const(24))?;
         sink.feed(ctx, &WasmInstruction::I32Shl)?;
@@ -1058,7 +1088,11 @@ where
         &self, ctx: &mut Context2, sink: &mut dyn MipsBodySink<Context2, E2>,
     ) -> Result<(), E2> {
         let t0 = sink.layout().base(self.swap_tmp_i64_slot);
-        sink.feed(ctx, &WasmInstruction::LocalTee(t0))?;
+        // Launder via `rotl 0` — see swap16 note.
+        sink.feed(ctx, &WasmInstruction::I64Const(0))?;
+        sink.feed(ctx, &WasmInstruction::I64Rotl)?;
+        sink.feed(ctx, &WasmInstruction::LocalSet(t0))?;
+        sink.feed(ctx, &WasmInstruction::LocalGet(t0))?;
         sink.feed(ctx, &WasmInstruction::I64Const(0xFF))?;
         sink.feed(ctx, &WasmInstruction::I64Const(56))?;
         sink.feed(ctx, &WasmInstruction::I64Shl)?;
@@ -1207,16 +1241,9 @@ where
         num_temps: u32,
         f: &mut (dyn FnMut(&mut (dyn Iterator<Item = (u32, ValType)> + '_)) -> F + '_),
     ) -> Result<usize, E> {
-        let gpr_type = if self.enable_mips64 { ValType::I64 } else { ValType::I32 };
+        let _ = num_temps; // scratch set pre-declared in setup_traps (Self::N_TEMPS)
         let mark = rctx.locals_mark();
         rctx.layout_mut().rewind(&mark);
-        self.temps_slot = rctx.layout_mut().append(num_temps, gpr_type);
-        self.addr_scratch_slot = rctx.layout_mut().append(1, self.addr_val_type());
-        self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
-        self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
-        // Dedicated byte-swap scratch (never touched by the lazy-store pool).
-        self.swap_tmp_slot = rctx.layout_mut().append(1, ValType::I32);
-        self.swap_tmp_i64_slot = rctx.layout_mut().append(1, ValType::I64);
         let mut unit = ();
         let mut ma_cell = self.memory_access.as_ref().map(|m| m.borrow_mut());
         let extra: &mut dyn yecta::LocalDeclarator = match ma_cell.as_deref_mut() {
@@ -1233,6 +1260,9 @@ where
         rctx.next_with(ctx, fn_type, 1)
     }
 
+    /// Temp locals pre-declared per function (was init_function's
+    /// `num_temps`; `translate_instruction` always passed 8).
+    const N_TEMPS: u32 = 8;
     /// Number of i32 locals reserved in the local pool for lazy-store operand saving.
     const N_POOL_I32: u32 = 8;
     /// Number of i64 locals reserved in the local pool for lazy-store operand saving.

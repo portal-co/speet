@@ -613,10 +613,11 @@ fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Str
         case.entry_pc as u32,
     );
     rc.set_memory64(true);
-    // Byte order stays little-endian for now: enabling the BE swaps
-    // surfaced a pre-existing param-forwarding/merge bug (per-slot layout
-    // locals vs stable return_call forwarding counts) — MS-3 of mips-plan.
-    // rc.set_little_endian_memory(); // (default LE until MS-3)
+    // Byte order stays little-endian for now (matches historical behavior;
+    // the oracle is BE, so byte-order-sensitive accesses still diverge).
+    // Enabling the BE swaps trips a yecta const-fold/peephole unsoundness:
+    // the swap term sequences get rewritten stack-imbalanced when the stored
+    // value is a known constant — minimal repro in mips-plan.md §4b.
     // Delay-slot support: the fetcher is installed below and branch/jump
     // translation re-runs the delay word inside the taken arm (see
     // docs/mips-plan.md §2). Delay words stay real slots so slot indices
