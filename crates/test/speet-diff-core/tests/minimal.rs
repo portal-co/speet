@@ -1,4 +1,4 @@
-use speet_diff_core::case::{FuzzCase, RegState};
+use speet_diff_core::case::{Arch, FuzzCase, RegState};
 use speet_diff_core::{run_oracle, run_recompiled};
 
 fn one_case(mut code: Vec<u8>) -> FuzzCase {
@@ -20,6 +20,7 @@ fn one_case(mut code: Vec<u8>) -> FuzzCase {
     stack[off..off + 8]
         .copy_from_slice(&((speet_diff_core::generator::CODE_BASE + code.len() as u64).to_le_bytes()));
     FuzzCase {
+        arch: Arch::X86_64,
         code,
         entry_pc: speet_diff_core::generator::CODE_BASE,
         regs,

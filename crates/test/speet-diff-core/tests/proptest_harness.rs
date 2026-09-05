@@ -7,7 +7,15 @@ use speet_diff_core::case::Arch;
 
 
 fn arch() -> impl Strategy<Value = Arch> {
-    proptest::sample::select(vec![Arch::X86_64, Arch::AArch64, Arch::RiscV64])
+    proptest::sample::select(vec![
+        Arch::X86_64,
+        Arch::AArch64,
+        Arch::RiscV64,
+        Arch::Arm,
+        Arch::X86_32,
+        Arch::RiscV32,
+        Arch::Mips,
+    ])
 }
 
 use std::collections::HashSet;

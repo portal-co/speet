@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Why a case was skipped (per the plan's scope rules).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SkipReason {
     /// An unsupported instruction was actually executed (speet `unreachable` /
     /// oracle invalid opcode). Translation never gates — frontends overtranslate.
@@ -71,7 +71,7 @@ pub struct DivergenceReport {
 }
 
 /// Serializable projection of a `FuzzCase`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct CaseRecord {
     pub arch: crate::case::Arch,
     pub code_hex: String,
@@ -109,6 +109,37 @@ pub struct OutcomeRecord {
     pub exit: String,
     pub data_changes: Vec<(u64, String, String)>,
     pub stack_changes: Vec<(u64, String, String)>,
+}
+
+impl CaseRecord {
+    /// Rebuild a replayable case from a record (the artifact JSON's
+    /// `"case"` object).
+    pub fn to_case(&self) -> FuzzCase {
+        let mut gprs = [0u64; 32];
+        for (i, v) in self.regs.gprs.iter().take(32).enumerate() {
+            gprs[i] = *v;
+        }
+        FuzzCase {
+            arch: self.arch,
+            code: unhex(&self.code_hex),
+            entry_pc: self.entry_pc,
+            regs: RegState {
+                gprs,
+                ..self.regs
+            },
+            data: unhex(&self.data_hex),
+            data_base: self.data_base,
+            stack: unhex(&self.stack_hex),
+            stack_base: self.stack_base,
+            read_only: self.read_only.clone(),
+            step_budget: self.step_budget,
+            seed: 0,
+        }
+    }
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
 }
 
 fn hex(bytes: &[u8]) -> String {

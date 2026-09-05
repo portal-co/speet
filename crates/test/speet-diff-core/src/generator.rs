@@ -379,6 +379,10 @@ pub fn generate_case(arch: crate::case::Arch, seed: u64) -> FuzzCase {
         crate::case::Arch::X86_64 => generate_case_x86(seed),
         crate::case::Arch::AArch64 => crate::gen_a64::generate_case(seed),
         crate::case::Arch::RiscV64 => crate::gen_rv64::generate_case(seed),
+        crate::case::Arch::Arm => crate::gen_32::generate_case_arm(seed),
+        crate::case::Arch::X86_32 => crate::gen_32::generate_case_x86_32(seed),
+        crate::case::Arch::RiscV32 => crate::gen_32::generate_case_rv32(seed),
+        crate::case::Arch::Mips => crate::gen_32::generate_case_mips(seed),
     }
 }
 

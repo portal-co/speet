@@ -23,11 +23,7 @@ fn main() {
             seed = args.get(i + 1).and_then(|a| a.parse().ok());
             i += 2;
         } else if args[i] == "--arch" {
-            arch = match args.get(i + 1).map(|s| s.as_str()) {
-                Some("aarch64") => Arch::AArch64,
-                Some("riscv64") => Arch::RiscV64,
-                _ => Arch::X86_64,
-            };
+            arch = speet_diff_core::parse_arch_name(args.get(i + 1).map(|s| s.as_str()));
             i += 2;
         } else {
             i += 1;
@@ -37,6 +33,10 @@ fn main() {
         Arch::X86_64 => "x86_64",
         Arch::AArch64 => "aarch64",
         Arch::RiscV64 => "riscv64",
+        Arch::Arm => "arm",
+        Arch::X86_32 => "x86_32",
+        Arch::RiscV32 => "riscv32",
+        Arch::Mips => "mips",
     };
     let base_seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()

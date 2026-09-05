@@ -15,11 +15,7 @@ fn case_from_json(v: &serde_json::Value) -> FuzzCase {
     let case = &v["case"];
     let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect::<Vec<u8>>();
     let g: Vec<u64> = case["regs"]["gprs"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
-    let arch = match case["arch"].as_str().unwrap_or("X86_64") {
-        "AArch64" => speet_diff_core::case::Arch::AArch64,
-        "RiscV64" => speet_diff_core::case::Arch::RiscV64,
-        _ => speet_diff_core::case::Arch::X86_64,
-    };
+    let arch = speet_diff_core::parse_arch_name(case["arch"].as_str());
     let mut gprs = [0u64; 32];
     for (i, v) in g.iter().enumerate() {
         gprs[i] = *v;

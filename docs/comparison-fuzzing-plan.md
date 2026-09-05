@@ -397,3 +397,66 @@ Arch-porting notes that took real debugging:
    speet: oracle `0xffffffffffffff80`, recompiled `0x1ffffffffffffff`.
    Artifact `aarch64/seed-4a1bb85be9b0c7a9` (minimized to one SBFM word).
    Same class observed for generic SBFM/UBFM bitfield extractions.
+
+### M5 addenda (mips + arm + x86-32 + rv32)
+
+`diff-fuzz --arch arm|x86_32|riscv32|mips` extends the pipeline to the
+32-bit set: hand-encoded A32 (AL-cond data-processing + LDR/STR + BX LR),
+i686, RV32, and MIPS32 big-endian generators, Unicorn
+`Arch::ARM/X86/RISCV/MIPS32|BIG_ENDIAN` oracles, and per-arch param
+layouts in the recompiled runner. The oracle required widening
+`unicorn-engine` features to `arch_x86 + arch_aarch64 + arch_arm +
+arch_mips + arch_riscv` (a missing `Arch` feature surfaces as
+`Err(ARCH)` from `Unicorn::new` — fail-loud, not silent).
+
+**Host LLVM decode verification** (`tests/llvm_decode.rs`): every word the
+generators emit must decode under `llvm-mc --disassemble` (located via
+`$LLVM_MC`, `xcrun --find`, or the Homebrew prefix; missing binary fails
+closed) with no `<invalid>` and only intended mnemonics — an
+independent-decoder cross-check of the hand encodings across all 7 archs.
+`tests/branchfix.rs` adds the minimizer-integration invariant: after a
+word removal, branch targets are re-fixup'd and the module must validate.
+
+**Minimizer branch fixup** (`src/branchfix.rs`): removing a word from a
+fixed-width case stales every later branch offset; the minimizer re-scans
+branch encodings (B/B.cond/CBZ A64, B A32, B-type RV, BEQ/BNE MIPS) and
+repoints out-of-range targets at the terminator word. Validate failures
+that survive the fixup are kept as findings, not filtered — the user
+directive: harness-internal errors are still errors fuzzing should catch.
+
+Arch-porting notes:
+
+- **A32 B displacement is `(target - (pc + 8)) / 4`**, MIPS BEQ/BNE is
+  `(target - (pc + 4)) / 4` — an early patch pass that dropped the `pc`
+  term produced offsets that only landed in-table by luck at `pc = 0`.
+- **Memory anchors must be excluded from destination registers**: EBX
+  (i686 `[ebx+disp]`) and $8 (MIPS `off($8)`) were both clobberable
+  before the exclusion — the RV64 `$ra` clobber class again.
+- **RV32/RV64 memory**: the RV frontends keep the raw emission path
+  (`memory64`'s i64 loads/stores ARE the identity mapping under
+  OwnedLinear); binding the address-mapper on RV32 mismatches the i32
+  value widths (`validate: expected i32, found i64`).
+- **x86-32 (i686) is a smoke frontend**: condition flags are not modeled
+  (`direct.rs` "Smoke: fall through only") and Jcc emits a flags-stub
+  unreachable, so the generator vocabulary excludes flag-setting ALU and
+  Jcc until the frontend models flags — including them floods the run
+  with the (real, but expected) "flags never computed" divergence.
+- **MIPS immediates were zero-extended**: `rabbitizer`'s
+  `get_immediate() -> u16` cast via `as i32` treated every signed imm16
+  (addi/addiu/slti/loads/branches) as zero-extended; fixed to
+  `as i16 as i32` across `speet-mips` (fuzz finding #5).
+
+### New findings
+
+5. **speet-mips zero-extends all signed immediates** — one-line fix in
+   `crates/native/speet-mips/src/lib.rs` (22 sites); caught when minimized
+   MIPS cases failed validation on backward branches.
+6. **speet-mips does not model branch delay slots** — the oracle executes
+   the delay-slot instruction before the branch takes effect; the
+   recompiler branches immediately. Minimized repro `14740001`
+   (`bne $3, $20, +1` with `lw $20, 0x15c0($8)` in the slot), artifact
+   `mips/seed-560ae4bc9...json`-family.
+7. **speet-mips store/ALU paths clobber unrelated registers** — minimized
+   `ad0a02d8` (`sw $10, 0x2d8($8)` alone diverges in $17), and `324a49de`
+   (`andi $10, $18, 0x49de` diverges in $21) — likely shared-scratch
+   misindexing in the raw memory path. Artifacts in `test-data/diff-fuzz/mips/`.

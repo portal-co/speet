@@ -6,14 +6,17 @@
 
 use crate::case::{Arch, ExecOutcome, ExitKind, FuzzCase, RegState};
 use speet_aarch64::AArch64Recompiler;
+use speet_arm::ArmRecompiler;
 use speet_corpus_harness::{
     assemble_corpus_module, corpus_manifest, corpus_n_imports, instrument_functions,
 };
 use speet_link_core::image_layout::MemoryModel;
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
 use speet_memory::memory_access_for_model;
+use speet_mips::MipsRecompiler;
 use speet_riscv::RiscVRecompiler;
 use rv_asm::Xlen;
+use speet_x86::X86_32Recompiler;
 use speet_x86_64::X86Recompiler;
 use wasmparser;
 use wasmi::{Engine, Linker, Module as WasmiModule, Store};
@@ -287,6 +290,71 @@ fn seed_param(i: usize, vt: wasmi::ValType, case: &FuzzCase) -> wasmi::Val {
             (_, wasmi::ValType::F64) => wasmi::Val::F64(0f64.into()),
             (_, other) => panic!("unexpected param type {other:?}"),
         },
+        Arch::Arm => match (i, vt) {
+            // 16 GPR i64 (0–15, R13=SP, R14=LR) + expected_ra i64 (16) +
+            // CPSR i32 (17) — see `ArmRecompiler::BASE_PARAMS` (18).
+            (idx, wasmi::ValType::I64) if idx < 16 => {
+                wasmi::Val::I64(case.regs.gprs[idx] as i64)
+            }
+            (16, wasmi::ValType::I64) => wasmi::Val::I64(0), // expected_ra
+            (17, wasmi::ValType::I32) => {
+                // CPSR: N Z C V at bits 31/30/29/28.
+                wasmi::Val::I32(
+                    ((case.regs.sf as i32) << 31)
+                        | ((case.regs.zf as i32) << 30)
+                        | ((case.regs.cf as i32) << 29)
+                        | ((case.regs.of as i32) << 28),
+                )
+            }
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
+        Arch::X86_32 => match (i, vt) {
+            // 8 GPR i64 (0–7) + EIP i64 (8) + flags i32 9–12 (ZF SF CF OF)
+            // + expected_ra i64 (13) + tmp i64 (14–15).
+            (idx, wasmi::ValType::I64) if idx < 8 => {
+                wasmi::Val::I64(case.regs.gprs[idx] as i64)
+            }
+            (8, wasmi::ValType::I64) => wasmi::Val::I64(case.entry_pc as i64),
+            (9, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.zf as i32),
+            (10, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.sf as i32),
+            (11, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.cf as i32),
+            (12, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.of as i32),
+            (13, wasmi::ValType::I64) => wasmi::Val::I64(0), // expected_ra
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
+        Arch::RiscV32 => match (i, vt) {
+            // 32 int i32 (0–31) + 32 FP (32–63) + PC i32 (64) +
+            // expected_RA i32 (65).
+            (idx, wasmi::ValType::I32) if idx < 32 => {
+                wasmi::Val::I32(case.regs.gprs[idx] as i32)
+            }
+            (64, wasmi::ValType::I32) => wasmi::Val::I32(case.entry_pc as i32),
+            (65, wasmi::ValType::I32) => wasmi::Val::I32(0), // expected_RA
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            // memory64 address-mapper scratch params are i64 even on RV32
+            // (guest addresses are 64-bit WASM offsets under OwnedLinear).
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::F64) => wasmi::Val::F64(0f64.into()),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
+        Arch::Mips => match (i, vt) {
+            // 32 GPR i32 (0–31) + HI/LO i32 (32–33) + PC i32 (34) +
+            // expected_RA i32 (35) — see `MipsRecompiler::BASE_PARAMS` (36).
+            (idx, wasmi::ValType::I32) if idx < 32 => {
+                wasmi::Val::I32(case.regs.gprs[idx] as i32)
+            }
+            (34, wasmi::ValType::I32) => wasmi::Val::I32(case.entry_pc as i32),
+            (35, wasmi::ValType::I32) => wasmi::Val::I32(0), // expected_RA
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            // memory64 address-mapper scratch params (i64) — same note as
+            // the RV32 branch.
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
     }
 }
 
@@ -326,6 +394,41 @@ fn regs_from_results(case: &FuzzCase, results: &[wasmi::Val]) -> RegState {
             regs.gprs[0] = 0; // hardwired zero — both engines keep it 0
             regs.rip = 0;
         }
+        Arch::Arm => {
+            for g in 0..16 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.rip = 0;
+            let cpsr = read_i64(results, 17);
+            regs.sf = cpsr & (1 << 31) != 0;
+            regs.zf = cpsr & (1 << 30) != 0;
+            regs.cf = cpsr & (1 << 29) != 0;
+            regs.of = cpsr & (1 << 28) != 0;
+        }
+        Arch::X86_32 => {
+            for g in 0..8 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.rip = 0;
+            regs.zf = read_i64(results, 9) != 0;
+            regs.sf = read_i64(results, 10) != 0;
+            regs.cf = read_i64(results, 11) != 0;
+            regs.of = read_i64(results, 12) != 0;
+        }
+        Arch::RiscV32 => {
+            for g in 0..32 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.gprs[0] = 0;
+            regs.rip = 0;
+        }
+        Arch::Mips => {
+            for g in 0..32 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.gprs[0] = 0; // $0 hardwired zero
+            regs.rip = 0;
+        }
     }
     regs
 }
@@ -353,6 +456,10 @@ pub fn translate_case(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Stri
         Arch::X86_64 => translate_case_x86(case),
         Arch::AArch64 => translate_case_a64(case),
         Arch::RiscV64 => translate_case_rv64(case),
+        Arch::Arm => translate_case_arm(case),
+        Arch::X86_32 => translate_case_x86_32(case),
+        Arch::RiscV32 => translate_case_rv32(case),
+        Arch::Mips => translate_case_mips(case),
     }
 }
 
@@ -421,27 +528,120 @@ fn translate_case_a64(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Stri
     (rctx.drain_fns(), params, unsupported)
 }
 
-fn translate_case_rv64(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+fn translate_case_rv(case: &FuzzCase, xlen: Xlen) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
     let mut ctx = ();
+    let rv64 = xlen == Xlen::Rv64;
     // (base_pc, track_hints, enable_rv64, use_memory64) — same config as
-    // the e2e harness `translate_rv` for Rv64.
+    // the e2e harness `translate_rv`.
     let mut rc = RiscVRecompiler::<(), core::convert::Infallible, Function>::new_with_full_config(
-        case.entry_pc, false, true, true,
+        case.entry_pc, false, rv64, true,
     );
+    // Memory access: like the e2e harness, RV frontends keep the raw
+    // emission path (memory64's i64 loads/stores ARE the identity mapping
+    // under OwnedLinear). Binding the address-mapper here mismatches the
+    // RV32 i32 value widths (validate: "expected i32, found i64").
+    if rv64 {
+        rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
+            MemoryModel::OwnedLinear,
+        ));
+    }
+    rc.setup_traps(&mut rctx, &mut ctx);
+    rc.bind_memory_layout(&rctx);
+    let params = collect_params(&rctx);
+    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc as u32, xlen, &mut |a| {
+        Function::new(a.collect::<Vec<_>>())
+    })
+    .expect("translate_bytes");
+    let unsupported = rc.unsupported_insns().iter().cloned().collect();
+    (rctx.drain_fns(), params, unsupported)
+}
+
+fn translate_case_rv64(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    translate_case_rv(case, Xlen::Rv64)
+}
+
+fn translate_case_rv32(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    translate_case_rv(case, Xlen::Rv32)
+}
+
+fn translate_case_arm(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    let mut ctx = ();
+    let mut rc = ArmRecompiler::<(), core::convert::Infallible>::new_with_base_pc(case.entry_pc);
     rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
         MemoryModel::OwnedLinear,
     ));
     rc.setup_traps(&mut rctx, &mut ctx);
     rc.bind_memory_layout(&rctx);
     let params = collect_params(&rctx);
-    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc as u32, Xlen::Rv64, &mut |a| {
+    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc, &mut |a| {
         Function::new(a.collect::<Vec<_>>())
     })
     .expect("translate_bytes");
     let unsupported = rc.unsupported_insns().iter().cloned().collect();
     (rctx.drain_fns(), params, unsupported)
+}
+
+fn translate_case_x86_32(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    let mut ctx = ();
+    let mut rc = X86_32Recompiler::<(), core::convert::Infallible>::new_with_base_eip(case.entry_pc);
+    rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
+        MemoryModel::OwnedLinear,
+    ));
+    rc.setup_traps(&mut rctx, &mut ctx);
+    rc.bind_memory_layout(&rctx);
+    let params = collect_params(&rctx);
+    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc, &mut |a| {
+        Function::new(a.collect::<Vec<_>>())
+    })
+    .expect("translate_bytes");
+    let unsupported = rc.unsupported_insns().iter().cloned().collect();
+    (rctx.drain_fns(), params, unsupported)
+}
+
+fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    let mut ctx = ();
+    // MipsRecompiler::new_with_base_pc takes u32 (mips32 addresses).
+    let mut rc = MipsRecompiler::<(), core::convert::Infallible, Function>::new_with_base_pc(
+        case.entry_pc as u32,
+    );
+    rc.set_memory64(true);
+    // Raw emission path (see the RV note): memory64's i64 loads/stores are
+    // the identity mapping under OwnedLinear; binding the address-mapper
+    // mismatches MIPS's i32 value widths.
+    // rc.set_memory_access(...);
+    rc.setup_traps(&mut rctx, &mut ctx);
+    rc.bind_memory_layout(&rctx);
+    let params = collect_params(&rctx);
+    // MIPS words are big-endian; translate per word (same as the e2e
+    // harness `translate_mips`).
+    let words = case.code.len() / 4;
+    for i in 0..words {
+        let offset = i * 4;
+        let word = u32::from_be_bytes([
+            case.code[offset],
+            case.code[offset + 1],
+            case.code[offset + 2],
+            case.code[offset + 3],
+        ]);
+        let pc = (case.entry_pc as u32).wrapping_add(offset as u32);
+        let inst = rabbitizer::Instruction::new(word, pc, rabbitizer::InstrCategory::CPU);
+        rc.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |a| {
+            Function::new(a.collect::<Vec<_>>())
+        })
+        .expect("translate_instruction");
+    }
+    let _ = rctx.seal_remaining(&mut ctx);
+    // MIPS tracks no unsupported_insns (unrecognized words emit a bare
+    // `unreachable` with no name recorded) — empty coverage signal.
+    (rctx.drain_fns(), params, Vec::new())
 }
 
 /// Debug helper: which mnemonics the recompiler flagged as unsupported

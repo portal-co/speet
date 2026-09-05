@@ -3,7 +3,7 @@
 /// Target architecture of a case. Each arch fixes the register-file shape
 /// (register count, modeled flags) and the halt convention — see [`Arch`]'s
 /// methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Arch {
     /// x86-64: 16 GPRs (RAX..R15), 5 flags (ZF SF CF OF PF), stack-based
     /// `ret` (halt sentinel read from `[SP]`).
@@ -14,6 +14,17 @@ pub enum Arch {
     /// RV64: 32 GPRs (X0–X31, X0 hardwired zero, X1 = RA, X2 = SP),
     /// no modeled flags, link-register `ret`.
     RiscV64,
+    /// AArch32 (ARMv7 A32): 16 GPRs (R0–R15, R13 = SP, R14 = LR,
+    /// R15 = PC), CPSR flags, link-register `ret`. Word-aligned (4).
+    Arm,
+    /// i686: 8 GPRs (EAX..EDI), 5 flags (ZF SF CF OF PF), stack-based
+    /// `ret`, byte-granular slots.
+    X86_32,
+    /// RV32: 32 GPRs (i32), no modeled flags, link-register `ret`.
+    RiscV32,
+    /// MIPS32 (big-endian words): 32 GPRs + HI/LO, no modeled flags,
+    /// register conventions GPR-side ($31 = ra, $29 = sp).
+    Mips,
 }
 
 impl Arch {
@@ -21,8 +32,11 @@ impl Arch {
     pub fn n_gprs(self) -> usize {
         match self {
             Arch::X86_64 => 16,
+            Arch::X86_32 => 8,
+            Arch::Arm => 16,
             Arch::AArch64 => 31,
-            Arch::RiscV64 => 32,
+            Arch::RiscV64 | Arch::RiscV32 => 32,
+            Arch::Mips => 32,
         }
     }
 
@@ -32,10 +46,14 @@ impl Arch {
     pub fn flag_names(self) -> &'static [(&'static str, usize)] {
         match self {
             // x86: (name, RegState field index) — zf sf cf of pf.
-            Arch::X86_64 => &[("ZF", 0), ("SF", 1), ("CF", 2), ("OF", 3), ("PF", 4)],
+            Arch::X86_64 | Arch::X86_32 => {
+                &[("ZF", 0), ("SF", 1), ("CF", 2), ("OF", 3), ("PF", 4)]
+            }
             // AArch64 NZCV — N→sf, Z→zf, C→cf, V→of. PF unused.
             Arch::AArch64 => &[("Z", 0), ("N", 1), ("C", 2), ("V", 3)],
-            Arch::RiscV64 => &[],
+            // ARM CPSR — same NZCV mapping.
+            Arch::Arm => &[("Z", 0), ("N", 1), ("C", 2), ("V", 3)],
+            Arch::RiscV64 | Arch::RiscV32 | Arch::Mips => &[],
         }
     }
 
@@ -43,17 +61,22 @@ impl Arch {
     /// (`true`, x86-64) or reads it from the link register (`false`,
     /// AArch64 / RV64).
     pub fn stack_based_ret(self) -> bool {
-        matches!(self, Arch::X86_64)
+        matches!(self, Arch::X86_64 | Arch::X86_32)
     }
 
     /// Instruction alignment. Generators must keep `code.len()` a multiple
     /// of it and the entry PC aligned.
     pub fn code_align(self) -> u64 {
         match self {
-            Arch::X86_64 => 1,
-            Arch::AArch64 => 4,
-            Arch::RiscV64 => 4,
+            Arch::X86_64 | Arch::X86_32 => 1,
+            Arch::Arm | Arch::AArch64 | Arch::RiscV64 | Arch::RiscV32 | Arch::Mips => 4,
         }
+    }
+
+    /// True for archs whose linear memory is i32-addressed (32-bit guest
+    /// pointers) — affects oracle register types and wasmi param types.
+    pub fn is_i32_addr(self) -> bool {
+        matches!(self, Arch::Arm | Arch::X86_32 | Arch::RiscV32 | Arch::Mips)
     }
 }
 
@@ -64,7 +87,7 @@ impl Arch {
 /// X0–X30 with X30 = LR, RV64 0–31 with X0 hardwired zero). Flags are the
 /// recompilers' modeled slots, mapped per arch by [`Arch::flag_names`]
 /// (AArch64 NZCV: N→sf, Z→zf, C→cf, V→of).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RegState {
     pub gprs: [u64; 32],
     pub rip: u64,

@@ -14,7 +14,7 @@ use crate::generator::{
 use rv_asm::{Inst, IsCompressed, Xlen};
 
 /// x5 (t0) anchors the data-region base — avoiding x1 (ra), x2 (sp).
-const ANCHOR: u32 = 5;
+pub(crate) const ANCHOR: u32 = 5;
 /// Destination-eligible registers: x3–x31 minus the anchor (x5). x0 is
 /// hardwired zero (writes are ignored architecturally); x1 = ra is excluded
 /// (it carries the halt sentinel — clobbering it makes the final `ret`
@@ -32,9 +32,17 @@ fn any(r: &mut dyn Rand) -> u32 {
     r.below(32) as u32
 }
 
+pub(crate) fn r_type_pub(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
+    r_type(funct7, rs2, rs1, funct3, rd, opcode)
+}
+
 fn r_type(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
     (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
 }
+pub(crate) fn i_type_pub(imm12: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
+    i_type(imm12, rs1, funct3, rd, opcode)
+}
+
 fn i_type(imm12: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
     ((imm12 & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
 }
@@ -141,6 +149,10 @@ fn gen_one(
 
 /// Patch branch sites: 50% the sentinel (clean exit), 50% a small backward
 /// loop. B-type immediate: imm[12|10:5] | imm[4:1|11].
+pub(crate) fn patch_branches_pub(code: &mut [u8], sites: &[usize], r: &mut dyn Rand, sentinel: u64) {
+    patch_branches(code, sites, r, sentinel)
+}
+
 fn patch_branches(code: &mut [u8], sites: &[usize], r: &mut dyn Rand, sentinel: u64) {
     let code_len = code.len() as u64;
     for &wi in sites {

@@ -22,3 +22,11 @@ seed-81af1551de8dab94	StoreToReadOnly
 seed-be1e08c4dd22a3be	StoreToReadOnly
 seed-5c55827e5c6d1fd3	Trapped
 seed-11a25cd7582c0851	OracleFault
+seed-9e3779b9e9e5ff51	UnsupportedExecuted
+seed-78dde6e667c57390	Trapped
+seed-b54cda59665a6bba	OracleFault
+seed-8ff34785e439dff9	StoreToReadOnly
+seed-a708a82560ae4c62	Trapped
+seed-454021dedff8c877	Trapped
+seed-81af1551de8dc0a1	Trapped
+seed-1fe68f0b5dd83cb6	StoreToReadOnly

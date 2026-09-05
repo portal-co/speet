@@ -1190,7 +1190,7 @@ where
             InstrId::cpu_addi => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
@@ -1203,7 +1203,7 @@ where
             InstrId::cpu_addiu => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rs)?;
@@ -1388,7 +1388,7 @@ where
             InstrId::cpu_beq => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, Some(rt), offset, pc, BranchOp::Eq)?;
             }
@@ -1396,35 +1396,35 @@ where
             InstrId::cpu_bne => {
                 let rs: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, Some(rt), offset, pc, BranchOp::Ne)?;
             }
 
             InstrId::cpu_blez => {
                 let rs: GprO32 = instruction.get_rs_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, None, offset, pc, BranchOp::LeZ)?;
             }
 
             InstrId::cpu_bgtz => {
                 let rs: GprO32 = instruction.get_rs_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, None, offset, pc, BranchOp::GtZ)?;
             }
 
             InstrId::cpu_bltz => {
                 let rs: GprO32 = instruction.get_rs_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, None, offset, pc, BranchOp::LtZ)?;
             }
 
             InstrId::cpu_bgez => {
                 let rs: GprO32 = instruction.get_rs_o32();
-                let offset = instruction.get_immediate() as i32;
+                let offset = instruction.get_immediate() as i16 as i32;
 
                 self.translate_branch(ctx, rctx, tail_idx, rs, None, offset, pc, BranchOp::GeZ)?;
             }
@@ -1433,7 +1433,7 @@ where
             InstrId::cpu_lb => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -1481,7 +1481,7 @@ where
             InstrId::cpu_lbu => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -1528,7 +1528,7 @@ where
             InstrId::cpu_lh => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -1575,7 +1575,7 @@ where
             InstrId::cpu_lhu => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -1622,7 +1622,7 @@ where
             InstrId::cpu_sb => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
@@ -1688,7 +1688,7 @@ where
             InstrId::cpu_sh => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
                 rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(imm))?;
@@ -1754,7 +1754,7 @@ where
             InstrId::cpu_lw => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     // compute effective address: base + imm
@@ -1802,7 +1802,7 @@ where
             InstrId::cpu_sw => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 // compute effective address: base + imm
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -1870,7 +1870,7 @@ where
             InstrId::cpu_ld => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if !self.enable_mips64 {
                     // LD is only valid when MIPS64 support is enabled
@@ -1915,7 +1915,7 @@ where
             InstrId::cpu_sd => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if !self.enable_mips64 {
                     // SD is only valid when MIPS64 support is enabled
@@ -2255,7 +2255,7 @@ where
             InstrId::cpu_ll => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if rt != GprO32::zero {
                     self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -2312,7 +2312,7 @@ where
             InstrId::cpu_sc => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 // Compute effective address
                 self.emit_gpr_get(ctx, rctx, tail_idx, base)?;
@@ -2385,7 +2385,7 @@ where
             InstrId::cpu_lld => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if !self.enable_mips64 {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
@@ -2438,7 +2438,7 @@ where
             InstrId::cpu_scd => {
                 let base: GprO32 = instruction.get_rs_o32();
                 let rt: GprO32 = instruction.get_rt_o32();
-                let imm = instruction.get_immediate() as i32;
+                let imm = instruction.get_immediate() as i16 as i32;
 
                 if !self.enable_mips64 {
                     rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;

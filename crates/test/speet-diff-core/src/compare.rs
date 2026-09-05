@@ -61,12 +61,22 @@ pub fn compare_outcomes(
     }
 
     // ── Exact register/flag comparison (plan §5: no tolerance) ──
+    // 32-bit archs: the WASM register file is i64 but the architectural
+    // width is 32 — compare the low 32 bits only.
+    let mask = if case.arch.is_i32_addr() { 0xFFFF_FFFF } else { u64::MAX };
+    // AArch32's R15 (PC) is not a stable end-state on either side (the
+    // oracle reports the stopped PC; the halt stub reports the sentinel
+    // slot) — both engines ended "at halt" by construction, so skip it.
+    let n_gprs = case.arch.n_gprs()
+        - if case.arch == crate::case::Arch::Arm { 1 } else { 0 };
     let mut facets = Vec::new();
-    for g in 0..case.arch.n_gprs() {
-        if o.regs.gprs[g] != r.regs.gprs[g] {
+    for g in 0..n_gprs {
+        if o.regs.gprs[g] & mask != r.regs.gprs[g] & mask {
             facets.push(format!(
                 "gpr{}: oracle={:#x} recompiled={:#x}",
-                g, o.regs.gprs[g], r.regs.gprs[g]
+                g,
+                o.regs.gprs[g] & mask,
+                r.regs.gprs[g] & mask
             ));
         }
     }

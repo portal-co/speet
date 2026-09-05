@@ -9,7 +9,7 @@
 use crate::case::{Arch, ExecOutcome, ExitKind, FuzzCase, RegState};
 use crate::generator::{CODE_BASE, STACK_BASE};
 use unicorn_engine::unicorn_const::{Arch as UArch, Mode, Prot};
-use unicorn_engine::{RegisterARM64, RegisterRISCV, RegisterX86, Unicorn};
+use unicorn_engine::{RegisterARM, RegisterARM64, RegisterMIPS, RegisterRISCV, RegisterX86, Unicorn};
 
 fn err_str(e: unicorn_engine::uc_error) -> String {
     format!("{e:?}")
@@ -23,7 +23,140 @@ pub fn run_oracle(case: &FuzzCase) -> Result<ExecOutcome, String> {
         Arch::X86_64 => run_oracle_x86(case),
         Arch::AArch64 => run_oracle_a64(case),
         Arch::RiscV64 => run_oracle_rv64(case),
+        Arch::Arm => run_oracle_arm(case),
+        Arch::X86_32 => run_oracle_x86_32(case),
+        Arch::RiscV32 => run_oracle_rv32(case),
+        Arch::Mips => run_oracle_mips(case),
     }
+}
+
+const ARM_REGS: [RegisterARM; 16] = [
+    RegisterARM::R0, RegisterARM::R1, RegisterARM::R2, RegisterARM::R3,
+    RegisterARM::R4, RegisterARM::R5, RegisterARM::R6, RegisterARM::R7,
+    RegisterARM::R8, RegisterARM::R9, RegisterARM::R10, RegisterARM::R11,
+    RegisterARM::R12, RegisterARM::SP, RegisterARM::LR, RegisterARM::PC,
+];
+
+const MIPS_REGS: [RegisterMIPS; 32] = [
+    RegisterMIPS::R0, RegisterMIPS::R1, RegisterMIPS::R2, RegisterMIPS::R3,
+    RegisterMIPS::R4, RegisterMIPS::R5, RegisterMIPS::R6, RegisterMIPS::R7,
+    RegisterMIPS::R8, RegisterMIPS::R9, RegisterMIPS::R10, RegisterMIPS::R11,
+    RegisterMIPS::R12, RegisterMIPS::R13, RegisterMIPS::R14, RegisterMIPS::R15,
+    RegisterMIPS::R16, RegisterMIPS::R17, RegisterMIPS::R18, RegisterMIPS::R19,
+    RegisterMIPS::R20, RegisterMIPS::R21, RegisterMIPS::R22, RegisterMIPS::R23,
+    RegisterMIPS::R24, RegisterMIPS::R25, RegisterMIPS::R26, RegisterMIPS::R27,
+    RegisterMIPS::R28, RegisterMIPS::R29, RegisterMIPS::R30, RegisterMIPS::R31,
+];
+
+/// AArch32 oracle. Halt: sentinel seeded in LR (R14), terminator BX LR.
+fn run_oracle_arm(case: &FuzzCase) -> Result<ExecOutcome, String> {
+    let mut uc = Unicorn::new(UArch::ARM, Mode::ARM).map_err(err_str)?;
+    map_regions(&mut uc, case)?;
+    for (i, reg) in ARM_REGS.iter().enumerate().take(15) {
+        uc.reg_write(*reg, case.regs.gprs[i] & 0xFFFF_FFFF).map_err(err_str)?;
+    }
+    // CPSR: N Z C V at bits 31/30/29/28 (flag_names: Z→zf N→sf C→cf V→of).
+    let cpsr = ((case.regs.sf as u32) << 31)
+        | ((case.regs.zf as u32) << 30)
+        | ((case.regs.cf as u32) << 29)
+        | ((case.regs.of as u32) << 28);
+    uc.reg_write(RegisterARM::CPSR, cpsr as u64).map_err(err_str)?;
+    let until = case.halt_sentinel();
+    let exit = match uc.emu_start(case.entry_pc, until, 0, case.step_budget as usize) {
+        Ok(()) => ExitKind::Completed,
+        Err(e) => classify_start_err(e)?,
+    };
+    let mut regs = RegState::default();
+    for (i, reg) in ARM_REGS.iter().enumerate().take(15) {
+        regs.gprs[i] = uc.reg_read(*reg).unwrap_or(0);
+    }
+    regs.rip = uc.reg_read(RegisterARM::PC).unwrap_or(until);
+    let cpsr = uc.reg_read(RegisterARM::CPSR).unwrap_or(0) as u64;
+    regs.sf = cpsr & (1 << 31) != 0;
+    regs.zf = cpsr & (1 << 30) != 0;
+    regs.cf = cpsr & (1 << 29) != 0;
+    regs.of = cpsr & (1 << 28) != 0;
+    let (data, stack) = snapshot_mem(&uc, case);
+    Ok(ExecOutcome { regs, data, stack, exit })
+}
+
+/// i686 oracle. Same register names as x86-64 (MODE_32), 32-bit EIP via
+/// `emu_start`'s begin; the halt sentinel is popped by RET.
+fn run_oracle_x86_32(case: &FuzzCase) -> Result<ExecOutcome, String> {
+    let mut uc = Unicorn::new(UArch::X86, Mode::MODE_32).map_err(err_str)?;
+    map_regions(&mut uc, case)?;
+    for (i, reg) in [
+        RegisterX86::EAX, RegisterX86::ECX, RegisterX86::EDX, RegisterX86::EBX,
+        RegisterX86::ESP, RegisterX86::EBP, RegisterX86::ESI, RegisterX86::EDI,
+    ].iter().enumerate() {
+        uc.reg_write(*reg, case.regs.gprs[i] & 0xFFFF_FFFF).map_err(err_str)?;
+    }
+    let until = case.halt_sentinel();
+    let exit = match uc.emu_start(case.entry_pc, until, 0, case.step_budget as usize) {
+        Ok(()) => ExitKind::Completed,
+        Err(e) => classify_start_err(e)?,
+    };
+    let mut regs = RegState::default();
+    for (i, reg) in [
+        RegisterX86::EAX, RegisterX86::ECX, RegisterX86::EDX, RegisterX86::EBX,
+        RegisterX86::ESP, RegisterX86::EBP, RegisterX86::ESI, RegisterX86::EDI,
+    ].iter().enumerate() {
+        regs.gprs[i] = uc.reg_read(*reg).unwrap_or(0) & 0xFFFF_FFFF;
+    }
+    regs.rip = uc.reg_read(RegisterX86::EIP).unwrap_or(until);
+    let eflags = uc.reg_read(RegisterX86::EFLAGS).unwrap_or(0) as u64;
+    regs.cf = eflags & (1 << 0) != 0;
+    regs.pf = eflags & (1 << 2) != 0;
+    regs.zf = eflags & (1 << 6) != 0;
+    regs.sf = eflags & (1 << 7) != 0;
+    regs.of = eflags & (1 << 11) != 0;
+    let (data, stack) = snapshot_mem(&uc, case);
+    Ok(ExecOutcome { regs, data, stack, exit })
+}
+
+/// RV32 oracle.
+fn run_oracle_rv32(case: &FuzzCase) -> Result<ExecOutcome, String> {
+    let mut uc = Unicorn::new(UArch::RISCV, Mode::RISCV32).map_err(err_str)?;
+    map_regions(&mut uc, case)?;
+    for (i, reg) in RV64_REGS.iter().enumerate() {
+        uc.reg_write(*reg, case.regs.gprs[i] & 0xFFFF_FFFF).map_err(err_str)?;
+    }
+    let until = case.halt_sentinel();
+    let exit = match uc.emu_start(case.entry_pc, until, 0, case.step_budget as usize) {
+        Ok(()) => ExitKind::Completed,
+        Err(e) => classify_start_err(e)?,
+    };
+    let mut regs = RegState::default();
+    for (i, reg) in RV64_REGS.iter().enumerate() {
+        regs.gprs[i] = uc.reg_read(*reg).unwrap_or(0) & 0xFFFF_FFFF;
+    }
+    regs.gprs[0] = 0;
+    regs.rip = uc.reg_read(RegisterRISCV::PC).unwrap_or(until);
+    let (data, stack) = snapshot_mem(&uc, case);
+    Ok(ExecOutcome { regs, data, stack, exit })
+}
+
+/// MIPS32 big-endian oracle. Halt: sentinel seeded in $31 (ra),
+/// terminator JR $ra.
+fn run_oracle_mips(case: &FuzzCase) -> Result<ExecOutcome, String> {
+    let mut uc = Unicorn::new(UArch::MIPS, Mode::MIPS32 | Mode::BIG_ENDIAN).map_err(err_str)?;
+    map_regions(&mut uc, case)?;
+    for (i, reg) in MIPS_REGS.iter().enumerate() {
+        uc.reg_write(*reg, case.regs.gprs[i] & 0xFFFF_FFFF).map_err(err_str)?;
+    }
+    let until = case.halt_sentinel();
+    let exit = match uc.emu_start(case.entry_pc, until, 0, case.step_budget as usize) {
+        Ok(()) => ExitKind::Completed,
+        Err(e) => classify_start_err(e)?,
+    };
+    let mut regs = RegState::default();
+    for (i, reg) in MIPS_REGS.iter().enumerate() {
+        regs.gprs[i] = uc.reg_read(*reg).unwrap_or(0) & 0xFFFF_FFFF;
+    }
+    regs.gprs[0] = 0;
+    regs.rip = uc.reg_read(RegisterMIPS::PC).unwrap_or(until);
+    let (data, stack) = snapshot_mem(&uc, case);
+    Ok(ExecOutcome { regs, data, stack, exit })
 }
 
 /// Shared region mapping (code RX / data RW+RO page / stack RW).
