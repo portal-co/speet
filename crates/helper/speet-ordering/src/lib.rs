@@ -326,6 +326,12 @@ fn rmw_align(w: RmwWidth) -> u32 {
 
 /// The canonical wasm [`MemArg`] (offset 0, natural alignment) for an RMW
 /// access of the given width into memory index 0.
+/// Public re-entry for frontends that emit RMW-adjacent loads/stores through
+/// their own sinks (e.g. MIPS delay-slot body re-runs).
+pub fn rmw_memarg_of(w: RmwWidth) -> MemArg {
+    rmw_memarg(w)
+}
+
 fn rmw_memarg(w: RmwWidth) -> MemArg {
     MemArg {
         offset: 0,

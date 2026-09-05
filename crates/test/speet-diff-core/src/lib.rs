@@ -37,7 +37,9 @@ pub use recompiled::{build_case_module, run_recompiled, unsupported_for, Recompi
 /// Parse an `--arch`/argv arch name (`x86_64`, `aarch64`, `riscv64`,
 /// `arm`, `x86_32`, `riscv32`, `mips`) — default x86_64.
 pub fn parse_arch_name(s: Option<&str>) -> crate::case::Arch {
-    match s {
+    // Case-insensitive: artifact JSON serializes the serde variant names
+    // ("Mips", "AArch64", …) while the CLI uses the kebab names.
+    match s.map(|v| v.to_ascii_lowercase()).as_deref() {
         Some("aarch64") => crate::case::Arch::AArch64,
         Some("riscv64") => crate::case::Arch::RiscV64,
         Some("arm") => crate::case::Arch::Arm,

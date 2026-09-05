@@ -4,17 +4,26 @@ use speet_mips::{BreakInfo, CallbackContext, MipsRecompiler, SyscallInfo};
 use wasm_encoder::Function;
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
-fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>)
-    -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool>
-{
+fn make_rctx(
+    reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>,
+) -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool> {
     static T: TableIdx = TableIdx(0);
     ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: speet_link_core::RuntimeLayoutParams::new(),
-        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &T,
+            ty: TypeIdx(0),
+        },
         escape: yecta::CallEscape::Jump,
     }
 }
@@ -172,11 +181,12 @@ fn test_syscall_callback() {
     // before the recompiler (drop order) and share flags via Cell.
     let syscall_called = std::rc::Rc::new(core::cell::Cell::new(false));
     let flag = syscall_called.clone();
-    let mut syscall_callback = move |_: &SyscallInfo,
-                                _ctx: &mut (),
-                                _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
-        flag.set(true);
-    };
+    let mut syscall_callback =
+        move |_: &SyscallInfo,
+              _ctx: &mut (),
+              _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
+            flag.set(true);
+        };
 
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
@@ -205,11 +215,12 @@ fn test_break_callback() {
     // before the recompiler (drop order) and share flags via Cell.
     let break_called = std::rc::Rc::new(core::cell::Cell::new(false));
     let flag = break_called.clone();
-    let mut break_callback = move |_: &BreakInfo,
-                              _ctx: &mut (),
-                              _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
-        flag.set(true);
-    };
+    let mut break_callback =
+        move |_: &BreakInfo,
+              _ctx: &mut (),
+              _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
+            flag.set(true);
+        };
 
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);

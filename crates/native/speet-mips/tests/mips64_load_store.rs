@@ -4,17 +4,26 @@ use speet_mips::MipsRecompiler;
 use wasm_encoder::Function;
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
-fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>)
-    -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool>
-{
+fn make_rctx(
+    reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>,
+) -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool> {
     static T: TableIdx = TableIdx(0);
     ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: speet_link_core::RuntimeLayoutParams::new(),
-        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &T,
+            ty: TypeIdx(0),
+        },
         escape: yecta::CallEscape::Jump,
     }
 }
@@ -24,8 +33,7 @@ fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, Loca
 fn test_mips64_load_store() {
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_full_config(
-            0x1000,
-            true, // enable mips64
+            0x1000, true, // enable mips64
         );
     let mut ctx = ();
     let mut reactor = Reactor::default();

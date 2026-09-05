@@ -13,10 +13,19 @@ fn make_rctx(
     ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: speet_link_core::RuntimeLayoutParams::new(),
-        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &T,
+            ty: TypeIdx(0),
+        },
         escape: yecta::CallEscape::Jump,
     }
 }
@@ -50,7 +59,10 @@ fn test_escape_tag_configuration() {
 
     assert_eq!(recompiler.get_escape_tag(&rctx), None);
 
-    let tag = EscapeTag { tag: TagIdx(42), ty: TypeIdx(1) };
+    let tag = EscapeTag {
+        tag: TagIdx(42),
+        ty: TypeIdx(1),
+    };
     recompiler.set_escape_tag(&mut rctx, Some(tag));
     assert_eq!(recompiler.get_escape_tag(&rctx), Some(tag));
 
@@ -106,7 +118,13 @@ fn test_jal_with_exception_escape() {
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
     recompiler.setup_traps(&mut rctx, &mut ctx);
-    recompiler.set_escape_tag(&mut rctx, Some(EscapeTag { tag: TagIdx(0), ty: TypeIdx(0) }));
+    recompiler.set_escape_tag(
+        &mut rctx,
+        Some(EscapeTag {
+            tag: TagIdx(0),
+            ty: TypeIdx(0),
+        }),
+    );
 
     let inst = Instruction::new(0x0c000000, 0x1000, InstrCategory::CPU);
     let result = recompiler.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |locals| {
@@ -145,7 +163,13 @@ fn test_jr_ra_with_exception_escape() {
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
     recompiler.setup_traps(&mut rctx, &mut ctx);
-    recompiler.set_escape_tag(&mut rctx, Some(EscapeTag { tag: TagIdx(0), ty: TypeIdx(0) }));
+    recompiler.set_escape_tag(
+        &mut rctx,
+        Some(EscapeTag {
+            tag: TagIdx(0),
+            ty: TypeIdx(0),
+        }),
+    );
 
     let inst = Instruction::new(0x03e00008, 0x1000, InstrCategory::CPU);
     let result = recompiler.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |locals| {
@@ -206,7 +230,13 @@ fn test_jalr_with_exception_escape() {
     let mut reactor = Reactor::default();
     let mut rctx = make_rctx(&mut reactor);
     recompiler.setup_traps(&mut rctx, &mut ctx);
-    recompiler.set_escape_tag(&mut rctx, Some(EscapeTag { tag: TagIdx(0), ty: TypeIdx(0) }));
+    recompiler.set_escape_tag(
+        &mut rctx,
+        Some(EscapeTag {
+            tag: TagIdx(0),
+            ty: TypeIdx(0),
+        }),
+    );
 
     let inst = Instruction::new(0x0100f809, 0x1000, InstrCategory::CPU);
     let result = recompiler.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |locals| {

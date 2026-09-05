@@ -1089,3 +1089,149 @@ fn test_local_const_tracking() {
     let fns = reactor.into_fns();
     assert_eq!(fns.len(), 1);
 }
+
+/// A taken-arm prefix (e.g. a MIPS delay-slot body) must be emitted inside
+/// the `if` arm, after the condition and before the params/transfer. The
+/// not-taken arm stays empty and receives the merged fall-through.
+#[test]
+fn test_taken_prefix_emitted_inside_taken_arm() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+
+    // Runtime condition: local 0 (not statically known → real If/Else).
+    let cond = LocalPlusConst { local_idx: 0, k: 0 }; // local 0 + 0 — unknown at fold time
+    let prefix = ConstCondition(7); // test-only snippet emitting `i32.const 7`
+    let params = JumpCallParams::conditional_jump(FuncIdx(1), 1, &cond, pool)
+        .with_taken_prefix(&prefix);
+
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count() - 1).is_ok());
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 1).unwrap();
+    assert!(reactor.seal_to(reactor.fn_count() - 1, &mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 2);
+    let mut expected = Function::new([(1, ValType::I32)]);
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::I32Const(0));
+    expected.instruction(&Instruction::I32Add);
+    expected.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+    // Taken arm: prefix first…
+    expected.instruction(&Instruction::I32Const(7));
+    // …then params (1 param: local 0), then the transfer.
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::ReturnCall(1));
+    // Not-taken arm: empty here (fall-through merging would fill it once a
+    // successor slot exists; none does in this test). Seal closes the open
+    // If with Unreachable+End, then re-asserts Unreachable before the
+    // function's own End (BlockType::Empty ifs resume with zero values).
+    expected.instruction(&Instruction::Else);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "taken_prefix must land inside the if arm, before params/return_call");
+}
+
+/// The known-true early-fold path must also run the taken-arm prefix (the
+/// prefix is part of the taken edge's semantics, folded or not).
+#[test]
+fn test_taken_prefix_runs_on_known_true_condition() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 0).unwrap();
+
+    let condition = ConstCondition(1); // always true → If/Else skeleton folds away
+    let prefix = ConstCondition(7);
+    let params = JumpCallParams::conditional_jump(FuncIdx(1), 1, &condition, pool)
+        .with_taken_prefix(&prefix);
+
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count() - 1).is_ok());
+
+    reactor.next(&mut ctx, [(1, ValType::I32)].into_iter(), 1).unwrap();
+    assert!(reactor.seal_to(reactor.fn_count() - 1, &mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 2);
+    let mut expected = Function::new([(1, ValType::I32)]);
+    expected.instruction(&Instruction::I32Const(7)); // prefix, no If/Else
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::ReturnCall(1));
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "known-true fold must keep the taken-arm prefix before params/return_call");
+}
+
+/// The prefix flows through the same optimizer pipeline as inline emission:
+/// a constant pushed inside the prefix and consumed by nothing still
+/// materializes (no elision across the transfer), and inst_count grows.
+#[test]
+fn test_taken_prefix_feeds_through_optimizer() {
+    let mut reactor = Reactor::<(), std::convert::Infallible, Function>::default();
+    let mut ctx = ();
+    let pool = { static T: yecta::TableIdx = yecta::TableIdx(0); yecta::Pool { handler: &T, ty: TypeIdx(0) } };
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 0).unwrap();
+    // Fold local 1 to a known constant BEFORE the branch: the prefix then
+    // re-stores it; the store must be materialized (virtual locals flush)
+    // before the return_call params read local 1.
+    reactor.tail().instruction(&mut ctx, &Instruction::I32Const(5)).unwrap();
+    reactor.tail().instruction(&mut ctx, &Instruction::LocalSet(1)).unwrap();
+
+    let condition = ConstCondition(1);
+    // Prefix: local.get 1; i32.const 1; i32.add; local.set 1 → 6, real store.
+    struct Bump;
+    impl<Context, E> InstructionSource<Context, E> for Bump {
+        fn emit_instruction(
+            &self,
+            ctx: &mut Context,
+            sink: &mut (dyn InstructionSink<Context, E> + '_),
+        ) -> Result<(), E> {
+            sink.instruction(ctx, &Instruction::LocalGet(1))?;
+            sink.instruction(ctx, &Instruction::I32Const(1))?;
+            sink.instruction(ctx, &Instruction::I32Add)?;
+            sink.instruction(ctx, &Instruction::LocalSet(1))
+        }
+    }
+    impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for Bump {
+        fn emit(
+            &self,
+            ctx: &mut Context,
+            sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+        ) -> Result<(), E> {
+            self.emit_instruction(ctx, sink)
+        }
+    }
+
+    let params = JumpCallParams::conditional_jump(FuncIdx(1), 2, &condition, pool)
+        .with_taken_prefix(&Bump);
+    assert!(reactor.ji_with_params(&mut ctx, params, reactor.fn_count() - 1).is_ok());
+
+    reactor.next(&mut ctx, [(2, ValType::I32)].into_iter(), 1).unwrap();
+    assert!(reactor.seal_to(reactor.fn_count() - 1, &mut ctx, &Instruction::Unreachable).is_ok());
+    assert!(reactor.seal_to(0, &mut ctx, &Instruction::Unreachable).is_ok());
+
+    let fns = reactor.into_fns();
+    assert_eq!(fns.len(), 2);
+    let mut expected = Function::new([(2, ValType::I32)]);
+    // Everything folds through the single optimizer pipeline: the initial
+    // store of 5 is virtual; the prefix's `local.get 1` folds to 5, so the
+    // add produces 6 (virtual store); the return_call's param reads fold to
+    // the constants 0 and 6. The one materialized `i32.const 6;
+    // local.set 1` is the virtual-locals flush before the transfer.
+    expected.instruction(&Instruction::I32Const(6));
+    expected.instruction(&Instruction::LocalSet(1));
+    expected.instruction(&Instruction::LocalGet(0));
+    expected.instruction(&Instruction::I32Const(6));
+    expected.instruction(&Instruction::ReturnCall(1));
+    expected.instruction(&Instruction::Unreachable);
+    expected.instruction(&Instruction::End);
+    assert_eq!(fns[0], expected, "prefix must fold through the same optimizer pipeline as inline emission (re-run, not a frozen buffer)");
+}

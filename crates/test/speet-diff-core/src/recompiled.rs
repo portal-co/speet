@@ -613,17 +613,38 @@ fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Str
         case.entry_pc as u32,
     );
     rc.set_memory64(true);
-    // Delay-slot inline execution is DISABLED here: the yecta reactor's
-    // fall-through chaining re-executes the delay word as its own slot on
-    // the not-taken path (double execution), and the inline body interacts
-    // with the lazy-store pool locals. Correct support needs the ji
-    // Else-arm retarget (see comparison-fuzzing-plan.md finding #6).
-    // The set_delay_slot_fetcher / is_absorbed_delay_pc API stays for when
-    // that lands.
+    // Byte order stays little-endian for now: enabling the BE swaps
+    // surfaced a pre-existing param-forwarding/merge bug (per-slot layout
+    // locals vs stable return_call forwarding counts) — MS-3 of mips-plan.
+    // rc.set_little_endian_memory(); // (default LE until MS-3)
+    // Delay-slot support: the fetcher is installed below and branch/jump
+    // translation re-runs the delay word inside the taken arm (see
+    // docs/mips-plan.md §2). Delay words stay real slots so slot indices
+    // stay 1:1 with decode positions.
     // Raw emission path (see the RV note): memory64's i64 loads/stores are
     // the identity mapping under OwnedLinear; binding the address-mapper
     // mismatches MIPS's i32 value widths.
     // rc.set_memory_access(...);
+    // Delay-slot fetcher: hand the recompiler the big-endian word stream so
+    // branch/jump translation can re-run the delay word in its taken arm.
+    let entry = case.entry_pc as u32;
+    rc.set_delay_slot_fetcher(Box::new(move |pc: u32| {
+        let off = (pc.wrapping_sub(entry)) as usize;
+        if off + 4 > case.code.len() {
+            return None;
+        }
+        let bytes = [
+            case.code[off],
+            case.code[off + 1],
+            case.code[off + 2],
+            case.code[off + 3],
+        ];
+        Some(rabbitizer::Instruction::new(
+            u32::from_be_bytes(bytes),
+            pc,
+            rabbitizer::InstrCategory::CPU,
+        ))
+    }));
     rc.setup_traps(&mut rctx, &mut ctx);
     rc.bind_memory_layout(&rctx);
     let params = collect_params(&rctx);
@@ -639,11 +660,6 @@ fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Str
             case.code[offset + 3],
         ]);
         let pc = (case.entry_pc as u32).wrapping_add(offset as u32);
-        // Delay-slot words are executed inline by their branch/jump — a
-        // standalone slot would double-execute them on the not-taken path.
-        if rc.is_absorbed_delay_pc(pc) {
-            continue;
-        }
         let inst = rabbitizer::Instruction::new(word, pc, rabbitizer::InstrCategory::CPU);
         rc.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |a| {
             Function::new(a.collect::<Vec<_>>())

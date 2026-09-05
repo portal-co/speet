@@ -604,6 +604,16 @@ pub struct JumpCallParams<'a, Context, E> {
     /// transformed condition value).  Only meaningful when `condition` is
     /// `Some`; ignored for unconditional jumps.
     pub condition_hook: Option<&'a (dyn Snippet<Context, E> + 'a)>,
+    /// If Some, emitted at the top of the *taken* arm, after the `if`
+    /// instruction and before the params/transfer.  This is the generic hook
+    /// for "work that must run on the taken edge before control leaves":
+    /// MIPS delay slots pass a snippet that re-runs the delay instruction's
+    /// translation, so the taken edge executes `[delay body][transfer]`
+    /// exactly like the not-taken edge executes `[delay body][fall-through]`
+    /// (via merged fall-through chaining).  May emit any balanced
+    /// instruction sequence (including `if`/`end` frames); must leave no
+    /// values on the stack.
+    pub taken_prefix: Option<&'a (dyn Snippet<Context, E> + 'a)>,
 }
 
 impl<'a, Context, E> JumpCallParams<'a, Context, E> {
@@ -622,6 +632,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             pool,
             condition: None,
             condition_hook: None,
+            taken_prefix: None,
         }
     }
 
@@ -646,6 +657,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             pool,
             condition: None,
             condition_hook: None,
+            taken_prefix: None,
         }
     }
 
@@ -664,6 +676,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             pool,
             condition: None,
             condition_hook: None,
+            taken_prefix: None,
         }
     }
 
@@ -688,6 +701,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             pool,
             condition: Some(condition),
             condition_hook: None,
+            taken_prefix: None,
         }
     }
 
@@ -710,6 +724,7 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
             pool,
             condition: None,
             condition_hook: None,
+            taken_prefix: None,
         }
     }
 
@@ -746,6 +761,18 @@ impl<'a, Context, E> JumpCallParams<'a, Context, E> {
     /// * `hook` - Snippet emitted between the condition snippet and `if`
     pub fn with_condition_hook(mut self, hook: &'a (dyn Snippet<Context, E> + 'a)) -> Self {
         self.condition_hook = Some(hook);
+        self
+    }
+
+    /// Attach a snippet emitted at the top of the *taken* arm, after the
+    /// `if` instruction and before the params/transfer.
+    ///
+    /// The snippet may emit any balanced instruction sequence (including
+    /// `if`/`end` frames) but **must** leave no values on the stack — the
+    /// params/transfer emission that follows assumes the arm's stack is
+    /// empty.
+    pub fn with_taken_prefix(mut self, prefix: &'a (dyn Snippet<Context, E> + 'a)) -> Self {
+        self.taken_prefix = Some(prefix);
         self
     }
 
@@ -2404,6 +2431,7 @@ impl<F> Entry<F> {
         pool: Pool<'_, Context, E>,
         condition: &(dyn Snippet<Context, E> + '_),
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        taken_prefix: Option<&(dyn Snippet<Context, E> + '_)>,
         base_func_offset: u32,
         _exit: ExitId,
     ) -> Result<(), E>
@@ -2416,6 +2444,15 @@ impl<F> Entry<F> {
         }
         self.feed_one(ctx, &Instruction::If(BlockType::Empty))?;
 
+        // Taken-arm prefix (e.g. a MIPS delay-slot body): emitted inside the
+        // arm, before the params/transfer, so the taken edge executes
+        // [prefix][transfer] just like the not-taken edge executes
+        // [prefix][fall-through] via merged fall-through chaining. Runs
+        // through the same optimizer pipeline as any inline emission.
+        if let Some(prefix) = taken_prefix {
+            prefix.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+        }
+
         match call {
             CallEscape::Exception(escape_tag) => {
                 self.emit_params_with_fixups(ctx, params, fixups)?;
@@ -2427,7 +2464,10 @@ impl<F> Entry<F> {
                 self.emit_flag_call_body(ctx, target, pool, fixups, params, base_func_offset)?;
             }
             CallEscape::Jump => {
-                self.emit_unconditional_jump_body(ctx, params, fixups, target, pool, base_func_offset)?;
+                // taken_prefix was already emitted at the top of this arm —
+                // emit_unconditional_jump_body's own prefix emission is for
+                // the *known-true folded* path, which bypasses this arm.
+                self.emit_unconditional_jump_body(ctx, params, fixups, target, pool, None, base_func_offset)?;
             }
         }
 
@@ -2453,11 +2493,15 @@ impl<F> Entry<F> {
         fixups: &BTreeMap<u32, &(dyn Snippet<Context, E> + '_)>,
         target: Target<Context, E>,
         pool: Pool<'_, Context, E>,
+        taken_prefix: Option<&(dyn Snippet<Context, E> + '_)>,
         base_func_offset: u32,
     ) -> Result<(), E>
     where
         F: InstructionSink<Context, E>,
     {
+        if let Some(prefix) = taken_prefix {
+            prefix.emit_snippet(ctx, &mut |ctx, instr| self.feed_one(ctx, instr))?;
+        }
         match target {
             Target::Static {
                 func: FuncIdx(func_idx),
@@ -3385,6 +3429,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             pool,
             condition,
             condition_hook,
+            taken_prefix,
         } = params;
 
         self.ji_internal(
@@ -3396,6 +3441,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             pool,
             condition,
             condition_hook,
+            taken_prefix,
             tail_idx,
         )
     }
@@ -3438,6 +3484,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             pool,
             condition,
             None,
+            None,
             tail_idx,
         )
     }
@@ -3452,8 +3499,15 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        taken_prefix: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
+        if taken_prefix.is_some() {
+            debug_assert!(
+                condition.is_some() || matches!(call, CallEscape::Jump),
+                "taken_prefix only affects the taken arm of a conditional branch (or an unconditional jump)"
+            );
+        }
         self.flush_bundles(ctx, tail_idx)?;
         // Track if statements for conditional branches
         if condition.is_some() {
@@ -3464,12 +3518,13 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
             CallEscape::Exception(_) | CallEscape::Flag => {
                 self.emit_conditional_call(
                     ctx, params, fixups, target, call, pool, condition, condition_hook,
-                    tail_idx,
+                    taken_prefix, tail_idx,
                 )?;
             }
             CallEscape::Jump => {
                 self.emit_conditional_jump(
-                    ctx, params, fixups, target, pool, condition, condition_hook, tail_idx,
+                    ctx, params, fixups, target, pool, condition, condition_hook,
+                    taken_prefix, tail_idx,
                 )?;
             }
         }
@@ -3676,6 +3731,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        taken_prefix: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         debug_assert!(escape.is_native_stack());
@@ -3696,6 +3752,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                         Some(known) => {
                             Self::emit_resolved_condition_side_effects(&mut e, ctx, cond, condition_hook)?;
                             if known {
+                                if let Some(prefix) = taken_prefix {
+                                    prefix.emit_snippet(ctx, &mut |ctx, instr| e.feed_one(ctx, instr))?;
+                                }
                                 e.emit_params_with_fixups(ctx, params, fixups)?;
                                 match escape {
                                     CallEscape::Exception(tag) => {
@@ -3726,6 +3785,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                                 pool,
                                 cond,
                                 condition_hook,
+                                taken_prefix,
                                 self.base_func_offset,
                                 SOLE_EXIT,
                             )?;
@@ -3734,6 +3794,9 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                 }
                 None => {
                     let mut e = self.lock_entry(idx as usize, false);
+                    if let Some(prefix) = taken_prefix {
+                        prefix.emit_snippet(ctx, &mut |ctx, instr| e.feed_one(ctx, instr))?;
+                    }
                     e.emit_params_with_fixups(ctx, params, fixups)?;
                     match escape {
                         CallEscape::Exception(tag) => {
@@ -3769,6 +3832,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
         pool: Pool<'_, Context, E>,
         condition: Option<&(dyn Snippet<Context, E> + '_)>,
         condition_hook: Option<&(dyn Snippet<Context, E> + '_)>,
+        taken_prefix: Option<&(dyn Snippet<Context, E> + '_)>,
         tail_idx: usize,
     ) -> Result<(), E> {
         if let Some(cond) = condition {
@@ -3794,6 +3858,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                                 fixups,
                                 target,
                                 pool,
+                                taken_prefix,
                                 self.base_func_offset,
                             )?;
                         }
@@ -3808,6 +3873,7 @@ impl<Context, E, F: InstructionSink<Context, E>, P: LocalPoolBackend, Gate: Slot
                             pool,
                             cond,
                             condition_hook,
+                            taken_prefix,
                             self.base_func_offset,
                             SOLE_EXIT,
                         )?;

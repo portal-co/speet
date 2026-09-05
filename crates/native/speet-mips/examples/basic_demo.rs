@@ -4,17 +4,26 @@ use speet_mips::MipsRecompiler;
 use wasm_encoder::Function;
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
-fn make_rctx(reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>)
-    -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool>
-{
+fn make_rctx(
+    reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>,
+) -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool> {
     static T: TableIdx = TableIdx(0);
     ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: speet_link_core::RuntimeLayoutParams::new(),
-        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &T,
+            ty: TypeIdx(0),
+        },
         escape: yecta::CallEscape::Jump,
     }
 }
@@ -28,18 +37,22 @@ fn main() {
     // is shared via Cell so the borrow isn't two-way.
     let syscall_count = std::rc::Rc::new(core::cell::Cell::new(0u32));
     let count = syscall_count.clone();
-    let mut syscall_callback =
-        |syscall: &speet_mips::SyscallInfo,
-         ctx: &mut (),
-         callback_ctx: &mut speet_mips::CallbackContext<'_, (), core::convert::Infallible>| {
-            count.set(count.get() + 1);
-            println!(
-                "   SYSCALL detected at PC: 0x{:x}, count: {}",
-                syscall.pc, count.get()
-            );
-            // Could emit custom WebAssembly code here if needed
-            callback_ctx.emit(ctx, &wasm_encoder::Instruction::Nop).ok();
-        };
+    let mut syscall_callback = |syscall: &speet_mips::SyscallInfo,
+                                ctx: &mut (),
+                                callback_ctx: &mut speet_mips::CallbackContext<
+        '_,
+        (),
+        core::convert::Infallible,
+    >| {
+        count.set(count.get() + 1);
+        println!(
+            "   SYSCALL detected at PC: 0x{:x}, count: {}",
+            syscall.pc,
+            count.get()
+        );
+        // Could emit custom WebAssembly code here if needed
+        callback_ctx.emit(ctx, &wasm_encoder::Instruction::Nop).ok();
+    };
 
     // Create a recompiler instance
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =

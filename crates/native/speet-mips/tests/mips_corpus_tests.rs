@@ -27,17 +27,26 @@ use std::{fs, path::Path};
 use wasm_encoder::Function;
 use yecta::{LocalPool, Reactor, TableIdx, TypeIdx};
 
-fn make_rctx(reactor: &mut Reactor<(), Infallible, Function, LocalPool>)
-    -> ReactorAdapter<'_, (), Infallible, Function, LocalPool>
-{
+fn make_rctx(
+    reactor: &mut Reactor<(), Infallible, Function, LocalPool>,
+) -> ReactorAdapter<'_, (), Infallible, Function, LocalPool> {
     static T: TableIdx = TableIdx(0);
     ReactorAdapter {
         reactor,
         layout: yecta::LocalLayout::empty(),
-        locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
-        injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
+        locals_mark: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
+        injected_start: yecta::Mark {
+            slot_count: 0,
+            total_locals: 0,
+        },
         layout_params: speet_link_core::RuntimeLayoutParams::new(),
-        pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
+        pool: yecta::Pool {
+            handler: &T,
+            ty: TypeIdx(0),
+        },
         escape: yecta::CallEscape::Jump,
     }
 }

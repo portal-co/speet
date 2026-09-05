@@ -490,6 +490,18 @@ fn emit_mips_unit(
     let mut recompiler =
         speet_mips::MipsRecompiler::<'_, '_, (), LinkErr, Function>::new_with_full_config(start_addr, true);
     recompiler.set_slot_assigner(slots.clone());
+    recompiler.set_delay_slot_fetcher(Box::new(move |pc: u32| {
+        let off = pc.wrapping_sub(start_addr) as usize;
+        if off + 4 > text.len() {
+            return None;
+        }
+        let bytes: [u8; 4] = text[off..off + 4].try_into().expect("exact chunk");
+        Some(MipsInstruction::new(
+            u32::from_be_bytes(bytes),
+            pc,
+            InstrCategory::CPU,
+        ))
+    }));
     // `MipsRecompiler::setup_traps` retains the caller layout; the preceding
     // WASI guest slot may contain unrelated locals.
     *rctx.layout_mut() = yecta::LocalLayout::empty();
@@ -498,17 +510,15 @@ fn emit_mips_unit(
     syscall.base_func_offset = rctx.base_func_offset();
     syscall.num_params = params.len() as u32;
     recompiler.set_syscall_callback(&mut syscall);
-    // Branch/jump delay slots: fetching is available via
-    // set_delay_slot_fetcher, but inline delay execution is disabled until
-    // the yecta Else-arm retarget lands (see comparison-fuzzing-plan.md
-    // finding #6) — enabling it here double-executes the delay word on the
-    // not-taken path.
+    // Branch/jump delay slots: the fetcher hands the recompiler the BE word
+    // stream so conditional branches re-run the delay word in their taken arm
+    // (docs/mips-plan.md §2). Delay words stay real slots — see the loop note.
     for (offset, bytes) in text.chunks_exact(4).enumerate() {
         let pc = start_addr + (offset * 4) as u32;
-        // Delay-slot words are executed inline by their branch/jump.
-        if recompiler.is_absorbed_delay_pc(pc) {
-            continue;
-        }
+        // Delay-slot words stay real slots (their bodies are re-run inside
+        // their branch/jump's taken arm — see docs/mips-plan.md §2); the
+        // sequential loop translates every word so slot indices stay 1:1
+        // with decode positions and branches into a delay word resolve.
         let insn = MipsInstruction::new(
             u32::from_be_bytes(bytes.try_into().expect("exact chunk")),
             pc,

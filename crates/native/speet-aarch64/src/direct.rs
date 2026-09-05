@@ -337,6 +337,7 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
                         pool: rctx.pool(),
                         condition: None,
                         condition_hook: None,
+                        taken_prefix: None,
                     };
                     rctx.ji_with_params(ctx, tail_idx, params)?;
                     return Ok(());

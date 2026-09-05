@@ -1,6 +1,6 @@
 # MIPS recompiler: delay slots, big-endian memory, store-path correctness
 
-**Status: Planned** — supersedes the open MIPS findings in
+**Status: MS-1/MS-2 shipped (delay slots live), MS-3+ open** — supersedes the open MIPS findings in
 [comparison-fuzzing-plan.md](comparison-fuzzing-plan.md) (findings #6, #7 and
 the endianness sub-finding of #4).
 **Crates affected:** `yecta`, `speet-mips`, `speet-ordering`,
@@ -228,14 +228,14 @@ follow one recipe (replacing the disabled `emit_delay_slot` call sites from
    the sink yecta provides, as `taken_prefix` to `ji`. No buffer, no
    second emission path — the tail slot and the taken arm share one
    `emit_insn`.
-5. **Record `absorbed_delay_pcs.push(pc+4)`** so the sequential
-   translation loop skips it (already implemented). Slot(pc+4) therefore
-   never exists *unless* something else branches directly at it —
-   branching into a delay slot is architecturally legal but
-   pathological; `pc_to_func_idx` will resolve it to the wrong slot (the
-   next created slot), so detect it: when translating any branch whose
-   *target* is an absorbed PC, drop to unsupported with a note. The fuzz
-   generators already never target delay words.
+5. **Delay words stay real slots — no absorption.** (Correction of the
+   earlier absorbed-PC plan: the prefix-in-taken-arm shape removed the
+   double-execution risk, so slot(pc+4) is created and translated like
+   any other word. This keeps `pc_to_func_idx` 1:1 with decode positions
+   (the old absorption broke the no-assigner index math for every later
+   word) and makes branching *into* a delay word resolve to a real slot
+   that executes the delay body then falls through — architecturally
+   correct. `absorbed_delay_pcs` and its loop skips are gone.)
 6. **JAL/JALR link register.** Already correct: `$ra` is written to
    `pc+8` (delay-slot-relative return) before the prefix runs; the prefix
    must not clobber `$ra` — reject delay instructions that write the link
@@ -402,6 +402,52 @@ oracle=X recompiled=Y" divergence class disappears from fixed-seed MIPS
 runs.
 
 ---
+
+## 4b. Shipped status (MS-1/MS-2)
+
+- **MS-1 (yecta)**: `JumpCallParams::taken_prefix` (+ builder), threaded
+  through `ji_internal` → `emit_conditional_jump`/`emit_conditional_call`
+  → `emit_conditional_arm` (inside the taken arm, before params) and the
+  known-true fold path (`emit_unconditional_jump_body`). Unit tests cover
+  arm-order, known-true fold, and optimizer interaction.
+- **MS-2 (speet-mips)**: `emit_insn` split into a transfer/privileged
+  dispatcher plus `emit_insn_body` parameterized over a new
+  `MipsBodySink` (`TailBodySink` = historical `rctx.feed(tail)` behavior;
+  `GoBodySink` = per-entry closure for the prefix re-run). Helpers
+  (`emit_gpr_*`, ALU ops, swaps, pc/ra) take the sink. `DelaySlotPrefix`
+  wraps `(&MipsRecompiler, &RC, delay, delay_pc)` and re-runs the body
+  live — no frozen op stream, ambient behavior preserved. Mapper state,
+  syscall/break callbacks, and delay notes moved to interior mutability
+  (`RefCell`) so the body runs `&self` under the snippet's shared
+  borrows. `translate_branch` precomputes the predicate, fetches the
+  delay word, and passes the prefix via `ji_with_params`; the prefix is
+  skipped when `target == pc+4` (the target slot executes the delay).
+  Speculative JAL/JALR gained the post-call continuation
+  `jump_to_pc(pc+8)` — the callee returns to `ra = pc+8`, and `jmp`
+  purges the fall-through edge so the delay word cannot re-run after the
+  return (this also fixes a pre-existing post-call-at-pc+4 bug).
+- **Enablement**: fetcher installed in both production callers
+  (`speet-diff-core`, `speet-linux-wasi`). Fixed-seed sweep: MIPS
+  32 pass / 10 divergence / 58 skip (from 16/37 pre-MS-2); every other
+  arch unchanged. Remaining MIPS divergence classes: big-endian data
+  memory (§3) and one validate class (below).
+
+### New MS-3 blocker (diagnosed, unfixed): per-slot layout locals vs
+### stable param forwarding
+
+`MipsRecompiler::init_function` rewinds the layout to `locals_mark` and
+appends each slot's scratch locals (temps, addr scratch, pools, swap
+temps). Merged functions absorb every later slot's appends into their
+signature (type[0] grew to 76 params), but the return_call/jmp/ji
+forwarding paths pass `rctx.locals_mark().total_locals` — the count at
+setup time (38). A merged group whose body ends in a `jmp` (e.g. SW +
+JR $ra) seals with a 38-value `return_call` against a 76-param type:
+`validate: type mismatch: expected i64, found i32`. Wasmi previously
+masked this class (the M5-era skip rates); the fetcher-on sweep exposes
+it. Fix direction: declare the per-slot scratch set once (setup_traps,
+x86/riscv-style) instead of per-slot rewind-and-reappend, or forward the
+tail entry's real signature params. This gates BE-swap enablement (§3.2
+debug step 2 will hit the same class).
 
 ## 5. Testing and acceptance
 
