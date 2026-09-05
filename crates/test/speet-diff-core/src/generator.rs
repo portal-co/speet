@@ -61,7 +61,7 @@ impl Rand for SeedRng {
 
 /// Draw an "interesting" 64-bit value: small, bit-boundary, i64::MIN/MAX —
 /// biasing toward flag edges (carry, overflow) rather than uniform noise.
-fn interesting_value(r: &mut dyn Rand) -> u64 {
+pub(crate) fn interesting_value(r: &mut dyn Rand) -> u64 {
     match r.below(8) {
         0 => r.below(16),
         1 => r.below(0x1_0000),
@@ -133,7 +133,7 @@ fn width(r: &mut dyn Rand) -> W {
 /// Displacement into the data region, bounded so `disp + size` stays inside
 /// the region (plan §4.2). RBX is pre-seeded to `DATA_BASE` so
 /// `[rbx + disp]` addressing is safe by construction.
-fn data_displacement(r: &mut dyn Rand, size: u64) -> i64 {
+pub(crate) fn data_displacement(r: &mut dyn Rand, size: u64) -> i64 {
     let max = (DATA_SIZE as u64).saturating_sub(size + 16);
     (r.below(max.max(1))) as i64
 }
@@ -372,9 +372,19 @@ fn gen_one(code: &mut Vec<u8>, r: &mut dyn Rand, pc: u64) -> bool {
     }
 }
 
-/// Generate a complete fuzz case from a seed. Deterministic: same seed,
-/// same case — every artifact records its seed for replay.
-pub fn generate_case(seed: u64) -> FuzzCase {
+/// Generate a complete fuzz case for `arch` from a seed. Deterministic:
+/// same (arch, seed), same case — every artifact records both for replay.
+pub fn generate_case(arch: crate::case::Arch, seed: u64) -> FuzzCase {
+    match arch {
+        crate::case::Arch::X86_64 => generate_case_x86(seed),
+        crate::case::Arch::AArch64 => crate::gen_a64::generate_case(seed),
+        crate::case::Arch::RiscV64 => crate::gen_rv64::generate_case(seed),
+    }
+}
+
+/// Generate a complete x86-64 fuzz case from a seed. Deterministic: same
+/// seed, same case — every artifact records its seed for replay.
+pub fn generate_case_x86(seed: u64) -> FuzzCase {
     let mut rng = SeedRng(seed);
     let n_target = 8 + rng.below(17) as usize; // 8..=24 instructions
     let mut code: Vec<u8> = Vec::with_capacity(n_target * 4);
@@ -419,6 +429,7 @@ pub fn generate_case(seed: u64) -> FuzzCase {
     regs.gprs[4] = sp;
 
     FuzzCase {
+        arch: crate::case::Arch::X86_64,
         code,
         entry_pc: CODE_BASE,
         regs,

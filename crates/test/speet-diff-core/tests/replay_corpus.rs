@@ -15,17 +15,28 @@ fn case_from_json(v: &serde_json::Value) -> FuzzCase {
     let case = &v["case"];
     let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect::<Vec<u8>>();
     let g: Vec<u64> = case["regs"]["gprs"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
+    let arch = match case["arch"].as_str().unwrap_or("X86_64") {
+        "AArch64" => speet_diff_core::case::Arch::AArch64,
+        "RiscV64" => speet_diff_core::case::Arch::RiscV64,
+        _ => speet_diff_core::case::Arch::X86_64,
+    };
+    let mut gprs = [0u64; 32];
+    for (i, v) in g.iter().enumerate() {
+        gprs[i] = *v;
+    }
     FuzzCase {
+        arch,
         code: hex(case["code_hex"].as_str().unwrap()),
         entry_pc: case["entry_pc"].as_u64().unwrap(),
         regs: RegState {
-            gprs: g.try_into().unwrap(),
+            gprs,
             rip: case["regs"]["rip"].as_u64().unwrap(),
             zf: case["regs"]["zf"].as_bool().unwrap(),
             sf: case["regs"]["sf"].as_bool().unwrap(),
             cf: case["regs"]["cf"].as_bool().unwrap(),
             of: case["regs"]["of"].as_bool().unwrap(),
             pf: case["regs"]["pf"].as_bool().unwrap(),
+            sp: case["regs"].get("sp").and_then(|x| x.as_u64()).unwrap_or(0),
         },
         data: hex(case["data_hex"].as_str().unwrap()),
         data_base: case["data_base"].as_u64().unwrap(),

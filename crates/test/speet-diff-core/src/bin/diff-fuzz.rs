@@ -1,10 +1,11 @@
 //! Comparison-fuzzing driver: run N random cases through both engines and
 //! report pass/skip/divergence counts (plan §3, §5, §6).
 //!
-//! Usage: `cargo run -p speet-diff-core --bin diff-fuzz -- [N] [--seed S]`
-//! Divergences land in `test-data/diff-fuzz/x86_64/` as JSON artifacts with
+//! Usage: `cargo run -p speet-diff-core --bin diff-fuzz -- [N] [--seed S] [--arch A]`
+//! Divergences land in `test-data/diff-fuzz/<arch>/` as JSON artifacts with
 //! the case seed, so every finding replays deterministically.
 
+use speet_diff_core::case::Arch;
 use speet_diff_core::generator::generate_case;
 use speet_diff_core::report::{
     record_divergence, record_skip, CaseRecord, DivergenceReport, OutcomeRecord, RunStats,
@@ -15,15 +16,28 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: u64 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100);
     let mut seed: Option<u64> = None;
+    let mut arch = Arch::X86_64;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--seed" {
             seed = args.get(i + 1).and_then(|a| a.parse().ok());
             i += 2;
+        } else if args[i] == "--arch" {
+            arch = match args.get(i + 1).map(|s| s.as_str()) {
+                Some("aarch64") => Arch::AArch64,
+                Some("riscv64") => Arch::RiscV64,
+                _ => Arch::X86_64,
+            };
+            i += 2;
         } else {
             i += 1;
         }
     }
+    let arch_name = match arch {
+        Arch::X86_64 => "x86_64",
+        Arch::AArch64 => "aarch64",
+        Arch::RiscV64 => "riscv64",
+    };
     let base_seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -34,7 +48,7 @@ fn main() {
     let mut stats = RunStats::default();
     for k in 0..n {
         let case_seed = base_seed.wrapping_add(k.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let case = generate_case(case_seed);
+        let case = generate_case(arch, case_seed);
         let label = format!("seed-{case_seed:016x}");
 
         // Oracle side.
@@ -48,7 +62,7 @@ fn main() {
             Comparison::Match => stats.passed += 1,
             Comparison::Skip(reason) => {
                 stats.record_skip(reason);
-                record_skip("x86_64", &label, reason);
+                record_skip(arch_name, &label, reason);
             }
             Comparison::Divergence(desc) => {
                 stats.divergences += 1;
@@ -75,7 +89,7 @@ fn main() {
                     },
                 };
                 // The divergence description is the key evidence — embed it.
-                let path = record_divergence("x86_64", &label, &report);
+                let path = record_divergence(arch_name, &label, &report);
                 eprintln!(
                     "DIVERGENCE {label}: {desc}\n  minimized: {} bytes (was {})\n  artifact: {}",
                     minimized.code.len(),
@@ -87,7 +101,7 @@ fn main() {
     }
 
     println!(
-        "x86_64 diff-fuzz: {} cases | {} pass | {} divergences | {} skipped \
+        "{arch_name} diff-fuzz: {} cases | {} pass | {} divergences | {} skipped \
          (unsupported-exec {} / trap {} / ro-store {} / oracle-fault {} / budget {})",
         stats.total(),
         stats.passed,

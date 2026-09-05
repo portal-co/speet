@@ -62,7 +62,7 @@ pub fn compare_outcomes(
 
     // ── Exact register/flag comparison (plan §5: no tolerance) ──
     let mut facets = Vec::new();
-    for g in 0..16 {
+    for g in 0..case.arch.n_gprs() {
         if o.regs.gprs[g] != r.regs.gprs[g] {
             facets.push(format!(
                 "gpr{}: oracle={:#x} recompiled={:#x}",
@@ -70,16 +70,19 @@ pub fn compare_outcomes(
             ));
         }
     }
-    for (name, (of, rf)) in [
-        ("ZF", (o.regs.zf, r.regs.zf)),
-        ("SF", (o.regs.sf, r.regs.sf)),
-        ("CF", (o.regs.cf, r.regs.cf)),
-        ("OF", (o.regs.of, r.regs.of)),
-        ("PF", (o.regs.pf, r.regs.pf)),
-    ] {
-        if of != rf {
-            facets.push(format!("flag {name}: oracle={of} recompiled={rf}"));
+    let o_flags = o.regs.flags();
+    let r_flags = r.regs.flags();
+    for (name, idx) in case.arch.flag_names() {
+        if o_flags[*idx] != r_flags[*idx] {
+            facets.push(format!(
+                "flag {name}: oracle={} recompiled={}",
+                o_flags[*idx], r_flags[*idx]
+            ));
         }
+    }
+    // AArch64's dedicated SP (x86/RV keep SP in `gprs`).
+    if case.arch == crate::case::Arch::AArch64 && o.regs.sp != r.regs.sp {
+        facets.push(format!("sp: oracle={:#x} recompiled={:#x}", o.regs.sp, r.regs.sp));
     }
 
     // ── Exact memory comparison ──

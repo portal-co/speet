@@ -3,6 +3,13 @@
 //! failing seeds persist to `proptest-regressions/` and replay on CI.
 
 use proptest::prelude::*;
+use speet_diff_core::case::Arch;
+
+
+fn arch() -> impl Strategy<Value = Arch> {
+    proptest::sample::select(vec![Arch::X86_64, Arch::AArch64, Arch::RiscV64])
+}
+
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -11,9 +18,19 @@ use std::sync::OnceLock;
 fn documented_facets() -> &'static HashSet<String> {
     static SET: OnceLock<HashSet<String>> = OnceLock::new();
     SET.get_or_init(|| {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../test-data/diff-fuzz/x86_64");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test-data/diff-fuzz");
         let mut set = HashSet::new();
+        let mut arch_dirs = vec![root.clone()];
+        // Root plus every per-arch directory (x86_64/, aarch64/, …).
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    arch_dirs.push(e.path());
+                }
+            }
+        }
+        for dir in arch_dirs {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let p = e.path();
@@ -26,11 +43,18 @@ fn documented_facets() -> &'static HashSet<String> {
                     if let Some(desc) = v.get("description").and_then(|d| d.as_str()) {
                         for f in desc.split("; ") {
                             let f = f.split(':').next().unwrap_or(f).trim();
-                            set.insert(if f.starts_with("flag") { "flags".into() } else { f.to_string() });
+                            set.insert(if f.starts_with("flag") {
+                                "flags".into()
+                            } else if f.starts_with("gpr") {
+                                "gpr".into()
+                            } else {
+                                f.to_string()
+                            });
                         }
                     }
                 }
             }
+        }
         }
         set
     })
@@ -44,8 +68,8 @@ proptest! {
     })]
 
     #[test]
-    fn recompiled_matches_oracle(seed in any::<u64>()) {
-        let case = speet_diff_core::generate_case(seed);
+    fn recompiled_matches_oracle(arch in arch(), seed in any::<u64>()) {
+        let case = speet_diff_core::generate_case(arch, seed);
         let oracle = speet_diff_core::run_oracle(&case);
         let recompiled = speet_diff_core::run_recompiled(&case);
         let c = speet_diff_core::compare_outcomes(
@@ -63,7 +87,19 @@ proptest! {
             let facets: HashSet<String> = desc
                 .split("; ")
                 .map(|f| f.split(':').next().unwrap_or(f).trim().to_string())
-                .map(|f| if f.starts_with("flag") { "flags".into() } else { f })
+                .map(|f| {
+                    if f.starts_with("flag") {
+                        "flags".into()
+                    } else if f.starts_with("gpr") {
+                        // Collapse the register number: the artifact keeps
+                        // the specific register as evidence; the tolerance
+                        // class is "any register mismatch" (a clobber class
+                        // isn't register-specific).
+                        "gpr".into()
+                    } else {
+                        f
+                    }
+                })
                 .collect();
             prop_assert!(
                 !facets.is_empty() && facets.is_subset(&documented_facets()),

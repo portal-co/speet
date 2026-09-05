@@ -1,7 +1,15 @@
+
+fn parse_arch(s: Option<&String>) -> speet_diff_core::case::Arch {
+    match s.map(|x| x.as_str()) {
+        Some("aarch64") => speet_diff_core::case::Arch::AArch64,
+        Some("riscv64") => speet_diff_core::case::Arch::RiscV64,
+        _ => speet_diff_core::case::Arch::X86_64,
+    }
+}
 use wasmparser::{Operator, Payload};
 fn main() {
     let seed: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let case = speet_diff_core::generator::generate_case(seed);
+    let case = speet_diff_core::generator::generate_case(parse_arch(std::env::args().nth(2).as_ref()), seed);
     let wasm = speet_diff_core::recompiled::build_case_module(&case).expect("build");
     let parser = wasmparser::Parser::new(0);
     let mut fn_idx = 0usize;

@@ -14,6 +14,8 @@
 pub mod case;
 pub mod compare;
 pub mod generator;
+pub mod gen_a64;
+pub mod gen_rv64;
 pub mod minimize;
 pub mod report;
 pub mod recompiled;
@@ -32,7 +34,7 @@ pub use recompiled::{run_recompiled, unsupported_for, RecompiledError};
 
 /// Debug helper: report the recompiled error for one seed (diagnostics only).
 pub fn debug_seed(seed: u64) -> String {
-    let case = generator::generate_case(seed);
+    let case = generator::generate_case(case::Arch::X86_64, seed);
     let o = crate::oracle::run_oracle(&case);
     let r = recompiled::run_recompiled(&case);
     format!(
@@ -49,7 +51,28 @@ pub fn debug_seed(seed: u64) -> String {
 pub mod tests_common {
     use crate::case::{FuzzCase, RegState};
     pub fn make_case(code: Vec<u8>, seed: u64) -> FuzzCase {
+        make_case_arch(crate::case::Arch::X86_64, code, seed)
+    }
+    pub fn make_case_arch(arch: crate::case::Arch, code: Vec<u8>, seed: u64) -> FuzzCase {
         let mut regs = RegState::default();
+        regs.rip = crate::generator::CODE_BASE;
+        match arch {
+            crate::case::Arch::X86_64 => {
+                regs.gprs[3] = crate::generator::DATA_BASE;
+                regs.gprs[7] = 0x1234;
+                regs.gprs[15] = 0xAAAA;
+            }
+            crate::case::Arch::AArch64 => {
+                regs.gprs[20] = crate::generator::DATA_BASE; // X20 anchor
+                regs.gprs[7] = 0x1234;
+                regs.gprs[15] = 0xAAAA;
+            }
+            crate::case::Arch::RiscV64 => {
+                regs.gprs[5] = crate::generator::DATA_BASE; // x5/t0 anchor
+                regs.gprs[7] = 0x1234;
+                regs.gprs[15] = 0xAAAA;
+            }
+        }
         regs.gprs[3] = crate::generator::DATA_BASE;
         let sp = crate::generator::STACK_BASE
             + ((crate::generator::STACK_SIZE as u64) & !0xF)
@@ -60,11 +83,14 @@ pub mod tests_common {
         regs.rip = crate::generator::CODE_BASE;
         let data = vec![0u8; crate::generator::DATA_SIZE];
         let mut stack = vec![0u8; crate::generator::STACK_SIZE];
-        let off = (sp - crate::generator::STACK_BASE) as usize;
-        stack[off..off + 8].copy_from_slice(
-            &((crate::generator::CODE_BASE + code.len() as u64).to_le_bytes()),
-        );
+        if arch.stack_based_ret() {
+            let off = (sp - crate::generator::STACK_BASE) as usize;
+            stack[off..off + 8].copy_from_slice(
+                &((crate::generator::CODE_BASE + code.len() as u64).to_le_bytes()),
+            );
+        }
         FuzzCase {
+            arch,
             code,
             entry_pc: crate::generator::CODE_BASE,
             regs,

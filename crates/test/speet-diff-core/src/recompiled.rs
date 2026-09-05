@@ -4,13 +4,16 @@
 //! unreachable instrumentation), and run under wasmi — then read the final
 //! register file back from the halt stub's results.
 
-use crate::case::{ExecOutcome, ExitKind, FuzzCase, RegState};
+use crate::case::{Arch, ExecOutcome, ExitKind, FuzzCase, RegState};
+use speet_aarch64::AArch64Recompiler;
 use speet_corpus_harness::{
     assemble_corpus_module, corpus_manifest, corpus_n_imports, instrument_functions,
 };
 use speet_link_core::image_layout::MemoryModel;
 use speet_link_core::{BaseContext, ReactorAdapter, ReactorContext};
 use speet_memory::memory_access_for_model;
+use speet_riscv::RiscVRecompiler;
+use rv_asm::Xlen;
 use speet_x86_64::X86Recompiler;
 use wasmparser;
 use wasmi::{Engine, Linker, Module as WasmiModule, Store};
@@ -21,8 +24,6 @@ use wasm_encoder::{Function, ValType};
 /// layout: GPRs 0–15 (i64; RSP = 4 per `X86Recompiler::SP_PARAM_INDEX`),
 /// RIP = 16 (i32), flags 17–21 (i32, ZF SF CF OF PF), temps 22–25, XMM
 /// 26–41. The halt stub returns the register file in this order.
-const N_GPRS: usize = 16;
-
 #[derive(Debug)]
 pub enum RecompiledError {
     /// Executed an unsupported instruction — the `__speet_unreachable_trap`
@@ -70,7 +71,10 @@ pub fn build_case_module(case: &FuzzCase) -> Result<Vec<u8>, RecompiledError> {
         instrument_functions(&mut fns, n_imports, trap_idx);
     }
 
-    let entry_func_idx = 0; // byte-granular: slot 0 = entry_pc
+    // All three archs' slot layouts put slot 0 at the entry PC (x86:
+    // byte-granular; aarch64: one slot per 4-byte word; riscv64: one slot
+    // per 2-byte halfword).
+    let entry_func_idx = 0;
     let wasm = assemble_corpus_module(&fns, &params, entry_func_idx);
     wasmparser::validate(&wasm)
         .map_err(|e| RecompiledError::Internal(format!("validate: {e}")))?;
@@ -221,7 +225,7 @@ fn exec_module(case: &FuzzCase, wasm: &[u8]) -> Result<ExecOutcome, RecompiledEr
         Ok(()) => {
             // Halt stub returned the live register file as results.
             Ok(ExecOutcome {
-                regs: regs_from_results(&results),
+                regs: regs_from_results(case, &results),
                 data: data_after,
                 stack: stack_after,
                 exit: ExitKind::Completed,
@@ -230,40 +234,99 @@ fn exec_module(case: &FuzzCase, wasm: &[u8]) -> Result<ExecOutcome, RecompiledEr
     }
 }
 
-/// Map case register state onto the WASM entry's parameter list.
+/// Map case register state onto the WASM entry's parameter list (per arch).
 fn seed_param(i: usize, vt: wasmi::ValType, case: &FuzzCase) -> wasmi::Val {
-    match (i, vt) {
-        (idx, wasmi::ValType::I64) if idx < N_GPRS => {
-            wasmi::Val::I64(case.regs.gprs[idx] as i64)
-        }
-        // RIP local (16) — see `speet_recompile::instrument::GuestPcRef::LocalI64(16)`.
-        (16, wasmi::ValType::I32) => wasmi::Val::I32(case.entry_pc as i32),
-        // Flags 17–21 (ZF SF CF OF PF).
-        (17, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.zf as i32),
-        (18, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.sf as i32),
-        (19, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.cf as i32),
-        (20, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.of as i32),
-        (21, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.pf as i32),
-        // Temps 22–25 and XMM 26–41: zero.
-        (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
-        (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
-        (_, other) => panic!("unexpected param type {other:?}"),
+    match case.arch {
+        Arch::X86_64 => match (i, vt) {
+            (idx, wasmi::ValType::I64) if idx < 16 => {
+                wasmi::Val::I64(case.regs.gprs[idx] as i64)
+            }
+            // RIP local (16) — see `speet_recompile::instrument::GuestPcRef::LocalI64(16)`.
+            (16, wasmi::ValType::I32) => wasmi::Val::I32(case.entry_pc as i32),
+            // Flags 17–21 (ZF SF CF OF PF).
+            (17, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.zf as i32),
+            (18, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.sf as i32),
+            (19, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.cf as i32),
+            (20, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.of as i32),
+            (21, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.pf as i32),
+            // Temps 22–25 and XMM 26–41: zero.
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
+        Arch::AArch64 => match (i, vt) {
+            (idx, wasmi::ValType::I64) if idx < 31 => {
+                wasmi::Val::I64(case.regs.gprs[idx] as i64)
+            }
+            // 31 GPRs + PC i64 (31) + 4 NZCV i32 (32–35, in N Z C V order
+            // per `nzcv_slot`'s declaration) + 3 scratch i64 (36–38) + 32 FP
+            // (39–70) + expected_RA (71) + SP (72) — see
+            // `AArch64Recompiler::BASE_PARAMS`/`SP_PARAM_INDEX`.
+            (31, wasmi::ValType::I64) => wasmi::Val::I64(case.entry_pc as i64),
+            (32, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.sf as i32), // N
+            (33, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.zf as i32), // Z
+            (34, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.cf as i32), // C
+            (35, wasmi::ValType::I32) => wasmi::Val::I32(case.regs.of as i32), // V
+            (71, wasmi::ValType::I64) => wasmi::Val::I64(0), // expected_RA
+            (72, wasmi::ValType::I64) => wasmi::Val::I64(case.regs.sp as i64),
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::I32) => wasmi::Val::I32(0),
+            // FP registers 39–70 are F64 params — M4 is integer-only.
+            (_, wasmi::ValType::F64) => wasmi::Val::F64(0f64.into()),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
+        Arch::RiscV64 => match (i, vt) {
+            (idx, wasmi::ValType::I64) if idx < 32 => {
+                wasmi::Val::I64(case.regs.gprs[idx] as i64)
+            }
+            // 32 int i64 (0–31) + 32 FP f64 (32–63) + PC i64 (64) +
+            // expected_RA i64 (65) — see `RiscVRecompiler::BASE_PARAMS`.
+            (64, wasmi::ValType::I64) => wasmi::Val::I64(case.entry_pc as i64),
+            (65, wasmi::ValType::I64) => wasmi::Val::I64(0), // expected_RA
+            (_, wasmi::ValType::I64) => wasmi::Val::I64(0),
+            (_, wasmi::ValType::F64) => wasmi::Val::F64(0f64.into()),
+            (_, other) => panic!("unexpected param type {other:?}"),
+        },
     }
 }
 
-fn regs_from_results(results: &[wasmi::Val]) -> RegState {
+fn regs_from_results(case: &FuzzCase, results: &[wasmi::Val]) -> RegState {
     let mut regs = RegState::default();
-    for g in 0..N_GPRS {
-        regs.gprs[g] = read_i64(results, g);
+    match case.arch {
+        Arch::X86_64 => {
+            for g in 0..16 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            // Final RIP: the halt stub returns the register file as it
+            // stood when the guest jumped past the translated set — the
+            // sentinel.
+            regs.rip = 0; // compared loosely (both engines end "at halt")
+            regs.zf = read_i64(results, 17) != 0;
+            regs.sf = read_i64(results, 18) != 0;
+            regs.cf = read_i64(results, 19) != 0;
+            regs.of = read_i64(results, 20) != 0;
+            regs.pf = read_i64(results, 21) != 0;
+        }
+        Arch::AArch64 => {
+            for g in 0..31 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.rip = 0;
+            // NZCV param order: N, Z, C, V (per `nzcv_slot` declaration).
+            regs.sf = read_i64(results, 32) != 0;
+            regs.zf = read_i64(results, 33) != 0;
+            regs.cf = read_i64(results, 34) != 0;
+            regs.of = read_i64(results, 35) != 0;
+            regs.sp = read_i64(results, 72);
+        }
+        Arch::RiscV64 => {
+            for g in 0..32 {
+                regs.gprs[g] = read_i64(results, g);
+            }
+            regs.gprs[0] = 0; // hardwired zero — both engines keep it 0
+            regs.rip = 0;
+        }
     }
-    // Final RIP: the halt stub returns the register file as it stood when
-    // the guest jumped past the translated set — the sentinel.
-    regs.rip = 0; // compared loosely (both engines end "at halt")
-    regs.zf = read_i64(results, 17) != 0;
-    regs.sf = read_i64(results, 18) != 0;
-    regs.cf = read_i64(results, 19) != 0;
-    regs.of = read_i64(results, 20) != 0;
-    regs.pf = read_i64(results, 21) != 0;
     regs
 }
 
@@ -286,12 +349,19 @@ fn n_imports_cached() -> u32 {
 /// Translate the case with the production x86-64 frontend: returns
 /// (function bodies, register-file params, unsupported-insn coverage signal).
 pub fn translate_case(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
-    let n_imports = n_imports_cached();
-    let mut reactor: Reactor<(), core::convert::Infallible, Function, LocalPool> =
-        Reactor::default();
+    match case.arch {
+        Arch::X86_64 => translate_case_x86(case),
+        Arch::AArch64 => translate_case_a64(case),
+        Arch::RiscV64 => translate_case_rv64(case),
+    }
+}
+
+fn make_rctx(
+    reactor: &mut Reactor<(), core::convert::Infallible, Function, LocalPool>,
+) -> ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool> {
     static T: TableIdx = TableIdx(0);
     let mut rctx = ReactorAdapter {
-        reactor: &mut reactor,
+        reactor,
         layout: yecta::LocalLayout::empty(),
         locals_mark: yecta::Mark { slot_count: 0, total_locals: 0 },
         injected_start: yecta::Mark { slot_count: 0, total_locals: 0 },
@@ -299,7 +369,23 @@ pub fn translate_case(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Stri
         pool: yecta::Pool { handler: &T, ty: TypeIdx(0) },
         escape: yecta::CallEscape::Jump,
     };
-    rctx.set_base_func_offset(n_imports);
+    rctx.set_base_func_offset(n_imports_cached());
+    rctx
+}
+
+fn collect_params(rctx: &ReactorAdapter<'_, (), core::convert::Infallible, Function, LocalPool>) -> Vec<ValType> {
+    // Snapshot the register-file param list right after setup_traps (the
+    // mark includes trap + memory-access scratch params) — same as the e2e
+    // harness `collect_rv_params`, which never hand-counts.
+    rctx.layout()
+        .iter_before(&rctx.locals_mark())
+        .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
+        .collect()
+}
+
+fn translate_case_x86(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
     let mut ctx = ();
     let mut rc = X86Recompiler::<(), core::convert::Infallible>::new_with_base_rip(case.entry_pc);
     rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
@@ -307,23 +393,54 @@ pub fn translate_case(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Stri
     ));
     rc.setup_traps(&mut rctx, &mut ctx);
     rc.bind_memory_layout(&rctx);
-    // Snapshot the register-file param list right after setup_traps (the
-    // mark includes trap + memory-access scratch params) — same as the e2e
-    // harness `collect_rv_params`, which never hand-counts.
-    let params: Vec<ValType> = rctx
-        .layout()
-        .iter_before(&rctx.locals_mark())
-        .flat_map(|(count, ty)| core::iter::repeat(ty).take(count as usize))
-        .collect();
+    let params = collect_params(&rctx);
     rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc, &mut |a| {
         Function::new(a.collect::<Vec<_>>())
     })
     .expect("translate_bytes");
-    let unsupported: Vec<String> = rc
-        .unsupported_insns()
-        .iter()
-        .cloned()
-        .collect();
+    let unsupported = rc.unsupported_insns().iter().cloned().collect();
+    (rctx.drain_fns(), params, unsupported)
+}
+
+fn translate_case_a64(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    let mut ctx = ();
+    let mut rc = AArch64Recompiler::<(), core::convert::Infallible>::new_with_base_pc(case.entry_pc);
+    rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
+        MemoryModel::OwnedLinear,
+    ));
+    rc.setup_traps(&mut rctx, &mut ctx);
+    rc.bind_memory_layout(&rctx);
+    let params = collect_params(&rctx);
+    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc, &mut |a| {
+        Function::new(a.collect::<Vec<_>>())
+    })
+    .expect("translate_bytes");
+    let unsupported = rc.unsupported_insns().iter().cloned().collect();
+    (rctx.drain_fns(), params, unsupported)
+}
+
+fn translate_case_rv64(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<String>) {
+    let mut reactor = Reactor::default();
+    let mut rctx = make_rctx(&mut reactor);
+    let mut ctx = ();
+    // (base_pc, track_hints, enable_rv64, use_memory64) — same config as
+    // the e2e harness `translate_rv` for Rv64.
+    let mut rc = RiscVRecompiler::<(), core::convert::Infallible, Function>::new_with_full_config(
+        case.entry_pc, false, true, true,
+    );
+    rc.set_memory_access(memory_access_for_model::<(), core::convert::Infallible>(
+        MemoryModel::OwnedLinear,
+    ));
+    rc.setup_traps(&mut rctx, &mut ctx);
+    rc.bind_memory_layout(&rctx);
+    let params = collect_params(&rctx);
+    rc.translate_bytes(&mut ctx, &mut rctx, &case.code, case.entry_pc as u32, Xlen::Rv64, &mut |a| {
+        Function::new(a.collect::<Vec<_>>())
+    })
+    .expect("translate_bytes");
+    let unsupported = rc.unsupported_insns().iter().cloned().collect();
     (rctx.drain_fns(), params, unsupported)
 }
 

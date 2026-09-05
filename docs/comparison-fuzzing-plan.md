@@ -363,3 +363,37 @@ unsupported, traps, RO stores, oracle faults) and the divergences above.
   path and are unaffected; the legacy AL/CL/... and AX/CX... destinations
   clobber. Artifacts: `seed-6cf2cbd9012400aa` (8-bit), `seed-a77806c5a1515715`
   (16-bit chain), plus shift-count flag drops (`48 C1 FE 14` etc.).
+
+### M4 addenda (aarch64 + riscv64, integer-only)
+
+`diff-fuzz --arch aarch64|riscv64` runs the same pipeline against Unicorn's
+ARM64/RV64 emulators: word-level generators verified with `disarm64` /
+`rv-asm` decoders, per-arch register files (31 GPRs + NZCV + SP; 32 GPRs),
+link-register halt sentinels, and the same skip semantics. The proptest
+harness now sweeps all three archs.
+
+Arch-porting notes that took real debugging:
+
+- **Unicorn's ARM64 NZCV power-on default is Z=1** (`NZCV = 0x40000000`) —
+  the oracle must seed NZCV from the case or every bare-`ret` case
+  diverges in flags.
+- **`speet-aarch64`'s NZCV param order is N, Z, C, V** (per
+  `nzcv_slot`'s declaration), not Z-first.
+- **Register enums aren't contiguous**: `RegisterARM64` puts X29/X30 at
+  1/2 with X0..X28 at 199..227 — the oracle keeps explicit register tables
+  (thin-runtime-genericity §1's "never hand-count" applied to enums).
+- **Branch targets must never be the halt sentinel** on aarch64/riscv64:
+  `pc_to_func_idx` rejects `idx >= total`, so a direct branch to the
+  sentinel seals with `unreachable` (unlike the x86 byte-granular halt
+  convention, where the sentinel byte offset IS the halt slot). The
+  generators patch forward branches to the last real instruction instead.
+- **RV64 LD/SD imm12 is sign-extended** — data-region offsets are bounded
+  below 0x800 so the encoded field stays positive.
+
+### New findings
+
+3. **AArch64 SBFM is translated with logical (unsigned) semantics** —
+   `ASR X4, X13, #57` (an `SBFM` alias) produces the `LSR` result under
+   speet: oracle `0xffffffffffffff80`, recompiled `0x1ffffffffffffff`.
+   Artifact `aarch64/seed-4a1bb85be9b0c7a9` (minimized to one SBFM word).
+   Same class observed for generic SBFM/UBFM bitfield extractions.

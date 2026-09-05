@@ -73,6 +73,7 @@ pub struct DivergenceReport {
 /// Serializable projection of a `FuzzCase`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CaseRecord {
+    pub arch: crate::case::Arch,
     pub code_hex: String,
     pub entry_pc: u64,
     pub regs: RegState,
@@ -87,6 +88,7 @@ pub struct CaseRecord {
 impl CaseRecord {
     pub fn of(case: &FuzzCase) -> Self {
         Self {
+            arch: case.arch,
             code_hex: hex(&case.code),
             entry_pc: case.entry_pc,
             regs: case.regs,

@@ -13,20 +13,30 @@ use crate::compare::{compare_outcomes, Comparison};
 use crate::recompiled::{run_recompiled, RecompiledError};
 use iced_x86::{Decoder, DecoderOptions};
 
-/// Split `code` (excluding the trailing `ret`) into decoded instruction
-/// byte-ranges via a sequential walk.
-fn split_insns(code: &[u8]) -> Vec<(usize, usize)> {
+/// Split `code` (excluding the trailing terminator) into instruction
+/// byte-ranges: fixed-width words for aarch64/riscv64, a sequential iced
+/// walk for x86-64.
+fn split_insns(arch: crate::case::Arch, code: &[u8]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    let mut off = 0;
-    while off < code.len() {
-        let mut dec = Decoder::with_ip(64, &code[off..], 0, DecoderOptions::NONE);
-        let inst = dec.decode();
-        if inst.is_invalid() {
-            break;
+    match arch {
+        crate::case::Arch::AArch64 | crate::case::Arch::RiscV64 => {
+            for off in (0..code.len()).step_by(4) {
+                out.push((off, off + 4));
+            }
         }
-        let len = inst.len() as usize;
-        out.push((off, off + len));
-        off += len;
+        crate::case::Arch::X86_64 => {
+            let mut off = 0;
+            while off < code.len() {
+                let mut dec = Decoder::with_ip(64, &code[off..], 0, DecoderOptions::NONE);
+                let inst = dec.decode();
+                if inst.is_invalid() {
+                    break;
+                }
+                let len = inst.len() as usize;
+                out.push((off, off + len));
+                off += len;
+            }
+        }
     }
     out
 }
@@ -47,8 +57,11 @@ pub fn minimize(case: &FuzzCase) -> FuzzCase {
         verdict_persists(case, &Comparison::Divergence(String::new())),
         "minimize() called on a non-diverging case"
     );
-    let body_len = case.code.len().saturating_sub(1); // strip trailing ret
-    let insns = split_insns(&case.code[..body_len]);
+    // Strip the arch terminator: x86 `ret` byte; aarch64 RET / rv64 JALR
+    // are 4-byte words.
+    let term = case.arch.code_align() as usize;
+    let body_len = case.code.len().saturating_sub(term);
+    let insns = split_insns(case.arch, &case.code[..body_len]);
     let mut current: Vec<(usize, usize)> = insns;
 
     loop {
@@ -57,7 +70,7 @@ pub fn minimize(case: &FuzzCase) -> FuzzCase {
             let mut trial_ranges: Vec<(usize, usize)> = Vec::with_capacity(current.len() - 1);
             trial_ranges.extend_from_slice(&current[..i]);
             trial_ranges.extend_from_slice(&current[i + 1..]);
-            let code = rebuild(&case.code, &trial_ranges);
+            let code = rebuild(&case.code, &trial_ranges, term);
             if code.len() <= 1 {
                 continue; // keep at least the ret
             }
@@ -73,16 +86,17 @@ pub fn minimize(case: &FuzzCase) -> FuzzCase {
         }
     }
 
-    with_code(case, rebuild(&case.code, &current))
+    with_code(case, rebuild(&case.code, &current, term))
 }
 
 /// Re-encode: concatenate the surviving instruction ranges + trailing ret.
-fn rebuild(code: &[u8], ranges: &[(usize, usize)]) -> Vec<u8> {
+fn rebuild(code: &[u8], ranges: &[(usize, usize)], term: usize) -> Vec<u8> {
     let mut out = Vec::new();
     for (s, e) in ranges {
         out.extend_from_slice(&code[*s..*e]);
     }
-    out.push(0xC3);
+    // Re-append the arch terminator (the final term bytes of the original).
+    out.extend_from_slice(&code[code.len() - term..]);
     out
 }
 
@@ -92,11 +106,22 @@ fn rebuild(code: &[u8], ranges: &[(usize, usize)]) -> Vec<u8> {
 fn with_code(case: &FuzzCase, code: Vec<u8>) -> FuzzCase {
     let mut c = case.clone();
     c.code = code;
-    // Re-seed the halt sentinel at [SP] (the stack image is copied as-is,
-    // but the sentinel value depends on the code length).
-    let sp = c.regs.gprs[4];
-    let off = (sp - c.stack_base) as usize;
+    // Re-seed the halt sentinel (the stack image is copied as-is, but the
+    // sentinel value depends on the code length). Stack-based-ret archs
+    // store it at [SP]; link-register archs carry it in the LR register.
     let sentinel = c.halt_sentinel().to_le_bytes();
-    c.stack[off..off + 8].copy_from_slice(&sentinel);
+    match c.arch {
+        crate::case::Arch::X86_64 => {
+            let sp = c.regs.gprs[4];
+            let off = (sp - c.stack_base) as usize;
+            c.stack[off..off + 8].copy_from_slice(&sentinel);
+        }
+        crate::case::Arch::AArch64 => {
+            c.regs.gprs[30] = c.halt_sentinel();
+        }
+        crate::case::Arch::RiscV64 => {
+            c.regs.gprs[1] = c.halt_sentinel();
+        }
+    }
     c
 }
