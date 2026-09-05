@@ -494,6 +494,10 @@ Direct follow-up on the M4/M5 findings, fixing them at the source:
    which the fuzzer's cases exercise. Correct support needs the yecta
    `ji` Else-arm retarget (jump to slot(pc+8) on the not-taken side); the
    finding stays open with the emission shape pinned down.
+The full remediation design for the MIPS items (generic yecta taken-arm
+retargeting for delay slots, big-endian swap enablement, clobber
+root-cause) is planned in [mips-plan.md](mips-plan.md).
+
 5. **MIPS big-endian data memory (new sub-finding of #4/#7) —
    infrastructure landed, gated off by default.** WASM linear memory is
    little-endian; the raw (no-mapper) load/store path stored/loaded LE
