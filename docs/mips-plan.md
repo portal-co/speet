@@ -141,29 +141,46 @@ Emission shape in `emit_conditional_arm`:
 
 Design constraints, each tied to an existing invariant:
 
-- **Snippet, not closure.** The prefix is a `&dyn Snippet` (the same seam
-  as `BranchCondition`/`ExpectedRaSnippet`/`TableIndexSnippet`). The
-  frontend cannot pass its `emit_insn` directly (snippets get an
-  instruction sink, not the `ReactorContext`), so the delay body is
-  pre-translated into a `Vec<wasm_encoder::Instruction>` buffer at branch
-  translation time and handed over as a buffer-backed snippet.
-  `InstructionSource` for a slice is a three-line impl in `speet-mips`.
-- **Buffer capture must not consult per-Entry folding state.** The delay
-  body is translated by feeding `emit_insn` into a *scratch sink* (`F`
-  instance over a `Vec`), so `ConstFoldState` never sees it and the real
-  entry's folding state never folds *across* the buffer boundary. This is
-  conservative (delay bodies don't fold into neighbours) and matches
-  yecta.md §1d's "flush at control-flow boundaries" conservatism. The
-  ops in the buffer must therefore be already-flattened: no reliance on
-  deferred constants, no `locals_virtual` writes. `emit_insn` today
-  satisfies this (gpr locals are real locals; loads flush alias checks
-  eagerly via `EagerMemorySink` when bound).
-- **Alias-check flushes inside the buffer.** `emit_load`'s runtime alias
-  check emits `If`/`End` frames of its own; captured into the buffer they
-  are balanced, so the taken arm stays structurally valid. The buffer
-  must be captured *after* any pending lazy stores are flushed into the
-  branch body (`flush_bundles` already runs at `ji` entry — keep that
-  ordering).
+- **Re-run, don't capture.** The prefix is a `&dyn Snippet` (the same
+  seam as `BranchCondition`/`ExpectedRaSnippet`/`TableIndexSnippet`)
+  whose `emit_snippet` **re-runs the frontend's `emit_insn` on the delay
+  instruction at emission time**, feeding every emitted op through the
+  `go` sink yecta hands it. It must *not* pre-translate the body into a
+  `Vec<wasm_encoder::Instruction>` at branch-translation time: the
+  passed-in sink may carry ambient capabilities
+  (`push_ambient_addr`/`call_ambient` — link-time data addresses, host
+  call plumbing) that a frozen op stream silently drops, and a
+  flattened second copy of the emission logic would drift from the tail
+  path it duplicates. Re-running keeps one source of truth and lets the
+  sink do whatever it does for inline runs.
+- **`emit_insn` needs a sink parameter.** Today it feeds the current
+  tail through `rctx`. Factor the feed target out:
+  `emit_insn_to(ctx, rctx, sink, insn)` where `sink` is the same
+  closure type snippet emission already uses
+  (`&mut dyn FnMut(&mut Context, &Instruction<'_>) -> Result<(), E>`),
+  with the existing `emit_insn` delegating to it with the current-tail
+  feed; the gpr/memory/swap helpers route through the same parameter.
+  The inline delay copy fires no `on_instruction` hook (unchanged
+  decision). Where the snippet gets its `&MipsRecompiler` depends on
+  the reactor-context split: if the snippet's `Context` can reach the
+  frontend, it holds only the decoded delay word; otherwise box it with
+  the same `'cb` lifetime as the existing `delay_slot_fetcher`.
+- **Const folding sees the body — and that's sound.** Emitted through
+  the real sink, the delay body flows through the Entry's optimizer
+  exactly like any inline run (`feed_one`). This is correct because the
+  absorbed slot means this is the *only* copy of the delay instruction —
+  no duplicate slot(pc+4) exists to fold inconsistently with — and the
+  optimizer already handles structured nesting from condition snippets
+  and alias-check `If`/`End` frames. `flush_bundles` at `ji` entry
+  still orders pending lazy stores before the arm (keep that ordering).
+- **Alias checks stay live.** `emit_load`'s runtime alias check inside
+  the delay body emits its `If`/`End` frames through the same sink —
+  balanced frames, so the taken arm stays structurally valid. No
+  special case. If the delay body's memory emission can route through
+  ambient addresses (link-time data references in the linker path),
+  yecta must hand snippets the ambient-capable sink surface
+  (`Entry::instruction`/`as_ambient_sink`) rather than bare
+  `feed_one` — unify with however condition snippets emit today.
 - **`SOLE_EXIT` stays.** The taken arm's `return_call` is still the
   function's only exit edge to `target`; the Else arm merges the
   continuation. No `ExitId` proliferation is required for this feature —
@@ -171,11 +188,11 @@ Design constraints, each tied to an existing invariant:
   optimizer (yecta.md §1e) can distinguish edges; delay slots do not need
   it.
 - **`max_ifs_per_fn` / `max_insts_per_fn` accounting.** The prefix raises
-  the body size of branch slots. Feed the buffer through
-  `feed_one`-equivalent counting (`inst_count`) so saturation splits still
-  fire; `increment_if_stmts_for_predecessors` is unaffected (the prefix
-  adds no `if` frames of its own beyond the alias-check frames, which are
-  counted the same way they are in straight-line loads today).
+  the body size of branch slots. Because the body flows through the real
+  sink, `inst_count` grows naturally and saturation splits still fire;
+  `increment_if_stmts_for_predecessors` is unaffected (the prefix adds no
+  `if` frames of its own beyond the alias-check frames, which are counted
+  the same way they are in straight-line loads today).
 - **Hoisted call regions.** The prefix must not open a call region
   (`close_call_region` runs before the `Else`). Delay bodies are never
   control transfers (rejected below), so they never open one. Enforce
@@ -205,10 +222,12 @@ follow one recipe (replacing the disabled `emit_delay_slot` call sites from
 3. **Reject control transfers in the slot.** A BRANCH/CALL-class delay
    instruction is UNPREDICTABLE per the ISA — emit the branch
    `unreachable`-terminated with a note (fuzzer treats it as a skip).
-4. **Pre-translate the delay body** into the buffer: set the PC local to
-   `pc+4` (the architectural PC while the slot executes), run
-   `emit_insn(&delay)` into the scratch sink, then pass the buffer as
-   `taken_prefix` to `ji`.
+4. **Wrap the delay word in a re-run snippet**: set the PC local to
+   `pc+4` (the architectural PC while the slot executes), then pass a
+   snippet that calls `emit_insn_to` on the decoded delay word through
+   the sink yecta provides, as `taken_prefix` to `ji`. No buffer, no
+   second emission path — the tail slot and the taken arm share one
+   `emit_insn`.
 5. **Record `absorbed_delay_pcs.push(pc+4)`** so the sequential
    translation loop skips it (already implemented). Slot(pc+4) therefore
    never exists *unless* something else branches directly at it —
@@ -242,12 +261,25 @@ the taken path of a speculative call also executes the slot first.
 - **Trap to the interpreter for branch instructions.** Correctness by
   giving up; defeats the reactor for the hottest guest construct (loop
   back-edges).
+- **Pre-translate the delay body into a `Vec<Instruction>`** at branch
+  translation time (an earlier draft of this plan). Two defects: the
+  frozen op stream bypasses whatever the passed-in sink adds on top of
+  plain instructions — ambient capabilities like `push_ambient_addr` /
+  `call_ambient` (link-time data addresses, host-call plumbing) are
+  silently dropped, so a body that emits cleanly on the tail path can
+  mis-link on the taken arm; and it forks the emission logic into a
+  flattened copy that must be kept in lockstep with `emit_insn`'s real
+  path (folding, alias-check frames, hook behavior). Re-running the
+  recompiler inside the snippet keeps a single source of truth.
 
 ### 2.6 Enablement order
 
 1. yecta: `taken_prefix` parameter + tests (a synthetic two-slot reactor
    case asserting the taken arm's body order: prefix → params →
-   return_call; plus saturation/`seal_for_split` interaction).
+   return_call; plus saturation/`seal_for_split` interaction, and an
+   ambient-capability test asserting `push_ambient_addr` ops emitted
+   inside the prefix reach the entry's ambient sink rather than being
+   dropped).
 2. `speet-linux-wasi` `emit_mips_unit` installs the fetcher (first
    production consumer; WASI corpus provides broad-coverage execution).
 3. `speet-diff-core` installs it; regenerate `test-data/diff-fuzz/mips/`
