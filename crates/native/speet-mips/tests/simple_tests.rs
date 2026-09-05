@@ -97,16 +97,20 @@ fn test_simple_or() {
 
 #[test]
 fn test_simple_syscall() {
+    // The callback borrow lives in the recompiler's 'cb slot, so the
+    // callback must be declared (and thus dropped) AFTER the recompiler.
+    // The flag is shared via Cell so the borrow isn't two-way.
+    let syscall_called = std::rc::Rc::new(core::cell::Cell::new(false));
+    let flag = syscall_called.clone();
+    let mut syscall_callback = move |_: &speet_mips::SyscallInfo,
+                                _ctx: &mut (),
+                                _: &mut speet_mips::CallbackContext<'_, (), core::convert::Infallible>| {
+        flag.set(true);
+    };
+
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
     let mut ctx = ();
-
-    let mut syscall_called = false;
-    let mut syscall_callback = |_: &speet_mips::SyscallInfo,
-                                _ctx: &mut (),
-                                _: &mut speet_mips::CallbackContext<'_, (), core::convert::Infallible>| {
-        syscall_called = true;
-    };
 
     recompiler.set_syscall_callback(&mut syscall_callback);
 
@@ -123,7 +127,7 @@ fn test_simple_syscall() {
         })
         .unwrap();
 
-    assert!(syscall_called);
+    assert!(syscall_called.get());
 }
 
 #[test]

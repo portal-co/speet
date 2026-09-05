@@ -613,6 +613,13 @@ fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Str
         case.entry_pc as u32,
     );
     rc.set_memory64(true);
+    // Delay-slot inline execution is DISABLED here: the yecta reactor's
+    // fall-through chaining re-executes the delay word as its own slot on
+    // the not-taken path (double execution), and the inline body interacts
+    // with the lazy-store pool locals. Correct support needs the ji
+    // Else-arm retarget (see comparison-fuzzing-plan.md finding #6).
+    // The set_delay_slot_fetcher / is_absorbed_delay_pc API stays for when
+    // that lands.
     // Raw emission path (see the RV note): memory64's i64 loads/stores are
     // the identity mapping under OwnedLinear; binding the address-mapper
     // mismatches MIPS's i32 value widths.
@@ -632,6 +639,11 @@ fn translate_case_mips(case: &FuzzCase) -> (Vec<Function>, Vec<ValType>, Vec<Str
             case.code[offset + 3],
         ]);
         let pc = (case.entry_pc as u32).wrapping_add(offset as u32);
+        // Delay-slot words are executed inline by their branch/jump — a
+        // standalone slot would double-execute them on the not-taken path.
+        if rc.is_absorbed_delay_pc(pc) {
+            continue;
+        }
         let inst = rabbitizer::Instruction::new(word, pc, rabbitizer::InstrCategory::CPU);
         rc.translate_instruction(&mut ctx, &mut rctx, &inst, &mut |a| {
             Function::new(a.collect::<Vec<_>>())

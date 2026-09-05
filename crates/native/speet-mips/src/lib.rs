@@ -335,6 +335,31 @@ pub struct MipsRecompiler<
     pool_i64_slot: LocalSlot,
     /// Optional slot assigner: controls which guest PCs receive function slots.
     slot_assigner: Option<alloc::boxed::Box<dyn SlotAssigner + Send + Sync>>,
+    /// Optional fetcher for the instruction at an arbitrary guest PC, used to
+    /// translate branch/jump delay slots inline (MIPS executes the
+    /// instruction at `pc+4` before every control transfer). Without a
+    /// fetcher, branches are emitted WITHOUT their delay slot and an
+    /// unsupported note is recorded (coverage signal; the recompiled
+    /// semantics are then knowingly wrong for delay-slot-bearing code).
+    delay_slot_fetcher:
+        Option<alloc::boxed::Box<dyn Fn(u32) -> Option<Instruction> + 'cb>>,
+    /// Coverage-signal notes for delay-slot handling (missing fetcher,
+    /// out-of-range slot, control transfer in a slot).
+    delay_slot_notes: alloc::vec::Vec<alloc::string::String>,
+    /// PCs already executed inline as delay slots — the sequential
+    /// translation loop must skip these (executing them again as their own
+    /// slot would double-execute the slot on the not-taken path).
+    absorbed_delay_pcs: alloc::vec::Vec<u32>,
+    /// Dedicated i32 scratch for big-endian byte swaps (per-function).
+    swap_tmp_slot: LocalSlot,
+    /// Dedicated i64 scratch for big-endian byte swaps (per-function).
+    swap_tmp_i64_slot: LocalSlot,
+    /// Whether guest DATA memory is big-endian (default: true, matching the
+    /// big-endian instruction fetch every caller uses for MIPS32). WASM
+    /// linear memory is little-endian, so raw-path loads/stores of 16/32/64
+    /// bits byte-swap when this is set. The `memory_access` mapper path is
+    /// expected to handle byte order itself.
+    big_endian_memory: bool,
     /// WASM import index for `env.__speet_stub_for_pc` (fn-ptr arg rewrite).
     stub_for_pc_import_idx: Option<u32>,
     /// When true, ABI JAL/JALR (link to `$ra`) and `JR $ra` use native-stack
@@ -376,6 +401,12 @@ where
             pool_i32_slot: LocalSlot::default(),
             pool_i64_slot: LocalSlot::default(),
             slot_assigner: None,
+            delay_slot_fetcher: None,
+            delay_slot_notes: alloc::vec::Vec::new(),
+            absorbed_delay_pcs: alloc::vec::Vec::new(),
+            swap_tmp_slot: LocalSlot::default(),
+            swap_tmp_i64_slot: LocalSlot::default(),
+            big_endian_memory: false,
             stub_for_pc_import_idx: None,
             enable_speculative_calls: false,
         }
@@ -675,6 +706,175 @@ where
         self.slot_assigner = Some(alloc::boxed::Box::new(gate));
     }
 
+    /// Install the delay-slot fetcher. The closure returns the decoded
+    /// instruction at a guest PC (normally `pc+4` for a branch/jump at
+    /// `pc`), or `None` when the address is out of range. Callers with the
+    /// code bytes in hand decode the word with rabbitizer and return it.
+    pub fn set_delay_slot_fetcher(
+        &mut self,
+        fetcher: alloc::boxed::Box<dyn Fn(u32) -> Option<Instruction> + 'cb>,
+    ) {
+        self.delay_slot_fetcher = Some(fetcher);
+    }
+
+    /// Coverage-signal notes recorded while translating branch/jump delay
+    /// slots (missing fetcher, out-of-range slot, UNPREDICTABLE slot).
+    pub fn delay_slot_notes(&self) -> &[alloc::string::String] {
+        &self.delay_slot_notes
+    }
+
+    /// Select guest data-memory byte order (default: big-endian). Call this
+    /// only for little-endian MIPS guests; WASM memory itself is always LE.
+    pub fn set_little_endian_memory(&mut self) {
+        self.big_endian_memory = false;
+    }
+
+    /// Byte-swap the low 16 bits of the i32 on the stack (stack: [v] -> [v']).
+    /// Uses the dedicated swap temp local — never the lazy-store pool.
+    fn emit_swap16_i32<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        // t = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
+        let t = rctx.layout().base(self.swap_tmp_slot);
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(t))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Or)?;
+        Ok(())
+    }
+
+    /// Byte-swap the i32 on the stack (stack: [v] -> [v']).
+    fn emit_swap32_i32<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        // r = ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF)
+        let t0 = rctx.layout().base(self.swap_tmp_slot);
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(24))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF00))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF00))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(24))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Or)?;
+        Ok(())
+    }
+
+    /// Byte-swap the i64 on the stack (stack: [v] -> [v']).
+    fn emit_swap64_i64<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &self, ctx: &mut Context, rctx: &mut RC, tail_idx: usize,
+    ) -> Result<(), E> {
+        let t0 = rctx.layout().base(self.swap_tmp_i64_slot);
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalTee(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(56))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF00))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(40))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF0000))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(24))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF000000))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Shl)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(8))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF000000))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(24))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF0000))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(40))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF00))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(t0))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(56))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64ShrU)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Const(0xFF))?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64And)?;
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I64Or)?;
+        Ok(())
+    }
+
+
+    /// Execute a branch/jump's delay slot inline: set the PC local to
+    /// `pc + 4` and emit the delay instruction's body into the current
+    /// slot before the control transfer.
+    ///
+    /// Returns `Ok(true)` when the caller should proceed with the jump
+    /// emission, `Ok(false)` when the delay slot made the transfer
+    /// UNPREDICTABLE (a control-transfer instruction in a delay slot) and
+    /// the jump must be dropped.
+    fn emit_delay_slot<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
+        pc: u32,
+    ) -> Result<bool, E> {
+        let Some(fetcher) = &self.delay_slot_fetcher else {
+            self.delay_slot_notes.push(alloc::format!("delay-slot: no fetcher (branch at {pc:#x})"));
+            return Ok(true);
+        };
+        let Some(delay) = fetcher(pc.wrapping_add(4)) else {
+            self.delay_slot_notes.push(alloc::format!("delay-slot: out of range at {pc:#x}"));
+            return Ok(true);
+        };
+        let delay_class = Self::classify_insn(delay.unique_id);
+        if delay_class.contains(InsnClass::BRANCH) || delay_class.contains(InsnClass::CALL) {
+            // Control transfer in a delay slot is UNPREDICTABLE per the ISA.
+            self.delay_slot_notes.push(alloc::format!("delay-slot: control transfer at {pc:#x}"));
+            return Ok(false);
+        }
+        // Architectural PC during the delay slot is pc+4.
+        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(pc.wrapping_add(4) as i32))?;
+        self.emit_pc_set(ctx, rctx, tail_idx)?;
+        self.emit_insn(ctx, rctx, tail_idx, &delay)?;
+        self.absorbed_delay_pcs.push(pc.wrapping_add(4));
+        Ok(true)
+    }
+
+    /// Whether the sequential translation loop should skip translating a
+    /// standalone slot at `pc` (it was already absorbed as a delay slot).
+    pub fn is_absorbed_delay_pc(&self, pc: u32) -> bool {
+        self.absorbed_delay_pcs.contains(&pc)
+    }
+
+
     /// Return the total WASM function slots declared by the installed slot assigner.
     ///
     /// Panics if no slot assigner has been installed via `set_slot_assigner`.
@@ -726,6 +926,9 @@ where
         self.addr_scratch_slot = rctx.layout_mut().append(1, self.addr_val_type());
         self.pool_i32_slot = rctx.layout_mut().append(Self::N_POOL_I32, ValType::I32);
         self.pool_i64_slot = rctx.layout_mut().append(Self::N_POOL_I64, ValType::I64);
+        // Dedicated byte-swap scratch (never touched by the lazy-store pool).
+        self.swap_tmp_slot = rctx.layout_mut().append(1, ValType::I32);
+        self.swap_tmp_i64_slot = rctx.layout_mut().append(1, ValType::I64);
         let mut unit = ();
         let extra: &mut dyn yecta::LocalDeclarator = match self.memory_access.as_deref_mut() {
             Some(m) => m as &mut dyn yecta::LocalDeclarator,
@@ -1083,11 +1286,53 @@ where
             }
         }
 
-        let condition = BranchCondition {
-            rs_local: self.gpr_to_local(rs, rctx.layout()),
-            rt_local: rt.map(|r| self.gpr_to_local(r, rctx.layout())),
-            op,
-        };
+        // Evaluate the branch predicate NOW, before the delay slot executes:
+        // architecturally the condition uses register values as of the
+        // branch, not values written by the delay-slot instruction.
+        let cond_local = rctx.layout().base(self.temps_slot); // temp 0
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(self.gpr_to_local(rs, rctx.layout())))?;
+        match op {
+            BranchOp::Eq | BranchOp::Ne => {
+                rctx.feed(ctx, tail_idx, &WasmInstruction::LocalGet(self.gpr_to_local(rt.expect("eq/ne need rt"), rctx.layout())))?;
+                rctx.feed(ctx, tail_idx, &match op {
+                    BranchOp::Eq => WasmInstruction::I32Eq,
+                    _ => WasmInstruction::I32Ne,
+                })?;
+            }
+            BranchOp::LeZ | BranchOp::GtZ | BranchOp::LtZ | BranchOp::GeZ => {
+                rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(0))?;
+                rctx.feed(ctx, tail_idx, &match op {
+                    BranchOp::LeZ => WasmInstruction::I32LeS,
+                    BranchOp::GtZ => WasmInstruction::I32GtS,
+                    BranchOp::LtZ => WasmInstruction::I32LtS,
+                    BranchOp::GeZ => WasmInstruction::I32GeS,
+                    _ => unreachable!(),
+                })?;
+            }
+        }
+        rctx.feed(ctx, tail_idx, &WasmInstruction::LocalSet(cond_local))?;
+
+        struct PrecomputedCondition { local: u32 }
+        impl<Context, E> wax_core::build::InstructionOperatorSource<Context, E> for PrecomputedCondition {
+            fn emit(
+                &self,
+                _ctx: &mut Context,
+                sink: &mut (dyn wax_core::build::InstructionOperatorSink<Context, E> + '_),
+            ) -> Result<(), E> {
+                sink.instruction(_ctx, &WasmInstruction::LocalGet(self.local))?;
+                Ok(())
+            }
+        }
+        impl<Context, E> wax_core::build::InstructionSource<Context, E> for PrecomputedCondition {
+            fn emit_instruction(
+                &self,
+                _ctx: &mut Context,
+                sink: &mut (dyn wax_core::build::InstructionSink<Context, E> + '_),
+            ) -> Result<(), E> {
+                sink.instruction(_ctx, &WasmInstruction::LocalGet(self.local))?;
+                Ok(())
+            }
+        }
 
         // Jump trap: conditional branch.
         let branch_info =
@@ -1095,6 +1340,12 @@ where
         if rctx.on_jump(&branch_info, ctx)?
             == TrapAction::Skip
         {
+            return Ok(());
+        }
+
+        // MIPS delay slot: execute the instruction at pc+4 before the
+        // transfer takes effect (both taken and not-taken paths).
+        if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
             return Ok(());
         }
 
@@ -1113,7 +1364,7 @@ where
             target,            // target: branch target
             yecta::CallEscape::Jump, // call: not an escape call
             rctx.pool(),  // pool: for indirect calls
-            Some(&condition),  // condition: branch condition
+            Some(&PrecomputedCondition { local: cond_local }),  // condition
         )?;
 
         Ok(())
@@ -1157,6 +1408,23 @@ where
             return Ok(());
         }
 
+        self.emit_insn(ctx, rctx, tail_idx, instruction)?;
+
+        Ok(())
+    }
+
+    /// Emit the WASM body for a single decoded MIPS instruction into the
+    /// current function slot (`tail_idx`). This is everything after the
+    /// per-instruction hook — shared by `translate_instruction` and the
+    /// delay-slot path of branch/jump translation.
+    fn emit_insn<RC: ReactorContext<Context, E, FnType = F> + ?Sized>(
+        &mut self,
+        ctx: &mut Context,
+        rctx: &mut RC,
+        tail_idx: usize,
+        instruction: &Instruction,
+    ) -> Result<(), E> {
+        let pc = instruction.vram;
         let opcode = instruction.unique_id;
 
         match opcode {
@@ -1564,6 +1832,14 @@ where
                         }),
                         tail_idx,
                     )?;
+                    if self.big_endian_memory {
+                        // swap the low 16 bytes then re-sign-extend from bit 15
+                        self.emit_swap16_i32(ctx, rctx, tail_idx)?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(16))?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Shl)?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(16))?;
+                        rctx.feed(ctx, tail_idx, &WasmInstruction::I32ShrS)?;
+                    }
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
@@ -1611,6 +1887,9 @@ where
                         }),
                         tail_idx,
                     )?;
+                    if self.big_endian_memory {
+                        self.emit_swap16_i32(ctx, rctx, tail_idx)?;
+                    }
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32U)?;
                     }
@@ -1719,6 +1998,9 @@ where
                 if self.enable_mips64 {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    if self.big_endian_memory {
+                        self.emit_swap16_i32(ctx, rctx, tail_idx)?;
+                    }
                     emit_store(
                         ctx,
                         rctx,
@@ -1734,6 +2016,9 @@ where
                     )?;
                 } else {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
+                    if self.big_endian_memory {
+                        self.emit_swap16_i32(ctx, rctx, tail_idx)?;
+                    }
                     emit_store(
                         ctx,
                         rctx,
@@ -1791,6 +2076,9 @@ where
                         }),
                         tail_idx,
                     )?;
+                    if self.big_endian_memory {
+                        self.emit_swap32_i32(ctx, rctx, tail_idx)?;
+                    }
                     if self.enable_mips64 {
                         rctx.feed(ctx, tail_idx, &WasmInstruction::I64ExtendI32S)?;
                     }
@@ -1835,6 +2123,9 @@ where
                 if self.enable_mips64 {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32WrapI64)?;
+                    if self.big_endian_memory {
+                        self.emit_swap32_i32(ctx, rctx, tail_idx)?;
+                    }
                     emit_store(
                         ctx,
                         rctx,
@@ -1850,6 +2141,9 @@ where
                     )?;
                 } else {
                     self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
+                    if self.big_endian_memory {
+                        self.emit_swap32_i32(ctx, rctx, tail_idx)?;
+                    }
                     emit_store(
                         ctx,
                         rctx,
@@ -1907,6 +2201,9 @@ where
                         }),
                         tail_idx,
                     )?;
+                    if self.big_endian_memory {
+                        self.emit_swap64_i64(ctx, rctx, tail_idx)?;
+                    }
                     self.emit_gpr_set(ctx, rctx, tail_idx, rt)?;
                 }
             }
@@ -1947,6 +2244,9 @@ where
 
                     // store 64-bit value directly
                     self.emit_gpr_get(ctx, rctx, tail_idx, rt)?;
+                    if self.big_endian_memory {
+                        self.emit_swap64_i64(ctx, rctx, tail_idx)?;
+                    }
                     emit_store(
                         ctx,
                         rctx,
@@ -1975,6 +2275,9 @@ where
                 {
                     return Ok(());
                 }
+                if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
+                    return Ok(());
+                }
                 self.jump_to_pc(ctx, rctx, tail_idx, target_pc, rctx.locals_mark().total_locals)?;
                 return Ok(());
             }
@@ -1999,6 +2302,11 @@ where
 
                     rctx.feed(ctx, tail_idx, &WasmInstruction::I32Const(return_addr as i32))?;
                     self.emit_gpr_set(ctx, rctx, tail_idx, GprO32::ra)?;
+
+                    // Delay slot executes before the call takes effect.
+                    if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
+                        return Ok(());
+                    }
 
                     let expected_ra_snippet = ExpectedRaSnippet { return_addr };
 
@@ -2032,6 +2340,9 @@ where
                 {
                     return Ok(());
                 }
+                if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
+                    return Ok(());
+                }
                 self.jump_to_pc(ctx, rctx, tail_idx, target_pc, rctx.locals_mark().total_locals)?;
                 return Ok(());
             }
@@ -2058,6 +2369,9 @@ where
                 if rctx.on_jump(&jr_info, ctx)?
                     == TrapAction::Skip
                 {
+                    return Ok(());
+                }
+                if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
                     return Ok(());
                 }
 
@@ -2183,6 +2497,9 @@ where
                 if rctx.on_jump(&jalr_info, ctx)?
                     == TrapAction::Skip
                 {
+                    return Ok(());
+                }
+                if !self.emit_delay_slot(ctx, rctx, tail_idx, pc)? {
                     return Ok(());
                 }
 
@@ -2497,7 +2814,6 @@ where
                 rctx.feed(ctx, tail_idx, &WasmInstruction::Unreachable)?;
             }
         }
-
         Ok(())
     }
 }

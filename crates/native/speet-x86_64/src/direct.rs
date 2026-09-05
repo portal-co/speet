@@ -1061,7 +1061,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
                             } else {
-                                self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                                self.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
                             }
                             Ok(Some(()))
                         } else {
@@ -1086,7 +1086,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                                 } else {
-                                    this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                    this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                                 }
                             },
                         )
@@ -1126,7 +1126,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
                             } else {
-                                self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                                self.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
                             }
                             Ok(Some(()))
                         } else {
@@ -1151,7 +1151,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                                 } else {
-                                    this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                    this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                                 }
                             },
                         )
@@ -1175,7 +1175,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                         }
                     },
                 ),
@@ -1197,7 +1197,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                         }
                     },
                 ),
@@ -1219,7 +1219,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                         }
                     },
                 ),
@@ -1241,7 +1241,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                         }
                     },
                 ),
@@ -1263,7 +1263,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                             rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                             rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                         } else {
-                            this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                            this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                         }
                     },
                 ),
@@ -1290,7 +1290,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                             }
                         },
                     )
@@ -1389,7 +1389,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                     rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                     rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))?;
                                 } else {
-                                    self.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
+                                    self.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)?;
                                 }
                                 Ok(Some(()))
                             }
@@ -1479,7 +1479,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                             }
                         },
                     )
@@ -1529,7 +1529,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
                                 rctx.feed(ctx, tail_idx, &Instruction::LocalSet(dst))
                             } else {
-                                this.emit_subreg_write_rmw(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
+                                this.emit_subreg_merge_write(ctx, rctx, tail_idx, dst, dst_size, dst_bit_offset)
                             }
                         },
                     )
@@ -2430,7 +2430,7 @@ impl<Context, E> X86Recompiler<Context, E> {
                     if size == 64 && bit == 0 {
                         rctx.feed(ctx, tail_idx, &Instruction::LocalSet(local))?;
                     } else {
-                        self.emit_subreg_write_rmw(ctx, rctx, tail_idx, local, size, bit)?;
+                        self.emit_subreg_merge_write(ctx, rctx, tail_idx, local, size, bit)?;
                     }
                 }
             }

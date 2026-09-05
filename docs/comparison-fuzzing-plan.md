@@ -460,3 +460,58 @@ Arch-porting notes:
    `ad0a02d8` (`sw $10, 0x2d8($8)` alone diverges in $17), and `324a49de`
    (`andi $10, $18, 0x49de` diverges in $21) — likely shared-scratch
    misindexing in the raw memory path. Artifacts in `test-data/diff-fuzz/mips/`.
+
+
+### M5.1 — fixing the findings (recompiler changes)
+
+Direct follow-up on the M4/M5 findings, fixing them at the source:
+
+1. **x86-64 sub-register destination clobber (finding: non-REX 8/16-bit
+   writes replace the full GPR) — FIXED.** All 14 `emit_subreg_write_rmw`
+   call sites (that function masked away the preserved bits and dropped the
+   incoming value) now route through the correct `emit_subreg_merge_write`.
+   Every checked-in subreg artifact (`seed-6cf2cbd9…`, `seed-9fd0b639…`,
+   `seed-a77806c5…`, …) flipped to `expectation: fixed` and replays clean;
+   fresh x86_64 runs diverge only in the documented const-fold flag class.
+2. **aarch64 SBFM/UBFM bitfield semantics (finding #2) — FIXED.** The
+   `imms < immr` branch translated as ROR+extract; per the ISA it is the
+   LSL alias: `Rn[imms:0] << (datasize - immr)`. The handler now also reads
+   the N bit (datasize 32 vs 64) so w-register forms mask the operand to 32
+   bits, and SBFM words with `imms < immr` (EXTR-class decodes) are
+   rejected rather than mistranslated. Verified against three independent
+   oracles: Unicorn, llvm-mc decode, and the Apple Silicon CPU itself
+   (inline-asm probes) — all 14 LSL/LSR/ASR/UXTB/SXTB/UXTW/move forms
+   (64-bit and 32-bit) agree.
+3. **MIPS signed immediates (finding #5) — FIXED in M5** (`as i16 as i32`).
+4. **MIPS branch delay slots (finding #6) — infrastructure landed,
+   semantics gated off.** The recompiler now has `emit_delay_slot`
+   (inline execution of the instruction at pc+4 with architectural PC
+   update), a `set_delay_slot_fetcher` hook, precomputed branch predicates
+   (the condition must read pre-delay-slot register values), and
+   `is_absorbed_delay_pc` for the sequential translation loop. Enabling it
+   today double-executes the delay word on the not-taken path: yecta's
+   fall-through chaining lands slot(pc)'s not-taken arm in slot(pc+4),
+   which the fuzzer's cases exercise. Correct support needs the yecta
+   `ji` Else-arm retarget (jump to slot(pc+8) on the not-taken side); the
+   finding stays open with the emission shape pinned down.
+5. **MIPS big-endian data memory (new sub-finding of #4/#7) —
+   infrastructure landed, gated off by default.** WASM linear memory is
+   little-endian; the raw (no-mapper) load/store path stored/loaded LE
+   values for BE guests, so every SW/LW of a byte-order-sensitive value
+   diverged (e.g. `ad0b0f78` `sw $t3, 0xf78($t0)`: oracle byte at 0xaf9 =
+   0x20, recompiled wrote 0x20 at 0xaf8). `big_endian_memory` (default
+   **false** — byte-order-neutral for round-tripping guests, matching the
+   previous behavior) adds swap16/swap32/swap64 on the raw LH/LHU/SH/LW/
+   SW/LD/SD paths via dedicated per-function swap scratch locals. Turning
+   it on currently breaks slot emission (validate type mismatches in the
+   yecta lazy-store flush paths); that interplay is the remaining work
+   behind findings #4/#7.
+6. **Drop-order fixes**: `syscall`/`break` callback borrows live in the
+   recompiler's `'cb` slot — speet-linux-wasi's `emit_mips_unit` and the
+   speet-mips tests/examples now declare callbacks before the recompiler.
+
+`replay_corpus` and `proptest_harness` stay green; the aarch64 SBFM
+artifact (`seed-4a1bb85b…`) now replays as a SKIP on both sides (its
+reserved-encoding word is rejected by the frontend), so the durable
+regression record for this class is the sbfm probe table in
+`examples/sbfm.rs` plus the corpus flags.

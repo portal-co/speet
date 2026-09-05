@@ -168,15 +168,18 @@ fn test_jump_instructions() {
 
 #[test]
 fn test_syscall_callback() {
-    let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
-        MipsRecompiler::new_with_base_pc(0x1000);
-
-    let mut syscall_called = false;
-    let mut syscall_callback = |_: &SyscallInfo,
+    // Callback borrows live in the recompiler's 'cb slot: declare them
+    // before the recompiler (drop order) and share flags via Cell.
+    let syscall_called = std::rc::Rc::new(core::cell::Cell::new(false));
+    let flag = syscall_called.clone();
+    let mut syscall_callback = move |_: &SyscallInfo,
                                 _ctx: &mut (),
                                 _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
-        syscall_called = true;
+        flag.set(true);
     };
+
+    let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
+        MipsRecompiler::new_with_base_pc(0x1000);
 
     recompiler.set_syscall_callback(&mut syscall_callback);
 
@@ -193,20 +196,23 @@ fn test_syscall_callback() {
         })
         .unwrap();
 
-    assert!(syscall_called);
+    assert!(syscall_called.get());
 }
 
 #[test]
 fn test_break_callback() {
-    let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
-        MipsRecompiler::new_with_base_pc(0x1000);
-
-    let mut break_called = false;
-    let mut break_callback = |_: &BreakInfo,
+    // Callback borrows live in the recompiler's 'cb slot: declare them
+    // before the recompiler (drop order) and share flags via Cell.
+    let break_called = std::rc::Rc::new(core::cell::Cell::new(false));
+    let flag = break_called.clone();
+    let mut break_callback = move |_: &BreakInfo,
                               _ctx: &mut (),
                               _: &mut CallbackContext<'_, (), core::convert::Infallible>| {
-        break_called = true;
+        flag.set(true);
     };
+
+    let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
+        MipsRecompiler::new_with_base_pc(0x1000);
 
     recompiler.set_break_callback(&mut break_callback);
 
@@ -223,7 +229,7 @@ fn test_break_callback() {
         })
         .unwrap();
 
-    assert!(break_called);
+    assert!(break_called.get());
 }
 
 #[test]

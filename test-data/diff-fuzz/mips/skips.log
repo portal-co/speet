@@ -1,9 +1,4 @@
-seed-78dde6e667c572f7	Trapped
-seed-cc623af8e2ced78a	OracleFault
-seed-6a99b4b26219539f	Trapped
-seed-08d12e6be163cfb4	Trapped
-seed-e3779b985f4343f3	Trapped
-seed-be1e08c4dd22b832	Trapped
-seed-fa8cfc37dbb7b05c	OracleFault
-seed-736ae31dd8e1a0b0	Trapped
-seed-ec48ca03d60b9104	Trapped
+seed-9e3779b97f4a7c3f	StepBudgetExceeded
+seed-81af155173f23d8f	OracleFault
+seed-36fbefaa6fb1260d	OracleFault
+seed-afd9d6906cdb1661	StepBudgetExceeded

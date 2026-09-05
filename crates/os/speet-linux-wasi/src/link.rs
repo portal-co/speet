@@ -477,6 +477,16 @@ fn emit_mips_unit(
     halt_stub_idx: u32,
 ) -> BinaryUnit<Function> {
     use rabbitizer::{InstrCategory, Instruction as MipsInstruction};
+    // `syscall` must be declared before `recompiler`: the callback borrow is
+    // held in the recompiler's 'cb slot, and values drop in reverse
+    // declaration order.
+    let mut syscall = LinuxWasiMipsSyscall {
+        syscall_dispatch_idx,
+        slots: slots.clone(),
+        base_func_offset: 0,
+        halt_stub_idx,
+        num_params: 0,
+    };
     let mut recompiler =
         speet_mips::MipsRecompiler::<'_, '_, (), LinkErr, Function>::new_with_full_config(start_addr, true);
     recompiler.set_slot_assigner(slots.clone());
@@ -485,15 +495,23 @@ fn emit_mips_unit(
     *rctx.layout_mut() = yecta::LocalLayout::empty();
     recompiler.setup_traps(rctx, ctx);
     let params = collect_params(rctx);
-    let mut syscall = LinuxWasiMipsSyscall {
-        syscall_dispatch_idx, slots: slots.clone(), base_func_offset: rctx.base_func_offset(),
-        halt_stub_idx, num_params: params.len() as u32,
-    };
+    syscall.base_func_offset = rctx.base_func_offset();
+    syscall.num_params = params.len() as u32;
     recompiler.set_syscall_callback(&mut syscall);
+    // Branch/jump delay slots: fetching is available via
+    // set_delay_slot_fetcher, but inline delay execution is disabled until
+    // the yecta Else-arm retarget lands (see comparison-fuzzing-plan.md
+    // finding #6) — enabling it here double-executes the delay word on the
+    // not-taken path.
     for (offset, bytes) in text.chunks_exact(4).enumerate() {
+        let pc = start_addr + (offset * 4) as u32;
+        // Delay-slot words are executed inline by their branch/jump.
+        if recompiler.is_absorbed_delay_pc(pc) {
+            continue;
+        }
         let insn = MipsInstruction::new(
             u32::from_be_bytes(bytes.try_into().expect("exact chunk")),
-            start_addr + (offset * 4) as u32,
+            pc,
             InstrCategory::CPU,
         );
         recompiler.translate_instruction(ctx, rctx, &insn,

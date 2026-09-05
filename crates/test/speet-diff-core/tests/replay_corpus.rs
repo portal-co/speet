@@ -11,38 +11,6 @@ fn artifact_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/diff-fuzz/x86_64")
 }
 
-fn case_from_json(v: &serde_json::Value) -> FuzzCase {
-    let case = &v["case"];
-    let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect::<Vec<u8>>();
-    let g: Vec<u64> = case["regs"]["gprs"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
-    let arch = speet_diff_core::parse_arch_name(case["arch"].as_str());
-    let mut gprs = [0u64; 32];
-    for (i, v) in g.iter().enumerate() {
-        gprs[i] = *v;
-    }
-    FuzzCase {
-        arch,
-        code: hex(case["code_hex"].as_str().unwrap()),
-        entry_pc: case["entry_pc"].as_u64().unwrap(),
-        regs: RegState {
-            gprs,
-            rip: case["regs"]["rip"].as_u64().unwrap(),
-            zf: case["regs"]["zf"].as_bool().unwrap(),
-            sf: case["regs"]["sf"].as_bool().unwrap(),
-            cf: case["regs"]["cf"].as_bool().unwrap(),
-            of: case["regs"]["of"].as_bool().unwrap(),
-            pf: case["regs"]["pf"].as_bool().unwrap(),
-            sp: case["regs"].get("sp").and_then(|x| x.as_u64()).unwrap_or(0),
-        },
-        data: hex(case["data_hex"].as_str().unwrap()),
-        data_base: case["data_base"].as_u64().unwrap(),
-        stack: hex(case["stack_hex"].as_str().unwrap()),
-        stack_base: case["stack_base"].as_u64().unwrap(),
-        read_only: case["read_only"].as_array().map(|a| a.iter().map(|p| (p[0].as_u64().unwrap(), p[1].as_u64().unwrap())).collect()).unwrap_or_default(),
-        step_budget: case["step_budget"].as_u64().unwrap(),
-        seed: case.get("seed").and_then(|s| s.as_u64()).unwrap_or(0),
-    }
-}
 
 #[test]
 fn checked_in_divergences_still_diverge() {
@@ -56,7 +24,7 @@ fn checked_in_divergences_still_diverge() {
         }
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let case = case_from_json(&v);
+        let case = speet_diff_core::case_from_json(&v);
         let oracle = run_oracle(&case);
         let recompiled = run_recompiled(&case);
         let c = compare_outcomes(&case, oracle.as_ref().ok(), recompiled.as_ref());

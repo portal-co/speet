@@ -23,6 +23,24 @@ fn main() {
     println!("MIPS to WebAssembly Recompiler Demo");
     println!("==================================");
 
+    // The syscall callback borrow lives in the recompiler's 'cb slot, so it
+    // must be declared (and dropped) AFTER the recompiler itself. The count
+    // is shared via Cell so the borrow isn't two-way.
+    let syscall_count = std::rc::Rc::new(core::cell::Cell::new(0u32));
+    let count = syscall_count.clone();
+    let mut syscall_callback =
+        |syscall: &speet_mips::SyscallInfo,
+         ctx: &mut (),
+         callback_ctx: &mut speet_mips::CallbackContext<'_, (), core::convert::Infallible>| {
+            count.set(count.get() + 1);
+            println!(
+                "   SYSCALL detected at PC: 0x{:x}, count: {}",
+                syscall.pc, count.get()
+            );
+            // Could emit custom WebAssembly code here if needed
+            callback_ctx.emit(ctx, &wasm_encoder::Instruction::Nop).ok();
+        };
+
     // Create a recompiler instance
     let mut recompiler: MipsRecompiler<'_, '_, (), core::convert::Infallible, _> =
         MipsRecompiler::new_with_base_pc(0x1000);
@@ -100,20 +118,6 @@ fn main() {
     // Example 7: System call with callback
     println!("\n7. Translating: syscall (with callback)");
 
-    let mut syscall_count = 0;
-    let mut syscall_callback =
-        |syscall: &speet_mips::SyscallInfo,
-         ctx: &mut (),
-         callback_ctx: &mut speet_mips::CallbackContext<'_, (), core::convert::Infallible>| {
-            syscall_count += 1;
-            println!(
-                "   SYSCALL detected at PC: 0x{:x}, count: {}",
-                syscall.pc, syscall_count
-            );
-            // Could emit custom WebAssembly code here if needed
-            callback_ctx.emit(ctx, &wasm_encoder::Instruction::Nop).ok();
-        };
-
     recompiler.set_syscall_callback(&mut syscall_callback);
 
     let syscall_instruction = Instruction::new(0x0000000C, 0x1000, InstrCategory::CPU); // syscall
@@ -175,5 +179,5 @@ fn main() {
         .unwrap();
 
     println!("\nDemo completed successfully!");
-    println!("Total SYSCALL callbacks invoked: {}", syscall_count);
+    println!("Total SYSCALL callbacks invoked: {}", syscall_count.get());
 }

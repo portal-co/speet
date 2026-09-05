@@ -295,6 +295,11 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
         let src  = rn(w);
         let immr = field(w, 16, 21) as u8; // 6-bit rotate
         let imms = field(w, 10, 15) as u8; // 6-bit width-1
+        // N (bit 22) selects the operand datasize: 64-bit when N=1, 32-bit
+        // when N=0. Valid encodings have N == sf; reading N (instead of
+        // assuming 64-bit) keeps w-register and reserved-N forms honest.
+        let n = (w >> 22) & 1;
+        let datasize: u32 = if n == 1 { 64 } else { 32 };
 
         if is_bfm {
             // BFM Rd, Rn, #immr, #imms — insert field from Rn into Rd
@@ -326,11 +331,16 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
             return Ok(());
         }
 
-        // UBFM / SBFM
+        // UBFM / SBFM — operand is Rn masked to `datasize` bits; for
+        // w-register (N=0) forms every field index lives below 32.
         if imms >= immr {
             // Extract bits [imms:immr] from Rn, zero/sign-extend
             let width = (imms - immr + 1) as u32;
             self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            if datasize < 64 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const((1i64 << datasize) - 1))?;
+                rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+            }
             if immr > 0 {
                 rctx.feed(ctx, tail_idx, &Instruction::I64Const(immr as i64))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
@@ -350,30 +360,24 @@ impl<'cb, 'ctx, Context, E> AArch64Recompiler<'cb, 'ctx, Context, E> {
             }
             self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
         } else {
-            // imms < immr: rotate right by immr, then extract/sign-extend [imms:0]
-            // ROR(Rn, immr) = (Rn >> immr) | (Rn << (64-immr))
-            let tmp0 = rctx.layout().local(self.tmp_slot, 0);
-            self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalTee(tmp0))?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Const(immr as i64))?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64ShrU)?;
-            rctx.feed(ctx, tail_idx, &Instruction::LocalGet(tmp0))?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Const((64 - immr as u32) as i64))?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
-            rctx.feed(ctx, tail_idx, &Instruction::I64Or)?;
-            // Now extract [imms:0]: width = imms+1
-            let width = (imms + 1) as u32;
+            // imms < immr — the LSL alias (UBFM): dst = Rn[imms:0] <<
+            // (datasize - immr), zero-extended. (SBFM/EXTR-class words with
+            // imms < immr are decoded by the ISA as EXTR, not SBFM — reject
+            // them here rather than emitting wrong semantics.)
             if signed {
-                let sh = (64 - width) as i64;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Const(sh))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64Const(sh))?;
-                rctx.feed(ctx, tail_idx, &Instruction::I64ShrS)?;
-            } else {
-                let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
-                rctx.feed(ctx, tail_idx, &Instruction::I64Const(mask as i64))?;
+                unsup!();
+            }
+            let width = (imms + 1) as u32;
+            let mask = (1u64 << width) - 1;
+            self.emit_gpr_get(ctx, rctx, tail_idx, src)?;
+            if datasize < 64 {
+                rctx.feed(ctx, tail_idx, &Instruction::I64Const((1i64 << datasize) - 1))?;
                 rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
             }
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const(mask as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64And)?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Const((datasize - immr as u32) as i64))?;
+            rctx.feed(ctx, tail_idx, &Instruction::I64Shl)?;
             self.emit_gpr_set(ctx, rctx, tail_idx, dest)?;
         }
         Ok(())

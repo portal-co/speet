@@ -101,6 +101,8 @@ fn gen_one(code: &mut Vec<u8>, r: &mut dyn Rand, pc: u64, fwd: &mut Vec<usize>) 
             let amt = r.below(64) as u32;
             match r.below(3) {
                 // LSL Xd, Xn, #amt = UBFM Xd, Xn, (64-amt)&63, 63-amt
+                // (base 0xD3400000 = UBFM sf=1 N=1; 0x93400000 = SBFM
+                // sf=1 N=1 — bit 22 of both bases is the N bit, already 1)
                 0 => 0xD3400000 | (((64 - amt) & 63) << 16) | ((63 - amt) << 10) | (s << 5) | d,
                 // LSR Xd, Xn, #amt = UBFM Xd, Xn, amt, 63
                 1 => 0xD3400000 | (amt << 16) | (63 << 10) | (s << 5) | d,
